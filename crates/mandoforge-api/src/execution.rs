@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
+use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -30,46 +31,61 @@ fn default_sandbox() -> String {
     "workspace-write".to_string()
 }
 
-pub(crate) async fn execute_approved_tool(
-    state: &AppState,
-    approval: &Approval,
-) -> Result<(), AppError> {
-    let Some(tool_call_id) = approval.tool_call_id else {
-        return Ok(());
-    };
-    let tool_call = state.get_tool_call(tool_call_id).await?;
-    let job = state
-        .execution_queue
-        .enqueue(ExecutionJobRequest {
-            session_id: approval.session_id,
-            approval_id: approval.id,
-            tool_call_id,
-            tool_name: tool_call.tool_name.clone(),
-        })
-        .await;
-    state.execution_queue.start(job.id).await?;
-    let result = match tool_call.tool_name.as_str() {
-        "file.write" => execute_approved_file_write(state, approval, &tool_call).await,
-        "shell.exec" => execute_approved_shell(state, approval, &tool_call).await,
-        "codex.exec" => execute_approved_codex(state, approval, &tool_call).await,
-        _ => {
-            state
-                .update_tool_call_status(
-                    tool_call_id,
-                    "completed",
-                    Some(json!({"approval": "approved"})),
-                    None,
-                )
-                .await?;
-            Ok(())
+#[async_trait]
+pub(crate) trait ExecutionWorker: Send + Sync {
+    async fn execute_approved_tool(
+        &self,
+        state: &AppState,
+        approval: &Approval,
+    ) -> Result<(), AppError>;
+}
+
+pub(crate) struct InlineExecutionWorker;
+
+#[async_trait]
+impl ExecutionWorker for InlineExecutionWorker {
+    async fn execute_approved_tool(
+        &self,
+        state: &AppState,
+        approval: &Approval,
+    ) -> Result<(), AppError> {
+        let Some(tool_call_id) = approval.tool_call_id else {
+            return Ok(());
+        };
+        let tool_call = state.get_tool_call(tool_call_id).await?;
+        let job = state
+            .execution_queue
+            .enqueue(ExecutionJobRequest {
+                session_id: approval.session_id,
+                approval_id: approval.id,
+                tool_call_id,
+                tool_name: tool_call.tool_name.clone(),
+            })
+            .await;
+        state.execution_queue.start(job.id).await?;
+        let result = match tool_call.tool_name.as_str() {
+            "file.write" => execute_approved_file_write(state, approval, &tool_call).await,
+            "shell.exec" => execute_approved_shell(state, approval, &tool_call).await,
+            "codex.exec" => execute_approved_codex(state, approval, &tool_call).await,
+            _ => {
+                state
+                    .update_tool_call_status(
+                        tool_call_id,
+                        "completed",
+                        Some(json!({"approval": "approved"})),
+                        None,
+                    )
+                    .await?;
+                Ok(())
+            }
+        };
+        if result.is_ok() {
+            state.execution_queue.complete(job.id).await?;
+        } else {
+            state.execution_queue.fail(job.id).await?;
         }
-    };
-    if result.is_ok() {
-        state.execution_queue.complete(job.id).await?;
-    } else {
-        state.execution_queue.fail(job.id).await?;
+        result
     }
-    result
 }
 
 async fn execute_approved_file_write(

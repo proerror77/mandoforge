@@ -27,7 +27,7 @@ mod provider;
 mod shell_runner;
 mod store;
 
-use execution::execute_approved_tool;
+use execution::{ExecutionWorker, InlineExecutionWorker};
 #[cfg(test)]
 use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
 use execution_queue::ExecutionQueue;
@@ -50,6 +50,7 @@ use store::{MemoryStore, StoreBackend};
 struct AppState {
     store: StoreBackend,
     execution_queue: ExecutionQueue,
+    execution_worker: Arc<dyn ExecutionWorker>,
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
@@ -269,6 +270,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         store,
         execution_queue: ExecutionQueue::default(),
+        execution_worker: Arc::new(InlineExecutionWorker),
         workspace_root,
         tenant_id,
         policy,
@@ -1245,7 +1247,10 @@ async fn decide_approval(
         )
         .await?;
     if status == "approved" {
-        execute_approved_tool(&state, &updated).await?;
+        state
+            .execution_worker
+            .execute_approved_tool(&state, &updated)
+            .await?;
         state
             .set_session_status(updated.session_id, SessionStatus::Completed)
             .await?;
@@ -1600,6 +1605,7 @@ not json
         let state = AppState {
             store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
             execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(InlineExecutionWorker),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
