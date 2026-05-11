@@ -9,6 +9,24 @@ RUN_DEMO="${RUN_DEMO:-1}"
 RUN_LIVE="${RUN_LIVE:-0}"
 START_LIVE_STACK="${START_LIVE_STACK:-0}"
 DATABASE_URL="${DATABASE_URL:-postgres://mandoforge:mandoforge@127.0.0.1:5432/mandoforge}"
+API_PID=""
+FAKE_CODEX_DIR=""
+STARTED_COMPOSE_POSTGRES=0
+
+cleanup() {
+  if [[ -n "${API_PID:-}" ]]; then
+    kill "$API_PID" >/dev/null 2>&1 || true
+    wait "$API_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${FAKE_CODEX_DIR:-}" ]]; then
+    rm -rf "$FAKE_CODEX_DIR"
+  fi
+  if [[ "$STARTED_COMPOSE_POSTGRES" == "1" ]]; then
+    docker compose stop postgres >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT
 
 cargo fmt --all -- --check
 cargo test -p mandoforge-api
@@ -52,7 +70,6 @@ start_gate_api() {
   shift
   env "$@" cargo run -p mandoforge-api >"$log_file" 2>&1 &
   API_PID="$!"
-  trap 'kill "$API_PID" >/dev/null 2>&1 || true' EXIT
 
   for _ in $(seq 1 60); do
     if curl -fsS "$GATE_BASE_URL/healthz" >/dev/null 2>&1; then
@@ -93,6 +110,7 @@ if [[ "$START_LIVE_STACK" == "1" ]]; then
     exit 1
   fi
   docker compose up -d postgres
+  STARTED_COMPOSE_POSTGRES=1
   for _ in $(seq 1 60); do
     if docker compose exec -T postgres pg_isready -U mandoforge -d mandoforge >/dev/null 2>&1; then
       break

@@ -57,20 +57,21 @@ Latest live final gate evidence:
 
 ```text
 stage1 demo ok
-session_id=28db8dd0-918e-4464-b400-fb9806c7df4b
+session_id=4c0832f2-1360-4b4b-9d67-fe30e37b0eb5
 tool_calls=file.write:completed,shell.exec:completed,sql.query:completed,sql.get_schema:completed,file.read:completed
 codex adapter verification ok
-session_id=87c92cb8-499e-49cc-a524-c604d645143e
+session_id=72c981e1-d061-4abe-aca9-e3aa0c666a68
 artifacts=codex-final-message.md
 postgres sql.query verification ok
-session_id=bea38181-2da2-4989-8e7f-b733d01a387e
+session_id=1667f520-5854-4de9-89a9-b399f4057ee1
 row_count=7
-first_row={"count":32,"event_type":"approval.approved","status":"ok"}
+first_row={"count":62,"event_type":"approval.approved","status":"ok"}
 docker shell runner verification ok
-session_id=41a06536-ae65-4aa9-977a-6764ad23f3bd
+session_id=f6f3148f-be5f-4bcd-9dee-b9affd572561
 runner=docker
 stdout=sandbox-ok:/workspace
 stage1 final gate ok
+docker compose ps: no running project services after gate cleanup
 ```
 
 Latest browser UI signoff:
