@@ -88,3 +88,4 @@
 - [x] Enforce RBAC on approval decisions with a default demo operator principal.
 - [x] Enforce RBAC on execution job drain with a default demo operator principal.
 - [x] Route provider API key vault references through the reserved secret provider boundary.
+- [x] Enforce RBAC on session run with a default demo operator principal.

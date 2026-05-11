@@ -631,7 +631,9 @@ async fn provider_client_from_env() -> Result<Box<dyn ProviderClient>, AppError>
 async fn run_session(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Session>, AppError> {
+    authorize_session_run(&state, &headers, id).await?;
     state.set_session_status(id, SessionStatus::Running).await?;
     state
         .append_audit_log(new_audit_log(
@@ -753,6 +755,21 @@ async fn run_session(
         session
     };
     Ok(Json(session))
+}
+
+async fn authorize_session_run(
+    state: &AppState,
+    headers: &HeaderMap,
+    session_id: Uuid,
+) -> Result<(), AppError> {
+    let principal = principal_from_headers(state.tenant_id, headers)?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::SessionsRun,
+        resource_type: "session".to_string(),
+        resource_id: Some(session_id),
+    };
+    state.authorizer.authorize(&principal, &request).await
 }
 
 async fn list_events(
@@ -2376,6 +2393,59 @@ not json
                 .unwrap_or_default()
                 .contains(&session.id.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn session_run_enforces_rbac_role() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "rbac session run"}),
+            ),
+        )
+        .await;
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", session.id))
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let unchanged: Session = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(unchanged.status, SessionStatus::Created));
     }
 
     #[tokio::test]

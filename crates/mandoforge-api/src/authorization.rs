@@ -20,6 +20,7 @@ pub(crate) enum Permission {
     AgentsRead,
     AgentsWrite,
     SessionsRead,
+    SessionsRun,
     SessionsWrite,
     ToolsExecute,
     ApprovalsDecide,
@@ -93,6 +94,7 @@ fn role_allows_permission(role: Role, permission: Permission) -> bool {
             permission,
             Permission::AgentsRead
                 | Permission::SessionsRead
+                | Permission::SessionsRun
                 | Permission::SessionsWrite
                 | Permission::ToolsExecute
                 | Permission::ApprovalsDecide
@@ -125,6 +127,10 @@ mod tests {
         assert!(role_allows_permission(
             Role::Operator,
             Permission::ExecutionJobsRun
+        ));
+        assert!(role_allows_permission(
+            Role::Operator,
+            Permission::SessionsRun
         ));
         assert!(role_allows_permission(
             Role::Viewer,
