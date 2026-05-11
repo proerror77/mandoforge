@@ -13,6 +13,9 @@ use uuid::Uuid;
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{AppError, AppState, Approval, Artifact, ToolCall, new_audit_log};
 
+const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+const MAX_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct CodexRequest {
@@ -145,6 +148,9 @@ async fn execute_approved_shell(
     let output = tokio::time::timeout(Duration::from_secs(30), process.output())
         .await
         .map_err(|_| AppError::bad_request("shell.exec timed out"))??;
+    let limit = execution_output_limit_bytes();
+    let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout), limit);
+    let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr), limit);
 
     let result = json!({
         "approval": "approved",
@@ -152,8 +158,12 @@ async fn execute_approved_shell(
         "runner": runner,
         "workspace": workspace.display().to_string(),
         "exit_code": output.status.code(),
-        "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-        "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+        "stdout": stdout.text,
+        "stdout_bytes": stdout.original_bytes,
+        "stdout_truncated": stdout.truncated,
+        "stderr": stderr.text,
+        "stderr_bytes": stderr.original_bytes,
+        "stderr_truncated": stderr.truncated,
     });
     state
         .append_event(
@@ -306,12 +316,12 @@ async fn run_codex(
     .await
     .map_err(|_| AppError::bad_request("codex exec timed out"))??;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout_full = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_full = String::from_utf8_lossy(&output.stderr).to_string();
     let final_message = tokio::fs::read_to_string(&last_message)
         .await
         .unwrap_or_default();
-    for event in parse_codex_jsonl(&stdout) {
+    for event in parse_codex_jsonl(&stdout_full) {
         state
             .append_event(
                 "tool",
@@ -322,6 +332,10 @@ async fn run_codex(
             )
             .await?;
     }
+    let limit = execution_output_limit_bytes();
+    let stdout = truncate_output(&stdout_full, limit);
+    let stderr = truncate_output(&stderr_full, limit);
+    let final_output = truncate_output(&final_message, limit);
     if !final_message.trim().is_empty() {
         let artifact = Artifact {
             id: Uuid::new_v4(),
@@ -329,7 +343,11 @@ async fn run_codex(
             artifact_type: "markdown".to_string(),
             name: "codex-final-message.md".to_string(),
             path: Some("codex-final-message.md".to_string()),
-            content: json!({"markdown": final_message.clone()}),
+            content: json!({
+                "markdown": final_output.text.clone(),
+                "markdown_bytes": final_output.original_bytes,
+                "markdown_truncated": final_output.truncated
+            }),
             created_at: Utc::now(),
         };
         let artifact = state.insert_artifact(artifact).await?;
@@ -354,12 +372,32 @@ async fn run_codex(
             None,
             session_id,
             event_type,
-            json!({"exit_code": output.status.code(), "stdout": stdout, "stderr": stderr, "final_message": final_message}),
+            json!({
+                "exit_code": output.status.code(),
+                "stdout": stdout.text,
+                "stdout_bytes": stdout.original_bytes,
+                "stdout_truncated": stdout.truncated,
+                "stderr": stderr.text,
+                "stderr_bytes": stderr.original_bytes,
+                "stderr_truncated": stderr.truncated,
+                "final_message": final_output.text,
+                "final_message_bytes": final_output.original_bytes,
+                "final_message_truncated": final_output.truncated
+            }),
         )
         .await?;
-    Ok(
-        json!({"status": output.status.code(), "stdout": stdout, "stderr": stderr, "final_message": final_message}),
-    )
+    Ok(json!({
+        "status": output.status.code(),
+        "stdout": stdout.text,
+        "stdout_bytes": stdout.original_bytes,
+        "stdout_truncated": stdout.truncated,
+        "stderr": stderr.text,
+        "stderr_bytes": stderr.original_bytes,
+        "stderr_truncated": stderr.truncated,
+        "final_message": final_output.text,
+        "final_message_bytes": final_output.original_bytes,
+        "final_message_truncated": final_output.truncated
+    }))
 }
 
 pub(crate) fn parse_codex_jsonl(stdout: &str) -> Vec<Value> {
@@ -383,4 +421,42 @@ pub(crate) fn codex_jsonl_event_type(event: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string()
+}
+
+fn execution_output_limit_bytes() -> usize {
+    std::env::var("MANDOFORGE_EXECUTION_OUTPUT_LIMIT_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, MAX_OUTPUT_LIMIT_BYTES))
+        .unwrap_or(DEFAULT_OUTPUT_LIMIT_BYTES)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TruncatedOutput {
+    pub(crate) text: String,
+    pub(crate) original_bytes: usize,
+    pub(crate) truncated: bool,
+}
+
+pub(crate) fn truncate_output(value: &str, max_bytes: usize) -> TruncatedOutput {
+    let original_bytes = value.len();
+    if original_bytes <= max_bytes {
+        return TruncatedOutput {
+            text: value.to_string(),
+            original_bytes,
+            truncated: false,
+        };
+    }
+
+    let boundary = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    TruncatedOutput {
+        text: value[..boundary].to_string(),
+        original_bytes,
+        truncated: true,
+    }
 }

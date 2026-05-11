@@ -23,6 +23,7 @@
 - [x] Split policy, provider, and shell runner support modules out of `main.rs` without behavior changes.
 - [x] Split `AppState` store methods into a dedicated `store` module after Stage 1 signoff.
 - [x] Split approved file, shell, and Codex execution into a dedicated `execution` module before worker-process extraction.
+- [x] Add output-size limits for approved shell and Codex execution results.
 - [x] Add SQL safety tests for `sql.query`.
 - [x] Add API integration test for Generic Runtime Diagnostics replay.
 - [x] Add artifact detail panel in UI.

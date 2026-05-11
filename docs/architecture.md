@@ -200,7 +200,7 @@ Allowed non-extra-approval sandbox modes:
 Next worker work:
 
 - Keep `execution.rs` as the in-process execution boundary for approved `file.write`, `shell.exec`, and `codex.exec`.
-- Add output-size limits.
+- Keep output-size limits on approved shell and Codex execution results.
 - Move long tasks into a queue-backed worker process.
 
 ## Deployment Boundary

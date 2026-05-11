@@ -28,7 +28,7 @@ mod store;
 
 use execution::execute_approved_tool;
 #[cfg(test)]
-use execution::{codex_jsonl_event_type, parse_codex_jsonl};
+use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
 #[cfg(test)]
 use policy::ensure_read_only_sql;
 use policy::{PolicyConfig, ensure_read_only_sql_with_policy, load_policy_config};
@@ -1504,6 +1504,19 @@ not json
         assert_eq!(events.len(), 2);
         assert_eq!(codex_jsonl_event_type(&events[0]), "session.started");
         assert_eq!(codex_jsonl_event_type(&events[1]), "agent.message");
+    }
+
+    #[test]
+    fn truncates_execution_output_on_utf8_boundary() {
+        let output = truncate_output("abc你好", 4);
+        assert_eq!(output.text, "abc");
+        assert_eq!(output.original_bytes, 9);
+        assert!(output.truncated);
+
+        let unchanged = truncate_output("short", 64);
+        assert_eq!(unchanged.text, "short");
+        assert_eq!(unchanged.original_bytes, 5);
+        assert!(!unchanged.truncated);
     }
 
     #[test]

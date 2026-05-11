@@ -112,6 +112,7 @@ cargo run -p mandoforge-api
 ```
 
 `shell.exec` still requires approval. Docker mode runs approved commands with `--network none`, a workspace mount, and basic CPU/memory limits.
+Approved shell and Codex execution outputs are truncated before entering `tool_calls`, `session_events`, and artifacts. Set `MANDOFORGE_EXECUTION_OUTPUT_LIMIT_BYTES` to tune the per-field limit.
 
 Verify Docker shell runner mode against a running API started with `MANDOFORGE_SHELL_RUNNER=docker`:
 
