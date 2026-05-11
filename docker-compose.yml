@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mandoforge
+      POSTGRES_PASSWORD: mandoforge
+      POSTGRES_DB: mandoforge
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mandoforge -d mandoforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      MANDOFORGE_ADDR: 0.0.0.0:8787
+      MANDOFORGE_WORKSPACE_ROOT: /var/lib/mandoforge/workspaces
+      DATABASE_URL: postgres://mandoforge:mandoforge@postgres:5432/mandoforge
+    ports:
+      - "8787:8787"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - workspace-data:/var/lib/mandoforge/workspaces
+
+volumes:
+  postgres-data:
+  workspace-data:
+

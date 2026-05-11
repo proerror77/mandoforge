@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MandoForge Agent OS</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <div>
+          <p class="eyebrow">MandoForge</p>
+          <h1>Commerce Agent OS</h1>
+        </div>
+        <button id="new-session">Run GMV Demo</button>
+        <section>
+          <h2>Agents</h2>
+          <div id="agents" class="list"></div>
+        </section>
+        <section>
+          <h2>Approvals</h2>
+          <div id="approvals" class="list"></div>
+        </section>
+      </aside>
+
+      <section class="conversation">
+        <header>
+          <div>
+            <p class="eyebrow">Session Console</p>
+            <h2 id="session-title">No session selected</h2>
+          </div>
+          <span id="session-status" class="status">idle</span>
+        </header>
+        <div id="final-report" class="report"></div>
+      </section>
+
+      <section class="timeline">
+        <header>
+          <p class="eyebrow">Append-only Timeline</p>
+          <h2>Events</h2>
+        </header>
+        <div id="events" class="events"></div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
+

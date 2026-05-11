@@ -1,0 +1,42 @@
+version: 1
+defaults:
+  data_access: read_only
+  max_tool_runtime_seconds: 180
+  max_rows_returned: 500
+blocked_tools:
+  - production_db.write
+  - secret.read
+  - price.update.execute
+  - coupon.issue.execute
+  - refund.issue.execute
+  - customer.bulk_message.execute
+approval_policy:
+  required:
+    - tool: codex.exec
+      when:
+        sandbox_mode_not_in: ["read-only", "workspace-write"]
+      risk: high
+    - tool: campaign.draft
+      when:
+        affected_users_gt: 1000
+      risk: medium
+    - tool: coupon.issue
+      risk: high
+    - tool: price.update
+      risk: critical
+    - tool: refund.issue
+      when:
+        amount_gt: 100
+      risk: high
+allowed_tools:
+  commerce-manager-agent:
+    - warehouse.get_schema
+    - warehouse.query
+    - inventory.query
+    - customer_voice.search
+    - campaign.draft
+    - codex.exec
+    - approval.request
+    - file.read
+    - file.write
+
