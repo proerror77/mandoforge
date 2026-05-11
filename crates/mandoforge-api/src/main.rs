@@ -1441,6 +1441,7 @@ async fn run_execution_job_route(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
+    authorize_execution_job_run(&state, &headers, id).await?;
     let worker_id = headers
         .get("x-mandoforge-worker-id")
         .and_then(|value| value.to_str().ok())
@@ -1449,6 +1450,21 @@ async fn run_execution_job_route(
     let completed = run_execution_job(&state, id, worker_id).await?;
     resume_provider_after_approval(&state, completed.session_id).await?;
     Ok(Json(completed))
+}
+
+async fn authorize_execution_job_run(
+    state: &AppState,
+    headers: &HeaderMap,
+    job_id: Uuid,
+) -> Result<(), AppError> {
+    let principal = principal_from_headers(state.tenant_id, headers)?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::ExecutionJobsRun,
+        resource_type: "execution_job".to_string(),
+        resource_id: Some(job_id),
+    };
+    state.authorizer.authorize(&principal, &request).await
 }
 
 async fn list_session_audit_logs(
@@ -2986,12 +3002,32 @@ not json
             .find(|job| job.approval_id == approved.id)
             .expect("execution job queued");
         assert_eq!(job.status, ExecutionJobStatus::Queued);
+        let job_id = job.id;
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
 
         let completed: execution_queue::ExecutionJob = request_json(
             app.clone(),
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/execution-jobs/{}/run", job.id))
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
                 .body(Body::empty())
                 .expect("valid request"),
         )

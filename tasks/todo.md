@@ -86,3 +86,4 @@
 - [x] Add reserved Vault secret provider boundary before runtime secret reads.
 - [x] Enforce RBAC on manual tool execution with a default demo operator principal.
 - [x] Enforce RBAC on approval decisions with a default demo operator principal.
+- [x] Enforce RBAC on execution job drain with a default demo operator principal.
