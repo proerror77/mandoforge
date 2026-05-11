@@ -77,3 +77,7 @@
 - [x] Add deployment guide and demo script.
 - [x] Add Stage 1 final gate script with self-started in-memory demo and optional live stack mode.
 - [x] Add Stage 1 completion audit with evidence gaps.
+
+## Stage 2 / 3 Boundary Work
+
+- [x] Add reserved MCP Gateway config and client boundary before enabling `mcp.call`.

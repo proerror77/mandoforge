@@ -227,7 +227,7 @@ Stage 2/3 target components:
 - `runtime-worker`
 - `codex-worker`
 - `sandbox-runner`
-- `mcp-gateway`
+- `mcp-gateway` with `McpGatewayConfig` and `McpGatewayClient` as the reserved gateway boundary before enabling `mcp.call`.
 - `policy-engine`
 - `otel-collector`
 - `postgres`
