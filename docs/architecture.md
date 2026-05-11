@@ -8,22 +8,23 @@ Aligned:
 
 - Runtime-first direction.
 - Agent is treated as configuration, not a microservice.
+- Sessions bind to an agent version.
 - Session and append-only event log are core objects.
 - Postgres is the durable store when `DATABASE_URL` is set.
-- Tool execution is routed through named tool endpoints.
+- Tool execution is routed through a `ToolExecutor` registry and named tool endpoints.
 - Approval and artifacts are first-class API/store concepts.
-- Tool calls and audit logs are written for the current generic diagnostics path.
+- Tool calls and audit logs are written for generic diagnostics, manual tool execution, approvals, and worker resume paths.
 - Generic diagnostics demo has replaced the commerce GMV demo.
 - Docker Compose and Kubernetes skeleton exist.
+- Stage 1 YAML policy is loaded and enforced globally, then narrowed by session agent-version tool allowlists.
+- Approved shell execution can use the optional Docker runner.
+- Approved jobs can be queued for external worker handoff through the execution job API.
 
 Not yet aligned:
 
-- Harness still uses deterministic mock events instead of provider-driven tool-call turns.
-- Tool Router is not yet a `Tool` trait registry.
-- Policy YAML is not loaded/enforced centrally yet.
-- Tool calls and audit logs need broader coverage for future provider-driven and worker paths.
-- Approval does not yet resume the same harness turn.
-- Sandbox is workspace/Codex-oriented; Docker shell sandbox runner is not implemented yet.
+- Approval resume completes approved work through the execution layer, but does not yet continue the exact same provider turn.
+- External worker mode is API-drained; a separate long-running worker process is still future work.
+- Credentialed external provider verification exists, but only runs when provider credentials are supplied.
 - MCP Gateway, OTel, RBAC, and Vault are later-stage work.
 
 ## Runtime Layers
