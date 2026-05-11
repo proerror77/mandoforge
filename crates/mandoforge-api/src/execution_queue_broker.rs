@@ -1,5 +1,9 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -38,6 +42,9 @@ pub(crate) struct RedisExecutionJobPayload {
     pub(crate) tool_call_id: Uuid,
     pub(crate) tool_name: String,
 }
+
+#[allow(dead_code)]
+pub(crate) struct RedisStreamClient;
 
 #[allow(dead_code)]
 impl BrokerQueueKind {
@@ -180,6 +187,86 @@ impl RedisStreamCommand {
             ],
         })
     }
+
+    fn resp_args(&self) -> Vec<String> {
+        std::iter::once(self.command.clone())
+            .chain(self.args.iter().cloned())
+            .collect()
+    }
+}
+
+#[allow(dead_code)]
+impl RedisStreamClient {
+    pub(crate) async fn execute(
+        config: &BrokerQueueConfig,
+        command: &RedisStreamCommand,
+    ) -> Result<String, AppError> {
+        let addr = redis_tcp_addr(&config.endpoint)?;
+        let mut stream = TcpStream::connect(addr).await?;
+        let payload = encode_resp_array(&command.resp_args());
+        stream.write_all(payload.as_bytes()).await?;
+        stream.flush().await?;
+        let mut buffer = vec![0; 4096];
+        let bytes = stream.read(&mut buffer).await?;
+        if bytes == 0 {
+            return Err(AppError::bad_request("Redis returned an empty response"));
+        }
+        parse_redis_response(&String::from_utf8_lossy(&buffer[..bytes]))
+    }
+}
+
+fn redis_tcp_addr(endpoint: &str) -> Result<String, AppError> {
+    let trimmed = endpoint.trim();
+    let without_scheme = trimmed
+        .strip_prefix("redis://")
+        .ok_or_else(|| AppError::bad_request("MANDOFORGE_REDIS_URL must use redis://"))?;
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("MANDOFORGE_REDIS_URL must include host:port"))?;
+    if authority.contains('@') {
+        return Err(AppError::bad_request(
+            "authenticated Redis URLs are not supported by the current broker boundary",
+        ));
+    }
+    if !authority.contains(':') {
+        return Err(AppError::bad_request(
+            "MANDOFORGE_REDIS_URL must include host:port",
+        ));
+    }
+    Ok(authority.to_string())
+}
+
+fn encode_resp_array(args: &[String]) -> String {
+    let mut encoded = format!("*{}\r\n", args.len());
+    for arg in args {
+        encoded.push_str(&format!("${}\r\n{}\r\n", arg.len(), arg));
+    }
+    encoded
+}
+
+fn parse_redis_response(response: &str) -> Result<String, AppError> {
+    if let Some(error) = response.strip_prefix('-') {
+        let message = error.trim_end_matches("\r\n");
+        return Err(AppError::bad_request(format!("Redis error: {message}")));
+    }
+    if let Some(value) = response.strip_prefix('+') {
+        return Ok(value.trim_end_matches("\r\n").to_string());
+    }
+    if let Some(value) = response.strip_prefix('$') {
+        let (_, rest) = value
+            .split_once("\r\n")
+            .ok_or_else(|| AppError::bad_request("invalid Redis bulk response"))?;
+        let (bulk, _) = rest
+            .split_once("\r\n")
+            .ok_or_else(|| AppError::bad_request("invalid Redis bulk response"))?;
+        return Ok(bulk.to_string());
+    }
+    if let Some(value) = response.strip_prefix(':') {
+        return Ok(value.trim_end_matches("\r\n").to_string());
+    }
+    Err(AppError::bad_request("unsupported Redis response"))
 }
 
 #[async_trait]
@@ -251,9 +338,14 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
 mod tests {
     use super::{
         BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind, RedisExecutionJobPayload,
-        RedisStreamCommand, ReservedBrokerQueueHealthCheck,
+        RedisStreamClient, RedisStreamCommand, ReservedBrokerQueueHealthCheck, encode_resp_array,
+        parse_redis_response, redis_tcp_addr,
     };
     use crate::execution_queue::ExecutionJobRequest;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     #[test]
     fn broker_queue_config_requires_kind_endpoint() {
@@ -369,5 +461,77 @@ mod tests {
 
         assert!(RedisStreamCommand::xgroup_create(&config).is_err());
         assert!(RedisStreamCommand::xack(&config, "1-0").is_err());
+    }
+
+    #[test]
+    fn redis_stream_client_parses_endpoint_and_resp_responses() {
+        assert_eq!(
+            redis_tcp_addr("redis://127.0.0.1:6379/0").expect("addr"),
+            "127.0.0.1:6379"
+        );
+        assert!(redis_tcp_addr("http://127.0.0.1:6379").is_err());
+        assert!(redis_tcp_addr("redis://127.0.0.1").is_err());
+        assert_eq!(parse_redis_response("+OK\r\n").expect("simple"), "OK");
+        assert_eq!(parse_redis_response("$3\r\n1-0\r\n").expect("bulk"), "1-0");
+        assert_eq!(parse_redis_response(":1\r\n").expect("int"), "1");
+        assert!(parse_redis_response("-ERR no\r\n").is_err());
+    }
+
+    #[test]
+    fn redis_stream_client_encodes_resp_arrays() {
+        let encoded = encode_resp_array(&[
+            "XACK".to_string(),
+            "custom-stream".to_string(),
+            "custom-workers".to_string(),
+            "1-0".to_string(),
+        ]);
+
+        assert_eq!(
+            encoded,
+            "*4\r\n$4\r\nXACK\r\n$13\r\ncustom-stream\r\n$14\r\ncustom-workers\r\n$3\r\n1-0\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_stream_client_sends_resp_command_to_mock_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0; 4096];
+            let bytes = socket.read(&mut buffer).await.expect("read");
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            assert!(request.starts_with("*5\r\n$4\r\nXADD\r\n"));
+            assert!(request.contains("$25\r\nmandoforge:execution-jobs\r\n"));
+            assert!(request.contains("$7\r\npayload\r\n"));
+            assert!(request.contains("codex.exec"));
+            socket.write_all(b"$3\r\n1-0\r\n").await.expect("write");
+        });
+        let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Redis, |key| match key {
+            "MANDOFORGE_REDIS_URL" => Some(format!("redis://{addr}/0")),
+            _ => None,
+        })
+        .expect("redis config");
+        let request = ExecutionJobRequest {
+            session_id: "00000000-0000-4000-8000-000000000001"
+                .parse()
+                .expect("session id"),
+            approval_id: "00000000-0000-4000-8000-000000000002"
+                .parse()
+                .expect("approval id"),
+            tool_call_id: "00000000-0000-4000-8000-000000000003"
+                .parse()
+                .expect("tool call id"),
+            tool_name: "codex.exec".to_string(),
+        };
+        let payload = RedisExecutionJobPayload::from_request(&request);
+        let command = RedisStreamCommand::xadd_enqueue(&config, &payload).expect("xadd command");
+
+        let response = RedisStreamClient::execute(&config, &command)
+            .await
+            .expect("redis response");
+
+        server.await.expect("server");
+        assert_eq!(response, "1-0");
     }
 }
