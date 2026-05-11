@@ -37,6 +37,7 @@
 - [x] Split store backend type definitions out of the store method module.
 - [x] Split agent, agent-version, and session store methods out of the remaining store module.
 - [x] Split session event store methods out of the remaining store module.
+- [x] Split tool-call store methods out of the remaining store module.
 - [x] Bind sessions to agent versions and enforce agent-version tool allowlists.
 - [x] Add SQL safety tests for `sql.query`.
 - [x] Add API integration test for Generic Runtime Diagnostics replay.

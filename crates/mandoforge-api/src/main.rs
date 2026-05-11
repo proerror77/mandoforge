@@ -30,6 +30,7 @@ mod store_backend;
 mod store_entities;
 mod store_events;
 mod store_rows;
+mod store_tool_calls;
 
 use execution::{
     ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker, QueueBackedExecutionWorker,

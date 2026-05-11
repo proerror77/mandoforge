@@ -91,6 +91,7 @@ Next store work:
 - Keep backend type definitions in `store_backend` so startup wiring and store methods share the same backend contract.
 - Keep agent, agent-version, and session storage methods in `store_entities`.
 - Keep session event log storage methods in `store_events`.
+- Keep tool-call storage methods in `store_tool_calls`.
 - Split store methods into smaller modules.
 
 ## Event Log Contract
