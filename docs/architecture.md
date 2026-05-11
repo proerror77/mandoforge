@@ -85,7 +85,7 @@ Current store methods:
 
 Next store work:
 
-- Keep the dedicated `store` module as the persistence boundary.
+- Keep the `store_*` modules as the persistence boundary.
 - Keep agent version read APIs available for agent/version inspection.
 - Keep Postgres row mapping in `store_rows` so storage queries and row decoding can evolve separately.
 - Keep backend type definitions in `store_backend` so startup wiring and store methods share the same backend contract.
@@ -95,7 +95,7 @@ Next store work:
 - Keep artifact storage methods in `store_artifacts`.
 - Keep approval storage methods in `store_approvals`.
 - Keep audit-log storage methods in `store_audit`.
-- Split store methods into smaller modules.
+- Keep demo seed storage wiring in `store_seed`.
 
 ## Event Log Contract
 
