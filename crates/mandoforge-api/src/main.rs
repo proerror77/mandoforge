@@ -486,8 +486,10 @@ async fn list_agents(
 
 async fn create_agent(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<CreateAgent>,
 ) -> Result<Json<Agent>, AppError> {
+    authorize_request(&state, &headers, Permission::AgentsWrite, "agents", None).await?;
     Ok(Json(state.create_agent(input).await?))
 }
 
@@ -519,8 +521,17 @@ async fn list_sessions(
 
 async fn create_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<CreateSession>,
 ) -> Result<Json<Session>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsWrite,
+        "sessions",
+        None,
+    )
+    .await?;
     Ok(Json(state.create_session(input).await?))
 }
 
@@ -543,8 +554,17 @@ async fn get_session(
 async fn add_message(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Json(input): Json<AddMessage>,
 ) -> Result<Json<SessionEvent>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsWrite,
+        "session",
+        Some(id),
+    )
+    .await?;
     Ok(Json(
         state
             .append_event(
@@ -2048,18 +2068,23 @@ not json
         let app = test_app().await;
         let created: Agent = request_json(
             app.clone(),
-            json_request(
-                "POST",
-                "/api/agents",
-                json!({
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
                     "name": "Versioned Agent",
                     "kind": "orchestrator",
                     "provider": "openai-compatible",
                     "model": "gpt-5.4-mini",
                     "system_prompt": "Keep a version record.",
                     "tools": ["file.read", "sql.query"]
-                }),
-            ),
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
         )
         .await;
 
@@ -2094,18 +2119,23 @@ not json
         let app = test_app().await;
         let created: Agent = request_json(
             app.clone(),
-            json_request(
-                "POST",
-                "/api/agents",
-                json!({
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
                     "name": "Read Only Agent",
                     "kind": "orchestrator",
                     "provider": "openai-compatible",
                     "model": "gpt-5.4-mini",
                     "system_prompt": "Read only.",
                     "tools": ["file.read"]
-                }),
-            ),
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
         )
         .await;
         let versions: Vec<AgentVersion> = request_json(
@@ -2596,6 +2626,93 @@ not json
         .await;
 
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn write_routes_enforce_rbac_role_header() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::from(
+                    json!({"agent_id": agent.id, "title": "viewer denied session"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "operator session"}),
+            ),
+        )
+        .await;
+        let (status, _) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/messages", session.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(json!({"message": "allowed"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, error) = request_value(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "name": "Operator Denied Agent",
+                        "description": "operators cannot create agents",
+                        "model": "mock",
+                        "tools": ["file.read"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
     }
 
     #[tokio::test]

@@ -93,3 +93,4 @@
 - [x] Add explicit reserved/vault secret provider selection while keeping reserved as the default.
 - [x] Add local mock Vault KV v2 HTTP verification for token, namespace, path, and secret parsing.
 - [x] Enforce RBAC on read/list API paths with default demo operator compatibility.
+- [x] Enforce RBAC on core write API paths with default demo operator compatibility.
