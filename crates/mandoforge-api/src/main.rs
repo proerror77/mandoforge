@@ -27,6 +27,23 @@ use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::{error, info};
 use uuid::Uuid;
 
+mod policy;
+mod provider;
+mod shell_runner;
+
+#[cfg(test)]
+use policy::ensure_read_only_sql;
+use policy::{PolicyConfig, ensure_read_only_sql_with_policy, load_policy_config};
+#[cfg(test)]
+use provider::parse_openai_compatible_provider_response;
+use provider::{
+    HarnessContext, MockProviderClient, OpenAiCompatibleProviderClient, ProviderClient,
+    ProviderResponse,
+};
+#[cfg(test)]
+use shell_runner::docker_shell_args;
+use shell_runner::{shell_command, shell_runner};
+
 #[derive(Clone)]
 struct AppState {
     store: StoreBackend,
@@ -181,41 +198,6 @@ struct ToolCall {
     created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct HarnessContext {
-    session_id: Uuid,
-    event_count: usize,
-    last_user_message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProviderToolCall {
-    tool_name: String,
-    args: Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProviderResponse {
-    plan: Vec<String>,
-    tool_calls: Vec<ProviderToolCall>,
-}
-
-#[async_trait]
-trait ProviderClient: Send + Sync {
-    fn name(&self) -> &'static str;
-
-    async fn complete(&self, context: HarnessContext) -> Result<ProviderResponse, AppError>;
-}
-
-struct MockProviderClient;
-
-struct OpenAiCompatibleProviderClient {
-    base_url: String,
-    api_key: String,
-    model: String,
-    client: reqwest::Client,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AuditLog {
     id: Uuid,
@@ -269,109 +251,6 @@ struct ApprovalRequestTool;
 struct ExecuteTool {
     session_id: Uuid,
     args: Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct PolicyConfig {
-    #[serde(default)]
-    blocked_tools: Vec<String>,
-    #[serde(default)]
-    approval_required: Vec<ApprovalRequiredRule>,
-    #[serde(default)]
-    allowed_tools: HashMap<String, Vec<String>>,
-    #[serde(default)]
-    sql_policy: SqlPolicy,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ApprovalRequiredRule {
-    tool: String,
-    risk: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct SqlPolicy {
-    #[serde(default = "default_sql_max_rows")]
-    max_rows: i64,
-    #[serde(default)]
-    blocked_keywords: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ToolPolicyDecision {
-    decision: &'static str,
-    risk_level: String,
-    reason: String,
-}
-
-impl Default for PolicyConfig {
-    fn default() -> Self {
-        Self {
-            blocked_tools: vec![
-                "secret.read".to_string(),
-                "production_db.write".to_string(),
-                "system.network.unrestricted".to_string(),
-                "shell.exec.unrestricted".to_string(),
-            ],
-            approval_required: vec![
-                ApprovalRequiredRule {
-                    tool: "shell.exec".to_string(),
-                    risk: "high".to_string(),
-                },
-                ApprovalRequiredRule {
-                    tool: "codex.exec".to_string(),
-                    risk: "high".to_string(),
-                },
-                ApprovalRequiredRule {
-                    tool: "file.write".to_string(),
-                    risk: "medium".to_string(),
-                },
-                ApprovalRequiredRule {
-                    tool: "http.request".to_string(),
-                    risk: "high".to_string(),
-                },
-            ],
-            allowed_tools: HashMap::from([(
-                "generic-orchestrator-agent".to_string(),
-                vec![
-                    "file.read".to_string(),
-                    "file.write".to_string(),
-                    "sql.get_schema".to_string(),
-                    "sql.query".to_string(),
-                    "shell.exec".to_string(),
-                    "codex.exec".to_string(),
-                    "approval.request".to_string(),
-                    "artifact.create".to_string(),
-                ],
-            )]),
-            sql_policy: SqlPolicy {
-                max_rows: default_sql_max_rows(),
-                blocked_keywords: vec![
-                    "INSERT".to_string(),
-                    "UPDATE".to_string(),
-                    "DELETE".to_string(),
-                    "DROP".to_string(),
-                    "ALTER".to_string(),
-                    "CREATE".to_string(),
-                    "TRUNCATE".to_string(),
-                    "GRANT".to_string(),
-                    "REVOKE".to_string(),
-                    "COPY".to_string(),
-                    "CALL".to_string(),
-                    "DO".to_string(),
-                ],
-            },
-        }
-    }
-}
-
-impl Default for SqlPolicy {
-    fn default() -> Self {
-        Self {
-            max_rows: default_sql_max_rows(),
-            blocked_keywords: PolicyConfig::default().sql_policy.blocked_keywords,
-        }
-    }
 }
 
 #[allow(dead_code)]
@@ -466,13 +345,6 @@ fn build_router(state: AppState) -> Router {
 
 async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
-}
-
-async fn load_policy_config(path: &str) -> Result<PolicyConfig> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .with_context(|| format!("failed to read policy config {path}"))?;
-    serde_yml::from_str(&content).with_context(|| format!("failed to parse policy config {path}"))
 }
 
 async fn run_migrations(pool: &PgPool) -> Result<()> {
@@ -1401,243 +1273,6 @@ fn new_audit_log(
         details,
         created_at: Utc::now(),
     }
-}
-
-#[async_trait]
-impl ProviderClient for MockProviderClient {
-    fn name(&self) -> &'static str {
-        "mock-openai-compatible"
-    }
-
-    async fn complete(&self, _context: HarnessContext) -> Result<ProviderResponse, AppError> {
-        Ok(ProviderResponse {
-            plan: vec![
-                "Read README and Stage 1 policy/config from the workspace".to_string(),
-                "Query generic_demo.platform_events for recent session health".to_string(),
-                "Request approval before shell execution or writing diagnostics.md".to_string(),
-                "Create diagnostics.md as an artifact and emit a final summary".to_string(),
-            ],
-            tool_calls: vec![
-                ProviderToolCall {
-                    tool_name: "file.read".to_string(),
-                    args: json!({"paths": ["README.md", "config/policy.stage1.yaml"]}),
-                },
-                ProviderToolCall {
-                    tool_name: "sql.get_schema".to_string(),
-                    args: json!({"schema": "generic_demo"}),
-                },
-                ProviderToolCall {
-                    tool_name: "sql.query".to_string(),
-                    args: json!({"sql": "select event_type, status, count(*) from generic_demo.platform_events where created_at >= now() - interval '24 hours' group by event_type, status"}),
-                },
-                ProviderToolCall {
-                    tool_name: "shell.exec".to_string(),
-                    args: json!({"command": "pwd"}),
-                },
-            ],
-        })
-    }
-}
-
-impl OpenAiCompatibleProviderClient {
-    fn from_env() -> Result<Option<Self>, AppError> {
-        let Ok(base_url) = std::env::var("MANDOFORGE_PROVIDER_BASE_URL") else {
-            return Ok(None);
-        };
-        let Ok(api_key) = std::env::var("MANDOFORGE_PROVIDER_API_KEY") else {
-            return Ok(None);
-        };
-        let base_url = base_url.trim().trim_end_matches('/').to_string();
-        if base_url.is_empty() || api_key.trim().is_empty() {
-            return Ok(None);
-        }
-        let model = std::env::var("MANDOFORGE_PROVIDER_MODEL")
-            .unwrap_or_else(|_| default_model())
-            .trim()
-            .to_string();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()?;
-        Ok(Some(Self {
-            base_url,
-            api_key,
-            model,
-            client,
-        }))
-    }
-}
-
-#[async_trait]
-impl ProviderClient for OpenAiCompatibleProviderClient {
-    fn name(&self) -> &'static str {
-        "openai-compatible-http"
-    }
-
-    async fn complete(&self, context: HarnessContext) -> Result<ProviderResponse, AppError> {
-        let endpoint = format!("{}/v1/chat/completions", self.base_url);
-        let body = json!({
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are MandoForge's Stage 1 provider harness. Return tool calls only for the supplied generic runtime session. Use available tools through the runtime policy path."
-                },
-                {
-                    "role": "user",
-                    "content": serde_json::to_string(&context)?
-                }
-            ],
-            "tools": provider_tool_schemas(),
-            "tool_choice": "auto"
-        });
-        let response = self
-            .client
-            .post(endpoint)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await?;
-        let status = response.status();
-        let value: Value = response.json().await?;
-        if !status.is_success() {
-            return Err(AppError::bad_request(format!(
-                "provider request failed with status {status}: {}",
-                redact_provider_error(&value)
-            )));
-        }
-        parse_openai_compatible_provider_response(&value)
-    }
-}
-
-fn provider_tool_schemas() -> Value {
-    json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "file.read",
-                "description": "Read summarized files from the session workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"paths": {"type": "array", "items": {"type": "string"}}},
-                    "required": ["paths"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "sql.get_schema",
-                "description": "Return the generic demo database schema.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"schema": {"type": "string"}},
-                    "required": ["schema"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "sql.query",
-                "description": "Execute read-only SQL against generic demo data.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"sql": {"type": "string"}},
-                    "required": ["sql"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "shell.exec",
-                "description": "Request approval to run a shell command in the session workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"command": {"type": "string"}},
-                    "required": ["command"]
-                }
-            }
-        }
-    ])
-}
-
-fn parse_openai_compatible_provider_response(value: &Value) -> Result<ProviderResponse, AppError> {
-    let message = value
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .ok_or_else(|| AppError::bad_request("provider response missing choices[0].message"))?;
-    let content = message
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let tool_calls = message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .map(|calls| {
-            calls
-                .iter()
-                .filter_map(parse_provider_tool_call)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let plan = provider_plan_from_content(content).unwrap_or_else(|| {
-        vec![format!(
-            "Provider returned {} runtime tool call(s)",
-            tool_calls.len()
-        )]
-    });
-    Ok(ProviderResponse { plan, tool_calls })
-}
-
-fn parse_provider_tool_call(value: &Value) -> Option<ProviderToolCall> {
-    let function = value.get("function")?;
-    let tool_name = function.get("name")?.as_str()?.to_string();
-    let arguments = function
-        .get("arguments")
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
-    let args =
-        serde_json::from_str(arguments).unwrap_or_else(|_| json!({"raw_arguments": arguments}));
-    Some(ProviderToolCall { tool_name, args })
-}
-
-fn provider_plan_from_content(content: &str) -> Option<Vec<String>> {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if let Some(plan) = value.get("plan").and_then(Value::as_array) {
-            let steps: Vec<_> = plan
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect();
-            if !steps.is_empty() {
-                return Some(steps);
-            }
-        }
-    }
-    Some(
-        trimmed
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect(),
-    )
-}
-
-fn redact_provider_error(value: &Value) -> String {
-    value
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or("provider returned an error")
-        .to_string()
 }
 
 async fn build_harness_context(
@@ -2574,48 +2209,6 @@ async fn execute_approved_shell(
     Ok(())
 }
 
-fn shell_runner() -> String {
-    std::env::var("MANDOFORGE_SHELL_RUNNER")
-        .unwrap_or_else(|_| "host".to_string())
-        .trim()
-        .to_string()
-}
-
-fn shell_command(runner: &str, workspace: &FsPath, command: &str) -> Command {
-    if runner == "docker" {
-        let image = std::env::var("MANDOFORGE_SHELL_DOCKER_IMAGE")
-            .unwrap_or_else(|_| "alpine:3.20".to_string());
-        let mut process = Command::new("docker");
-        process.args(docker_shell_args(workspace, &image, command));
-        process
-    } else {
-        let mut process = Command::new("sh");
-        process.arg("-c").arg(command).current_dir(workspace);
-        process
-    }
-}
-
-fn docker_shell_args(workspace: &FsPath, image: &str, command: &str) -> Vec<String> {
-    vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "--network".to_string(),
-        "none".to_string(),
-        "--cpus".to_string(),
-        "1".to_string(),
-        "--memory".to_string(),
-        "512m".to_string(),
-        "-v".to_string(),
-        format!("{}:/workspace", workspace.display()),
-        "-w".to_string(),
-        "/workspace".to_string(),
-        image.to_string(),
-        "sh".to_string(),
-        "-lc".to_string(),
-        command.to_string(),
-    ]
-}
-
 async fn execute_approved_codex(
     state: &AppState,
     approval: &Approval,
@@ -2884,82 +2477,6 @@ fn codex_jsonl_event_type(event: &Value) -> String {
         .to_string()
 }
 
-fn ensure_read_only_sql_with_policy(sql: &str, policy: &SqlPolicy) -> Result<(), AppError> {
-    let lowered = sql.trim().to_lowercase();
-    if lowered.matches(';').count() > 1 {
-        return Err(AppError::bad_request("only one SQL statement is allowed"));
-    }
-    if policy.blocked_keywords.iter().any(|keyword| {
-        let keyword = keyword.to_lowercase();
-        lowered.starts_with(&keyword) || lowered.contains(&format!(" {keyword} "))
-    }) {
-        return Err(AppError::bad_request(
-            "sql.query only accepts read-only SQL",
-        ));
-    }
-    if !lowered.starts_with("select")
-        && !lowered.starts_with("with")
-        && !lowered.starts_with("explain")
-    {
-        return Err(AppError::bad_request(
-            "sql.query requires SELECT, WITH, or EXPLAIN",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn ensure_read_only_sql(sql: &str) -> Result<(), AppError> {
-    ensure_read_only_sql_with_policy(sql, &PolicyConfig::default().sql_policy)
-}
-
-impl PolicyConfig {
-    fn evaluate_tool(&self, name: &str) -> ToolPolicyDecision {
-        if self.blocked_tools.iter().any(|tool| tool == name) {
-            return ToolPolicyDecision {
-                decision: "denied",
-                risk_level: tool_risk_level(name).to_string(),
-                reason: format!("{name} is blocked by config/policy.stage1.yaml"),
-            };
-        }
-
-        if let Some(rule) = self.approval_required.iter().find(|rule| rule.tool == name) {
-            return ToolPolicyDecision {
-                decision: "requires_approval",
-                risk_level: rule.risk.clone(),
-                reason: format!("{name} requires approval by config/policy.stage1.yaml"),
-            };
-        }
-
-        if self
-            .allowed_tools
-            .values()
-            .any(|tools| tools.iter().any(|tool| tool == name))
-        {
-            return ToolPolicyDecision {
-                decision: "allowed",
-                risk_level: tool_risk_level(name).to_string(),
-                reason: format!("{name} is allowed by config/policy.stage1.yaml"),
-            };
-        }
-
-        ToolPolicyDecision {
-            decision: "denied",
-            risk_level: "unknown".to_string(),
-            reason: format!("{name} is not allowed by config/policy.stage1.yaml"),
-        }
-    }
-}
-
-fn tool_risk_level(name: &str) -> &'static str {
-    match name {
-        "file.read" | "sql.get_schema" | "approval.request" | "artifact.create" => "low",
-        "file.write" | "sql.query" => "medium",
-        "shell.exec" | "codex.exec" | "http.request" => "high",
-        _ => "unknown",
-    }
-}
-
 fn generic_file_read_summary() -> Value {
     json!({
         "files": [
@@ -3017,10 +2534,6 @@ fn default_provider() -> String {
 
 fn default_model() -> String {
     "gpt-5.4-mini".to_string()
-}
-
-fn default_sql_max_rows() -> i64 {
-    500
 }
 
 fn default_session_title() -> String {
