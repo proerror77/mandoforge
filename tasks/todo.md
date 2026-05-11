@@ -81,3 +81,4 @@
 ## Stage 2 / 3 Boundary Work
 
 - [x] Add reserved MCP Gateway config and client boundary before enabling `mcp.call`.
+- [x] Add reserved OTel observability config and exporter boundary before enabling telemetry export.

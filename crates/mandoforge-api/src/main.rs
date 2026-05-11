@@ -24,6 +24,7 @@ mod execution;
 mod execution_queue;
 mod execution_queue_broker;
 mod mcp_gateway;
+mod observability;
 mod policy;
 mod provider;
 mod shell_runner;

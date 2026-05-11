@@ -229,7 +229,7 @@ Stage 2/3 target components:
 - `sandbox-runner`
 - `mcp-gateway` with `McpGatewayConfig` and `McpGatewayClient` as the reserved gateway boundary before enabling `mcp.call`.
 - `policy-engine`
-- `otel-collector`
+- `otel-collector` with `ObservabilityConfig` and `TelemetryExporter` as the reserved exporter boundary before enabling OTLP export.
 - `postgres`
 - `redis-or-nats`
 - `object-storage`
