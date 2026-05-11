@@ -17,7 +17,7 @@ Aligned:
 - Generic diagnostics demo has replaced the commerce GMV demo.
 - Docker Compose and Kubernetes skeleton exist.
 - Stage 1 YAML policy is loaded and enforced globally, then narrowed by session agent-version tool allowlists.
-- Session run, manual tool execution, approval decisions, execution job drain, read/list API paths, and core write API paths now pass through the RBAC `Authorizer`; the demo default principal is an operator, and explicit invalid/no-role principals fail closed.
+- Session run, tool catalog reads, manual tool execution, approval decisions, execution job drain, read/list API paths, and core write API paths now pass through the RBAC `Authorizer`; the demo default principal is an operator, and explicit invalid/no-role principals fail closed.
 - Approved shell execution can use the optional Docker runner.
 - Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh` or the `mandoforge-worker` Rust binary; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
 - Worker deployment entries exist for Docker Compose and Kubernetes.

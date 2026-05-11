@@ -1136,8 +1136,12 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
     descriptors
 }
 
-async fn list_tools() -> Json<Vec<ToolDescriptor>> {
-    Json(tool_descriptors())
+async fn list_tools(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ToolDescriptor>>, AppError> {
+    authorize_request(&state, &headers, Permission::AgentsRead, "tools", None).await?;
+    Ok(Json(tool_descriptors()))
 }
 
 async fn execute_tool(
@@ -2595,6 +2599,7 @@ not json
         let app = test_app().await;
         for uri in [
             "/api/agents",
+            "/api/tools",
             "/api/sessions",
             "/api/approvals",
             "/api/tool-calls",
