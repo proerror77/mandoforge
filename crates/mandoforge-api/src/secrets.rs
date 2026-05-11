@@ -312,8 +312,41 @@ mod tests {
         ReservedSecretProvider, SecretProvider, SecretProviderConfig, SecretProviderKind,
         SecretRef, VaultSecretProvider, secret_provider_from_lookup, validate_secret_component,
     };
-    use axum::http::StatusCode;
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{HeaderMap as AxumHeaderMap, StatusCode},
+        routing::get,
+    };
     use serde_json::json;
+
+    #[derive(Clone)]
+    struct VaultMockState {
+        token: String,
+        namespace: String,
+    }
+
+    async fn mock_vault_kv(
+        State(state): State<VaultMockState>,
+        headers: AxumHeaderMap,
+    ) -> Result<Json<serde_json::Value>, StatusCode> {
+        let token = headers
+            .get("x-vault-token")
+            .and_then(|value| value.to_str().ok());
+        let namespace = headers
+            .get("x-vault-namespace")
+            .and_then(|value| value.to_str().ok());
+        if token != Some(state.token.as_str()) || namespace != Some(state.namespace.as_str()) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Ok(Json(json!({
+            "data": {
+                "data": {
+                    "api_key": "mock-vault-key"
+                }
+            }
+        })))
+    }
 
     #[test]
     fn secret_provider_config_requires_vault_addr() {
@@ -514,5 +547,40 @@ mod tests {
             VaultSecretProvider::parse_kv_v2_secret(json!({"data": {"data": {}}}), &secret_ref)
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn vault_secret_provider_reads_kv_v2_secret_over_http() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let app = Router::new()
+            .route("/v1/kv/data/providers/openai", get(mock_vault_kv))
+            .with_state(VaultMockState {
+                token: "dev-token".to_string(),
+                namespace: "agent-os".to_string(),
+            });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("mock vault");
+        });
+        let config = SecretProviderConfig::from_lookup(|key| match key {
+            "MANDOFORGE_VAULT_ADDR" => Some(format!("http://{addr}/")),
+            "MANDOFORGE_VAULT_MOUNT" => Some("/kv/".to_string()),
+            "MANDOFORGE_VAULT_NAMESPACE" => Some("agent-os".to_string()),
+            "MANDOFORGE_VAULT_TOKEN" => Some("dev-token".to_string()),
+            _ => None,
+        })
+        .expect("vault config");
+        let secret_ref = SecretRef::new("providers/openai", "api_key").expect("secret ref");
+        let provider = VaultSecretProvider::new().expect("provider");
+
+        let secret = provider
+            .read_secret(&config, &secret_ref)
+            .await
+            .expect("secret");
+
+        server.abort();
+        assert_eq!(secret.expose_for_provider_use(), "mock-vault-key");
     }
 }

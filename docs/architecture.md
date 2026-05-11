@@ -243,7 +243,7 @@ Current verified path:
 
 - `cargo fmt --all -- --check`
 - `cargo check -p mandoforge-api --bins`
-- `cargo test -p mandoforge-api`
+- `cargo test -p mandoforge-api` including local mock Vault KV v2 HTTP coverage for token, namespace, path, and secret parsing.
 - `./scripts/stage1-final-gate.sh`
 - `RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh`
 
