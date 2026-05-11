@@ -84,7 +84,7 @@ Current store methods:
 
 Next store work:
 
-- Move these methods into a dedicated `store` module.
+- Keep the dedicated `store` module as the persistence boundary.
 - Add agent version read APIs.
 - Split store methods into smaller modules.
 
@@ -146,7 +146,7 @@ Target Stage 1 tools:
 - `approval.request`: low risk.
 - `artifact.create`: low risk.
 
-The current code exposes descriptors, mock execution, `tool_calls`, policy events, audit logs, and normalized results for the generic diagnostics path. The next implementation should introduce a `Tool` trait and registry so this behavior is shared by every tool.
+The current code exposes descriptors, a `ToolExecutor` trait, a tool registry, `tool_calls`, policy events, audit logs, and normalized results for the generic diagnostics path.
 
 ## Policy Boundary
 
@@ -159,10 +159,8 @@ Current enforced checks:
 
 Next enforcement work:
 
-- Load YAML policy at startup.
-- Check allowed tools per agent.
-- Emit `policy.allowed`, `policy.denied`, and `policy.requires_approval`.
-- Persist policy decisions into `tool_calls.policy_decision`.
+- Check allowed tools per agent version rather than only the global policy file.
+- Expand policy coverage for later worker, HTTP, and MCP tools.
 
 ## Sandbox Boundary
 
@@ -201,8 +199,7 @@ Allowed non-extra-approval sandbox modes:
 
 Next worker work:
 
-- Parse JSONL event lines into `codex.task.event`.
-- Persist final files as artifacts.
+- Keep `execution.rs` as the in-process execution boundary for approved `file.write`, `shell.exec`, and `codex.exec`.
 - Add output-size limits.
 - Move long tasks into a queue-backed worker process.
 
