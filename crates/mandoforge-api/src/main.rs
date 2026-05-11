@@ -23,6 +23,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct AppState {
     store: StoreBackend,
+    #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
 }
@@ -34,6 +35,8 @@ struct MemoryStore {
     events: HashMap<Uuid, Vec<SessionEvent>>,
     approvals: HashMap<Uuid, Approval>,
     artifacts: HashMap<Uuid, Artifact>,
+    tool_calls: HashMap<Uuid, ToolCall>,
+    audit_logs: HashMap<Uuid, AuditLog>,
 }
 
 #[derive(Clone)]
@@ -143,6 +146,7 @@ struct SessionEvent {
 struct Approval {
     id: Uuid,
     session_id: Uuid,
+    tool_call_id: Option<Uuid>,
     action: String,
     risk_level: String,
     reason: String,
@@ -150,6 +154,36 @@ struct Approval {
     status: String,
     created_at: DateTime<Utc>,
     decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ToolCall {
+    id: Uuid,
+    session_id: Uuid,
+    event_id: Option<Uuid>,
+    tool_name: String,
+    args: Value,
+    status: String,
+    risk_level: String,
+    policy_decision: Value,
+    result: Option<Value>,
+    error: Option<Value>,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditLog {
+    id: Uuid,
+    session_id: Option<Uuid>,
+    actor_type: String,
+    actor_id: Option<Uuid>,
+    action: String,
+    resource_type: String,
+    resource_id: Option<Uuid>,
+    details: Value,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +210,7 @@ struct ExecuteTool {
     args: Value,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct CodexRequest {
     task: String,
@@ -229,11 +264,21 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{id}/events", get(list_events))
         .route("/api/sessions/{id}/stream", get(stream_events))
         .route("/api/sessions/{id}/artifacts", get(list_artifacts))
+        .route(
+            "/api/sessions/{id}/tool-calls",
+            get(list_session_tool_calls),
+        )
+        .route(
+            "/api/sessions/{id}/audit-logs",
+            get(list_session_audit_logs),
+        )
         .route("/api/tools", get(list_tools))
         .route("/api/tools/{name}/execute", post(execute_tool))
+        .route("/api/tool-calls", get(list_tool_calls))
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
+        .route("/api/audit-logs", get(list_audit_logs))
         .fallback_service(ServeDir::new("web"))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -271,8 +316,8 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
 
 async fn seed_demo_tenant(pool: &PgPool, tenant_id: Uuid) -> Result<()> {
     sqlx::query(
-        "INSERT INTO tenants (id, name)
-         VALUES ($1, 'Demo Tenant')
+        "INSERT INTO tenants (id, name, slug)
+         VALUES ($1, 'Demo Tenant', 'default')
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(tenant_id)
@@ -345,6 +390,7 @@ fn approval_from_row(row: PgRow) -> Result<Approval, AppError> {
     Ok(Approval {
         id: row.try_get("id")?,
         session_id: row.try_get("session_id")?,
+        tool_call_id: row.try_get("tool_call_id")?,
         action: row.try_get("action")?,
         risk_level: row.try_get("risk_level")?,
         reason: row.try_get("reason")?,
@@ -352,6 +398,38 @@ fn approval_from_row(row: PgRow) -> Result<Approval, AppError> {
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
         decided_at: row.try_get("decided_at")?,
+    })
+}
+
+fn tool_call_from_row(row: PgRow) -> Result<ToolCall, AppError> {
+    Ok(ToolCall {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        event_id: row.try_get("event_id")?,
+        tool_name: row.try_get("tool_name")?,
+        args: row.try_get("args")?,
+        status: row.try_get("status")?,
+        risk_level: row.try_get("risk_level")?,
+        policy_decision: row.try_get("policy_decision")?,
+        result: row.try_get("result")?,
+        error: row.try_get("error")?,
+        started_at: row.try_get("started_at")?,
+        completed_at: row.try_get("completed_at")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn audit_log_from_row(row: PgRow) -> Result<AuditLog, AppError> {
+    Ok(AuditLog {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        actor_type: row.try_get("actor_type")?,
+        actor_id: row.try_get("actor_id")?,
+        action: row.try_get("action")?,
+        resource_type: row.try_get("resource_type")?,
+        resource_id: row.try_get("resource_id")?,
+        details: row.try_get("details")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 
@@ -668,6 +746,128 @@ impl AppState {
         }
     }
 
+    async fn insert_tool_call(&self, tool_call: ToolCall) -> Result<ToolCall, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .tool_calls
+                    .insert(tool_call.id, tool_call.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO tool_calls
+                        (id, tenant_id, session_id, event_id, tool_name, args, result, status, risk_level, policy_decision, started_at, completed_at, error, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                )
+                .bind(tool_call.id)
+                .bind(self.tenant_id)
+                .bind(tool_call.session_id)
+                .bind(tool_call.event_id)
+                .bind(&tool_call.tool_name)
+                .bind(&tool_call.args)
+                .bind(&tool_call.result)
+                .bind(&tool_call.status)
+                .bind(&tool_call.risk_level)
+                .bind(&tool_call.policy_decision)
+                .bind(tool_call.started_at)
+                .bind(tool_call.completed_at)
+                .bind(&tool_call.error)
+                .bind(tool_call.created_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(tool_call)
+    }
+
+    async fn update_tool_call_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        result: Option<Value>,
+        error: Option<Value>,
+    ) -> Result<ToolCall, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let tool_call = store
+                    .tool_calls
+                    .get_mut(&id)
+                    .ok_or_else(|| AppError::not_found("tool call not found"))?;
+                tool_call.status = status.to_string();
+                tool_call.completed_at = Some(Utc::now());
+                tool_call.result = result;
+                tool_call.error = error;
+                Ok(tool_call.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE tool_calls
+                     SET status = $1, result = $2, error = $3, completed_at = now()
+                     WHERE tenant_id = $4 AND id = $5
+                     RETURNING id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at",
+                )
+                .bind(status)
+                .bind(result)
+                .bind(error)
+                .bind(self.tenant_id)
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("tool call not found"))?;
+                tool_call_from_row(row)
+            }
+        }
+    }
+
+    async fn list_tool_calls(&self, session_id: Option<Uuid>) -> Result<Vec<ToolCall>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut calls: Vec<_> = inner
+                    .read()
+                    .await
+                    .tool_calls
+                    .values()
+                    .filter(|call| session_id.is_none_or(|id| call.session_id == id))
+                    .cloned()
+                    .collect();
+                calls.sort_by_key(|call| call.created_at);
+                calls.reverse();
+                Ok(calls)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = match session_id {
+                    Some(session_id) => {
+                        sqlx::query(
+                            "SELECT id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at
+                             FROM tool_calls
+                             WHERE tenant_id = $1 AND session_id = $2
+                             ORDER BY created_at DESC",
+                        )
+                        .bind(self.tenant_id)
+                        .bind(session_id)
+                        .fetch_all(pool)
+                        .await?
+                    }
+                    None => {
+                        sqlx::query(
+                            "SELECT id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at
+                             FROM tool_calls
+                             WHERE tenant_id = $1
+                             ORDER BY created_at DESC",
+                        )
+                        .bind(self.tenant_id)
+                        .fetch_all(pool)
+                        .await?
+                    }
+                };
+                rows.into_iter().map(tool_call_from_row).collect()
+            }
+        }
+    }
+
     async fn insert_artifact(&self, artifact: Artifact) -> Result<Artifact, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -734,12 +934,13 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO approvals (id, tenant_id, session_id, action, risk_level, reason, evidence, status, created_at, decided_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                    "INSERT INTO approvals (id, tenant_id, session_id, tool_call_id, action, risk_level, reason, evidence, status, created_at, decided_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(approval.id)
                 .bind(self.tenant_id)
                 .bind(approval.session_id)
+                .bind(approval.tool_call_id)
                 .bind(&approval.action)
                 .bind(&approval.risk_level)
                 .bind(&approval.reason)
@@ -761,7 +962,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, session_id, action, risk_level, reason, evidence, status, created_at, decided_at
+                    "SELECT id, session_id, tool_call_id, action, risk_level, reason, evidence, status, created_at, decided_at
                      FROM approvals
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
@@ -791,7 +992,7 @@ impl AppState {
                     "UPDATE approvals
                      SET status = $1, decided_at = now()
                      WHERE tenant_id = $2 AND id = $3
-                     RETURNING id, session_id, action, risk_level, reason, evidence, status, created_at, decided_at",
+                     RETURNING id, session_id, tool_call_id, action, risk_level, reason, evidence, status, created_at, decided_at",
                 )
                 .bind(status)
                 .bind(self.tenant_id)
@@ -800,6 +1001,84 @@ impl AppState {
                 .await?
                 .ok_or_else(|| AppError::not_found("approval not found"))?;
                 approval_from_row(row)
+            }
+        }
+    }
+
+    async fn append_audit_log(&self, audit_log: AuditLog) -> Result<AuditLog, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .audit_logs
+                    .insert(audit_log.id, audit_log.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO audit_logs
+                        (id, tenant_id, session_id, actor_type, actor_id, action, resource_type, resource_id, details, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                )
+                .bind(audit_log.id)
+                .bind(self.tenant_id)
+                .bind(audit_log.session_id)
+                .bind(&audit_log.actor_type)
+                .bind(audit_log.actor_id)
+                .bind(&audit_log.action)
+                .bind(&audit_log.resource_type)
+                .bind(audit_log.resource_id)
+                .bind(&audit_log.details)
+                .bind(audit_log.created_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(audit_log)
+    }
+
+    async fn list_audit_logs(&self, session_id: Option<Uuid>) -> Result<Vec<AuditLog>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut logs: Vec<_> = inner
+                    .read()
+                    .await
+                    .audit_logs
+                    .values()
+                    .filter(|log| session_id.is_none_or(|id| log.session_id == Some(id)))
+                    .cloned()
+                    .collect();
+                logs.sort_by_key(|log| log.created_at);
+                logs.reverse();
+                Ok(logs)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = match session_id {
+                    Some(session_id) => {
+                        sqlx::query(
+                            "SELECT id, session_id, actor_type, actor_id, action, resource_type, resource_id, details, created_at
+                             FROM audit_logs
+                             WHERE tenant_id = $1 AND session_id = $2
+                             ORDER BY created_at DESC",
+                        )
+                        .bind(self.tenant_id)
+                        .bind(session_id)
+                        .fetch_all(pool)
+                        .await?
+                    }
+                    None => {
+                        sqlx::query(
+                            "SELECT id, session_id, actor_type, actor_id, action, resource_type, resource_id, details, created_at
+                             FROM audit_logs
+                             WHERE tenant_id = $1
+                             ORDER BY created_at DESC",
+                        )
+                        .bind(self.tenant_id)
+                        .fetch_all(pool)
+                        .await?
+                    }
+                };
+                rows.into_iter().map(audit_log_from_row).collect()
             }
         }
     }
@@ -900,11 +1179,115 @@ async fn add_message(
     ))
 }
 
+fn new_audit_log(
+    session_id: Option<Uuid>,
+    actor_type: &str,
+    actor_id: Option<Uuid>,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<Uuid>,
+    details: Value,
+) -> AuditLog {
+    AuditLog {
+        id: Uuid::new_v4(),
+        session_id,
+        actor_type: actor_type.to_string(),
+        actor_id,
+        action: action.to_string(),
+        resource_type: resource_type.to_string(),
+        resource_id,
+        details,
+        created_at: Utc::now(),
+    }
+}
+
+async fn record_completed_tool_call(
+    state: &AppState,
+    session_id: Uuid,
+    tool_name: &str,
+    risk_level: &str,
+    args: Value,
+    content: Value,
+    summary: &str,
+) -> Result<ToolCall, AppError> {
+    let call_event = state
+        .append_event(
+            "tool",
+            None,
+            session_id,
+            "tool.call",
+            json!({"tool": tool_name, "args": args}),
+        )
+        .await?;
+    let tool_call = state
+        .insert_tool_call(ToolCall {
+            id: Uuid::new_v4(),
+            session_id,
+            event_id: Some(call_event.id),
+            tool_name: tool_name.to_string(),
+            args,
+            status: "running".to_string(),
+            risk_level: risk_level.to_string(),
+            policy_decision: json!({"decision": "allowed"}),
+            result: None,
+            error: None,
+            started_at: Some(Utc::now()),
+            completed_at: None,
+            created_at: Utc::now(),
+        })
+        .await?;
+    state
+        .append_event(
+            "system",
+            None,
+            session_id,
+            "policy.allowed",
+            json!({"tool_call_id": tool_call.id, "tool": tool_name, "risk_level": risk_level}),
+        )
+        .await?;
+    let result = json!({"tool": tool_name, "summary": summary, "content": content});
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            session_id,
+            "tool.result",
+            result.clone(),
+        )
+        .await?;
+    let tool_call = state
+        .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "tool",
+            Some(tool_call.id),
+            "tool.completed",
+            "tool_call",
+            Some(tool_call.id),
+            json!({"tool": tool_name, "risk_level": risk_level, "summary": summary}),
+        ))
+        .await?;
+    Ok(tool_call)
+}
+
 async fn run_session(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Session>, AppError> {
     state.set_session_status(id, SessionStatus::Running).await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(id),
+            "system",
+            None,
+            "session.started",
+            "session",
+            Some(id),
+            json!({"status": "running"}),
+        ))
+        .await?;
 
     state
         .append_event(
@@ -923,35 +1306,36 @@ async fn run_session(
         )
         .await?;
 
-    let schema = generic_schema();
-    state
-        .append_event(
-        "tool",
-        None,
+    record_completed_tool_call(
+        &state,
         id,
-        "tool.result",
-        json!({"tool": "file.read", "summary": "Read workspace README and config policy summary", "content": generic_file_read_summary()}),
+        "file.read",
+        "low",
+        json!({"paths": ["README.md", "config/policy.stage1.yaml"]}),
+        generic_file_read_summary(),
+        "Read workspace README and config policy summary",
     )
     .await?;
 
-    state
-        .append_event(
-        "tool",
-        None,
+    record_completed_tool_call(
+        &state,
         id,
-        "tool.result",
-        json!({"tool": "sql.get_schema", "summary": "Generic demo SQL schema loaded", "content": schema}),
+        "sql.get_schema",
+        "low",
+        json!({"schema": "generic_demo"}),
+        generic_schema(),
+        "Generic demo SQL schema loaded",
     )
     .await?;
 
-    let diagnostics = generic_diagnostics();
-    state
-        .append_event(
-        "tool",
-        None,
+    record_completed_tool_call(
+        &state,
         id,
-        "tool.result",
-        json!({"tool": "sql.query", "summary": "Recent platform_events status query completed", "content": diagnostics}),
+        "sql.query",
+        "medium",
+        json!({"sql": "select event_type, status, count(*) from generic_demo.platform_events where created_at >= now() - interval '24 hours' group by event_type, status"}),
+        generic_diagnostics(),
+        "Recent platform_events status query completed",
     )
     .await?;
 
@@ -976,10 +1360,72 @@ async fn run_session(
         json!({"artifact_id": artifact.id, "name": artifact.name, "artifact_type": artifact.artifact_type}),
     )
     .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(id),
+            "system",
+            None,
+            "artifact.created",
+            "artifact",
+            Some(artifact.id),
+            json!({"name": artifact.name, "artifact_type": artifact.artifact_type}),
+        ))
+        .await?;
+
+    let shell_call_event = state
+        .append_event(
+            "tool",
+            None,
+            id,
+            "tool.call",
+            json!({"tool": "shell.exec", "args": {"command": "ls -la && test -f README.md"}}),
+        )
+        .await?;
+    let shell_tool_call = state
+        .insert_tool_call(ToolCall {
+            id: Uuid::new_v4(),
+            session_id: id,
+            event_id: Some(shell_call_event.id),
+            tool_name: "shell.exec".to_string(),
+            args: json!({"command": "ls -la && test -f README.md"}),
+            status: "waiting_approval".to_string(),
+            risk_level: "high".to_string(),
+            policy_decision: json!({
+                "decision": "requires_approval",
+                "reason": "shell.exec requires human approval in Stage 1",
+            }),
+            result: None,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            created_at: Utc::now(),
+        })
+        .await?;
+    state
+        .append_event(
+            "system",
+            None,
+            id,
+            "policy.requires_approval",
+            json!({"tool_call_id": shell_tool_call.id, "tool": "shell.exec", "risk_level": "high"}),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(id),
+            "system",
+            None,
+            "policy.requires_approval",
+            "tool_call",
+            Some(shell_tool_call.id),
+            json!({"tool": "shell.exec", "risk_level": "high"}),
+        ))
+        .await?;
 
     let approval = Approval {
         id: Uuid::new_v4(),
         session_id: id,
+        tool_call_id: Some(shell_tool_call.id),
         action: "shell.exec".to_string(),
         risk_level: "high".to_string(),
         reason: "The diagnostics task requested a shell command. Stage 1 policy requires human approval before shell execution.".to_string(),
@@ -998,6 +1444,17 @@ async fn run_session(
         json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence}),
     )
     .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(id),
+            "system",
+            None,
+            "approval.requested",
+            "approval",
+            Some(approval.id),
+            json!({"tool_call_id": approval.tool_call_id, "action": approval.action, "risk_level": approval.risk_level}),
+        ))
+        .await?;
 
     state
         .append_event(
@@ -1090,7 +1547,9 @@ async fn execute_tool(
     Path(name): Path<String>,
     Json(input): Json<ExecuteTool>,
 ) -> Result<Json<Value>, AppError> {
-    state
+    let risk_level = tool_risk_level(&name);
+    let requires_approval = matches!(name.as_str(), "file.write" | "shell.exec" | "codex.exec");
+    let call_event = state
         .append_event(
             "tool",
             None,
@@ -1099,8 +1558,60 @@ async fn execute_tool(
             json!({"tool": name, "args": input.args}),
         )
         .await?;
-    match name.as_str() {
-        "sql.get_schema" => Ok(Json(generic_schema())),
+    let tool_call = state
+        .insert_tool_call(ToolCall {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            event_id: Some(call_event.id),
+            tool_name: name.clone(),
+            args: input.args.clone(),
+            status: if requires_approval {
+                "waiting_approval".to_string()
+            } else {
+                "running".to_string()
+            },
+            risk_level: risk_level.to_string(),
+            policy_decision: if requires_approval {
+                json!({"decision": "requires_approval", "reason": format!("{name} requires approval in Stage 1")})
+            } else {
+                json!({"decision": "allowed"})
+            },
+            result: None,
+            error: None,
+            started_at: Some(Utc::now()),
+            completed_at: None,
+            created_at: Utc::now(),
+        })
+        .await?;
+    if requires_approval {
+        let result = json!({"status": "approval_required", "reason": format!("{name} requires approval in Stage 1")});
+        state
+            .append_event(
+                "system",
+                Some(tool_call.id),
+                input.session_id,
+                "policy.requires_approval",
+                json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "waiting_approval", Some(result.clone()), None)
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "tool",
+                Some(tool_call.id),
+                "tool.waiting_approval",
+                "tool_call",
+                Some(tool_call.id),
+                json!({"tool": name, "risk_level": risk_level, "status": "waiting_approval"}),
+            ))
+            .await?;
+        return Ok(Json(result));
+    }
+    let result = match name.as_str() {
+        "sql.get_schema" => generic_schema(),
         "sql.query" => {
             let sql = input
                 .args
@@ -1108,22 +1619,53 @@ async fn execute_tool(
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             ensure_read_only_sql(sql)?;
-            Ok(Json(json!({"rows": generic_diagnostics(), "row_count": 4})))
+            json!({"rows": generic_diagnostics(), "row_count": 4})
         }
-        "file.read" => Ok(Json(generic_file_read_summary())),
-        "file.write" => Ok(Json(
-            json!({"status": "approval_required", "reason": "file.write requires approval in Stage 1"}),
-        )),
-        "shell.exec" => Ok(Json(
-            json!({"status": "approval_required", "reason": "shell.exec requires approval in Stage 1"}),
-        )),
-        "codex.exec" => {
-            let request: CodexRequest = serde_json::from_value(input.args)?;
-            let output = run_codex(&state, input.session_id, request).await?;
-            Ok(Json(output))
-        }
-        _ => Err(AppError::not_found("unknown tool")),
-    }
+        "file.read" => generic_file_read_summary(),
+        _ => return Err(AppError::not_found("unknown tool")),
+    };
+    let status = if result.get("status").and_then(Value::as_str) == Some("approval_required") {
+        "waiting_approval"
+    } else {
+        "completed"
+    };
+    let event_type = if status == "waiting_approval" {
+        "policy.requires_approval"
+    } else {
+        "tool.result"
+    };
+    state
+        .append_event(
+            if status == "waiting_approval" {
+                "system"
+            } else {
+                "tool"
+            },
+            Some(tool_call.id),
+            input.session_id,
+            event_type,
+            json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+        )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, status, Some(result.clone()), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(input.session_id),
+            "tool",
+            Some(tool_call.id),
+            if status == "waiting_approval" {
+                "tool.waiting_approval"
+            } else {
+                "tool.completed"
+            },
+            "tool_call",
+            Some(tool_call.id),
+            json!({"tool": name, "risk_level": risk_level, "status": status}),
+        ))
+        .await?;
+    Ok(Json(result))
 }
 
 async fn list_approvals(State(state): State<AppState>) -> Result<Json<Vec<Approval>>, AppError> {
@@ -1151,6 +1693,28 @@ async fn list_artifacts(
     Ok(Json(state.list_artifacts(id).await?))
 }
 
+async fn list_tool_calls(State(state): State<AppState>) -> Result<Json<Vec<ToolCall>>, AppError> {
+    Ok(Json(state.list_tool_calls(None).await?))
+}
+
+async fn list_session_tool_calls(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<ToolCall>>, AppError> {
+    Ok(Json(state.list_tool_calls(Some(id)).await?))
+}
+
+async fn list_audit_logs(State(state): State<AppState>) -> Result<Json<Vec<AuditLog>>, AppError> {
+    Ok(Json(state.list_audit_logs(None).await?))
+}
+
+async fn list_session_audit_logs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<AuditLog>>, AppError> {
+    Ok(Json(state.list_audit_logs(Some(id)).await?))
+}
+
 async fn decide_approval(
     state: AppState,
     approval_id: Uuid,
@@ -1167,6 +1731,16 @@ async fn decide_approval(
         )
         .await?;
     if status == "approved" {
+        if let Some(tool_call_id) = updated.tool_call_id {
+            state
+                .update_tool_call_status(
+                    tool_call_id,
+                    "completed",
+                    Some(json!({"approval": "approved"})),
+                    None,
+                )
+                .await?;
+        }
         state
             .set_session_status(updated.session_id, SessionStatus::Completed)
             .await?;
@@ -1180,9 +1754,21 @@ async fn decide_approval(
             )
             .await?;
     }
+    state
+        .append_audit_log(new_audit_log(
+            Some(updated.session_id),
+            "user",
+            Some(approval_id),
+            &format!("approval.{status}"),
+            "approval",
+            Some(approval_id),
+            json!({"tool_call_id": updated.tool_call_id, "decision": status}),
+        ))
+        .await?;
     Ok(Json(updated))
 }
 
+#[allow(dead_code)]
 async fn run_codex(
     state: &AppState,
     session_id: Uuid,
@@ -1276,6 +1862,15 @@ fn ensure_read_only_sql(sql: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn tool_risk_level(name: &str) -> &'static str {
+    match name {
+        "file.read" | "sql.get_schema" | "approval.request" | "artifact.create" => "low",
+        "file.write" | "sql.query" => "medium",
+        "shell.exec" | "codex.exec" | "http.request" => "high",
+        _ => "unknown",
+    }
+}
+
 fn generic_file_read_summary() -> Value {
     json!({
         "files": [
@@ -1339,6 +1934,7 @@ fn default_session_title() -> String {
     "Untitled session".to_string()
 }
 
+#[allow(dead_code)]
 fn default_sandbox() -> String {
     "workspace-write".to_string()
 }

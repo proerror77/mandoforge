@@ -15,5 +15,7 @@ SESSION_ID="$(
 
 curl -fsS -X POST "$BASE_URL/api/sessions/$SESSION_ID/run" >/dev/null
 curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/events" | grep -q 'approval.requested'
+curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/tool-calls" | grep -q 'shell.exec'
+curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/audit-logs" | grep -q 'policy.requires_approval'
 
 echo "smoke ok: $SESSION_ID"

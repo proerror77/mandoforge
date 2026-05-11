@@ -62,7 +62,7 @@ Stage 1 explicitly does not build commerce, finance, support, or other vertical 
 
 - SQLx repository layer.
 - Persist agents, sessions, session_events, artifacts, approvals.
-- Persist tool_calls and audit_logs.
+- Persist tool_calls and audit_logs for generic diagnostics.
 - Agent version snapshots.
 - API tests for session replay and approval.
 
@@ -157,6 +157,7 @@ Implemented:
 - In-memory fallback for local demos.
 - Generic demo migrations and seed data.
 - Mock Generic Runtime Diagnostics Demo.
+- Tool call and audit log persistence for the demo path.
 - Stage 1 YAML policy.
 - Static UI for timeline/report/approval queue.
 - Docker Compose.
@@ -167,8 +168,7 @@ Not yet implemented:
 
 - Real provider/harness loop.
 - Real Tool trait and registry.
-- `tool_calls` persistence for every tool path.
-- `audit_logs` writer.
+- Full `tool_calls` / `audit_logs` coverage for provider-driven and worker paths.
 - Approval resume semantics.
 - Docker sandbox runner.
 - Codex JSONL event parsing.

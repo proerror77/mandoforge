@@ -17,7 +17,9 @@
 - [x] Add SQLx and Postgres connection pool.
 - [x] Implement repositories for agents, sessions, session_events, artifacts, and approvals.
 - [x] Replace in-memory-only state with Postgres-backed state plus local fallback.
-- [ ] Persist `tool_calls` rows for tool execution audit.
+- [x] Persist `tool_calls` rows for generic diagnostics and manual tool execution paths.
+- [x] Persist `audit_logs` rows for generic diagnostics and approval decisions.
+- [ ] Expand `tool_calls` / `audit_logs` coverage to provider-driven and worker paths.
 - [ ] Split `AppState` store methods into a dedicated `store` module.
 - [x] Add SQL safety tests for `sql.query`.
 - [ ] Add API integration test for Generic Runtime Diagnostics replay.

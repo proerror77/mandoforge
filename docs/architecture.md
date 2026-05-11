@@ -12,6 +12,7 @@ Aligned:
 - Postgres is the durable store when `DATABASE_URL` is set.
 - Tool execution is routed through named tool endpoints.
 - Approval and artifacts are first-class API/store concepts.
+- Tool calls and audit logs are written for the current generic diagnostics path.
 - Generic diagnostics demo has replaced the commerce GMV demo.
 - Docker Compose and Kubernetes skeleton exist.
 
@@ -20,7 +21,7 @@ Not yet aligned:
 - Harness still uses deterministic mock events instead of provider-driven tool-call turns.
 - Tool Router is not yet a `Tool` trait registry.
 - Policy YAML is not loaded/enforced centrally yet.
-- `tool_calls` and `audit_logs` are present in schema but not fully written by all paths.
+- Tool calls and audit logs need broader coverage for future provider-driven and worker paths.
 - Approval does not yet resume the same harness turn.
 - Sandbox is workspace/Codex-oriented; Docker shell sandbox runner is not implemented yet.
 - MCP Gateway, OTel, RBAC, Vault, and queue workers are later-stage work.
@@ -75,13 +76,17 @@ Current store methods:
 - `insert_approval`
 - `list_approvals`
 - `decide_approval`
+- `insert_tool_call`
+- `update_tool_call_status`
+- `list_tool_calls`
+- `append_audit_log`
+- `list_audit_logs`
 
 Next store work:
 
 - Move these methods into a dedicated `store` module.
-- Add `tool_calls` write/update methods.
-- Add `audit_logs` append/list methods.
 - Add agent version read APIs.
+- Split store methods into smaller modules.
 
 ## Event Log Contract
 
@@ -141,7 +146,7 @@ Target Stage 1 tools:
 - `approval.request`: low risk.
 - `artifact.create`: low risk.
 
-The current code exposes descriptors and mock execution for part of this list. The next implementation should introduce a `Tool` trait and registry, then make every execution path write `tool_calls`, policy events, audit logs, and normalized results.
+The current code exposes descriptors, mock execution, `tool_calls`, policy events, audit logs, and normalized results for the generic diagnostics path. The next implementation should introduce a `Tool` trait and registry so this behavior is shared by every tool.
 
 ## Policy Boundary
 
@@ -237,4 +242,3 @@ docker compose up -d postgres
 DATABASE_URL=postgres://mandoforge:mandoforge@localhost:5432/mandoforge cargo run -p mandoforge-api
 BASE_URL=http://127.0.0.1:8787 ./scripts/smoke.sh
 ```
-

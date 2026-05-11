@@ -87,8 +87,12 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `POST /api/sessions/:id/run`
 - `GET /api/sessions/:id/events`
 - `GET /api/sessions/:id/stream`
+- `GET /api/sessions/:id/tool-calls`
+- `GET /api/sessions/:id/audit-logs`
 - `GET /api/approvals`
 - `POST /api/approvals/:id/approve`
+- `GET /api/tool-calls`
+- `GET /api/audit-logs`
 - `GET /api/tools`
 - `POST /api/tools/:name/execute`
 
@@ -109,13 +113,13 @@ Already aligned:
 - Postgres event log with in-memory fallback.
 - Tool names moved toward `file.*`, `sql.*`, `shell.exec`, `codex.exec`.
 - Approval queue and replayable timeline.
+- Tool call records and audit log records for the generic diagnostics path.
 - Docker Compose and K8s skeleton.
 
 Still incomplete:
 
 - Real provider/harness loop and tool-call parsing.
 - Real Tool trait implementations for file, SQL, shell, artifact, approval.
-- `tool_calls` and `audit_logs` persistence for every tool path.
 - Resume semantics after approval.
 - Docker sandbox wrapper and split worker processes.
 - Agent Builder form and detailed Tool/Audit panels.

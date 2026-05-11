@@ -172,3 +172,32 @@ CREATE INDEX IF NOT EXISTS idx_session_events_session_seq ON session_events(sess
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_session ON audit_logs(session_id);
+
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT 'default';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
+
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_version INT NOT NULL DEFAULT 1;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime_config JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS created_by UUID;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+ALTER TABLE agent_versions ADD COLUMN IF NOT EXISTS model_provider_id UUID;
+ALTER TABLE agent_versions ADD COLUMN IF NOT EXISTS tool_names JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE agent_versions ADD COLUMN IF NOT EXISTS runtime_config JSONB NOT NULL DEFAULT '{}';
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_by UUID;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS runtime_config JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS error JSONB;
+
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
+
+ALTER TABLE tool_calls ADD COLUMN IF NOT EXISTS event_id UUID REFERENCES session_events(id);
+ALTER TABLE tool_calls ADD COLUMN IF NOT EXISTS risk_level TEXT NOT NULL DEFAULT 'low';
+
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS tool_call_id UUID REFERENCES tool_calls(id);
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS requested_reason TEXT;
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS requested_payload JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS decision_payload JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS approved_by UUID;
