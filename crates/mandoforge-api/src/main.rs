@@ -256,7 +256,7 @@ async fn healthz() -> Json<Value> {
 async fn run_migrations(pool: &PgPool) -> Result<()> {
     for path in [
         "db/migrations/0001_core.sql",
-        "db/migrations/0002_commerce_demo.sql",
+        "db/migrations/0002_generic_demo.sql",
     ] {
         let sql = tokio::fs::read_to_string(path)
             .await
@@ -279,7 +279,7 @@ async fn seed_demo_tenant(pool: &PgPool, tenant_id: Uuid) -> Result<()> {
     .execute(pool)
     .await?;
 
-    if let Ok(seed_sql) = tokio::fs::read_to_string("db/seed/commerce_demo.sql").await {
+    if let Ok(seed_sql) = tokio::fs::read_to_string("db/seed/generic_demo.sql").await {
         sqlx::raw_sql(&seed_sql).execute(pool).await?;
     }
     Ok(())
@@ -416,8 +416,8 @@ impl AppState {
     async fn insert_agent_version(&self, agent: &Agent, version: i32) -> Result<(), AppError> {
         if let StoreBackend::Postgres(pool) = &self.store {
             sqlx::query(
-                "INSERT INTO agent_versions (agent_id, version, model, system_prompt, tools, approval_policy)
-                 VALUES ($1, $2, $3, $4, $5, '{}')
+                    "INSERT INTO agent_versions (agent_id, version, model, system_prompt, tools, tool_names, approval_policy)
+                 VALUES ($1, $2, $3, $4, $5, $5, '{}')
                  ON CONFLICT (agent_id, version) DO NOTHING",
             )
             .bind(agent.id)
@@ -807,18 +807,20 @@ impl AppState {
     async fn seed_demo_agent(&self) -> Result<(), AppError> {
         let agent = Agent {
             id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid"),
-            name: "Commerce Manager Agent".to_string(),
-            kind: "manager".to_string(),
+            name: "Generic Orchestrator Agent".to_string(),
+            kind: "orchestrator".to_string(),
             provider: "openai-compatible".to_string(),
             model: "gpt-5.4-mini".to_string(),
-            system_prompt: "Diagnose commerce performance using warehouse facts, route risky actions to approval, and preserve an auditable timeline.".to_string(),
+            system_prompt: "You are a general-purpose orchestrator. Use tools through the runtime only, request approval before risky actions, and preserve an auditable timeline.".to_string(),
             tools: vec![
-                "warehouse.get_schema".to_string(),
-                "warehouse.query".to_string(),
-                "inventory.query".to_string(),
-                "customer_voice.search".to_string(),
-                "campaign.draft".to_string(),
+                "file.read".to_string(),
+                "file.write".to_string(),
+                "sql.get_schema".to_string(),
+                "sql.query".to_string(),
+                "shell.exec".to_string(),
                 "codex.exec".to_string(),
+                "approval.request".to_string(),
+                "artifact.create".to_string(),
             ],
             created_at: Utc::now(),
         };
@@ -909,36 +911,47 @@ async fn run_session(
             "agent",
             None,
             id,
-            "manager.plan",
+            "agent.plan",
             json!({
                 "steps": [
-                    "Inspect GMV by day and compare to prior baseline",
-                    "Break down by SKU, advertising, refunds, inventory, and customer voice",
-                    "Draft operating actions and route risky changes to approval"
+                    "Read README and Stage 1 policy/config from the workspace",
+                    "Query generic_demo.platform_events for recent session health",
+                    "Request approval before shell execution or writing diagnostics.md",
+                    "Create diagnostics.md as an artifact and emit a final summary"
                 ]
             }),
         )
         .await?;
 
-    let schema = demo_schema();
+    let schema = generic_schema();
     state
         .append_event(
         "tool",
         None,
         id,
         "tool.result",
-        json!({"tool": "warehouse.get_schema", "summary": "Demo commerce schema loaded", "content": schema}),
+        json!({"tool": "file.read", "summary": "Read workspace README and config policy summary", "content": generic_file_read_summary()}),
     )
     .await?;
 
-    let diagnosis = demo_gmv_diagnosis();
     state
         .append_event(
         "tool",
         None,
         id,
         "tool.result",
-        json!({"tool": "warehouse.query", "summary": "GMV decline attribution query completed", "content": diagnosis}),
+        json!({"tool": "sql.get_schema", "summary": "Generic demo SQL schema loaded", "content": schema}),
+    )
+    .await?;
+
+    let diagnostics = generic_diagnostics();
+    state
+        .append_event(
+        "tool",
+        None,
+        id,
+        "tool.result",
+        json!({"tool": "sql.query", "summary": "Recent platform_events status query completed", "content": diagnostics}),
     )
     .await?;
 
@@ -946,10 +959,10 @@ async fn run_session(
         id: Uuid::new_v4(),
         session_id: id,
         artifact_type: "markdown".to_string(),
-        name: "gmv-diagnosis-report.md".to_string(),
+        name: "diagnostics.md".to_string(),
         path: None,
         content: json!({
-            "markdown": "# GMV Diagnosis\n\nGMV fell 18.4% day over day. Main drivers: SKU-A stockout, ad spend drop, refund spike, and negative reviews."
+            "markdown": "# Runtime Diagnostics\n\nThe generic runtime processed recent platform events, confirmed approval gating for shell execution, and produced a replayable diagnostics artifact."
         }),
         created_at: Utc::now(),
     };
@@ -967,10 +980,10 @@ async fn run_session(
     let approval = Approval {
         id: Uuid::new_v4(),
         session_id: id,
-        action: "campaign.draft.coupon".to_string(),
-        risk_level: "medium".to_string(),
-        reason: "A coupon for at-risk users could recover demand, but it affects more than 1,000 customers.".to_string(),
-        evidence: json!({"affected_users": 1250, "suggested_discount_percent": 5, "primary_skus": ["SKU-A", "SKU-D"]}),
+        action: "shell.exec".to_string(),
+        risk_level: "high".to_string(),
+        reason: "The diagnostics task requested a shell command. Stage 1 policy requires human approval before shell execution.".to_string(),
+        evidence: json!({"command": "ls -la && test -f README.md", "sandbox_mode": "workspace_write", "network": "disabled"}),
         status: "pending".to_string(),
         created_at: Utc::now(),
         decided_at: None,
@@ -991,17 +1004,19 @@ async fn run_session(
         "agent",
         None,
         id,
-        "llm.response",
-        json!({
-            "final_report": {
-                "gmv_drop": "-18.4%",
-                "top_skus": ["SKU-A", "SKU-D", "SKU-F", "SKU-B", "SKU-H"],
-                "drivers": ["SKU-A stockout caused lost sales", "Ad ROI fell after spend was reduced 31%", "Refund rate rose on SKU-D", "Negative review rate doubled for delayed shipments"],
-                "recommendations": [
-                    "Replenish SKU-A and pin substitution SKU-B until stock recovers",
-                    "Restore paid search budget on campaigns with ROI > 2.5",
-                    "Open a logistics incident review for delayed shipment cohort",
-                    "Draft a 5% retention coupon for affected high-value customers"
+            "llm.response",
+            json!({
+                "final_report": {
+                "summary": "Generic Runtime Diagnostics Demo reached the approval gate and produced a replayable artifact.",
+                "files_read": ["README.md", "config/policy.stage1.yaml"],
+                "sql_tables": ["generic_demo.platform_events", "generic_demo.sample_documents", "generic_demo.sample_metrics"],
+                "policy_events": ["policy.requires_approval for shell.exec"],
+                "artifacts": ["diagnostics.md"],
+                "next_steps": [
+                    "Implement real Tool trait execution for file.read, sql.query, shell.exec, and file.write",
+                    "Persist tool_calls and audit_logs for every tool path",
+                    "Replace mock harness events with provider-driven tool-call parsing",
+                    "Wire approval resume to continue the same session after human decision"
                 ]
             }
         }),
@@ -1038,29 +1053,29 @@ async fn stream_events(
 async fn list_tools() -> Json<Vec<ToolDescriptor>> {
     Json(vec![
         ToolDescriptor {
-            name: "warehouse.get_schema",
+            name: "file.read",
             risk: "low",
-            description: "Return demo commerce warehouse schema",
+            description: "Read files inside the session workspace",
         },
         ToolDescriptor {
-            name: "warehouse.query",
+            name: "file.write",
             risk: "medium",
-            description: "Execute read-only demo SQL",
+            description: "Write files inside the session workspace after approval",
         },
         ToolDescriptor {
-            name: "inventory.query",
+            name: "sql.get_schema",
             risk: "low",
-            description: "Inspect inventory and fulfillment signals",
+            description: "Return generic demo SQL schema",
         },
         ToolDescriptor {
-            name: "customer_voice.search",
-            risk: "low",
-            description: "Search tickets and reviews",
-        },
-        ToolDescriptor {
-            name: "campaign.draft",
+            name: "sql.query",
             risk: "medium",
-            description: "Draft campaign action for approval",
+            description: "Execute read-only SQL against generic demo data",
+        },
+        ToolDescriptor {
+            name: "shell.exec",
+            risk: "high",
+            description: "Run a shell command in a controlled workspace after approval",
         },
         ToolDescriptor {
             name: "codex.exec",
@@ -1085,16 +1100,23 @@ async fn execute_tool(
         )
         .await?;
     match name.as_str() {
-        "warehouse.get_schema" => Ok(Json(demo_schema())),
-        "warehouse.query" => {
+        "sql.get_schema" => Ok(Json(generic_schema())),
+        "sql.query" => {
             let sql = input
                 .args
                 .get("sql")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             ensure_read_only_sql(sql)?;
-            Ok(Json(json!({"rows": demo_gmv_diagnosis(), "row_count": 5})))
+            Ok(Json(json!({"rows": generic_diagnostics(), "row_count": 4})))
         }
+        "file.read" => Ok(Json(generic_file_read_summary())),
+        "file.write" => Ok(Json(
+            json!({"status": "approval_required", "reason": "file.write requires approval in Stage 1"}),
+        )),
+        "shell.exec" => Ok(Json(
+            json!({"status": "approval_required", "reason": "shell.exec requires approval in Stage 1"}),
+        )),
         "codex.exec" => {
             let request: CodexRequest = serde_json::from_value(input.args)?;
             let output = run_codex(&state, input.session_id, request).await?;
@@ -1240,7 +1262,7 @@ fn ensure_read_only_sql(sql: &str) -> Result<(), AppError> {
         .any(|keyword| lowered.starts_with(keyword) || lowered.contains(&format!(" {keyword} ")))
     {
         return Err(AppError::bad_request(
-            "warehouse.query only accepts read-only SQL",
+            "sql.query only accepts read-only SQL",
         ));
     }
     if !lowered.starts_with("select")
@@ -1248,50 +1270,61 @@ fn ensure_read_only_sql(sql: &str) -> Result<(), AppError> {
         && !lowered.starts_with("explain")
     {
         return Err(AppError::bad_request(
-            "warehouse.query requires SELECT, WITH, or EXPLAIN",
+            "sql.query requires SELECT, WITH, or EXPLAIN",
         ));
     }
     Ok(())
 }
 
-fn demo_schema() -> Value {
+fn generic_file_read_summary() -> Value {
+    json!({
+        "files": [
+            {
+                "path": "README.md",
+                "summary": "Rust-native Managed Agents runtime prototype with Postgres-backed event log and approval timeline."
+            },
+            {
+                "path": "config/policy.stage1.yaml",
+                "summary": "Generic Stage 1 policy requiring approval for shell.exec, codex.exec, file.write, and http.request."
+            }
+        ]
+    })
+}
+
+fn generic_schema() -> Value {
     json!({
         "tables": {
-            "orders": ["id", "customer_id", "ordered_at", "status", "channel", "session_id"],
-            "order_items": ["order_id", "sku_id", "quantity", "unit_price", "unit_cost"],
-            "products": ["sku_id", "name", "category", "brand"],
-            "inventory": ["sku_id", "available_qty", "reserved_qty", "avg_daily_sales"],
-            "ad_spend": ["campaign_id", "date", "sku_id", "spend", "attributed_gmv"],
-            "tickets": ["id", "sku_id", "created_at", "category", "sentiment"],
-            "reviews": ["id", "sku_id", "created_at", "rating", "body"],
-            "refunds": ["id", "order_id", "sku_id", "amount", "reason"]
+            "generic_demo.platform_events": ["id", "session_id", "event_type", "status", "latency_ms", "payload", "created_at"],
+            "generic_demo.sample_documents": ["id", "title", "body", "metadata", "created_at"],
+            "generic_demo.sample_metrics": ["id", "metric_name", "metric_value", "dimensions", "observed_at"]
         },
         "metrics": {
-            "gmv": "sum(order_items.quantity * order_items.unit_price)",
-            "refund_rate": "refunds / orders",
-            "ad_roi": "attributed_gmv / ad_spend",
-            "stock_days": "inventory.available_qty / avg_daily_sales"
+            "sessions_started_24h": "count(*) where event_type = 'session.started'",
+            "sessions_completed_24h": "count(*) where event_type = 'session.completed'",
+            "approvals_requested_24h": "count(*) where event_type = 'policy.requires_approval'",
+            "p95_latency_ms": "percentile_cont(0.95) within group (order by latency_ms)"
         }
     })
 }
 
-fn demo_gmv_diagnosis() -> Value {
+fn generic_diagnostics() -> Value {
     json!({
-        "gmv_yesterday": 81240.50,
-        "gmv_prior_day": 99580.25,
-        "drop_percent": 18.4,
-        "top_sku_drops": [
-            {"sku_id": "SKU-A", "gmv_drop": 8420.0, "driver": "stockout", "stock_days": 0.4},
-            {"sku_id": "SKU-D", "gmv_drop": 4210.5, "driver": "refund spike", "refund_rate": 0.18},
-            {"sku_id": "SKU-F", "gmv_drop": 3033.2, "driver": "ad spend down", "ad_spend_delta": -0.31},
-            {"sku_id": "SKU-B", "gmv_drop": 2210.0, "driver": "conversion down", "conversion_delta": -0.12},
-            {"sku_id": "SKU-H", "gmv_drop": 1490.8, "driver": "negative reviews", "negative_review_rate": 0.26}
+        "window": "24h",
+        "sessions_started": 12,
+        "sessions_completed": 9,
+        "sessions_failed": 1,
+        "approvals_requested": 3,
+        "tool_success_rate": 0.91,
+        "notable_events": [
+            {"event_type": "policy.requires_approval", "status": "waiting_approval", "tool": "shell.exec"},
+            {"event_type": "artifact.created", "status": "ok", "artifact": "diagnostics.md"},
+            {"event_type": "session.failed", "status": "failed", "reason": "tool timeout"}
         ]
     })
 }
 
 fn default_agent_kind() -> String {
-    "manager".to_string()
+    "orchestrator".to_string()
 }
 
 fn default_provider() -> String {
@@ -1397,9 +1430,11 @@ mod tests {
 
     #[test]
     fn allows_read_only_sql() {
-        assert!(ensure_read_only_sql("select * from commerce_demo.orders limit 10").is_ok());
+        assert!(
+            ensure_read_only_sql("select * from generic_demo.platform_events limit 10").is_ok()
+        );
         assert!(ensure_read_only_sql("with daily as (select 1) select * from daily").is_ok());
-        assert!(ensure_read_only_sql("explain select * from commerce_demo.orders").is_ok());
+        assert!(ensure_read_only_sql("explain select * from generic_demo.platform_events").is_ok());
     }
 
     #[test]

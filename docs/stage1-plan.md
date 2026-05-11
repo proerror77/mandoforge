@@ -1,31 +1,50 @@
-# Stage 1 Plan: Commerce Agent OS Prototype
+# Stage 1 Plan: Generic Agent OS Kernel MVP
 
 ## Goal
 
-Build a demonstrable Rust-native Managed Agents runtime that can answer:
+Build a generic Rust-native Agent OS runtime kernel. Stage 1 validates the architecture loop, not an industry workflow.
 
-> 昨天 GMV 为什么下降？请找出主要原因，并生成今天可执行的运营建议。
+The target loop is:
 
-The demo must show a full loop: user message, manager plan, warehouse-backed attribution, Codex-generated artifact, operating recommendations, approval request, and replayable timeline.
+```text
+Create Agent
+-> Create Session
+-> Run Harness
+-> Call Provider
+-> Parse Tool Call
+-> Policy Check
+-> Approval Pause
+-> Human Approves
+-> Resume
+-> Execute Tool in Workspace/Sandbox
+-> Create Artifact
+-> Persist Events and Audit
+-> Replay Timeline
+```
 
 ## Product Boundary
 
-Stage 1 is a single-tenant prototype. It proves the runtime shape, not the whole enterprise platform.
+Stage 1 is a single-tenant runtime kernel prototype.
 
-- Data access is demo warehouse only and read-only.
-- Codex runs only in isolated session workspaces.
-- High-risk actions stay draft-only and require approval.
-- Specialist agents are represented as configs/tools, not independent sessions.
-- Postgres event log is the durable source of truth.
+- Agent is configuration: model, instructions, tools, policy, runtime limits.
+- Session is the core execution object.
+- Event log is append-only and replayable.
+- Tool Router is the only external execution path.
+- Sandbox and approval are separate control layers.
+- Generic demo data is not industry-specific.
+
+Stage 1 explicitly does not build commerce, finance, support, or other vertical agent templates.
 
 ## Architecture Slice
 
 - `mandoforge-api`: Axum API server for agents, sessions, tools, artifacts, approvals, and SSE.
 - Runtime store: Postgres via SQLx with in-memory fallback for local demos.
-- Tool router: typed tool registry with policy decisions and audit events.
-- Warehouse tools: schema introspection, read-only SQL, row/time limits.
-- Codex worker: `codex exec --sandbox workspace-write --json --output-last-message`.
-- UI: Agent list, session console, event timeline, tool/artifact detail, approval queue.
+- Event store: append-only `session_events`.
+- Tool router target: `file.read`, `file.write`, `sql.query`, `shell.exec`, `codex.exec`, `approval.request`, `artifact.create`.
+- Policy engine target: YAML allow/block/approval-required rules.
+- Sandbox target: session workspace and Docker wrapper.
+- UI: Agent list, session console, event timeline, tool detail, approval queue, artifact viewer, audit log.
+- Deployment: Docker Compose for local, K8s skeleton for cluster deployment.
 
 ## Milestones
 
@@ -33,104 +52,123 @@ Stage 1 is a single-tenant prototype. It proves the runtime shape, not the whole
 
 - Rust workspace and Axum server.
 - Docker Compose with Postgres.
-- Core migrations for agents, agent_versions, sessions, session_events, workspaces, artifacts, tool_calls, approvals.
-- Commerce demo schema and seed data.
-- Mock harness demo path.
+- K8s deployment skeleton.
+- Core migrations for tenants, agents, agent_versions, providers, sessions, events, tools, approvals, artifacts, audit logs.
+- Generic demo schema and seed data.
+- Mock generic diagnostics harness.
 - GitHub repository and CI.
 
-### Week 2: Durable API
+### Week 2: Durable Runtime Store
 
 - SQLx repository layer.
-- Replace in-memory store with Postgres persistence.
-- Session event append/read APIs.
-- Agent CRUD and agent version snapshots.
-- Basic API tests.
+- Persist agents, sessions, session_events, artifacts, approvals.
+- Persist tool_calls and audit_logs.
+- Agent version snapshots.
+- API tests for session replay and approval.
 
-### Week 3: Streaming And Replay
+### Week 3: Agent / Session API
+
+- Agent create/read/update/archive.
+- Agent version APIs.
+- Session create/message/run/pause/resume/interrupt.
+- Session status events.
+
+### Week 4: SSE And Replay
 
 - SSE stream for session events.
-- Session replay view contract.
+- Replay view contract.
 - Event type validation.
-- Timeline filters for manager, tool, policy, approval, Codex, artifact.
+- Timeline filters for agent, LLM, tool, policy, approval, sandbox, Codex, artifact.
 
-### Week 4: Provider Loop
+### Week 5: Provider Router
 
 - OpenAI-compatible provider abstraction.
+- LLM request/response events.
 - Tool schema injection.
 - Tool-call parsing.
-- Harness turn loop with max-turn and max-tool-call limits.
-- Context builder using recent event slices.
+- Max-turn, max-tool-call, and runtime limits.
 
-### Week 5: Tool Router And Warehouse
+### Week 6: Tool Router
 
-- `Tool` trait and registry.
-- `warehouse.get_schema`.
-- `warehouse.query` with read-only SQL enforcement.
-- Query timeout and row limits.
-- Tool call audit records with policy decision.
+- `Tool` trait.
+- Tool registry.
+- `file.read`.
+- `file.write` approval path.
+- `sql.query` read-only execution.
+- Result normalization and artifact references.
 
-### Week 6: Codex Worker
+### Week 7: Policy And Approval
+
+- Load YAML policy.
+- Emit `policy.allowed`, `policy.denied`, `policy.requires_approval`.
+- Approval request, approve, reject.
+- Resume after approval.
+
+### Week 8: Sandbox And Shell
 
 - Workspace manager.
-- `codex.exec` adapter.
-- JSONL event capture.
-- stdout/stderr/exit-code capture.
-- Artifacts for final message, SQL, scripts, and logs.
-- Timeout and output-size limits.
+- Workspace manifest.
+- Docker command wrapper.
+- `shell.exec` timeout, stdout, stderr, exit code.
+- Sandbox event stream.
 
-### Week 7: Commerce Manager
+### Week 9: Codex CLI Adapter
 
-- Commerce manager prompt/config.
-- Specialist-like tool configs for inventory and customer voice.
-- GMV diagnostic prompt path.
-- Seeded anomaly scenarios for SKU, stockout, ads, refunds, reviews.
+- `codex.exec`.
+- JSONL event parsing.
+- Artifact capture.
+- Timeout and output limits.
+- Failure summary.
 
-### Week 8: Approval And Audit
+### Week 10: UI And Demo Polish
 
-- YAML policy loader.
-- Approval-required decisions.
-- Approval request, approve, reject APIs.
-- Waiting-approval session state.
-- Audit log projection.
-
-### Week 9: UI Completion
-
-- Agent list and builder minimum form.
-- Session console.
-- Event timeline.
-- Tool detail and artifact detail.
-- Approval queue.
-
-### Week 10: Demo Polish
-
-- Scripted demo.
+- Agent Builder.
+- Session Console.
+- Timeline.
+- Tool Detail.
+- Approval Queue.
+- Artifact Viewer.
+- Audit Log.
 - README and deployment guide.
-- Smoke tests.
-- SQL safety tests.
-- Final acceptance pass.
 
 ## Acceptance Criteria
 
-- The GMV demo returns GMV decline percentage.
-- It lists top five abnormal SKUs.
-- It includes at least three attribution dimensions: inventory, ads, refunds/customer voice.
-- It produces at least four operating recommendations.
-- It creates at least one approval request.
-- It creates at least one artifact.
-- The session timeline is replayable by event sequence.
-- Tool calls show arguments, status, duration, result/error, and policy decision.
-- Non-read SQL is denied and audited.
+- UI can create a generic agent.
+- UI can create and run a session.
+- Harness can call a provider.
+- Provider response can emit a tool call.
+- Tool Router can execute `file.read`.
+- Tool Router can execute read-only `sql.query`.
+- `shell.exec` triggers approval.
+- Approval can resume the session.
+- `file.write` can create `diagnostics.md`.
+- All important events enter `session_events`.
+- All tool calls enter `tool_calls`.
+- All critical actions enter `audit_logs`.
+- UI can replay the timeline.
+- Codex CLI adapter can execute one workspace task.
 
 ## Current Repository State
 
-The current repository contains the Week 1 skeleton plus the first architecture hardening slice:
+Implemented:
 
-- Axum API with Postgres-backed runtime store when `DATABASE_URL` is set.
-- In-memory fallback for quick local demos.
-- Static UI for agents, timeline, report, and approvals.
-- Postgres migrations and demo commerce schema.
-- YAML Stage 1 policy.
-- Docker Compose and CI.
-- Smoke script for the mock GMV flow.
+- Axum API with generic orchestrator seed agent.
+- Postgres-backed runtime store for agents, sessions, events, artifacts, approvals.
+- In-memory fallback for local demos.
+- Generic demo migrations and seed data.
+- Mock Generic Runtime Diagnostics Demo.
+- Stage 1 YAML policy.
+- Static UI for timeline/report/approval queue.
+- Docker Compose.
+- K8s skeleton under `deploy/k8s`.
+- SQL safety tests.
 
-The next engineering step is splitting store/tool/harness code into modules and replacing the mock harness with the provider/tool-call loop.
+Not yet implemented:
+
+- Real provider/harness loop.
+- Real Tool trait and registry.
+- `tool_calls` persistence for every tool path.
+- `audit_logs` writer.
+- Approval resume semantics.
+- Docker sandbox runner.
+- Codex JSONL event parsing.

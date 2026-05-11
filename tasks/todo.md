@@ -1,10 +1,10 @@
-# MandoForge Task Plan
+# MandoForge Generic Agent OS Task Plan
 
 ## Now
 
 - [x] Initialize Rust workspace and Axum API skeleton.
 - [x] Add Stage 1 core database migrations.
-- [x] Add commerce demo schema and seed data.
+- [x] Add generic demo schema and seed data.
 - [x] Add static prototype UI.
 - [x] Add YAML governance policy.
 - [x] Add smoke script and CI.
@@ -19,8 +19,8 @@
 - [x] Replace in-memory-only state with Postgres-backed state plus local fallback.
 - [ ] Persist `tool_calls` rows for tool execution audit.
 - [ ] Split `AppState` store methods into a dedicated `store` module.
-- [x] Add SQL safety tests for `warehouse.query`.
-- [ ] Add API integration test for GMV demo replay.
+- [x] Add SQL safety tests for `sql.query`.
+- [ ] Add API integration test for Generic Runtime Diagnostics replay.
 - [ ] Add artifact detail panel in UI.
 - [ ] Add tool-call detail panel with policy decision.
 
@@ -31,5 +31,5 @@
 - [ ] Implement Codex JSONL event ingestion.
 - [ ] Persist Codex workspace artifacts.
 - [ ] Load and enforce `config/policy.stage1.yaml`.
-- [ ] Add seeded anomaly generator for demo warehouse.
+- [ ] Add seeded platform_events generator for generic runtime demo.
 - [ ] Add deployment guide and demo script.

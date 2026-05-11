@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mandoforge-config
+data:
+  MANDOFORGE_ADDR: "0.0.0.0:8787"
+  MANDOFORGE_WORKSPACE_ROOT: "/var/lib/mandoforge/workspaces"
+  RUST_LOG: "info"
+

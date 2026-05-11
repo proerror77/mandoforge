@@ -1,42 +1,55 @@
 version: 1
 defaults:
-  data_access: read_only
-  max_tool_runtime_seconds: 180
+  max_turns: 20
+  max_tool_calls: 30
+  max_runtime_seconds: 600
   max_rows_returned: 500
+  max_shell_runtime_seconds: 120
+  max_codex_runtime_seconds: 300
 blocked_tools:
-  - production_db.write
   - secret.read
-  - price.update.execute
-  - coupon.issue.execute
-  - refund.issue.execute
-  - customer.bulk_message.execute
-approval_policy:
-  required:
-    - tool: codex.exec
-      when:
-        sandbox_mode_not_in: ["read-only", "workspace-write"]
-      risk: high
-    - tool: campaign.draft
-      when:
-        affected_users_gt: 1000
-      risk: medium
-    - tool: coupon.issue
-      risk: high
-    - tool: price.update
-      risk: critical
-    - tool: refund.issue
-      when:
-        amount_gt: 100
-      risk: high
+  - production_db.write
+  - system.network.unrestricted
+  - shell.exec.unrestricted
+approval_required:
+  - tool: shell.exec
+    risk: high
+  - tool: codex.exec
+    risk: high
+  - tool: file.write
+    risk: medium
+  - tool: http.request
+    risk: high
 allowed_tools:
-  commerce-manager-agent:
-    - warehouse.get_schema
-    - warehouse.query
-    - inventory.query
-    - customer_voice.search
-    - campaign.draft
-    - codex.exec
-    - approval.request
+  generic-orchestrator-agent:
     - file.read
     - file.write
-
+    - sql.query
+    - shell.exec
+    - codex.exec
+    - approval.request
+    - artifact.create
+sql_policy:
+  default_mode: read_only
+  max_rows: 500
+  timeout_seconds: 10
+  allowed_schemas:
+    - generic_demo
+  blocked_keywords:
+    - INSERT
+    - UPDATE
+    - DELETE
+    - DROP
+    - ALTER
+    - CREATE
+    - TRUNCATE
+    - GRANT
+    - REVOKE
+    - COPY
+    - CALL
+    - DO
+sandbox_policy:
+  default_mode: workspace_write
+  network: disabled
+  allow_host_mounts: false
+  allow_secret_mounts: false

@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mandoforge-api
+spec:
+  selector:
+    app: mandoforge-api
+  ports:
+    - name: http
+      port: 8787
+      targetPort: 8787
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mandoforge-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mandoforge-api
+  template:
+    metadata:
+      labels:
+        app: mandoforge-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: api
+          image: ghcr.io/proerror77/mandoforge:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8787
+          envFrom:
+            - configMapRef:
+                name: mandoforge-config
+            - secretRef:
+                name: mandoforge-secrets
+          volumeMounts:
+            - name: workspaces
+              mountPath: /var/lib/mandoforge/workspaces
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: workspaces
+          emptyDir: {}
+

@@ -36,8 +36,9 @@ async function runDemo() {
     method: "POST",
     body: JSON.stringify({
       agent_id: agent.id,
-      title: "GMV decline diagnosis",
-      message: "昨天 GMV 为什么下降？请找出主要原因，并生成今天可执行的运营建议。",
+      title: "Generic runtime diagnostics",
+      message:
+        "Read README and config, query demo platform_events, request approval before shell or file write, and generate diagnostics.md.",
     }),
   });
   state.session = await api(`/api/sessions/${session.id}/run`, { method: "POST" });
@@ -90,19 +91,20 @@ function renderSession() {
   eventRoot.innerHTML = state.events.map(renderEvent).join("");
   const response = [...state.events].reverse().find((event) => event.event_type === "llm.response");
   if (!response) {
-    reportRoot.textContent = "Run the demo to generate the GMV diagnostic report.";
+    reportRoot.textContent = "Run the demo to generate the runtime diagnostics report.";
     return;
   }
   const report = response.payload.final_report;
   reportRoot.textContent = [
-    `GMV drop: ${report.gmv_drop}`,
-    `Top abnormal SKUs: ${report.top_skus.join(", ")}`,
+    report.summary,
     "",
-    "Drivers:",
-    ...report.drivers.map((driver) => `- ${driver}`),
+    `Files read: ${report.files_read.join(", ")}`,
+    `SQL tables: ${report.sql_tables.join(", ")}`,
+    `Policy events: ${report.policy_events.join(", ")}`,
+    `Artifacts: ${report.artifacts.join(", ")}`,
     "",
-    "Recommendations:",
-    ...report.recommendations.map((recommendation) => `- ${recommendation}`),
+    "Next steps:",
+    ...report.next_steps.map((step) => `- ${step}`),
   ].join("\n");
 }
 
@@ -143,4 +145,3 @@ function escapeHtml(value) {
 boot().catch((error) => {
   reportRoot.textContent = error.message;
 });
-

@@ -1,23 +1,67 @@
-# MandoForge Runtime Architecture
+# Generic Agent OS Runtime Architecture
+
+## Fit Against PRD v2
+
+The current architecture is partially aligned with Generic Agent OS PRD v2.
+
+Aligned:
+
+- Runtime-first direction.
+- Agent is treated as configuration, not a microservice.
+- Session and append-only event log are core objects.
+- Postgres is the durable store when `DATABASE_URL` is set.
+- Tool execution is routed through named tool endpoints.
+- Approval and artifacts are first-class API/store concepts.
+- Generic diagnostics demo has replaced the commerce GMV demo.
+- Docker Compose and Kubernetes skeleton exist.
+
+Not yet aligned:
+
+- Harness still uses deterministic mock events instead of provider-driven tool-call turns.
+- Tool Router is not yet a `Tool` trait registry.
+- Policy YAML is not loaded/enforced centrally yet.
+- `tool_calls` and `audit_logs` are present in schema but not fully written by all paths.
+- Approval does not yet resume the same harness turn.
+- Sandbox is workspace/Codex-oriented; Docker shell sandbox runner is not implemented yet.
+- MCP Gateway, OTel, RBAC, Vault, and queue workers are later-stage work.
 
 ## Runtime Layers
 
-MandoForge is structured around five runtime boundaries:
+```text
+Web UI
+  Agent Builder / Session Console / Timeline / Approval / Audit
 
-1. API layer: Axum routes expose agents, sessions, events, tools, artifacts, approvals, and SSE.
-2. Store layer: `AppState` owns the runtime store and hides whether data is backed by Postgres or in-memory demo state.
-3. Harness layer: the current mock harness writes a deterministic GMV diagnosis timeline; the next slice replaces that with provider/tool-call turns.
-4. Tool layer: tool execution is routed through named tool handlers and records `tool.call`, `tool.result`, `tool.error`, Codex, artifact, and approval events.
-5. Execution layer: warehouse and Codex execution stay behind policy checks and session-scoped workspace boundaries.
+Rust Agent OS API
+  Agents / Sessions / Events / Tools / Approvals / Artifacts / SSE
+
+Managed Agent Runtime
+  Session Store / Event Store / Context Builder
+  Harness Loop / Provider Router / Tool Router
+  Policy Engine / Approval Engine / Audit Logger
+  Artifact Store / Workspace Manager / Telemetry
+
+Execution Layer
+  file.read / file.write / sql.query / shell.exec / codex.exec
+  approval.request / artifact.create / mcp.call later
+
+Sandbox / Worker Layer
+  session workspace / Docker runner / Codex CLI adapter
+  gVisor and distributed workers later
+
+Context / Data Foundation
+  files / artifacts / generic demo Postgres / MCP resources later
+```
 
 ## Store Boundary
 
-The code now supports two backends:
+The code supports two backends:
 
-- Postgres backend: enabled when `DATABASE_URL` is set. Startup connects through SQLx, executes Stage 1 migrations, seeds the demo tenant, and inserts the Commerce Manager Agent.
+- Postgres backend: enabled when `DATABASE_URL` is set. Startup connects through SQLx, executes Stage 1 migrations, seeds the demo tenant, and inserts the Generic Orchestrator Agent.
 - Memory backend: enabled when `DATABASE_URL` is missing. This keeps local UI/API demos fast and avoids requiring Docker for every small change.
 
-The public API shape is identical for both backends. Handlers call `AppState` methods instead of touching storage directly:
+The public API shape is identical for both backends. Route handlers call `AppState` methods instead of touching storage directly.
+
+Current store methods:
 
 - `list_agents`
 - `create_agent`
@@ -32,7 +76,12 @@ The public API shape is identical for both backends. Handlers call `AppState` me
 - `list_approvals`
 - `decide_approval`
 
-This is the repository boundary for Stage 1. Future SQLx query code should stay behind these methods or move into a dedicated `store` module without changing route handlers.
+Next store work:
+
+- Move these methods into a dedicated `store` module.
+- Add `tool_calls` write/update methods.
+- Add `audit_logs` append/list methods.
+- Add agent version read APIs.
 
 ## Event Log Contract
 
@@ -42,24 +91,57 @@ Rules:
 
 - Events are append-only.
 - `seq` is session-local and monotonic.
-- Tool calls, tool results, artifacts, approvals, and final reports are linked by event sequence and payload references.
+- Tool calls, tool results, policy decisions, approvals, artifacts, and final reports are linked by event sequence and payload references.
 - UI replay must be derived from the event log, not from transient harness state.
 
-Current event types used by the prototype:
+Stage 1 event types:
 
 - `user.message`
-- `manager.plan`
+- `agent.plan`
+- `agent.message`
+- `agent.final`
+- `llm.request`
+- `llm.response`
+- `llm.error`
 - `tool.call`
 - `tool.result`
+- `tool.error`
+- `policy.allowed`
+- `policy.denied`
+- `policy.requires_approval`
 - `approval.requested`
 - `approval.approved`
 - `approval.rejected`
-- `artifact.created`
-- `llm.response`
+- `sandbox.started`
+- `sandbox.output`
+- `sandbox.completed`
+- `sandbox.failed`
 - `codex.task.started`
+- `codex.task.event`
 - `codex.task.completed`
 - `codex.task.failed`
+- `artifact.created`
+- `session.started`
+- `session.paused`
+- `session.resumed`
+- `session.waiting_approval`
 - `session.completed`
+- `session.failed`
+- `session.interrupted`
+
+## Tool Boundary
+
+Target Stage 1 tools:
+
+- `file.read`: low risk.
+- `file.write`: medium risk, approval required.
+- `sql.query`: medium risk, read-only enforced.
+- `shell.exec`: high risk, approval required.
+- `codex.exec`: high risk, approval required.
+- `approval.request`: low risk.
+- `artifact.create`: low risk.
+
+The current code exposes descriptors and mock execution for part of this list. The next implementation should introduce a `Tool` trait and registry, then make every execution path write `tool_calls`, policy events, audit logs, and normalized results.
 
 ## Policy Boundary
 
@@ -67,15 +149,37 @@ Stage 1 policy is defined in `config/policy.stage1.yaml`.
 
 Current enforced checks:
 
-- `warehouse.query` rejects non-read SQL.
-- `codex.exec` only allows `read-only` and `workspace-write` sandbox modes without approval.
-- High-risk commerce actions are represented as approval requests, not executed.
+- `sql.query` rejects non-read SQL.
+- `codex.exec` only allows `read-only` and `workspace-write` sandbox modes without extra approval.
 
 Next enforcement work:
 
 - Load YAML policy at startup.
-- Write explicit `policy.allowed` and `policy.denied` events.
+- Check allowed tools per agent.
+- Emit `policy.allowed`, `policy.denied`, and `policy.requires_approval`.
 - Persist policy decisions into `tool_calls.policy_decision`.
+
+## Sandbox Boundary
+
+Sandbox and approval are separate:
+
+- Sandbox controls files, process execution, network, timeout, and workspace path.
+- Approval controls whether humans allow high-risk tool calls to proceed.
+
+Stage 1 workspace target:
+
+```text
+workspaces/{session_id}/
+  input/
+  output/
+  artifacts/
+  tmp/
+  logs/
+  .agent-os/
+    manifest.json
+    policy.json
+    events.jsonl
+```
 
 ## Codex Worker Boundary
 
@@ -85,35 +189,48 @@ Next enforcement work:
 {MANDOFORGE_WORKSPACE_ROOT}/{session_id}
 ```
 
-Allowed non-approval sandbox modes:
+Allowed non-extra-approval sandbox modes:
 
 - `read-only`
 - `workspace-write`
 
-The adapter captures:
-
-- stdout
-- stderr
-- exit code
-- final message file
-- Codex task events in the session timeline
-
 Next worker work:
 
-- Parse JSONL event lines into individual `codex.task.event` events.
+- Parse JSONL event lines into `codex.task.event`.
 - Persist final files as artifacts.
 - Add output-size limits.
 - Move long tasks into a queue-backed worker process.
+
+## Deployment Boundary
+
+Current deployment targets:
+
+- Docker Compose for local API + Postgres.
+- K8s skeleton for API + Postgres.
+
+Stage 2/3 target components:
+
+- `agent-os-api`
+- `agent-os-web`
+- `runtime-worker`
+- `codex-worker`
+- `sandbox-runner`
+- `mcp-gateway`
+- `policy-engine`
+- `otel-collector`
+- `postgres`
+- `redis-or-nats`
+- `object-storage`
 
 ## Verification
 
 Current verified path:
 
 - `cargo fmt --all -- --check`
-- `cargo check --workspace`
+- `cargo test --workspace`
 - memory backend smoke with `./scripts/smoke.sh`
 
-Postgres runtime path is implemented but was not runtime-smoked in this environment because Docker daemon was not running and `pg_isready` is not installed locally. It should be verified with:
+Postgres runtime path should be verified with:
 
 ```bash
 docker compose up -d postgres

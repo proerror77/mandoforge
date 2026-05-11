@@ -1,17 +1,40 @@
 # MandoForge
 
-MandoForge is a Rust-native Managed Agents runtime prototype for enterprise Agent OS work. Stage 1 focuses on one complete commerce demo: a user asks why yesterday's GMV dropped, the runtime records an append-only session timeline, runs governed tools against demo warehouse facts, creates an artifact, and routes risky operating actions to approval.
+MandoForge is a Rust-native Generic Agent OS Kernel. It is not a vertical commerce, finance, or support agent. Stage 1 focuses on the runtime kernel that lets any configured agent create sessions, append events, route tools through policy, pause for approval, create artifacts, and replay the timeline.
 
 ## Stage 1 Scope
 
 - Rust API server with Axum.
-- Session, event, tool, artifact, and approval APIs.
+- Postgres-backed session/event/artifact/approval store with in-memory fallback.
+- Generic orchestrator agent config.
 - Static Session Console UI with event timeline and approval queue.
-- Demo commerce warehouse schema and seed data.
+- Generic demo data: `platform_events`, `sample_documents`, and `sample_metrics`.
 - YAML governance policy for blocked and approval-required tools.
 - Codex CLI adapter stub that runs `codex exec` inside a per-session workspace when invoked.
+- Docker Compose and Kubernetes deployment skeleton.
 
-The server uses Postgres when `DATABASE_URL` is set and falls back to an in-memory store when it is missing. This keeps the demo easy to run while making `session_events` the durable runtime boundary for Docker and production-like runs.
+The runtime uses Postgres when `DATABASE_URL` is set and falls back to an in-memory store when it is missing. `session_events` is the durable context object; it is not the model context window.
+
+## Generic Diagnostics Demo
+
+The first demo validates runtime architecture, not business intelligence.
+
+Prompt:
+
+```text
+Read README and config, query demo platform_events, request approval before shell or file write, and generate diagnostics.md.
+```
+
+The mock harness currently demonstrates:
+
+- Agent plan.
+- `file.read` result.
+- `sql.get_schema` result.
+- `sql.query` result over generic platform events.
+- `approval.requested` for `shell.exec`.
+- `artifact.created` for `diagnostics.md`.
+- Final runtime diagnostics summary.
+- Replayable event timeline.
 
 ## Run Locally
 
@@ -37,12 +60,24 @@ BASE_URL=http://127.0.0.1:8787 ./scripts/smoke.sh
 docker compose up --build
 ```
 
-The API is served on `http://127.0.0.1:8787`. Postgres starts with the core runtime schema and commerce demo tables.
+The API is served on `http://127.0.0.1:8787`. Postgres starts with the runtime schema and generic demo tables.
+
+## Kubernetes
+
+The Stage 1 K8s skeleton lives in [deploy/k8s](deploy/k8s).
+
+```bash
+kubectl apply -k deploy/k8s
+kubectl -n agent-os port-forward svc/mandoforge-api 8787:8787
+```
+
+The manifests are a starting point, not a production hardening claim. Before shared-cluster use, split Codex/sandbox workers, replace example secrets, add NetworkPolicy, and move workspaces/artifacts to durable storage.
 
 ## Architecture
 
-- [Stage 1 Plan](docs/stage1-plan.md)
 - [Runtime Architecture](docs/architecture.md)
+- [Stage 1 Plan](docs/stage1-plan.md)
+- [Kubernetes Skeleton](deploy/k8s/README.md)
 
 ## Important APIs
 
@@ -57,33 +92,30 @@ The API is served on `http://127.0.0.1:8787`. Postgres starts with the core runt
 - `GET /api/tools`
 - `POST /api/tools/:name/execute`
 
-## Demo Prompt
-
-```text
-昨天 GMV 为什么下降？请找出主要原因，并生成今天可执行的运营建议。
-```
-
-The mock harness currently produces the required Stage 1 acceptance shape:
-
-- GMV decline percentage.
-- Top abnormal SKUs.
-- Inventory, ad, refund, and customer voice attribution.
-- Four operating recommendations.
-- One approval request.
-- Timeline and artifact events.
-
 ## Security Boundary
 
-- Demo warehouse access is intended to be read-only.
-- `warehouse.query` rejects non-read SQL commands.
-- `codex.exec` only allows `read-only` and `workspace-write` sandbox modes without approval.
-- Production secrets must not be passed into Codex workspaces.
-- Coupon, price, refund, and bulk-message actions remain draft/approval-only.
+- Tool Router is the only intended external execution path.
+- `sql.query` rejects non-read SQL commands.
+- `shell.exec`, `file.write`, `codex.exec`, and `http.request` require approval by Stage 1 policy.
+- `codex.exec` only allows `read-only` and `workspace-write` sandbox modes without extra approval.
+- Production secrets must not be passed into prompts, event logs, or Codex workspaces.
 
-## Next Implementation Slice
+## Fit Against PRD v2
 
-1. Split the current `AppState` store methods into a dedicated `store` module.
-2. Add OpenAI-compatible provider calls and tool-call parsing.
-3. Persist Codex JSONL events and generated files as artifacts.
-4. Add proper tests for SQL safety, approval routing, and session replay.
-5. Expand the UI detail panel for tool call arguments, results, and policy decisions.
+Already aligned:
+
+- Generic agent instead of commerce manager.
+- Generic diagnostics demo instead of GMV demo.
+- Postgres event log with in-memory fallback.
+- Tool names moved toward `file.*`, `sql.*`, `shell.exec`, `codex.exec`.
+- Approval queue and replayable timeline.
+- Docker Compose and K8s skeleton.
+
+Still incomplete:
+
+- Real provider/harness loop and tool-call parsing.
+- Real Tool trait implementations for file, SQL, shell, artifact, approval.
+- `tool_calls` and `audit_logs` persistence for every tool path.
+- Resume semantics after approval.
+- Docker sandbox wrapper and split worker processes.
+- Agent Builder form and detailed Tool/Audit panels.
