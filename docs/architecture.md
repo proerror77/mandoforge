@@ -201,7 +201,8 @@ Next worker work:
 
 - Keep `execution.rs` as the in-process execution boundary for approved `file.write`, `shell.exec`, and `codex.exec`.
 - Keep output-size limits on approved shell and Codex execution results.
-- Move long tasks into a queue-backed worker process.
+- Keep `execution_queue.rs` as the in-process queue facade for approved tool jobs.
+- Replace the in-process queue drain with an external queue-backed worker process.
 
 ## Deployment Boundary
 

@@ -21,6 +21,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 mod execution;
+mod execution_queue;
 mod policy;
 mod provider;
 mod shell_runner;
@@ -29,6 +30,9 @@ mod store;
 use execution::execute_approved_tool;
 #[cfg(test)]
 use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
+use execution_queue::ExecutionQueue;
+#[cfg(test)]
+use execution_queue::{ExecutionJobRequest, ExecutionJobStatus};
 #[cfg(test)]
 use policy::ensure_read_only_sql;
 use policy::{PolicyConfig, ensure_read_only_sql_with_policy, load_policy_config};
@@ -45,6 +49,7 @@ use store::{MemoryStore, StoreBackend};
 #[derive(Clone)]
 struct AppState {
     store: StoreBackend,
+    execution_queue: ExecutionQueue,
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
@@ -263,6 +268,7 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         store,
+        execution_queue: ExecutionQueue::default(),
         workspace_root,
         tenant_id,
         policy,
@@ -1519,6 +1525,29 @@ not json
         assert!(!unchanged.truncated);
     }
 
+    #[tokio::test]
+    async fn execution_queue_tracks_job_lifecycle() {
+        let queue = ExecutionQueue::default();
+        let request = ExecutionJobRequest {
+            session_id: Uuid::new_v4(),
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "codex.exec".to_string(),
+        };
+
+        let queued = queue.enqueue(request).await;
+        assert_eq!(queued.status, ExecutionJobStatus::Queued);
+        assert_eq!(queue.list().await.len(), 1);
+
+        let running = queue.start(queued.id).await.expect("start job");
+        assert_eq!(running.status, ExecutionJobStatus::Running);
+        assert!(running.started_at.is_some());
+
+        let completed = queue.complete(queued.id).await.expect("complete job");
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        assert!(completed.completed_at.is_some());
+    }
+
     #[test]
     fn parses_openai_compatible_tool_calls() {
         let response = json!({
@@ -1570,6 +1599,7 @@ not json
     async fn test_app() -> Router {
         let state = AppState {
             store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
