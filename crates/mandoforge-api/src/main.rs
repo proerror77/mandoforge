@@ -40,6 +40,9 @@ mod store_rows;
 mod store_seed;
 mod store_tool_calls;
 
+use authorization::{
+    AuthorizationRequest, Authorizer, Permission, Principal, Role, RoleBasedAuthorizer,
+};
 use execution::{
     ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker, QueueBackedExecutionWorker,
     run_execution_job,
@@ -69,6 +72,7 @@ struct AppState {
     store: StoreBackend,
     execution_queue: ExecutionQueue,
     execution_worker: Arc<dyn ExecutionWorker>,
+    authorizer: Arc<dyn Authorizer>,
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
@@ -312,6 +316,7 @@ async fn main() -> Result<()> {
         store,
         execution_queue,
         execution_worker: execution_worker_from_env(),
+        authorizer: Arc::new(RoleBasedAuthorizer),
         workspace_root,
         tenant_id,
         policy,
@@ -1044,9 +1049,65 @@ async fn list_tools() -> Json<Vec<ToolDescriptor>> {
 async fn execute_tool(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     Json(input): Json<ExecuteTool>,
 ) -> Result<Json<Value>, AppError> {
+    authorize_tool_execution(&state, &headers, &name).await?;
     Ok(Json(execute_tool_invocation(&state, &name, input).await?))
+}
+
+async fn authorize_tool_execution(
+    state: &AppState,
+    headers: &HeaderMap,
+    tool_name: &str,
+) -> Result<(), AppError> {
+    let principal = principal_from_headers(state.tenant_id, headers)?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::ToolsExecute,
+        resource_type: format!("tool:{tool_name}"),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await
+}
+
+fn principal_from_headers(tenant_id: Uuid, headers: &HeaderMap) -> Result<Principal, AppError> {
+    let subject_id = header_value(headers, "x-mandoforge-subject")
+        .unwrap_or("demo-operator")
+        .to_string();
+    let roles = header_value(headers, "x-mandoforge-roles")
+        .map(parse_roles_header)
+        .transpose()?
+        .unwrap_or_else(|| vec![Role::Operator]);
+    if roles.is_empty() {
+        return Err(AppError::forbidden("principal has no roles"));
+    }
+
+    Ok(Principal {
+        tenant_id,
+        subject_id,
+        roles,
+    })
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn parse_roles_header(value: &str) -> Result<Vec<Role>, AppError> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(|role| match role {
+            "admin" => Ok(Role::Admin),
+            "operator" => Ok(Role::Operator),
+            "viewer" => Ok(Role::Viewer),
+            other => Err(AppError::bad_request(format!(
+                "unsupported x-mandoforge-roles value: {other}"
+            ))),
+        })
+        .collect()
 }
 
 async fn execute_tool_invocation(
@@ -2019,6 +2080,7 @@ not json
             store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
             execution_queue: ExecutionQueue::default(),
             execution_worker,
+            authorizer: Arc::new(RoleBasedAuthorizer),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -2417,6 +2479,52 @@ not json
                 && call.status == "denied"
                 && call.policy_decision["decision"] == "denied"
         }));
+    }
+
+    #[tokio::test]
+    async fn manual_tool_execution_enforces_rbac_role() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "rbac denied tool"}),
+            ),
+        )
+        .await;
+
+        let (status, error) = request_value(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/sql.get_schema/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::from(
+                    json!({"session_id": session.id, "args": {}}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
     }
 
     #[tokio::test]

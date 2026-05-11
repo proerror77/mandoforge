@@ -84,3 +84,4 @@
 - [x] Add reserved OTel observability config and exporter boundary before enabling telemetry export.
 - [x] Add RBAC principal, permission, and authorizer boundary before request-path enforcement.
 - [x] Add reserved Vault secret provider boundary before runtime secret reads.
+- [x] Enforce RBAC on manual tool execution with a default demo operator principal.

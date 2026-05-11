@@ -17,6 +17,7 @@ Aligned:
 - Generic diagnostics demo has replaced the commerce GMV demo.
 - Docker Compose and Kubernetes skeleton exist.
 - Stage 1 YAML policy is loaded and enforced globally, then narrowed by session agent-version tool allowlists.
+- Manual tool execution now passes through the RBAC `Authorizer`; the demo default principal is an operator, and explicit lower-privilege roles fail closed.
 - Approved shell execution can use the optional Docker runner.
 - Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh` or the `mandoforge-worker` Rust binary; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
 - Worker deployment entries exist for Docker Compose and Kubernetes.
@@ -228,7 +229,7 @@ Stage 2/3 target components:
 - `codex-worker`
 - `sandbox-runner`
 - `mcp-gateway` with `McpGatewayConfig` and `McpGatewayClient` as the reserved gateway boundary before enabling `mcp.call`.
-- `policy-engine` with `Principal`, `Permission`, and `Authorizer` as the RBAC boundary before request-path enforcement.
+- `policy-engine` with `Principal`, `Permission`, and `Authorizer` as the RBAC boundary; manual tool execution is the first enforced request path.
 - `otel-collector` with `ObservabilityConfig` and `TelemetryExporter` as the reserved exporter boundary before enabling OTLP export.
 - `vault` or compatible secret store with `SecretProviderConfig`, `SecretRef`, and `SecretProvider` as the boundary before runtime secret reads.
 - `postgres`
