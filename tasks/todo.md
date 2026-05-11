@@ -21,7 +21,7 @@
 - [x] Persist `audit_logs` rows for generic diagnostics and approval decisions.
 - [x] Expand `tool_calls` / `audit_logs` coverage to provider-driven and worker paths.
 - [x] Split policy, provider, and shell runner support modules out of `main.rs` without behavior changes.
-- [ ] Split `AppState` store methods into a dedicated `store` module after Stage 1 signoff.
+- [x] Split `AppState` store methods into a dedicated `store` module after Stage 1 signoff.
 - [x] Add SQL safety tests for `sql.query`.
 - [x] Add API integration test for Generic Runtime Diagnostics replay.
 - [x] Add artifact detail panel in UI.
