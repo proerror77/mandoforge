@@ -1,12 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
-
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::{Value, json};
-use sqlx::PgPool;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::store_backend::StoreBackend;
 use crate::store_rows::{
     agent_from_row, agent_version_from_row, approval_from_row, artifact_from_row,
     audit_log_from_row, event_from_row, session_from_row, tool_call_from_row,
@@ -15,24 +12,6 @@ use crate::{
     Agent, AgentVersion, AppError, AppState, Approval, Artifact, AuditLog, CreateAgent,
     CreateSession, Session, SessionEvent, SessionStatus, ToolCall,
 };
-
-#[derive(Default)]
-pub(crate) struct MemoryStore {
-    agents: HashMap<Uuid, Agent>,
-    agent_versions: HashMap<Uuid, Vec<AgentVersion>>,
-    sessions: HashMap<Uuid, Session>,
-    events: HashMap<Uuid, Vec<SessionEvent>>,
-    approvals: HashMap<Uuid, Approval>,
-    artifacts: HashMap<Uuid, Artifact>,
-    tool_calls: HashMap<Uuid, ToolCall>,
-    audit_logs: HashMap<Uuid, AuditLog>,
-}
-
-#[derive(Clone)]
-pub(crate) enum StoreBackend {
-    Memory(Arc<RwLock<MemoryStore>>),
-    Postgres(PgPool),
-}
 
 impl AppState {
     pub(crate) async fn list_agents(&self) -> Result<Vec<Agent>, AppError> {

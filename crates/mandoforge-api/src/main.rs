@@ -26,6 +26,7 @@ mod policy;
 mod provider;
 mod shell_runner;
 mod store;
+mod store_backend;
 mod store_rows;
 
 use execution::{
@@ -48,7 +49,7 @@ use provider::{
 };
 #[cfg(test)]
 use shell_runner::docker_shell_args;
-use store::{MemoryStore, StoreBackend};
+use store_backend::{MemoryStore, StoreBackend};
 
 #[derive(Clone)]
 struct AppState {
