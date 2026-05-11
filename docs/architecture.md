@@ -19,11 +19,12 @@ Aligned:
 - Stage 1 YAML policy is loaded and enforced globally, then narrowed by session agent-version tool allowlists.
 - Approved shell execution can use the optional Docker runner.
 - Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh` or the `mandoforge-worker` Rust binary; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
+- Worker deployment entries exist for Docker Compose and Kubernetes.
 
 Not yet aligned:
 
 - Approval resume completes approved work through the execution layer, but does not yet continue the exact same provider turn.
-- External worker mode is API-drained; the Rust worker binary exists, but a standalone deployment manifest is still future work.
+- External worker mode is still API-drained; a separate broker-backed queue remains later-stage work.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
 - MCP Gateway, OTel, RBAC, and Vault are later-stage work.
 
@@ -63,27 +64,17 @@ The code supports two backends:
 
 The public API shape is identical for both backends. Route handlers call `AppState` methods instead of touching storage directly.
 
-Current store methods:
+Current store method groups:
 
-- `list_agents`
-- `create_agent`
-- `create_session`
-- `get_session`
-- `set_session_status`
-- `append_event`
-- `list_events`
-- `insert_artifact`
-- `list_artifacts`
-- `insert_approval`
-- `list_approvals`
-- `decide_approval`
-- `insert_tool_call`
-- `update_tool_call_status`
-- `list_tool_calls`
-- `append_audit_log`
-- `list_audit_logs`
+- `store_entities`: agents, agent versions, and sessions.
+- `store_events`: append-only session events.
+- `store_tool_calls`: tool-call persistence and status updates.
+- `store_artifacts`: artifact persistence.
+- `store_approvals`: approval persistence and decisions.
+- `store_audit`: audit-log persistence.
+- `store_seed`: demo agent seed wiring.
 
-Next store work:
+Store boundary rules:
 
 - Keep the `store_*` modules as the persistence boundary.
 - Keep agent version read APIs available for agent/version inspection.
@@ -209,20 +200,21 @@ Allowed non-extra-approval sandbox modes:
 - `read-only`
 - `workspace-write`
 
-Next worker work:
+Current worker boundary:
 
 - Keep `execution.rs` as the in-process execution boundary for approved `file.write`, `shell.exec`, and `codex.exec`.
 - Keep output-size limits on approved shell and Codex execution results.
 - Keep `execution_queue.rs` as the in-process queue facade for approved tool jobs.
 - Keep `ExecutionWorker` as the swappable worker interface and `InlineExecutionWorker` as the current local implementation.
-- Replace the in-process queue drain with an external queue-backed worker process.
+- Keep queue-backed worker mode, the API-drained `mandoforge-worker` binary, and the shell worker loop as the current external-worker handoff.
+- Replace the API-drained queue with a broker-backed queue in a later production stage.
 
 ## Deployment Boundary
 
 Current deployment targets:
 
-- Docker Compose for local API + Postgres.
-- K8s skeleton for API + Postgres.
+- Docker Compose for local API + Postgres + worker.
+- K8s skeleton for API + Postgres + worker.
 
 Stage 2/3 target components:
 
@@ -243,10 +235,12 @@ Stage 2/3 target components:
 Current verified path:
 
 - `cargo fmt --all -- --check`
-- `cargo test --workspace`
-- memory backend smoke with `./scripts/smoke.sh`
+- `cargo check -p mandoforge-api --bins`
+- `cargo test -p mandoforge-api`
+- `./scripts/stage1-final-gate.sh`
+- `RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh`
 
-Postgres runtime path should be verified with:
+Focused manual Postgres smoke can still be run with:
 
 ```bash
 docker compose up -d postgres
