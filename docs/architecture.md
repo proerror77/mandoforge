@@ -28,7 +28,7 @@ Not yet aligned:
 
 - External worker mode is still API-drained; a separate broker-backed queue remains later-stage work.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
-- MCP Gateway, OTel export, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
+- Enabling `mcp.call`, OTel export, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
 
 ## Runtime Layers
 
@@ -229,7 +229,7 @@ Stage 2/3 target components:
 - `runtime-worker`
 - `codex-worker`
 - `sandbox-runner`
-- `mcp-gateway` with `McpGatewayConfig` and `McpGatewayClient` as the reserved gateway boundary before enabling `mcp.call`.
+- `mcp-gateway` with `McpGatewayConfig`, `McpGatewayClient`, and a local-verified `HttpMcpGatewayClient` HTTP boundary before enabling `mcp.call`.
 - `policy-engine` with `Principal`, `Permission`, and `Authorizer` as the RBAC boundary; session run, manual tool execution, approval decisions, execution job drain, read/list APIs, and core write APIs are enforced request paths.
 - `otel-collector` with `ObservabilityConfig` and `TelemetryExporter` as the reserved exporter boundary before enabling OTLP export.
 - `vault` or compatible secret store with `SecretProviderKind`, `SecretProviderConfig`, `SecretRef`, `SecretProvider`, and explicit `reserved` / `vault` provider selection before enabling runtime secret reads by default.
