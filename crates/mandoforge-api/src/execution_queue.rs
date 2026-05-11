@@ -50,6 +50,8 @@ pub(crate) struct ExecutionJob {
     pub(crate) enqueued_at: DateTime<Utc>,
     pub(crate) started_at: Option<DateTime<Utc>>,
     pub(crate) completed_at: Option<DateTime<Utc>>,
+    pub(crate) worker_id: Option<String>,
+    pub(crate) lease_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +106,8 @@ fn execution_job_from_row(row: PgRow) -> Result<ExecutionJob, AppError> {
         enqueued_at: row.try_get("enqueued_at")?,
         started_at: row.try_get("started_at")?,
         completed_at: row.try_get("completed_at")?,
+        worker_id: row.try_get("worker_id")?,
+        lease_expires_at: row.try_get("lease_expires_at")?,
     })
 }
 
@@ -122,6 +126,8 @@ impl ExecutionQueue {
             enqueued_at: Utc::now(),
             started_at: None,
             completed_at: None,
+            worker_id: None,
+            lease_expires_at: None,
         };
         match self {
             Self::Memory { inner } => {
@@ -130,8 +136,8 @@ impl ExecutionQueue {
             Self::Postgres { pool, tenant_id } => {
                 sqlx::query(
                     "INSERT INTO execution_jobs
-                        (id, tenant_id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                        (id, tenant_id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 )
                 .bind(job.id)
                 .bind(*tenant_id)
@@ -143,6 +149,8 @@ impl ExecutionQueue {
                 .bind(job.enqueued_at)
                 .bind(job.started_at)
                 .bind(job.completed_at)
+                .bind(&job.worker_id)
+                .bind(job.lease_expires_at)
                 .execute(pool)
                 .await?;
             }
@@ -150,16 +158,22 @@ impl ExecutionQueue {
         Ok(job)
     }
 
-    pub(crate) async fn start(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        self.update(job_id, ExecutionJobStatus::Running).await
+    pub(crate) async fn start(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.update(job_id, ExecutionJobStatus::Running, Some(worker_id))
+            .await
     }
 
     pub(crate) async fn complete(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        self.update(job_id, ExecutionJobStatus::Completed).await
+        self.update(job_id, ExecutionJobStatus::Completed, None)
+            .await
     }
 
     pub(crate) async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        self.update(job_id, ExecutionJobStatus::Failed).await
+        self.update(job_id, ExecutionJobStatus::Failed, None).await
     }
 
     pub(crate) async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
@@ -167,7 +181,7 @@ impl ExecutionQueue {
             Self::Memory { inner } => Ok(inner.read().await.jobs.clone()),
             Self::Postgres { pool, tenant_id } => {
                 let rows = sqlx::query(
-                    "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at
+                    "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at
                      FROM execution_jobs
                      WHERE tenant_id = $1
                      ORDER BY enqueued_at ASC",
@@ -180,6 +194,7 @@ impl ExecutionQueue {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         match self {
             Self::Memory { inner } => inner
@@ -192,7 +207,7 @@ impl ExecutionQueue {
                 .ok_or_else(|| AppError::not_found("execution job not found")),
             Self::Postgres { pool, tenant_id } => {
                 let row = sqlx::query(
-                    "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at
+                    "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at
                      FROM execution_jobs
                      WHERE tenant_id = $1 AND id = $2",
                 )
@@ -210,6 +225,7 @@ impl ExecutionQueue {
         &self,
         job_id: Uuid,
         status: ExecutionJobStatus,
+        worker_id: Option<&str>,
     ) -> Result<ExecutionJob, AppError> {
         match self {
             Self::Memory { inner } => {
@@ -223,11 +239,19 @@ impl ExecutionQueue {
                 match job.status {
                     ExecutionJobStatus::Running => {
                         job.started_at = Some(Utc::now());
+                        job.worker_id = worker_id.map(str::to_string);
+                        job.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
                     }
                     ExecutionJobStatus::Completed | ExecutionJobStatus::Failed => {
                         job.completed_at = Some(Utc::now());
+                        job.lease_expires_at = None;
                     }
-                    ExecutionJobStatus::Queued => {}
+                    ExecutionJobStatus::Queued => {
+                        job.started_at = None;
+                        job.completed_at = None;
+                        job.worker_id = None;
+                        job.lease_expires_at = None;
+                    }
                 }
                 Ok(job.clone())
             }
@@ -235,10 +259,13 @@ impl ExecutionQueue {
                 let row = match status {
                     ExecutionJobStatus::Running => sqlx::query(
                         "UPDATE execution_jobs
-                         SET status = 'running', started_at = COALESCE(started_at, now()), lease_expires_at = now() + interval '5 minutes'
-                         WHERE tenant_id = $1 AND id = $2 AND status = 'queued'
-                         RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at",
+                         SET status = 'running', started_at = COALESCE(started_at, now()), worker_id = $1, lease_expires_at = now() + interval '5 minutes'
+                         WHERE tenant_id = $2
+                           AND id = $3
+                           AND (status = 'queued' OR (status = 'running' AND lease_expires_at < now()))
+                         RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at",
                     )
+                    .bind(worker_id.unwrap_or("api"))
                     .bind(*tenant_id)
                     .bind(job_id)
                     .fetch_optional(pool)
@@ -247,7 +274,7 @@ impl ExecutionQueue {
                         "UPDATE execution_jobs
                          SET status = $1, completed_at = COALESCE(completed_at, now()), lease_expires_at = NULL
                          WHERE tenant_id = $2 AND id = $3
-                         RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at",
+                         RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at",
                     )
                     .bind(status.as_str())
                     .bind(*tenant_id)
@@ -256,9 +283,9 @@ impl ExecutionQueue {
                     .await?,
                     ExecutionJobStatus::Queued => sqlx::query(
                         "UPDATE execution_jobs
-                         SET status = 'queued', started_at = NULL, completed_at = NULL, lease_expires_at = NULL
+                         SET status = 'queued', started_at = NULL, completed_at = NULL, worker_id = NULL, lease_expires_at = NULL
                          WHERE tenant_id = $1 AND id = $2
-                         RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at",
+                         RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at",
                     )
                     .bind(*tenant_id)
                     .bind(job_id)

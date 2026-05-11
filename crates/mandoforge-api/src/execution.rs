@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
+use crate::execution_queue::{ExecutionJob, ExecutionJobRequest};
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{AppError, AppState, Approval, Artifact, ToolCall, new_audit_log};
 
@@ -58,7 +58,7 @@ impl ExecutionWorker for InlineExecutionWorker {
         let Some(job) = enqueue_approved_job(state, approval).await? else {
             return Ok(ExecutionWorkerOutcome::Completed);
         };
-        run_execution_job(state, job.id).await?;
+        run_execution_job(state, job.id, "inline").await?;
         Ok(ExecutionWorkerOutcome::Completed)
     }
 }
@@ -112,11 +112,9 @@ async fn enqueue_approved_job(
 pub(crate) async fn run_execution_job(
     state: &AppState,
     job_id: Uuid,
+    worker_id: &str,
 ) -> Result<ExecutionJob, AppError> {
-    let job = state.execution_queue.get(job_id).await?;
-    if job.status != ExecutionJobStatus::Queued {
-        return Err(AppError::bad_request("execution job is not queued"));
-    }
+    let job = state.execution_queue.start(job_id, worker_id).await?;
     let approval = state.get_approval(job.approval_id).await?;
     if approval.status != "approved" {
         return Err(AppError::bad_request(
@@ -124,7 +122,6 @@ pub(crate) async fn run_execution_job(
         ));
     }
     let tool_call = state.get_tool_call(job.tool_call_id).await?;
-    state.execution_queue.start(job.id).await?;
     let result = match tool_call.tool_name.as_str() {
         "file.write" => execute_approved_file_write(state, &approval, &tool_call).await,
         "shell.exec" => execute_approved_shell(state, &approval, &tool_call).await,

@@ -18,7 +18,7 @@ Aligned:
 - Docker Compose and Kubernetes skeleton exist.
 - Stage 1 YAML policy is loaded and enforced globally, then narrowed by session agent-version tool allowlists.
 - Approved shell execution can use the optional Docker runner.
-- Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh`; the queue is durable in Postgres mode.
+- Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh`; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
 
 Not yet aligned:
 

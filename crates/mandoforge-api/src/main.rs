@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
     routing::{get, post},
 };
@@ -1275,8 +1275,14 @@ async fn list_execution_jobs(
 async fn run_execution_job_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
-    let completed = run_execution_job(&state, id).await?;
+    let worker_id = headers
+        .get("x-mandoforge-worker-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("api");
+    let completed = run_execution_job(&state, id, worker_id).await?;
     complete_session_after_approval(&state, completed.session_id).await?;
     Ok(Json(completed))
 }
@@ -1638,9 +1644,14 @@ not json
         assert_eq!(queued.status, ExecutionJobStatus::Queued);
         assert_eq!(queue.list().await.expect("list jobs").len(), 1);
 
-        let running = queue.start(queued.id).await.expect("start job");
+        let running = queue
+            .start(queued.id, "test-worker")
+            .await
+            .expect("start job");
         assert_eq!(running.status, ExecutionJobStatus::Running);
         assert!(running.started_at.is_some());
+        assert_eq!(running.worker_id.as_deref(), Some("test-worker"));
+        assert!(running.lease_expires_at.is_some());
 
         let completed = queue.complete(queued.id).await.expect("complete job");
         assert_eq!(completed.status, ExecutionJobStatus::Completed);

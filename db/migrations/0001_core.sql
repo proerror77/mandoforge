@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
     enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
+    worker_id TEXT,
     lease_expires_at TIMESTAMPTZ
 );
 
@@ -217,3 +218,6 @@ ALTER TABLE approvals ADD COLUMN IF NOT EXISTS requested_reason TEXT;
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS requested_payload JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS decision_payload JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS approved_by UUID;
+
+ALTER TABLE execution_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT;
+ALTER TABLE execution_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
