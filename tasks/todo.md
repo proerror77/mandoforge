@@ -53,6 +53,7 @@
 - [x] Persist Codex final-message artifact from approved `codex.exec`.
 - [x] Load and enforce `config/policy.stage1.yaml`.
 - [x] Add env-gated OpenAI-compatible HTTP provider transport.
+- [x] Add credential-gated external provider smoke verification script.
 - [x] Add seeded platform_events generator for generic runtime demo.
 - [x] Add deployment guide and demo script.
 - [x] Add Stage 1 final gate script with self-started in-memory demo and optional live stack mode.

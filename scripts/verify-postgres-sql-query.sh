@@ -13,9 +13,12 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 
 DATABASE_URL="$DATABASE_URL" COUNT="${COUNT:-96}" ./scripts/seed-platform-events.sh >/dev/null
 
-AGENT_ID="$(curl -fsS "$BASE_URL/api/agents" | jq -r '.[0].id')"
+AGENT_ID="$(
+  curl -fsS "$BASE_URL/api/agents" \
+    | jq -r 'map(select(.name == "Generic Orchestrator Agent"))[0].id // empty'
+)"
 if [[ -z "$AGENT_ID" || "$AGENT_ID" == "null" ]]; then
-  echo "no agent returned by $BASE_URL/api/agents" >&2
+  echo "no Generic Orchestrator Agent returned by $BASE_URL/api/agents" >&2
   exit 1
 fi
 

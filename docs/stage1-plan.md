@@ -182,4 +182,4 @@ Implemented:
 Post-Stage 1 hardening:
 
 - Split worker processes for sandbox/Codex execution.
-- Run a credentialed external provider smoke test when provider credentials are available.
+- Run `RUN_PROVIDER_SMOKE=1 ./scripts/verify-external-provider.sh` against an API started with provider credentials when provider credentials are available.

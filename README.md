@@ -104,6 +104,16 @@ cargo run -p mandoforge-api
 
 If either provider env var is missing, the runtime uses the deterministic mock provider.
 
+To verify a running API is using the external provider transport instead of the mock:
+
+```bash
+RUN_PROVIDER_SMOKE=1 \
+MANDOFORGE_PROVIDER_BASE_URL=https://api.openai.com \
+MANDOFORGE_PROVIDER_API_KEY=... \
+BASE_URL=http://127.0.0.1:8787 \
+./scripts/verify-external-provider.sh
+```
+
 Optional Docker shell sandbox:
 
 ```bash

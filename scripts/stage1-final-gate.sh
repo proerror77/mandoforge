@@ -37,6 +37,7 @@ bash -n scripts/seed-platform-events.sh
 bash -n scripts/verify-postgres-sql-query.sh
 bash -n scripts/verify-docker-shell-runner.sh
 bash -n scripts/verify-codex-exec-adapter.sh
+bash -n scripts/verify-external-provider.sh
 
 prepare_fake_codex() {
   FAKE_CODEX_DIR="$(mktemp -d -t mandoforge-fake-codex.XXXXXX)"
@@ -139,5 +140,8 @@ if [[ "$START_LIVE_STACK" == "1" || "${RUN_CODEX_VERIFY:-0}" == "1" ]]; then
 fi
 BASE_URL="$BASE_URL" DATABASE_URL="$DATABASE_URL" ./scripts/verify-postgres-sql-query.sh
 BASE_URL="$BASE_URL" ./scripts/verify-docker-shell-runner.sh
+if [[ "${RUN_PROVIDER_SMOKE:-0}" == "1" ]]; then
+  BASE_URL="$BASE_URL" ./scripts/verify-external-provider.sh
+fi
 
 echo "stage1 final gate ok"

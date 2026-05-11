@@ -22,7 +22,7 @@ Objective: complete Stage 1 of the generic Agent OS Kernel MVP.
 | All critical actions enter `audit_logs` | `stage1-demo.sh` output includes `approval.approved`, `approval.requested`, `artifact.created`, `policy.requires_approval`, `session.started`, and `tool.completed`. | Covered |
 | UI can replay the timeline | Chrome DevTools signoff rendered session status `completed`, artifact detail, tool-call detail, audit detail, and append-only timeline through `session.completed`. | Covered |
 | Codex CLI adapter can execute one workspace task | Final gate injects a fake `codex` shim and verifies approved `codex.exec`, JSONL ingestion, `codex.task.completed`, and `codex-final-message.md`. | Covered |
-| Real external provider HTTP call | Env-gated `OpenAiCompatibleProviderClient` posts to `/v1/chat/completions`; parser test covers tool-call extraction. Credentialed provider smoke is optional because credentials are not part of this repo. | Covered |
+| Real external provider HTTP call | Env-gated `OpenAiCompatibleProviderClient` posts to `/v1/chat/completions`; parser test covers tool-call extraction. `scripts/verify-external-provider.sh` runs a credentialed smoke only when `RUN_PROVIDER_SMOKE=1` and fails closed if provider env is missing. Credentialed provider smoke is optional because credentials are not part of this repo. | Covered |
 | Live Postgres `sql.query` verification | `RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh` verified row output from `generic_demo.platform_events`. | Covered |
 | Docker sandbox runner | `RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh` verified approved `shell.exec` with `result.runner == "docker"` and stdout `sandbox-ok:/workspace`. | Covered |
 
@@ -103,7 +103,7 @@ workspace_file=.mandoforge/verify-workspaces/eb7a766c-fee2-4ca6-aaf0-6e680ec81bb
 ## Residual Post-Stage 1 Hardening
 
 - Split sandbox and Codex execution into separate worker processes before production hardening.
-- Run a credentialed external provider smoke test when provider credentials are available.
+- Run `RUN_PROVIDER_SMOKE=1 ./scripts/verify-external-provider.sh` against an API started with provider credentials when provider credentials are available.
 
 Previously observed environment blockers, now resolved for the live gate by starting Docker Desktop:
 
