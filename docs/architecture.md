@@ -85,7 +85,7 @@ Current store methods:
 Next store work:
 
 - Keep the dedicated `store` module as the persistence boundary.
-- Add agent version read APIs.
+- Keep agent version read APIs available for agent/version inspection.
 - Split store methods into smaller modules.
 
 ## Event Log Contract

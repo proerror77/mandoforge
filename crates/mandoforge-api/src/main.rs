@@ -69,6 +69,20 @@ struct Agent {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentVersion {
+    id: Uuid,
+    agent_id: Uuid,
+    version: i32,
+    model: String,
+    system_prompt: String,
+    tools: Vec<String>,
+    tool_names: Vec<String>,
+    runtime_config: Value,
+    approval_policy: Value,
+    created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateAgent {
     name: String,
@@ -296,6 +310,11 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/agents", get(list_agents).post(create_agent))
+        .route("/api/agents/{id}/versions", get(list_agent_versions))
+        .route(
+            "/api/agents/{id}/versions/{version}",
+            get(get_agent_version),
+        )
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/messages", post(add_message))
@@ -369,6 +388,20 @@ async fn create_agent(
     Json(input): Json<CreateAgent>,
 ) -> Result<Json<Agent>, AppError> {
     Ok(Json(state.create_agent(input).await?))
+}
+
+async fn list_agent_versions(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<AgentVersion>>, AppError> {
+    Ok(Json(state.list_agent_versions(id).await?))
+}
+
+async fn get_agent_version(
+    State(state): State<AppState>,
+    Path((id, version)): Path<(Uuid, i32)>,
+) -> Result<Json<AgentVersion>, AppError> {
+    Ok(Json(state.get_agent_version(id, version).await?))
 }
 
 async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Session>>, AppError> {
@@ -1551,6 +1584,52 @@ not json
         let completed = queue.complete(queued.id).await.expect("complete job");
         assert_eq!(completed.status, ExecutionJobStatus::Completed);
         assert!(completed.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn reads_agent_versions_for_agent() {
+        let app = test_app().await;
+        let created: Agent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Versioned Agent",
+                    "kind": "orchestrator",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Keep a version record.",
+                    "tools": ["file.read", "sql.query"]
+                }),
+            ),
+        )
+        .await;
+
+        let versions: Vec<AgentVersion> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/agents/{}/versions", created.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].agent_id, created.id);
+        assert_eq!(versions[0].version, 1);
+        assert_eq!(versions[0].model, created.model);
+        assert_eq!(versions[0].tool_names, created.tools);
+
+        let version: AgentVersion = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/agents/{}/versions/1", created.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(version.id, versions[0].id);
+        assert_eq!(version.system_prompt, created.system_prompt);
     }
 
     #[test]

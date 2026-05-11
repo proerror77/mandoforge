@@ -153,6 +153,8 @@ The manifests are a starting point, not a production hardening claim. Before sha
 
 - `GET /healthz`
 - `GET /api/agents`
+- `GET /api/agents/:id/versions`
+- `GET /api/agents/:id/versions/:version`
 - `POST /api/sessions`
 - `POST /api/sessions/:id/run`
 - `GET /api/sessions/:id/events`

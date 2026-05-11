@@ -8,13 +8,14 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
-    Agent, AppError, AppState, Approval, Artifact, AuditLog, CreateAgent, CreateSession, Session,
-    SessionEvent, SessionStatus, ToolCall,
+    Agent, AgentVersion, AppError, AppState, Approval, Artifact, AuditLog, CreateAgent,
+    CreateSession, Session, SessionEvent, SessionStatus, ToolCall,
 };
 
 #[derive(Default)]
 pub(crate) struct MemoryStore {
     agents: HashMap<Uuid, Agent>,
+    agent_versions: HashMap<Uuid, Vec<AgentVersion>>,
     sessions: HashMap<Uuid, Session>,
     events: HashMap<Uuid, Vec<SessionEvent>>,
     approvals: HashMap<Uuid, Approval>,
@@ -52,6 +53,23 @@ fn session_from_row(row: PgRow) -> Result<Session, AppError> {
         status: status.into(),
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn agent_version_from_row(row: PgRow) -> Result<AgentVersion, AppError> {
+    let tools: Value = row.try_get("tools")?;
+    let tool_names: Value = row.try_get("tool_names")?;
+    Ok(AgentVersion {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        version: row.try_get("version")?,
+        model: row.try_get("model")?,
+        system_prompt: row.try_get("system_prompt")?,
+        tools: serde_json::from_value(tools).unwrap_or_default(),
+        tool_names: serde_json::from_value(tool_names).unwrap_or_default(),
+        runtime_config: row.try_get("runtime_config")?,
+        approval_policy: row.try_get("approval_policy")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 
@@ -184,9 +202,9 @@ impl AppState {
                 .bind(agent.created_at)
                 .execute(pool)
                 .await?;
-                self.insert_agent_version(&agent, 1).await?;
             }
         }
+        self.insert_agent_version(&agent, 1).await?;
         Ok(agent)
     }
 
@@ -195,21 +213,119 @@ impl AppState {
         agent: &Agent,
         version: i32,
     ) -> Result<(), AppError> {
-        if let StoreBackend::Postgres(pool) = &self.store {
-            sqlx::query(
-                    "INSERT INTO agent_versions (agent_id, version, model, system_prompt, tools, tool_names, approval_policy)
-                 VALUES ($1, $2, $3, $4, $5, $5, '{}')
-                 ON CONFLICT (agent_id, version) DO NOTHING",
-            )
-            .bind(agent.id)
-            .bind(version)
-            .bind(&agent.model)
-            .bind(&agent.system_prompt)
-            .bind(json!(agent.tools))
-            .execute(pool)
-            .await?;
+        let agent_version = AgentVersion {
+            id: Uuid::new_v4(),
+            agent_id: agent.id,
+            version,
+            model: agent.model.clone(),
+            system_prompt: agent.system_prompt.clone(),
+            tools: agent.tools.clone(),
+            tool_names: agent.tools.clone(),
+            runtime_config: json!({}),
+            approval_policy: json!({}),
+            created_at: Utc::now(),
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let versions = store.agent_versions.entry(agent.id).or_default();
+                if !versions.iter().any(|existing| existing.version == version) {
+                    versions.push(agent_version);
+                    versions.sort_by_key(|version| version.version);
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                        "INSERT INTO agent_versions (id, agent_id, version, model, system_prompt, tools, tool_names, runtime_config, approval_policy, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9)
+                     ON CONFLICT (agent_id, version) DO NOTHING",
+                )
+                .bind(agent_version.id)
+                .bind(agent.id)
+                .bind(version)
+                .bind(&agent.model)
+                .bind(&agent.system_prompt)
+                .bind(json!(agent.tools))
+                .bind(&agent_version.runtime_config)
+                .bind(&agent_version.approval_policy)
+                .bind(agent_version.created_at)
+                .execute(pool)
+                .await?;
+            }
         }
         Ok(())
+    }
+
+    pub(crate) async fn list_agent_versions(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<AgentVersion>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                if !store.agents.contains_key(&agent_id) {
+                    return Err(AppError::not_found("agent not found"));
+                }
+                Ok(store
+                    .agent_versions
+                    .get(&agent_id)
+                    .cloned()
+                    .unwrap_or_default())
+            }
+            StoreBackend::Postgres(pool) => {
+                if !self.agent_exists(agent_id).await? {
+                    return Err(AppError::not_found("agent not found"));
+                }
+                let rows = sqlx::query(
+                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.created_at
+                     FROM agent_versions av
+                     JOIN agents a ON a.id = av.agent_id
+                     WHERE a.tenant_id = $1 AND av.agent_id = $2
+                     ORDER BY av.version ASC",
+                )
+                .bind(self.tenant_id)
+                .bind(agent_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(agent_version_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn get_agent_version(
+        &self,
+        agent_id: Uuid,
+        version: i32,
+    ) -> Result<AgentVersion, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .agent_versions
+                .get(&agent_id)
+                .and_then(|versions| {
+                    versions
+                        .iter()
+                        .find(|agent_version| agent_version.version == version)
+                })
+                .cloned()
+                .ok_or_else(|| AppError::not_found("agent version not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.created_at
+                     FROM agent_versions av
+                     JOIN agents a ON a.id = av.agent_id
+                     WHERE a.tenant_id = $1 AND av.agent_id = $2 AND av.version = $3",
+                )
+                .bind(self.tenant_id)
+                .bind(agent_id)
+                .bind(version)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent version not found"))?;
+                agent_version_from_row(row)
+            }
+        }
     }
 
     pub(crate) async fn list_sessions(&self) -> Result<Vec<Session>, AppError> {
@@ -847,7 +963,7 @@ impl AppState {
 
         match &self.store {
             StoreBackend::Memory(inner) => {
-                inner.write().await.agents.insert(agent.id, agent);
+                inner.write().await.agents.insert(agent.id, agent.clone());
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
@@ -866,9 +982,9 @@ impl AppState {
                 .bind(agent.created_at)
                 .execute(pool)
                 .await?;
-                self.insert_agent_version(&agent, 1).await?;
             }
         }
+        self.insert_agent_version(&agent, 1).await?;
         Ok(())
     }
 }
