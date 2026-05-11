@@ -37,6 +37,8 @@ bash -n scripts/seed-platform-events.sh
 bash -n scripts/verify-postgres-sql-query.sh
 bash -n scripts/verify-docker-shell-runner.sh
 bash -n scripts/verify-codex-exec-adapter.sh
+bash -n scripts/execution-worker-loop.sh
+bash -n scripts/verify-execution-worker-loop.sh
 bash -n scripts/verify-external-provider.sh
 
 prepare_fake_codex() {

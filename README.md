@@ -126,6 +126,18 @@ cargo run -p mandoforge-api
 Approved shell and Codex execution outputs are truncated before entering `tool_calls`, `session_events`, and artifacts. Set `MANDOFORGE_EXECUTION_OUTPUT_LIMIT_BYTES` to tune the per-field limit.
 Approved execution also enters an execution queue facade before it is drained. The default worker is `InlineExecutionWorker`; set `MANDOFORGE_EXECUTION_WORKER=queue` to enqueue approved jobs for an external worker loop, then drain a job through `POST /api/execution-jobs/:id/run`.
 
+Run the external worker loop against an API started with `MANDOFORGE_EXECUTION_WORKER=queue`:
+
+```bash
+BASE_URL=http://127.0.0.1:8787 ./scripts/execution-worker-loop.sh
+```
+
+Verify the handoff path:
+
+```bash
+BASE_URL=http://127.0.0.1:8787 ./scripts/verify-execution-worker-loop.sh
+```
+
 Verify Docker shell runner mode against a running API started with `MANDOFORGE_SHELL_RUNNER=docker`:
 
 ```bash
