@@ -206,6 +206,7 @@ Current worker boundary:
 - Keep output-size limits on approved shell and Codex execution results.
 - Keep `execution_queue.rs` as the queue facade for approved tool jobs.
 - Keep `ExecutionQueueBackend` as the backend seam for memory, Postgres, and later broker-backed queues.
+- Keep `MANDOFORGE_EXECUTION_QUEUE_BACKEND` fail-closed: `auto`, `memory`, and `postgres` are selectable now; `broker`, `redis`, and `nats` are reserved until implemented.
 - Keep `ExecutionWorker` as the swappable worker interface and `InlineExecutionWorker` as the current local implementation.
 - Keep queue-backed worker mode, the API-drained `mandoforge-worker` binary, and the shell worker loop as the current external-worker handoff.
 - Replace the API-drained queue with a broker-backed queue in a later production stage.

@@ -68,6 +68,12 @@ struct AppState {
     policy: PolicyConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionQueueBackendSelection {
+    Memory,
+    Postgres,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Agent {
     id: Uuid,
@@ -293,10 +299,7 @@ async fn main() -> Result<()> {
         _ => StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
     };
 
-    let execution_queue = match &store {
-        StoreBackend::Memory(_) => ExecutionQueue::default(),
-        StoreBackend::Postgres(pool) => ExecutionQueue::postgres(pool.clone(), tenant_id),
-    };
+    let execution_queue = execution_queue_from_env(&store, tenant_id)?;
 
     let state = AppState {
         store,
@@ -321,6 +324,56 @@ async fn main() -> Result<()> {
     info!(%addr, "mandoforge api listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn select_execution_queue_backend(
+    requested: Option<&str>,
+    has_postgres: bool,
+) -> Result<ExecutionQueueBackendSelection> {
+    let requested = requested.unwrap_or("auto").trim().to_ascii_lowercase();
+    match requested.as_str() {
+        "" | "auto" => Ok(if has_postgres {
+            ExecutionQueueBackendSelection::Postgres
+        } else {
+            ExecutionQueueBackendSelection::Memory
+        }),
+        "memory" => Ok(ExecutionQueueBackendSelection::Memory),
+        "postgres" => {
+            if has_postgres {
+                Ok(ExecutionQueueBackendSelection::Postgres)
+            } else {
+                anyhow::bail!("MANDOFORGE_EXECUTION_QUEUE_BACKEND=postgres requires DATABASE_URL");
+            }
+        }
+        "broker" | "redis" | "nats" => {
+            anyhow::bail!(
+                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is reserved for a future broker-backed queue; use auto, memory, or postgres"
+            );
+        }
+        other => {
+            anyhow::bail!(
+                "unsupported MANDOFORGE_EXECUTION_QUEUE_BACKEND={other}; use auto, memory, or postgres"
+            );
+        }
+    }
+}
+
+fn execution_queue_from_env(store: &StoreBackend, tenant_id: Uuid) -> Result<ExecutionQueue> {
+    let selection = select_execution_queue_backend(
+        std::env::var("MANDOFORGE_EXECUTION_QUEUE_BACKEND")
+            .ok()
+            .as_deref(),
+        matches!(store, StoreBackend::Postgres(_)),
+    )?;
+    match (selection, store) {
+        (ExecutionQueueBackendSelection::Memory, _) => Ok(ExecutionQueue::default()),
+        (ExecutionQueueBackendSelection::Postgres, StoreBackend::Postgres(pool)) => {
+            Ok(ExecutionQueue::postgres(pool.clone(), tenant_id))
+        }
+        (ExecutionQueueBackendSelection::Postgres, StoreBackend::Memory(_)) => {
+            anyhow::bail!("Postgres execution queue selected without a Postgres store")
+        }
+    }
 }
 
 fn build_router(state: AppState) -> Router {
@@ -1904,6 +1957,30 @@ not json
         assert!(args.contains(&"/workspace".to_string()));
         assert!(args.contains(&"alpine:3.20".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("pwd"));
+    }
+
+    #[test]
+    fn selects_execution_queue_backend_fail_closed() {
+        assert_eq!(
+            select_execution_queue_backend(None, false).expect("auto memory"),
+            ExecutionQueueBackendSelection::Memory
+        );
+        assert_eq!(
+            select_execution_queue_backend(Some("auto"), true).expect("auto postgres"),
+            ExecutionQueueBackendSelection::Postgres
+        );
+        assert_eq!(
+            select_execution_queue_backend(Some("memory"), true).expect("forced memory"),
+            ExecutionQueueBackendSelection::Memory
+        );
+        assert!(
+            select_execution_queue_backend(Some("postgres"), false).is_err(),
+            "forced postgres queue should require DATABASE_URL"
+        );
+        assert!(
+            select_execution_queue_backend(Some("redis"), true).is_err(),
+            "broker-backed queue names are reserved until implemented"
+        );
     }
 
     async fn test_app() -> Router {
