@@ -18,12 +18,12 @@ Aligned:
 - Docker Compose and Kubernetes skeleton exist.
 - Stage 1 YAML policy is loaded and enforced globally, then narrowed by session agent-version tool allowlists.
 - Approved shell execution can use the optional Docker runner.
-- Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh`.
+- Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh`; the queue is durable in Postgres mode.
 
 Not yet aligned:
 
 - Approval resume completes approved work through the execution layer, but does not yet continue the exact same provider turn.
-- External worker mode is API-drained; the current separate worker is a script loop, not yet a Rust worker service with durable claims.
+- External worker mode is API-drained; the current separate worker is a script loop, not yet a Rust worker service with a standalone deployment manifest.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
 - MCP Gateway, OTel, RBAC, and Vault are later-stage work.
 

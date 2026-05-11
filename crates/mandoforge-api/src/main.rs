@@ -285,9 +285,14 @@ async fn main() -> Result<()> {
         _ => StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
     };
 
+    let execution_queue = match &store {
+        StoreBackend::Memory(_) => ExecutionQueue::default(),
+        StoreBackend::Postgres(pool) => ExecutionQueue::postgres(pool.clone(), tenant_id),
+    };
+
     let state = AppState {
         store,
-        execution_queue: ExecutionQueue::default(),
+        execution_queue,
         execution_worker: execution_worker_from_env(),
         workspace_root,
         tenant_id,
@@ -1264,7 +1269,7 @@ async fn list_audit_logs(State(state): State<AppState>) -> Result<Json<Vec<Audit
 async fn list_execution_jobs(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<execution_queue::ExecutionJob>>, AppError> {
-    Ok(Json(state.execution_queue.list().await))
+    Ok(Json(state.execution_queue.list().await?))
 }
 
 async fn run_execution_job_route(
@@ -1629,9 +1634,9 @@ not json
             tool_name: "codex.exec".to_string(),
         };
 
-        let queued = queue.enqueue(request).await;
+        let queued = queue.enqueue(request).await.expect("queue job");
         assert_eq!(queued.status, ExecutionJobStatus::Queued);
-        assert_eq!(queue.list().await.len(), 1);
+        assert_eq!(queue.list().await.expect("list jobs").len(), 1);
 
         let running = queue.start(queued.id).await.expect("start job");
         assert_eq!(running.status, ExecutionJobStatus::Running);

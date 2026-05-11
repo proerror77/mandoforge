@@ -168,10 +168,25 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS execution_jobs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    session_id UUID NOT NULL REFERENCES sessions(id),
+    approval_id UUID NOT NULL REFERENCES approvals(id),
+    tool_call_id UUID NOT NULL REFERENCES tool_calls(id),
+    tool_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    lease_expires_at TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_session_events_session_seq ON session_events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_session ON audit_logs(session_id);
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_status ON execution_jobs(tenant_id, status, enqueued_at);
 
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT 'default';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);

@@ -105,7 +105,7 @@ async fn enqueue_approved_job(
                 tool_call_id,
                 tool_name: tool_call.tool_name,
             })
-            .await,
+            .await?,
     ))
 }
 

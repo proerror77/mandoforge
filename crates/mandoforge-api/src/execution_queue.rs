@@ -1,19 +1,40 @@
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Row, postgres::PgRow};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::AppError;
 
-#[derive(Clone, Default)]
-pub(crate) struct ExecutionQueue {
-    inner: Arc<RwLock<ExecutionQueueState>>,
+#[derive(Clone)]
+pub(crate) enum ExecutionQueue {
+    Memory {
+        inner: Arc<RwLock<ExecutionQueueState>>,
+    },
+    Postgres {
+        pool: PgPool,
+        tenant_id: Uuid,
+    },
+}
+
+impl Default for ExecutionQueue {
+    fn default() -> Self {
+        Self::Memory {
+            inner: Arc::new(RwLock::new(ExecutionQueueState::default())),
+        }
+    }
+}
+
+impl ExecutionQueue {
+    pub(crate) fn postgres(pool: PgPool, tenant_id: Uuid) -> Self {
+        Self::Postgres { pool, tenant_id }
+    }
 }
 
 #[derive(Default)]
-struct ExecutionQueueState {
+pub(crate) struct ExecutionQueueState {
     jobs: Vec<ExecutionJob>,
 }
 
@@ -40,6 +61,30 @@ pub(crate) enum ExecutionJobStatus {
     Failed,
 }
 
+impl ExecutionJobStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl FromStr for ExecutionJobStatus {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match value {
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            _ => Self::Queued,
+        })
+    }
+}
+
 pub(crate) struct ExecutionJobRequest {
     pub(crate) session_id: Uuid,
     pub(crate) approval_id: Uuid,
@@ -47,8 +92,26 @@ pub(crate) struct ExecutionJobRequest {
     pub(crate) tool_name: String,
 }
 
+fn execution_job_from_row(row: PgRow) -> Result<ExecutionJob, AppError> {
+    let status: String = row.try_get("status")?;
+    Ok(ExecutionJob {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        approval_id: row.try_get("approval_id")?,
+        tool_call_id: row.try_get("tool_call_id")?,
+        tool_name: row.try_get("tool_name")?,
+        status: status.parse().unwrap_or(ExecutionJobStatus::Queued),
+        enqueued_at: row.try_get("enqueued_at")?,
+        started_at: row.try_get("started_at")?,
+        completed_at: row.try_get("completed_at")?,
+    })
+}
+
 impl ExecutionQueue {
-    pub(crate) async fn enqueue(&self, request: ExecutionJobRequest) -> ExecutionJob {
+    pub(crate) async fn enqueue(
+        &self,
+        request: ExecutionJobRequest,
+    ) -> Result<ExecutionJob, AppError> {
         let job = ExecutionJob {
             id: Uuid::new_v4(),
             session_id: request.session_id,
@@ -60,8 +123,31 @@ impl ExecutionQueue {
             started_at: None,
             completed_at: None,
         };
-        self.inner.write().await.jobs.push(job.clone());
-        job
+        match self {
+            Self::Memory { inner } => {
+                inner.write().await.jobs.push(job.clone());
+            }
+            Self::Postgres { pool, tenant_id } => {
+                sqlx::query(
+                    "INSERT INTO execution_jobs
+                        (id, tenant_id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                )
+                .bind(job.id)
+                .bind(*tenant_id)
+                .bind(job.session_id)
+                .bind(job.approval_id)
+                .bind(job.tool_call_id)
+                .bind(&job.tool_name)
+                .bind(job.status.as_str())
+                .bind(job.enqueued_at)
+                .bind(job.started_at)
+                .bind(job.completed_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(job)
     }
 
     pub(crate) async fn start(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
@@ -76,19 +162,48 @@ impl ExecutionQueue {
         self.update(job_id, ExecutionJobStatus::Failed).await
     }
 
-    pub(crate) async fn list(&self) -> Vec<ExecutionJob> {
-        self.inner.read().await.jobs.clone()
+    pub(crate) async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
+        match self {
+            Self::Memory { inner } => Ok(inner.read().await.jobs.clone()),
+            Self::Postgres { pool, tenant_id } => {
+                let rows = sqlx::query(
+                    "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at
+                     FROM execution_jobs
+                     WHERE tenant_id = $1
+                     ORDER BY enqueued_at ASC",
+                )
+                .bind(*tenant_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(execution_job_from_row).collect()
+            }
+        }
     }
 
     pub(crate) async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        self.inner
-            .read()
-            .await
-            .jobs
-            .iter()
-            .find(|job| job.id == job_id)
-            .cloned()
-            .ok_or_else(|| AppError::not_found("execution job not found"))
+        match self {
+            Self::Memory { inner } => inner
+                .read()
+                .await
+                .jobs
+                .iter()
+                .find(|job| job.id == job_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("execution job not found")),
+            Self::Postgres { pool, tenant_id } => {
+                let row = sqlx::query(
+                    "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at
+                     FROM execution_jobs
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(*tenant_id)
+                .bind(job_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("execution job not found"))?;
+                execution_job_from_row(row)
+            }
+        }
     }
 
     async fn update(
@@ -96,22 +211,63 @@ impl ExecutionQueue {
         job_id: Uuid,
         status: ExecutionJobStatus,
     ) -> Result<ExecutionJob, AppError> {
-        let mut state = self.inner.write().await;
-        let job = state
-            .jobs
-            .iter_mut()
-            .find(|job| job.id == job_id)
-            .ok_or_else(|| AppError::not_found("execution job not found"))?;
-        job.status = status;
-        match job.status {
-            ExecutionJobStatus::Running => {
-                job.started_at = Some(Utc::now());
+        match self {
+            Self::Memory { inner } => {
+                let mut state = inner.write().await;
+                let job = state
+                    .jobs
+                    .iter_mut()
+                    .find(|job| job.id == job_id)
+                    .ok_or_else(|| AppError::not_found("execution job not found"))?;
+                job.status = status;
+                match job.status {
+                    ExecutionJobStatus::Running => {
+                        job.started_at = Some(Utc::now());
+                    }
+                    ExecutionJobStatus::Completed | ExecutionJobStatus::Failed => {
+                        job.completed_at = Some(Utc::now());
+                    }
+                    ExecutionJobStatus::Queued => {}
+                }
+                Ok(job.clone())
             }
-            ExecutionJobStatus::Completed | ExecutionJobStatus::Failed => {
-                job.completed_at = Some(Utc::now());
+            Self::Postgres { pool, tenant_id } => {
+                let row = match status {
+                    ExecutionJobStatus::Running => sqlx::query(
+                        "UPDATE execution_jobs
+                         SET status = 'running', started_at = COALESCE(started_at, now()), lease_expires_at = now() + interval '5 minutes'
+                         WHERE tenant_id = $1 AND id = $2 AND status = 'queued'
+                         RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at",
+                    )
+                    .bind(*tenant_id)
+                    .bind(job_id)
+                    .fetch_optional(pool)
+                    .await?,
+                    ExecutionJobStatus::Completed | ExecutionJobStatus::Failed => sqlx::query(
+                        "UPDATE execution_jobs
+                         SET status = $1, completed_at = COALESCE(completed_at, now()), lease_expires_at = NULL
+                         WHERE tenant_id = $2 AND id = $3
+                         RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at",
+                    )
+                    .bind(status.as_str())
+                    .bind(*tenant_id)
+                    .bind(job_id)
+                    .fetch_optional(pool)
+                    .await?,
+                    ExecutionJobStatus::Queued => sqlx::query(
+                        "UPDATE execution_jobs
+                         SET status = 'queued', started_at = NULL, completed_at = NULL, lease_expires_at = NULL
+                         WHERE tenant_id = $1 AND id = $2
+                         RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at",
+                    )
+                    .bind(*tenant_id)
+                    .bind(job_id)
+                    .fetch_optional(pool)
+                    .await?,
+                }
+                .ok_or_else(|| AppError::not_found("execution job not found"))?;
+                execution_job_from_row(row)
             }
-            ExecutionJobStatus::Queued => {}
         }
-        Ok(job.clone())
     }
 }
