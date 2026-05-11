@@ -28,6 +28,7 @@ mod mcp_gateway;
 mod observability;
 mod policy;
 mod provider;
+mod secrets;
 mod shell_runner;
 mod store_approvals;
 mod store_artifacts;

@@ -230,6 +230,7 @@ Stage 2/3 target components:
 - `mcp-gateway` with `McpGatewayConfig` and `McpGatewayClient` as the reserved gateway boundary before enabling `mcp.call`.
 - `policy-engine` with `Principal`, `Permission`, and `Authorizer` as the RBAC boundary before request-path enforcement.
 - `otel-collector` with `ObservabilityConfig` and `TelemetryExporter` as the reserved exporter boundary before enabling OTLP export.
+- `vault` or compatible secret store with `SecretProviderConfig`, `SecretRef`, and `SecretProvider` as the boundary before runtime secret reads.
 - `postgres`
 - `redis-or-nats`
 - `object-storage`
