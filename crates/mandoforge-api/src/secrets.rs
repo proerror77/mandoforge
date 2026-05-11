@@ -1,3 +1,5 @@
+use std::fmt;
+
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -5,7 +7,7 @@ use serde_json::Value;
 
 use crate::AppError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct SecretProviderConfig {
     pub(crate) vault_addr: String,
@@ -21,10 +23,31 @@ pub(crate) struct SecretRef {
     pub(crate) key: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct SecretValue {
     value: String,
+}
+
+impl fmt::Debug for SecretProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SecretProviderConfig")
+            .field("vault_addr", &self.vault_addr)
+            .field("namespace", &self.namespace)
+            .field("mount", &self.mount)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl fmt::Debug for SecretValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SecretValue")
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -279,6 +302,22 @@ mod tests {
         assert_eq!(config.namespace.as_deref(), Some("agent-os"));
         assert_eq!(config.mount, "kv");
         assert_eq!(config.token.as_deref(), Some("dev-token"));
+    }
+
+    #[test]
+    fn secret_debug_output_redacts_sensitive_values() {
+        let config = SecretProviderConfig::from_lookup(|key| match key {
+            "MANDOFORGE_VAULT_ADDR" => Some("http://vault:8200".to_string()),
+            "MANDOFORGE_VAULT_TOKEN" => Some("dev-token".to_string()),
+            _ => None,
+        })
+        .expect("vault config");
+        let secret = super::SecretValue {
+            value: "resolved-key".to_string(),
+        };
+
+        assert!(!format!("{config:?}").contains("dev-token"));
+        assert!(!format!("{secret:?}").contains("resolved-key"));
     }
 
     #[test]
