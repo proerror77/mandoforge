@@ -26,7 +26,7 @@ Aligned:
 
 Not yet aligned:
 
-- External worker mode is still API-drained; a separate broker-backed queue remains later-stage work.
+- External worker mode is still API-drained; a separate broker-backed queue remains later-stage work, with Redis Stream command/payload shape now fixed before enabling a live Redis backend.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
 - Enabling `mcp.call`, wiring OTel export into runtime request paths, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
 
@@ -208,7 +208,7 @@ Current worker boundary:
 - Keep output-size limits on approved shell and Codex execution results.
 - Keep `execution_queue.rs` as the queue facade for approved tool jobs.
 - Keep `ExecutionQueueBackend` as the backend seam for memory, Postgres, and later broker-backed queues.
-- Keep `execution_queue_broker.rs` as the reserved Redis/NATS backend skeleton; it must fail closed until real broker operations are implemented.
+- Keep `execution_queue_broker.rs` as the reserved Redis/NATS backend skeleton; it must fail closed until real broker operations are implemented. Redis Stream enqueue/group/ack command shape is locally verified before live Redis wiring.
 - Keep `BrokerQueueConfig` and `BrokerQueueHealthCheck` as the broker configuration and readiness boundary before selecting a concrete Redis or NATS client.
 - Keep `MANDOFORGE_EXECUTION_QUEUE_BACKEND` fail-closed: `auto`, `memory`, and `postgres` are selectable now; `broker`, `redis`, and `nats` are reserved until implemented.
 - Keep `ExecutionWorker` as the swappable worker interface and `InlineExecutionWorker` as the current local implementation.

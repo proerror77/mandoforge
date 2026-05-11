@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -20,6 +21,22 @@ pub(crate) struct BrokerQueueConfig {
     pub(crate) endpoint: String,
     pub(crate) stream: String,
     pub(crate) consumer_group: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct RedisStreamCommand {
+    pub(crate) command: String,
+    pub(crate) args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub(crate) struct RedisExecutionJobPayload {
+    pub(crate) session_id: Uuid,
+    pub(crate) approval_id: Uuid,
+    pub(crate) tool_call_id: Uuid,
+    pub(crate) tool_name: String,
 }
 
 #[allow(dead_code)]
@@ -80,6 +97,87 @@ impl BrokerQueueConfig {
             endpoint,
             stream,
             consumer_group,
+        })
+    }
+}
+
+#[allow(dead_code)]
+impl RedisExecutionJobPayload {
+    pub(crate) fn from_request(request: &ExecutionJobRequest) -> Self {
+        Self {
+            session_id: request.session_id,
+            approval_id: request.approval_id,
+            tool_call_id: request.tool_call_id,
+            tool_name: request.tool_name.clone(),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "session_id": self.session_id,
+            "approval_id": self.approval_id,
+            "tool_call_id": self.tool_call_id,
+            "tool_name": self.tool_name,
+        })
+    }
+}
+
+#[allow(dead_code)]
+impl RedisStreamCommand {
+    pub(crate) fn xadd_enqueue(
+        config: &BrokerQueueConfig,
+        payload: &RedisExecutionJobPayload,
+    ) -> Result<Self, AppError> {
+        if config.kind != BrokerQueueKind::Redis {
+            return Err(AppError::bad_request(
+                "Redis stream command requires Redis broker config",
+            ));
+        }
+        Ok(Self {
+            command: "XADD".to_string(),
+            args: vec![
+                config.stream.clone(),
+                "*".to_string(),
+                "payload".to_string(),
+                payload.to_json().to_string(),
+            ],
+        })
+    }
+
+    pub(crate) fn xgroup_create(config: &BrokerQueueConfig) -> Result<Self, AppError> {
+        if config.kind != BrokerQueueKind::Redis {
+            return Err(AppError::bad_request(
+                "Redis stream command requires Redis broker config",
+            ));
+        }
+        Ok(Self {
+            command: "XGROUP".to_string(),
+            args: vec![
+                "CREATE".to_string(),
+                config.stream.clone(),
+                config.consumer_group.clone(),
+                "$".to_string(),
+                "MKSTREAM".to_string(),
+            ],
+        })
+    }
+
+    pub(crate) fn xack(
+        config: &BrokerQueueConfig,
+        message_id: impl Into<String>,
+    ) -> Result<Self, AppError> {
+        if config.kind != BrokerQueueKind::Redis {
+            return Err(AppError::bad_request(
+                "Redis stream command requires Redis broker config",
+            ));
+        }
+        Ok(Self {
+            command: "XACK".to_string(),
+            args: vec![
+                config.stream.clone(),
+                config.consumer_group.clone(),
+                message_id.into(),
+            ],
         })
     }
 }
@@ -152,8 +250,10 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind, ReservedBrokerQueueHealthCheck,
+        BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind, RedisExecutionJobPayload,
+        RedisStreamCommand, ReservedBrokerQueueHealthCheck,
     };
+    use crate::execution_queue::ExecutionJobRequest;
 
     #[test]
     fn broker_queue_config_requires_kind_endpoint() {
@@ -205,5 +305,69 @@ mod tests {
         .expect("redis config");
 
         assert!(health_check.check(&config).await.is_err());
+    }
+
+    #[test]
+    fn redis_stream_command_builds_enqueue_payload() {
+        let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Redis, |key| match key {
+            "MANDOFORGE_REDIS_URL" => Some("redis://127.0.0.1:6379/0".to_string()),
+            _ => None,
+        })
+        .expect("redis config");
+        let request = ExecutionJobRequest {
+            session_id: "00000000-0000-4000-8000-000000000001"
+                .parse()
+                .expect("session id"),
+            approval_id: "00000000-0000-4000-8000-000000000002"
+                .parse()
+                .expect("approval id"),
+            tool_call_id: "00000000-0000-4000-8000-000000000003"
+                .parse()
+                .expect("tool call id"),
+            tool_name: "codex.exec".to_string(),
+        };
+        let payload = RedisExecutionJobPayload::from_request(&request);
+        let command = RedisStreamCommand::xadd_enqueue(&config, &payload).expect("xadd command");
+
+        assert_eq!(command.command, "XADD");
+        assert_eq!(command.args[0], "mandoforge:execution-jobs");
+        assert_eq!(command.args[1], "*");
+        assert_eq!(command.args[2], "payload");
+        assert!(command.args[3].contains("\"tool_name\":\"codex.exec\""));
+        assert!(command.args[3].contains("00000000-0000-4000-8000-000000000001"));
+    }
+
+    #[test]
+    fn redis_stream_command_builds_group_and_ack_commands() {
+        let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Redis, |key| match key {
+            "MANDOFORGE_REDIS_URL" => Some("redis://127.0.0.1:6379/0".to_string()),
+            "MANDOFORGE_REDIS_STREAM" => Some("custom-stream".to_string()),
+            "MANDOFORGE_EXECUTION_QUEUE_CONSUMER_GROUP" => Some("custom-workers".to_string()),
+            _ => None,
+        })
+        .expect("redis config");
+
+        let group = RedisStreamCommand::xgroup_create(&config).expect("xgroup command");
+        assert_eq!(group.command, "XGROUP");
+        assert_eq!(
+            group.args,
+            vec!["CREATE", "custom-stream", "custom-workers", "$", "MKSTREAM"]
+        );
+
+        let ack = RedisStreamCommand::xack(&config, "1-0").expect("xack command");
+        assert_eq!(ack.command, "XACK");
+        assert_eq!(ack.args, vec!["custom-stream", "custom-workers", "1-0"]);
+    }
+
+    #[test]
+    fn redis_stream_commands_reject_non_redis_config() {
+        let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Nats, |key| match key {
+            "MANDOFORGE_NATS_URL" => Some("nats://127.0.0.1:4222".to_string()),
+            _ => None,
+        })
+        .expect("nats config");
+
+        assert!(RedisStreamCommand::xgroup_create(&config).is_err());
+        assert!(RedisStreamCommand::xack(&config, "1-0").is_err());
     }
 }

@@ -97,3 +97,4 @@
 - [x] Enforce RBAC on the tool catalog API while keeping health/static public.
 - [x] Add local-verified HTTP MCP Gateway client boundary before enabling `mcp.call`.
 - [x] Add local-verified HTTP OTel exporter boundary before wiring runtime telemetry export.
+- [x] Add local-verified Redis Stream command boundary before enabling a live broker queue backend.
