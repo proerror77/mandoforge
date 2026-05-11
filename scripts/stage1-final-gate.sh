@@ -29,6 +29,7 @@ cleanup() {
 trap cleanup EXIT
 
 cargo fmt --all -- --check
+cargo check -p mandoforge-api --bins
 cargo test -p mandoforge-api
 
 bash -n scripts/smoke.sh

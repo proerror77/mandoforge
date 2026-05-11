@@ -31,6 +31,7 @@
 - [x] Add external execution worker loop script and verification.
 - [x] Persist execution jobs in Postgres when a durable store is configured.
 - [x] Add execution job worker claims and lease-based stale running job reclaim.
+- [x] Add Rust `mandoforge-worker` binary for API-drained execution jobs.
 - [x] Bind sessions to agent versions and enforce agent-version tool allowlists.
 - [x] Add SQL safety tests for `sql.query`.
 - [x] Add API integration test for Generic Runtime Diagnostics replay.

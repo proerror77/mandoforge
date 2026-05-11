@@ -132,6 +132,12 @@ Run the external worker loop against an API started with `MANDOFORGE_EXECUTION_W
 BASE_URL=http://127.0.0.1:8787 ./scripts/execution-worker-loop.sh
 ```
 
+Or run the Rust worker binary:
+
+```bash
+BASE_URL=http://127.0.0.1:8787 cargo run -p mandoforge-api --bin mandoforge-worker
+```
+
 Verify the handoff path:
 
 ```bash
