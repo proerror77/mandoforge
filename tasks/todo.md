@@ -14,10 +14,12 @@
 
 ## Next Slice
 
-- [ ] Add SQLx and Postgres connection pool.
-- [ ] Implement repositories for agents, sessions, session_events, artifacts, approvals, and tool_calls.
-- [ ] Replace in-memory store with Postgres-backed state.
-- [ ] Add SQL safety tests for `warehouse.query`.
+- [x] Add SQLx and Postgres connection pool.
+- [x] Implement repositories for agents, sessions, session_events, artifacts, and approvals.
+- [x] Replace in-memory-only state with Postgres-backed state plus local fallback.
+- [ ] Persist `tool_calls` rows for tool execution audit.
+- [ ] Split `AppState` store methods into a dedicated `store` module.
+- [x] Add SQL safety tests for `warehouse.query`.
 - [ ] Add API integration test for GMV demo replay.
 - [ ] Add artifact detail panel in UI.
 - [ ] Add tool-call detail panel with policy decision.

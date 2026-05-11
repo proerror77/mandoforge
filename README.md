@@ -11,7 +11,7 @@ MandoForge is a Rust-native Managed Agents runtime prototype for enterprise Agen
 - YAML governance policy for blocked and approval-required tools.
 - Codex CLI adapter stub that runs `codex exec` inside a per-session workspace when invoked.
 
-The current server uses an in-memory store so the UI and API loop can be exercised immediately. The Postgres migrations are included as the durable schema target for the next implementation slice.
+The server uses Postgres when `DATABASE_URL` is set and falls back to an in-memory store when it is missing. This keeps the demo easy to run while making `session_events` the durable runtime boundary for Docker and production-like runs.
 
 ## Run Locally
 
@@ -38,6 +38,11 @@ docker compose up --build
 ```
 
 The API is served on `http://127.0.0.1:8787`. Postgres starts with the core runtime schema and commerce demo tables.
+
+## Architecture
+
+- [Stage 1 Plan](docs/stage1-plan.md)
+- [Runtime Architecture](docs/architecture.md)
 
 ## Important APIs
 
@@ -77,9 +82,8 @@ The mock harness currently produces the required Stage 1 acceptance shape:
 
 ## Next Implementation Slice
 
-1. Replace the in-memory store with SQLx-backed Postgres repositories.
+1. Split the current `AppState` store methods into a dedicated `store` module.
 2. Add OpenAI-compatible provider calls and tool-call parsing.
 3. Persist Codex JSONL events and generated files as artifacts.
 4. Add proper tests for SQL safety, approval routing, and session replay.
 5. Expand the UI detail panel for tool call arguments, results, and policy decisions.
-

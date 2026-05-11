@@ -11,6 +11,10 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sqlx::{
+    PgPool, Row,
+    postgres::{PgPoolOptions, PgRow},
+};
 use tokio::{process::Command, sync::RwLock};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::{error, info};
@@ -18,17 +22,24 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 struct AppState {
-    inner: Arc<RwLock<Store>>,
+    store: StoreBackend,
     workspace_root: PathBuf,
+    tenant_id: Uuid,
 }
 
 #[derive(Default)]
-struct Store {
+struct MemoryStore {
     agents: HashMap<Uuid, Agent>,
     sessions: HashMap<Uuid, Session>,
     events: HashMap<Uuid, Vec<SessionEvent>>,
     approvals: HashMap<Uuid, Approval>,
     artifacts: HashMap<Uuid, Artifact>,
+}
+
+#[derive(Clone)]
+enum StoreBackend {
+    Memory(Arc<RwLock<MemoryStore>>),
+    Postgres(PgPool),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +87,30 @@ enum SessionStatus {
     WaitingApproval,
     Completed,
     Failed,
+}
+
+impl SessionStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Running => "running",
+            Self::WaitingApproval => "waiting_approval",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl From<String> for SessionStatus {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "running" => Self::Running,
+            "waiting_approval" => Self::WaitingApproval,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            _ => Self::Created,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,11 +194,30 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| PathBuf::from(".mandoforge/workspaces"));
     tokio::fs::create_dir_all(&workspace_root).await?;
 
-    let state = AppState {
-        inner: Arc::new(RwLock::new(Store::default())),
-        workspace_root,
+    let tenant_id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid");
+    let store = match std::env::var("DATABASE_URL") {
+        Ok(database_url) if !database_url.trim().is_empty() => {
+            let pool = PgPoolOptions::new()
+                .max_connections(8)
+                .connect(&database_url)
+                .await
+                .context("failed to connect to Postgres")?;
+            run_migrations(&pool).await?;
+            seed_demo_tenant(&pool, tenant_id).await?;
+            StoreBackend::Postgres(pool)
+        }
+        _ => StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
     };
-    seed_demo_agent(&state).await;
+
+    let state = AppState {
+        store,
+        workspace_root,
+        tenant_id,
+    };
+    state
+        .seed_demo_agent()
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?;
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -199,93 +253,631 @@ async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
 }
 
-async fn list_agents(State(state): State<AppState>) -> Json<Vec<Agent>> {
-    Json(state.inner.read().await.agents.values().cloned().collect())
+async fn run_migrations(pool: &PgPool) -> Result<()> {
+    for path in [
+        "db/migrations/0001_core.sql",
+        "db/migrations/0002_commerce_demo.sql",
+    ] {
+        let sql = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("failed to read migration {path}"))?;
+        sqlx::raw_sql(&sql)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to execute migration {path}"))?;
+    }
+    Ok(())
+}
+
+async fn seed_demo_tenant(pool: &PgPool, tenant_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO tenants (id, name)
+         VALUES ($1, 'Demo Tenant')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await?;
+
+    if let Ok(seed_sql) = tokio::fs::read_to_string("db/seed/commerce_demo.sql").await {
+        sqlx::raw_sql(&seed_sql).execute(pool).await?;
+    }
+    Ok(())
+}
+
+fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
+    let tools: Value = row.try_get("tools")?;
+    Ok(Agent {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        kind: row.try_get("kind")?,
+        provider: row.try_get("provider")?,
+        model: row.try_get("model")?,
+        system_prompt: row.try_get("system_prompt")?,
+        tools: serde_json::from_value(tools).unwrap_or_default(),
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn session_from_row(row: PgRow) -> Result<Session, AppError> {
+    let status: String = row.try_get("status")?;
+    Ok(Session {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        title: row.try_get("title")?,
+        status: status.into(),
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn event_from_row(row: PgRow) -> Result<SessionEvent, AppError> {
+    Ok(SessionEvent {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        seq: row.try_get("seq")?,
+        parent_event_id: row.try_get("parent_event_id")?,
+        actor_type: row
+            .try_get::<Option<String>, _>("actor_type")?
+            .unwrap_or_else(|| "system".to_string()),
+        actor_id: row.try_get("actor_id")?,
+        event_type: row.try_get("event_type")?,
+        payload: row.try_get("payload")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn artifact_from_row(row: PgRow) -> Result<Artifact, AppError> {
+    Ok(Artifact {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        artifact_type: row.try_get("artifact_type")?,
+        name: row.try_get("name")?,
+        path: row.try_get("path")?,
+        content: row
+            .try_get::<Option<Value>, _>("content")?
+            .unwrap_or(json!({})),
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn approval_from_row(row: PgRow) -> Result<Approval, AppError> {
+    Ok(Approval {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        action: row.try_get("action")?,
+        risk_level: row.try_get("risk_level")?,
+        reason: row.try_get("reason")?,
+        evidence: row.try_get("evidence")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        decided_at: row.try_get("decided_at")?,
+    })
+}
+
+impl AppState {
+    async fn list_agents(&self) -> Result<Vec<Agent>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                Ok(inner.read().await.agents.values().cloned().collect())
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, name, kind, provider, model, system_prompt, tools, created_at
+                     FROM agents
+                     WHERE tenant_id = $1 AND archived_at IS NULL
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(agent_from_row).collect()
+            }
+        }
+    }
+
+    async fn create_agent(&self, input: CreateAgent) -> Result<Agent, AppError> {
+        let agent = Agent {
+            id: Uuid::new_v4(),
+            name: input.name,
+            kind: input.kind,
+            provider: input.provider,
+            model: input.model,
+            system_prompt: input.system_prompt,
+            tools: input.tools,
+            created_at: Utc::now(),
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner.write().await.agents.insert(agent.id, agent.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO agents (id, tenant_id, name, kind, provider, model, system_prompt, tools, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                )
+                .bind(agent.id)
+                .bind(self.tenant_id)
+                .bind(&agent.name)
+                .bind(&agent.kind)
+                .bind(&agent.provider)
+                .bind(&agent.model)
+                .bind(&agent.system_prompt)
+                .bind(json!(agent.tools))
+                .bind(agent.created_at)
+                .execute(pool)
+                .await?;
+                self.insert_agent_version(&agent, 1).await?;
+            }
+        }
+        Ok(agent)
+    }
+
+    async fn insert_agent_version(&self, agent: &Agent, version: i32) -> Result<(), AppError> {
+        if let StoreBackend::Postgres(pool) = &self.store {
+            sqlx::query(
+                "INSERT INTO agent_versions (agent_id, version, model, system_prompt, tools, approval_policy)
+                 VALUES ($1, $2, $3, $4, $5, '{}')
+                 ON CONFLICT (agent_id, version) DO NOTHING",
+            )
+            .bind(agent.id)
+            .bind(version)
+            .bind(&agent.model)
+            .bind(&agent.system_prompt)
+            .bind(json!(agent.tools))
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                Ok(inner.read().await.sessions.values().cloned().collect())
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, agent_id, title, status, created_at, updated_at
+                     FROM sessions
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(session_from_row).collect()
+            }
+        }
+    }
+
+    async fn create_session(&self, input: CreateSession) -> Result<Session, AppError> {
+        if !self.agent_exists(input.agent_id).await? {
+            return Err(AppError::not_found("agent not found"));
+        }
+        let now = Utc::now();
+        let session = Session {
+            id: Uuid::new_v4(),
+            agent_id: input.agent_id,
+            title: input.title,
+            status: SessionStatus::Created,
+            created_at: now,
+            updated_at: now,
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .sessions
+                    .insert(session.id, session.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO sessions (id, tenant_id, agent_id, title, status, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(session.id)
+                .bind(self.tenant_id)
+                .bind(session.agent_id)
+                .bind(&session.title)
+                .bind(session.status.as_str())
+                .bind(session.created_at)
+                .bind(session.updated_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        if let Some(message) = input.message {
+            self.append_event(
+                "user",
+                None,
+                session.id,
+                "user.message",
+                json!({ "message": message }),
+            )
+            .await?;
+        }
+        Ok(session)
+    }
+
+    async fn agent_exists(&self, agent_id: Uuid) -> Result<bool, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => Ok(inner.read().await.agents.contains_key(&agent_id)),
+            StoreBackend::Postgres(pool) => {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM agents WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL)",
+                )
+                .bind(self.tenant_id)
+                .bind(agent_id)
+                .fetch_one(pool)
+                .await?;
+                Ok(exists)
+            }
+        }
+    }
+
+    async fn get_session(&self, id: Uuid) -> Result<Session, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .sessions
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("session not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, agent_id, title, status, created_at, updated_at
+                     FROM sessions
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("session not found"))?;
+                session_from_row(row)
+            }
+        }
+    }
+
+    async fn set_session_status(
+        &self,
+        session_id: Uuid,
+        status: SessionStatus,
+    ) -> Result<Session, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let session = store
+                    .sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| AppError::not_found("session not found"))?;
+                session.status = status;
+                session.updated_at = Utc::now();
+                Ok(session.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE sessions
+                     SET status = $1, updated_at = now()
+                     WHERE tenant_id = $2 AND id = $3
+                     RETURNING id, agent_id, title, status, created_at, updated_at",
+                )
+                .bind(status.as_str())
+                .bind(self.tenant_id)
+                .bind(session_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("session not found"))?;
+                session_from_row(row)
+            }
+        }
+    }
+
+    async fn list_events(&self, session_id: Uuid) -> Result<Vec<SessionEvent>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => Ok(inner
+                .read()
+                .await
+                .events
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_default()),
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, session_id, seq, parent_event_id, actor_type, actor_id, event_type, payload, created_at
+                     FROM session_events
+                     WHERE tenant_id = $1 AND session_id = $2
+                     ORDER BY seq ASC",
+                )
+                .bind(self.tenant_id)
+                .bind(session_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(event_from_row).collect()
+            }
+        }
+    }
+
+    async fn append_event(
+        &self,
+        actor_type: &str,
+        actor_id: Option<Uuid>,
+        session_id: Uuid,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<SessionEvent, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                if !store.sessions.contains_key(&session_id) {
+                    return Err(AppError::not_found("session not found"));
+                }
+                let seq = store
+                    .events
+                    .get(&session_id)
+                    .map_or(1, |events| events.len() as i64 + 1);
+                let event = SessionEvent {
+                    id: Uuid::new_v4(),
+                    session_id,
+                    seq,
+                    parent_event_id: None,
+                    actor_type: actor_type.to_string(),
+                    actor_id,
+                    event_type: event_type.to_string(),
+                    payload,
+                    created_at: Utc::now(),
+                };
+                store
+                    .events
+                    .entry(session_id)
+                    .or_default()
+                    .push(event.clone());
+                Ok(event)
+            }
+            StoreBackend::Postgres(pool) => {
+                if self.get_session(session_id).await.is_err() {
+                    return Err(AppError::not_found("session not found"));
+                }
+                let row = sqlx::query(
+                    "WITH next_seq AS (
+                        SELECT COALESCE(MAX(seq), 0) + 1 AS seq
+                        FROM session_events
+                        WHERE tenant_id = $1 AND session_id = $2
+                     )
+                     INSERT INTO session_events
+                        (id, tenant_id, session_id, seq, actor_type, actor_id, event_type, payload, created_at)
+                     SELECT $3, $1, $2, next_seq.seq, $4, $5, $6, $7, $8
+                     FROM next_seq
+                     RETURNING id, session_id, seq, parent_event_id, actor_type, actor_id, event_type, payload, created_at",
+                )
+                .bind(self.tenant_id)
+                .bind(session_id)
+                .bind(Uuid::new_v4())
+                .bind(actor_type)
+                .bind(actor_id)
+                .bind(event_type)
+                .bind(payload)
+                .bind(Utc::now())
+                .fetch_one(pool)
+                .await?;
+                event_from_row(row)
+            }
+        }
+    }
+
+    async fn insert_artifact(&self, artifact: Artifact) -> Result<Artifact, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .artifacts
+                    .insert(artifact.id, artifact.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO artifacts (id, tenant_id, session_id, artifact_type, name, path, content, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind(artifact.id)
+                .bind(self.tenant_id)
+                .bind(artifact.session_id)
+                .bind(&artifact.artifact_type)
+                .bind(&artifact.name)
+                .bind(&artifact.path)
+                .bind(&artifact.content)
+                .bind(artifact.created_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(artifact)
+    }
+
+    async fn list_artifacts(&self, session_id: Uuid) -> Result<Vec<Artifact>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => Ok(inner
+                .read()
+                .await
+                .artifacts
+                .values()
+                .filter(|artifact| artifact.session_id == session_id)
+                .cloned()
+                .collect()),
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, session_id, artifact_type, name, path, content, created_at
+                     FROM artifacts
+                     WHERE tenant_id = $1 AND session_id = $2
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .bind(session_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(artifact_from_row).collect()
+            }
+        }
+    }
+
+    async fn insert_approval(&self, approval: Approval) -> Result<Approval, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .approvals
+                    .insert(approval.id, approval.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO approvals (id, tenant_id, session_id, action, risk_level, reason, evidence, status, created_at, decided_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                )
+                .bind(approval.id)
+                .bind(self.tenant_id)
+                .bind(approval.session_id)
+                .bind(&approval.action)
+                .bind(&approval.risk_level)
+                .bind(&approval.reason)
+                .bind(&approval.evidence)
+                .bind(&approval.status)
+                .bind(approval.created_at)
+                .bind(approval.decided_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(approval)
+    }
+
+    async fn list_approvals(&self) -> Result<Vec<Approval>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                Ok(inner.read().await.approvals.values().cloned().collect())
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, session_id, action, risk_level, reason, evidence, status, created_at, decided_at
+                     FROM approvals
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(approval_from_row).collect()
+            }
+        }
+    }
+
+    async fn decide_approval(&self, approval_id: Uuid, status: &str) -> Result<Approval, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let approval = store
+                    .approvals
+                    .get_mut(&approval_id)
+                    .ok_or_else(|| AppError::not_found("approval not found"))?;
+                approval.status = status.to_string();
+                approval.decided_at = Some(Utc::now());
+                Ok(approval.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE approvals
+                     SET status = $1, decided_at = now()
+                     WHERE tenant_id = $2 AND id = $3
+                     RETURNING id, session_id, action, risk_level, reason, evidence, status, created_at, decided_at",
+                )
+                .bind(status)
+                .bind(self.tenant_id)
+                .bind(approval_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("approval not found"))?;
+                approval_from_row(row)
+            }
+        }
+    }
+
+    async fn seed_demo_agent(&self) -> Result<(), AppError> {
+        let agent = Agent {
+            id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid"),
+            name: "Commerce Manager Agent".to_string(),
+            kind: "manager".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.4-mini".to_string(),
+            system_prompt: "Diagnose commerce performance using warehouse facts, route risky actions to approval, and preserve an auditable timeline.".to_string(),
+            tools: vec![
+                "warehouse.get_schema".to_string(),
+                "warehouse.query".to_string(),
+                "inventory.query".to_string(),
+                "customer_voice.search".to_string(),
+                "campaign.draft".to_string(),
+                "codex.exec".to_string(),
+            ],
+            created_at: Utc::now(),
+        };
+
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner.write().await.agents.insert(agent.id, agent);
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO agents (id, tenant_id, name, kind, provider, model, system_prompt, tools, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (id) DO NOTHING",
+                )
+                .bind(agent.id)
+                .bind(self.tenant_id)
+                .bind(&agent.name)
+                .bind(&agent.kind)
+                .bind(&agent.provider)
+                .bind(&agent.model)
+                .bind(&agent.system_prompt)
+                .bind(json!(agent.tools))
+                .bind(agent.created_at)
+                .execute(pool)
+                .await?;
+                self.insert_agent_version(&agent, 1).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<Agent>>, AppError> {
+    Ok(Json(state.list_agents().await?))
 }
 
 async fn create_agent(
     State(state): State<AppState>,
     Json(input): Json<CreateAgent>,
-) -> Json<Agent> {
-    let agent = Agent {
-        id: Uuid::new_v4(),
-        name: input.name,
-        kind: input.kind,
-        provider: input.provider,
-        model: input.model,
-        system_prompt: input.system_prompt,
-        tools: input.tools,
-        created_at: Utc::now(),
-    };
-    state
-        .inner
-        .write()
-        .await
-        .agents
-        .insert(agent.id, agent.clone());
-    Json(agent)
+) -> Result<Json<Agent>, AppError> {
+    Ok(Json(state.create_agent(input).await?))
 }
 
-async fn list_sessions(State(state): State<AppState>) -> Json<Vec<Session>> {
-    Json(
-        state
-            .inner
-            .read()
-            .await
-            .sessions
-            .values()
-            .cloned()
-            .collect(),
-    )
+async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Session>>, AppError> {
+    Ok(Json(state.list_sessions().await?))
 }
 
 async fn create_session(
     State(state): State<AppState>,
     Json(input): Json<CreateSession>,
 ) -> Result<Json<Session>, AppError> {
-    let now = Utc::now();
-    let session = Session {
-        id: Uuid::new_v4(),
-        agent_id: input.agent_id,
-        title: input.title,
-        status: SessionStatus::Created,
-        created_at: now,
-        updated_at: now,
-    };
-    {
-        let mut store = state.inner.write().await;
-        if !store.agents.contains_key(&session.agent_id) {
-            return Err(AppError::not_found("agent not found"));
-        }
-        store.sessions.insert(session.id, session.clone());
-    }
-    if let Some(message) = input.message {
-        append_event(
-            &state,
-            session.id,
-            "user",
-            None,
-            "user.message",
-            json!({ "message": message }),
-        )
-        .await?;
-    }
-    Ok(Json(session))
+    Ok(Json(state.create_session(input).await?))
 }
 
 async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Session>, AppError> {
-    state
-        .inner
-        .read()
-        .await
-        .sessions
-        .get(&id)
-        .cloned()
-        .map(Json)
-        .ok_or_else(|| AppError::not_found("session not found"))
+    Ok(Json(state.get_session(id).await?))
 }
 
 async fn add_message(
@@ -294,15 +886,15 @@ async fn add_message(
     Json(input): Json<AddMessage>,
 ) -> Result<Json<SessionEvent>, AppError> {
     Ok(Json(
-        append_event(
-            &state,
-            id,
-            "user",
-            None,
-            "user.message",
-            json!({ "message": input.message }),
-        )
-        .await?,
+        state
+            .append_event(
+                "user",
+                None,
+                id,
+                "user.message",
+                json!({ "message": input.message }),
+            )
+            .await?,
     ))
 }
 
@@ -310,41 +902,41 @@ async fn run_session(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Session>, AppError> {
-    set_session_status(&state, id, SessionStatus::Running).await?;
+    state.set_session_status(id, SessionStatus::Running).await?;
 
-    append_event(
-        &state,
-        id,
-        "agent",
-        None,
-        "manager.plan",
-        json!({
-            "steps": [
-                "Inspect GMV by day and compare to prior baseline",
-                "Break down by SKU, advertising, refunds, inventory, and customer voice",
-                "Draft operating actions and route risky changes to approval"
-            ]
-        }),
-    )
-    .await?;
+    state
+        .append_event(
+            "agent",
+            None,
+            id,
+            "manager.plan",
+            json!({
+                "steps": [
+                    "Inspect GMV by day and compare to prior baseline",
+                    "Break down by SKU, advertising, refunds, inventory, and customer voice",
+                    "Draft operating actions and route risky changes to approval"
+                ]
+            }),
+        )
+        .await?;
 
     let schema = demo_schema();
-    append_event(
-        &state,
-        id,
+    state
+        .append_event(
         "tool",
         None,
+        id,
         "tool.result",
         json!({"tool": "warehouse.get_schema", "summary": "Demo commerce schema loaded", "content": schema}),
     )
     .await?;
 
     let diagnosis = demo_gmv_diagnosis();
-    append_event(
-        &state,
-        id,
+    state
+        .append_event(
         "tool",
         None,
+        id,
         "tool.result",
         json!({"tool": "warehouse.query", "summary": "GMV decline attribution query completed", "content": diagnosis}),
     )
@@ -361,17 +953,12 @@ async fn run_session(
         }),
         created_at: Utc::now(),
     };
+    let artifact = state.insert_artifact(artifact).await?;
     state
-        .inner
-        .write()
-        .await
-        .artifacts
-        .insert(artifact.id, artifact.clone());
-    append_event(
-        &state,
-        id,
+        .append_event(
         "system",
         Some(artifact.id),
+        id,
         "artifact.created",
         json!({"artifact_id": artifact.id, "name": artifact.name, "artifact_type": artifact.artifact_type}),
     )
@@ -388,27 +975,22 @@ async fn run_session(
         created_at: Utc::now(),
         decided_at: None,
     };
+    let approval = state.insert_approval(approval).await?;
     state
-        .inner
-        .write()
-        .await
-        .approvals
-        .insert(approval.id, approval.clone());
-    append_event(
-        &state,
-        id,
+        .append_event(
         "system",
         Some(approval.id),
+        id,
         "approval.requested",
         json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence}),
     )
     .await?;
 
-    append_event(
-        &state,
-        id,
+    state
+        .append_event(
         "agent",
         None,
+        id,
         "llm.response",
         json!({
             "final_report": {
@@ -426,38 +1008,24 @@ async fn run_session(
     )
     .await?;
 
-    let session = set_session_status(&state, id, SessionStatus::WaitingApproval).await?;
+    let session = state
+        .set_session_status(id, SessionStatus::WaitingApproval)
+        .await?;
     Ok(Json(session))
 }
 
 async fn list_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Json<Vec<SessionEvent>> {
-    Json(
-        state
-            .inner
-            .read()
-            .await
-            .events
-            .get(&id)
-            .cloned()
-            .unwrap_or_default(),
-    )
+) -> Result<Json<Vec<SessionEvent>>, AppError> {
+    Ok(Json(state.list_events(id).await?))
 }
 
 async fn stream_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>> {
-    let events = state
-        .inner
-        .read()
-        .await
-        .events
-        .get(&id)
-        .cloned()
-        .unwrap_or_default();
+    let events = state.list_events(id).await.unwrap_or_default();
     let stream = futures_util::stream::iter(events.into_iter().map(|event| {
         Ok(Event::default()
             .event(event.event_type.clone())
@@ -507,15 +1075,15 @@ async fn execute_tool(
     Path(name): Path<String>,
     Json(input): Json<ExecuteTool>,
 ) -> Result<Json<Value>, AppError> {
-    append_event(
-        &state,
-        input.session_id,
-        "tool",
-        None,
-        "tool.call",
-        json!({"tool": name, "args": input.args}),
-    )
-    .await?;
+    state
+        .append_event(
+            "tool",
+            None,
+            input.session_id,
+            "tool.call",
+            json!({"tool": name, "args": input.args}),
+        )
+        .await?;
     match name.as_str() {
         "warehouse.get_schema" => Ok(Json(demo_schema())),
         "warehouse.query" => {
@@ -536,17 +1104,8 @@ async fn execute_tool(
     }
 }
 
-async fn list_approvals(State(state): State<AppState>) -> Json<Vec<Approval>> {
-    Json(
-        state
-            .inner
-            .read()
-            .await
-            .approvals
-            .values()
-            .cloned()
-            .collect(),
-    )
+async fn list_approvals(State(state): State<AppState>) -> Result<Json<Vec<Approval>>, AppError> {
+    Ok(Json(state.list_approvals().await?))
 }
 
 async fn approve(
@@ -566,18 +1125,8 @@ async fn reject(
 async fn list_artifacts(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Json<Vec<Artifact>> {
-    Json(
-        state
-            .inner
-            .read()
-            .await
-            .artifacts
-            .values()
-            .filter(|artifact| artifact.session_id == id)
-            .cloned()
-            .collect(),
-    )
+) -> Result<Json<Vec<Artifact>>, AppError> {
+    Ok(Json(state.list_artifacts(id).await?))
 }
 
 async fn decide_approval(
@@ -585,87 +1134,31 @@ async fn decide_approval(
     approval_id: Uuid,
     status: &str,
 ) -> Result<Json<Approval>, AppError> {
-    let mut store = state.inner.write().await;
-    let approval = store
-        .approvals
-        .get_mut(&approval_id)
-        .ok_or_else(|| AppError::not_found("approval not found"))?;
-    approval.status = status.to_string();
-    approval.decided_at = Some(Utc::now());
-    let updated = approval.clone();
-    drop(store);
-    append_event(
-        &state,
-        updated.session_id,
-        "user",
-        Some(approval_id),
-        &format!("approval.{status}"),
-        json!({"approval_id": approval_id, "decision": status}),
-    )
-    .await?;
-    if status == "approved" {
-        set_session_status(&state, updated.session_id, SessionStatus::Completed).await?;
-        append_event(
-            &state,
+    let updated = state.decide_approval(approval_id, status).await?;
+    state
+        .append_event(
+            "user",
+            Some(approval_id),
             updated.session_id,
-            "system",
-            None,
-            "session.completed",
-            json!({"reason": "pending approval resolved"}),
+            &format!("approval.{status}"),
+            json!({"approval_id": approval_id, "decision": status}),
         )
         .await?;
+    if status == "approved" {
+        state
+            .set_session_status(updated.session_id, SessionStatus::Completed)
+            .await?;
+        state
+            .append_event(
+                "system",
+                None,
+                updated.session_id,
+                "session.completed",
+                json!({"reason": "pending approval resolved"}),
+            )
+            .await?;
     }
     Ok(Json(updated))
-}
-
-async fn append_event(
-    state: &AppState,
-    session_id: Uuid,
-    actor_type: &str,
-    actor_id: Option<Uuid>,
-    event_type: &str,
-    payload: Value,
-) -> Result<SessionEvent, AppError> {
-    let mut store = state.inner.write().await;
-    if !store.sessions.contains_key(&session_id) {
-        return Err(AppError::not_found("session not found"));
-    }
-    let seq = store
-        .events
-        .get(&session_id)
-        .map_or(1, |events| events.len() as i64 + 1);
-    let event = SessionEvent {
-        id: Uuid::new_v4(),
-        session_id,
-        seq,
-        parent_event_id: None,
-        actor_type: actor_type.to_string(),
-        actor_id,
-        event_type: event_type.to_string(),
-        payload,
-        created_at: Utc::now(),
-    };
-    store
-        .events
-        .entry(session_id)
-        .or_default()
-        .push(event.clone());
-    Ok(event)
-}
-
-async fn set_session_status(
-    state: &AppState,
-    session_id: Uuid,
-    status: SessionStatus,
-) -> Result<Session, AppError> {
-    let mut store = state.inner.write().await;
-    let session = store
-        .sessions
-        .get_mut(&session_id)
-        .ok_or_else(|| AppError::not_found("session not found"))?;
-    session.status = status;
-    session.updated_at = Utc::now();
-    Ok(session.clone())
 }
 
 async fn run_codex(
@@ -682,15 +1175,15 @@ async fn run_codex(
     tokio::fs::create_dir_all(&workspace).await?;
     let last_message = workspace.join("last_message.md");
 
-    append_event(
-        state,
-        session_id,
-        "tool",
-        None,
-        "codex.task.started",
-        json!({"task": request.task, "sandbox_mode": request.sandbox_mode, "workspace": workspace}),
-    )
-    .await?;
+    state
+        .append_event(
+            "tool",
+            None,
+            session_id,
+            "codex.task.started",
+            json!({"task": request.task, "sandbox_mode": request.sandbox_mode, "workspace": workspace}),
+        )
+        .await?;
 
     let output = tokio::time::timeout(
         Duration::from_secs(180),
@@ -719,15 +1212,15 @@ async fn run_codex(
     } else {
         "codex.task.failed"
     };
-    append_event(
-        state,
-        session_id,
-        "tool",
-        None,
-        event_type,
-        json!({"exit_code": output.status.code(), "stdout": stdout, "stderr": stderr, "final_message": final_message}),
-    )
-    .await?;
+    state
+        .append_event(
+            "tool",
+            None,
+            session_id,
+            event_type,
+            json!({"exit_code": output.status.code(), "stdout": stdout, "stderr": stderr, "final_message": final_message}),
+        )
+        .await?;
     Ok(
         json!({"status": output.status.code(), "stdout": stdout, "stderr": stderr, "final_message": final_message}),
     )
@@ -795,27 +1288,6 @@ fn demo_gmv_diagnosis() -> Value {
             {"sku_id": "SKU-H", "gmv_drop": 1490.8, "driver": "negative reviews", "negative_review_rate": 0.26}
         ]
     })
-}
-
-async fn seed_demo_agent(state: &AppState) {
-    let agent = Agent {
-        id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid"),
-        name: "Commerce Manager Agent".to_string(),
-        kind: "manager".to_string(),
-        provider: "openai-compatible".to_string(),
-        model: "gpt-5.4-mini".to_string(),
-        system_prompt: "Diagnose commerce performance using warehouse facts, route risky actions to approval, and preserve an auditable timeline.".to_string(),
-        tools: vec![
-            "warehouse.get_schema".to_string(),
-            "warehouse.query".to_string(),
-            "inventory.query".to_string(),
-            "customer_voice.search".to_string(),
-            "campaign.draft".to_string(),
-            "codex.exec".to_string(),
-        ],
-        created_at: Utc::now(),
-    };
-    state.inner.write().await.agents.insert(agent.id, agent);
 }
 
 fn default_agent_kind() -> String {
@@ -888,6 +1360,16 @@ impl From<serde_json::Error> for AppError {
     }
 }
 
+impl From<sqlx::Error> for AppError {
+    fn from(error: sqlx::Error) -> Self {
+        error!(%error, "database error");
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: error.to_string(),
+        }
+    }
+}
+
 impl From<tokio::time::error::Elapsed> for AppError {
     fn from(_: tokio::time::error::Elapsed) -> Self {
         Self::bad_request("operation timed out")
@@ -906,5 +1388,30 @@ impl From<StatusCode> for AppError {
 impl From<anyhow::Error> for Box<AppError> {
     fn from(error: anyhow::Error) -> Self {
         Box::new(AppError::from(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_read_only_sql() {
+        assert!(ensure_read_only_sql("select * from commerce_demo.orders limit 10").is_ok());
+        assert!(ensure_read_only_sql("with daily as (select 1) select * from daily").is_ok());
+        assert!(ensure_read_only_sql("explain select * from commerce_demo.orders").is_ok());
+    }
+
+    #[test]
+    fn rejects_write_sql() {
+        for sql in [
+            "update products set price = price * 0.9",
+            "delete from orders",
+            "drop table orders",
+            "insert into products values ('x')",
+            "select * from orders; delete from orders;",
+        ] {
+            assert!(ensure_read_only_sql(sql).is_err(), "{sql}");
+        }
     }
 }

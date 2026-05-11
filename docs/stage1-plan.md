@@ -21,7 +21,7 @@ Stage 1 is a single-tenant prototype. It proves the runtime shape, not the whole
 ## Architecture Slice
 
 - `mandoforge-api`: Axum API server for agents, sessions, tools, artifacts, approvals, and SSE.
-- Runtime store: migrate from the current in-memory prototype to Postgres via SQLx.
+- Runtime store: Postgres via SQLx with in-memory fallback for local demos.
 - Tool router: typed tool registry with policy decisions and audit events.
 - Warehouse tools: schema introspection, read-only SQL, row/time limits.
 - Codex worker: `codex exec --sandbox workspace-write --json --output-last-message`.
@@ -123,14 +123,14 @@ Stage 1 is a single-tenant prototype. It proves the runtime shape, not the whole
 
 ## Current Repository State
 
-The initial commit contains the Week 1 skeleton:
+The current repository contains the Week 1 skeleton plus the first architecture hardening slice:
 
-- Axum API with in-memory demo state.
+- Axum API with Postgres-backed runtime store when `DATABASE_URL` is set.
+- In-memory fallback for quick local demos.
 - Static UI for agents, timeline, report, and approvals.
 - Postgres migrations and demo commerce schema.
 - YAML Stage 1 policy.
 - Docker Compose and CI.
 - Smoke script for the mock GMV flow.
 
-The next engineering step is replacing the in-memory store with SQLx-backed Postgres while preserving the current API shape.
-
+The next engineering step is splitting store/tool/harness code into modules and replacing the mock harness with the provider/tool-call loop.
