@@ -506,10 +506,23 @@ async fn build_harness_context(
         .and_then(|event| event.payload.get("message"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let approved_tool_result_count = events
+        .iter()
+        .filter(|event| {
+            event.event_type == "tool.result"
+                && event
+                    .payload
+                    .get("content")
+                    .and_then(|content| content.get("approval"))
+                    .and_then(Value::as_str)
+                    == Some("approved")
+        })
+        .count();
     Ok(HarnessContext {
         session_id,
         event_count: events.len(),
         last_user_message,
+        approved_tool_result_count,
     })
 }
 
@@ -536,10 +549,18 @@ async fn run_provider_harness(
             None,
             session_id,
             "llm.response",
-            json!({"provider": provider_name, "tool_calls": response.tool_calls}),
+            json!({"provider": provider_name, "tool_calls": &response.tool_calls, "final_message": &response.final_message}),
         )
         .await?;
     Ok(response)
+}
+
+fn provider_client_from_env() -> Result<Box<dyn ProviderClient>, AppError> {
+    if let Some(provider) = OpenAiCompatibleProviderClient::from_env()? {
+        Ok(Box::new(provider))
+    } else {
+        Ok(Box::new(MockProviderClient))
+    }
 }
 
 async fn run_session(
@@ -559,12 +580,7 @@ async fn run_session(
         ))
         .await?;
 
-    let provider: Box<dyn ProviderClient> =
-        if let Some(provider) = OpenAiCompatibleProviderClient::from_env()? {
-            Box::new(provider)
-        } else {
-            Box::new(MockProviderClient)
-        };
+    let provider = provider_client_from_env()?;
     let provider_response = run_provider_harness(&state, id, provider.as_ref()).await?;
 
     state
@@ -1291,7 +1307,7 @@ async fn run_execution_job_route(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("api");
     let completed = run_execution_job(&state, id, worker_id).await?;
-    complete_session_after_approval(&state, completed.session_id).await?;
+    resume_provider_after_approval(&state, completed.session_id).await?;
     Ok(Json(completed))
 }
 
@@ -1344,7 +1360,7 @@ async fn decide_approval(
             .await?;
         match outcome {
             ExecutionWorkerOutcome::Completed => {
-                complete_session_after_approval(&state, updated.session_id).await?;
+                resume_provider_after_approval(&state, updated.session_id).await?;
             }
             ExecutionWorkerOutcome::Queued => {
                 state
@@ -1383,6 +1399,62 @@ async fn complete_session_after_approval(
             json!({"reason": "pending approval resolved"}),
         )
         .await?;
+    Ok(())
+}
+
+async fn resume_provider_after_approval(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<(), AppError> {
+    let events = state.list_events(session_id).await?;
+    if !events.iter().any(|event| event.event_type == "llm.request") {
+        complete_session_after_approval(state, session_id).await?;
+        return Ok(());
+    }
+
+    state
+        .set_session_status(session_id, SessionStatus::Running)
+        .await?;
+    let provider = provider_client_from_env()?;
+    let provider_response = run_provider_harness(state, session_id, provider.as_ref()).await?;
+    state
+        .append_event(
+            "agent",
+            None,
+            session_id,
+            "agent.plan",
+            json!({"phase": "approval_resume", "steps": provider_response.plan}),
+        )
+        .await?;
+
+    for tool_call in provider_response.tool_calls {
+        let result = execute_tool_invocation(
+            state,
+            &tool_call.tool_name,
+            ExecuteTool {
+                session_id,
+                args: tool_call.args,
+            },
+        )
+        .await?;
+        if result.get("status").and_then(Value::as_str) == Some("approval_required") {
+            return Ok(());
+        }
+    }
+
+    if let Some(final_message) = provider_response.final_message {
+        state
+            .append_event(
+                "agent",
+                None,
+                session_id,
+                "agent.final",
+                json!({"message": final_message, "resumed_after_approval": true}),
+            )
+            .await?;
+    }
+
+    complete_session_after_approval(state, session_id).await?;
     Ok(())
 }
 
@@ -1814,6 +1886,10 @@ not json
         assert_eq!(parsed.tool_calls[0].tool_name, "file.read");
         assert_eq!(parsed.tool_calls[0].args["paths"][0], "README.md");
         assert_eq!(parsed.tool_calls[1].tool_name, "sql.query");
+        assert_eq!(
+            parsed.final_message.as_deref(),
+            Some("{\"plan\":[\"Read files\",\"Query demo data\"]}")
+        );
     }
 
     #[test]
@@ -2060,7 +2136,24 @@ not json
             .map(|event| event.event_type.as_str())
             .collect();
         assert!(event_types_after_approval.contains(&"approval.approved"));
+        assert!(
+            event_types_after_approval
+                .iter()
+                .filter(|event_type| **event_type == "llm.request")
+                .count()
+                >= 2,
+            "provider should be resumed after approval: {event_types_after_approval:?}"
+        );
+        assert!(event_types_after_approval.contains(&"agent.final"));
         assert!(event_types_after_approval.contains(&"session.completed"));
+        assert!(events_after_approval.iter().any(|event| {
+            event.event_type == "llm.response"
+                && event
+                    .payload
+                    .get("final_message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("Approved execution completed"))
+        }));
         let tool_calls_after_approval: Vec<ToolCall> = request_json(
             app,
             Request::builder()

@@ -13,6 +13,7 @@ pub(crate) struct HarnessContext {
     pub(crate) session_id: Uuid,
     pub(crate) event_count: usize,
     pub(crate) last_user_message: Option<String>,
+    pub(crate) approved_tool_result_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -25,6 +26,7 @@ pub(crate) struct ProviderToolCall {
 pub(crate) struct ProviderResponse {
     pub(crate) plan: Vec<String>,
     pub(crate) tool_calls: Vec<ProviderToolCall>,
+    pub(crate) final_message: Option<String>,
 }
 
 #[async_trait]
@@ -49,7 +51,17 @@ impl ProviderClient for MockProviderClient {
         "mock-openai-compatible"
     }
 
-    async fn complete(&self, _context: HarnessContext) -> Result<ProviderResponse, AppError> {
+    async fn complete(&self, context: HarnessContext) -> Result<ProviderResponse, AppError> {
+        if context.approved_tool_result_count > 0 {
+            return Ok(ProviderResponse {
+                plan: vec!["Review approved tool output and produce the final response".to_string()],
+                tool_calls: Vec::new(),
+                final_message: Some(
+                    "Approved execution completed. The session timeline now contains the approved tool result and final provider response."
+                        .to_string(),
+                ),
+            });
+        }
         Ok(ProviderResponse {
             plan: vec![
                 "Read README and Stage 1 policy/config from the workspace".to_string(),
@@ -75,6 +87,7 @@ impl ProviderClient for MockProviderClient {
                     args: json!({"command": "pwd"}),
                 },
             ],
+            final_message: None,
         })
     }
 }
@@ -231,7 +244,12 @@ pub(crate) fn parse_openai_compatible_provider_response(
             tool_calls.len()
         )]
     });
-    Ok(ProviderResponse { plan, tool_calls })
+    let final_message = (!content.trim().is_empty()).then(|| content.trim().to_string());
+    Ok(ProviderResponse {
+        plan,
+        tool_calls,
+        final_message,
+    })
 }
 
 fn parse_provider_tool_call(value: &Value) -> Option<ProviderToolCall> {

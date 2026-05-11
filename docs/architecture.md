@@ -20,10 +20,10 @@ Aligned:
 - Approved shell execution can use the optional Docker runner.
 - Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh` or the `mandoforge-worker` Rust binary; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
 - Worker deployment entries exist for Docker Compose and Kubernetes.
+- Approval resume executes the approved tool, rebuilds harness context, resumes the provider for provider-run sessions, and then emits the final provider response before completing the session.
 
 Not yet aligned:
 
-- Approval resume completes approved work through the execution layer, but does not yet continue the exact same provider turn.
 - External worker mode is still API-drained; a separate broker-backed queue remains later-stage work.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
 - MCP Gateway, OTel, RBAC, and Vault are later-stage work.
