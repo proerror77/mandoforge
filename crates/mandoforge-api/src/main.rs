@@ -20,6 +20,7 @@ use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::{error, info};
 use uuid::Uuid;
 
+mod authorization;
 mod execution;
 mod execution_queue;
 mod execution_queue_broker;

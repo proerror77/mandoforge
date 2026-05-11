@@ -228,7 +228,7 @@ Stage 2/3 target components:
 - `codex-worker`
 - `sandbox-runner`
 - `mcp-gateway` with `McpGatewayConfig` and `McpGatewayClient` as the reserved gateway boundary before enabling `mcp.call`.
-- `policy-engine`
+- `policy-engine` with `Principal`, `Permission`, and `Authorizer` as the RBAC boundary before request-path enforcement.
 - `otel-collector` with `ObservabilityConfig` and `TelemetryExporter` as the reserved exporter boundary before enabling OTLP export.
 - `postgres`
 - `redis-or-nats`
