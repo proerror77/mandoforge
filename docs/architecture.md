@@ -24,7 +24,7 @@ Not yet aligned:
 - Tool calls and audit logs need broader coverage for future provider-driven and worker paths.
 - Approval does not yet resume the same harness turn.
 - Sandbox is workspace/Codex-oriented; Docker shell sandbox runner is not implemented yet.
-- MCP Gateway, OTel, RBAC, Vault, and queue workers are later-stage work.
+- MCP Gateway, OTel, RBAC, and Vault are later-stage work.
 
 ## Runtime Layers
 
@@ -125,6 +125,7 @@ Stage 1 event types:
 - `codex.task.event`
 - `codex.task.completed`
 - `codex.task.failed`
+- `execution.queued`
 - `artifact.created`
 - `session.started`
 - `session.paused`

@@ -27,7 +27,10 @@ mod provider;
 mod shell_runner;
 mod store;
 
-use execution::{ExecutionWorker, InlineExecutionWorker};
+use execution::{
+    ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker, QueueBackedExecutionWorker,
+    run_execution_job,
+};
 #[cfg(test)]
 use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
 use execution_queue::ExecutionQueue;
@@ -284,7 +287,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         store,
         execution_queue: ExecutionQueue::default(),
-        execution_worker: Arc::new(InlineExecutionWorker),
+        execution_worker: execution_worker_from_env(),
         workspace_root,
         tenant_id,
         policy,
@@ -336,11 +339,26 @@ fn build_router(state: AppState) -> Router {
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
+        .route("/api/execution-jobs", get(list_execution_jobs))
+        .route(
+            "/api/execution-jobs/{id}/run",
+            post(run_execution_job_route),
+        )
         .route("/api/audit-logs", get(list_audit_logs))
         .fallback_service(ServeDir::new("web"))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+fn execution_worker_from_env() -> Arc<dyn ExecutionWorker> {
+    match std::env::var("MANDOFORGE_EXECUTION_WORKER")
+        .unwrap_or_else(|_| "inline".to_string())
+        .as_str()
+    {
+        "queue" | "queued" | "external" => Arc::new(QueueBackedExecutionWorker),
+        _ => Arc::new(InlineExecutionWorker),
+    }
 }
 
 async fn healthz() -> Json<Value> {
@@ -1237,6 +1255,21 @@ async fn list_audit_logs(State(state): State<AppState>) -> Result<Json<Vec<Audit
     Ok(Json(state.list_audit_logs(None).await?))
 }
 
+async fn list_execution_jobs(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<execution_queue::ExecutionJob>>, AppError> {
+    Ok(Json(state.execution_queue.list().await))
+}
+
+async fn run_execution_job_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
+    let completed = run_execution_job(&state, id).await?;
+    complete_session_after_approval(&state, completed.session_id).await?;
+    Ok(Json(completed))
+}
+
 async fn list_session_audit_logs(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -1280,22 +1313,20 @@ async fn decide_approval(
         )
         .await?;
     if status == "approved" {
-        state
+        let outcome = state
             .execution_worker
             .execute_approved_tool(&state, &updated)
             .await?;
-        state
-            .set_session_status(updated.session_id, SessionStatus::Completed)
-            .await?;
-        state
-            .append_event(
-                "system",
-                None,
-                updated.session_id,
-                "session.completed",
-                json!({"reason": "pending approval resolved"}),
-            )
-            .await?;
+        match outcome {
+            ExecutionWorkerOutcome::Completed => {
+                complete_session_after_approval(&state, updated.session_id).await?;
+            }
+            ExecutionWorkerOutcome::Queued => {
+                state
+                    .set_session_status(updated.session_id, SessionStatus::Running)
+                    .await?;
+            }
+        }
     }
     state
         .append_audit_log(new_audit_log(
@@ -1309,6 +1340,25 @@ async fn decide_approval(
         ))
         .await?;
     Ok(Json(updated))
+}
+
+async fn complete_session_after_approval(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<(), AppError> {
+    state
+        .set_session_status(session_id, SessionStatus::Completed)
+        .await?;
+    state
+        .append_event(
+            "system",
+            None,
+            session_id,
+            "session.completed",
+            json!({"reason": "pending approval resolved"}),
+        )
+        .await?;
+    Ok(())
 }
 
 fn generic_file_read_summary() -> Value {
@@ -1681,10 +1731,14 @@ not json
     }
 
     async fn test_app() -> Router {
+        test_app_with_worker(Arc::new(InlineExecutionWorker)).await
+    }
+
+    async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {
         let state = AppState {
             store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
             execution_queue: ExecutionQueue::default(),
-            execution_worker: Arc::new(InlineExecutionWorker),
+            execution_worker,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -2355,5 +2409,108 @@ not json
                 .iter()
                 .any(|event| event.event_type == "session.completed")
         );
+    }
+
+    #[tokio::test]
+    async fn queue_backed_worker_defers_approved_tool_until_job_run() {
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "queued file write approval"}),
+            ),
+        )
+        .await;
+
+        let relative_path = format!("queued-{}.md", Uuid::new_v4());
+        let content = "# Queued\n\nWorker drain.";
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "path": relative_path,
+                        "content": content
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+
+        let workspace_file = test_workspace_root()
+            .join(session.id.to_string())
+            .join(&relative_path);
+        assert!(
+            tokio::fs::metadata(&workspace_file).await.is_err(),
+            "queued approval should not run inline"
+        );
+
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job = jobs
+            .iter()
+            .find(|job| job.approval_id == approved.id)
+            .expect("execution job queued");
+        assert_eq!(job.status, ExecutionJobStatus::Queued);
+
+        let completed: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{}/run", job.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+
+        let written = tokio::fs::read_to_string(workspace_file)
+            .await
+            .expect("queued worker run wrote file");
+        assert_eq!(written, content);
+
+        let completed_session: Session = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(completed_session.status, SessionStatus::Completed));
     }
 }

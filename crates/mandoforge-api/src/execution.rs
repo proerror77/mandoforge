@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::execution_queue::ExecutionJobRequest;
+use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{AppError, AppState, Approval, Artifact, ToolCall, new_audit_log};
 
@@ -37,7 +37,13 @@ pub(crate) trait ExecutionWorker: Send + Sync {
         &self,
         state: &AppState,
         approval: &Approval,
-    ) -> Result<(), AppError>;
+    ) -> Result<ExecutionWorkerOutcome, AppError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionWorkerOutcome {
+    Completed,
+    Queued,
 }
 
 pub(crate) struct InlineExecutionWorker;
@@ -48,43 +54,99 @@ impl ExecutionWorker for InlineExecutionWorker {
         &self,
         state: &AppState,
         approval: &Approval,
-    ) -> Result<(), AppError> {
-        let Some(tool_call_id) = approval.tool_call_id else {
-            return Ok(());
+    ) -> Result<ExecutionWorkerOutcome, AppError> {
+        let Some(job) = enqueue_approved_job(state, approval).await? else {
+            return Ok(ExecutionWorkerOutcome::Completed);
         };
-        let tool_call = state.get_tool_call(tool_call_id).await?;
-        let job = state
+        run_execution_job(state, job.id).await?;
+        Ok(ExecutionWorkerOutcome::Completed)
+    }
+}
+
+pub(crate) struct QueueBackedExecutionWorker;
+
+#[async_trait]
+impl ExecutionWorker for QueueBackedExecutionWorker {
+    async fn execute_approved_tool(
+        &self,
+        state: &AppState,
+        approval: &Approval,
+    ) -> Result<ExecutionWorkerOutcome, AppError> {
+        let Some(job) = enqueue_approved_job(state, approval).await? else {
+            return Ok(ExecutionWorkerOutcome::Completed);
+        };
+        state
+            .append_event(
+                "system",
+                Some(job.id),
+                approval.session_id,
+                "execution.queued",
+                json!({"execution_job_id": job.id, "approval_id": approval.id, "tool_call_id": job.tool_call_id, "tool": job.tool_name}),
+            )
+            .await?;
+        Ok(ExecutionWorkerOutcome::Queued)
+    }
+}
+
+async fn enqueue_approved_job(
+    state: &AppState,
+    approval: &Approval,
+) -> Result<Option<ExecutionJob>, AppError> {
+    let Some(tool_call_id) = approval.tool_call_id else {
+        return Ok(None);
+    };
+    let tool_call = state.get_tool_call(tool_call_id).await?;
+    Ok(Some(
+        state
             .execution_queue
             .enqueue(ExecutionJobRequest {
                 session_id: approval.session_id,
                 approval_id: approval.id,
                 tool_call_id,
-                tool_name: tool_call.tool_name.clone(),
+                tool_name: tool_call.tool_name,
             })
-            .await;
-        state.execution_queue.start(job.id).await?;
-        let result = match tool_call.tool_name.as_str() {
-            "file.write" => execute_approved_file_write(state, approval, &tool_call).await,
-            "shell.exec" => execute_approved_shell(state, approval, &tool_call).await,
-            "codex.exec" => execute_approved_codex(state, approval, &tool_call).await,
-            _ => {
-                state
-                    .update_tool_call_status(
-                        tool_call_id,
-                        "completed",
-                        Some(json!({"approval": "approved"})),
-                        None,
-                    )
-                    .await?;
-                Ok(())
-            }
-        };
-        if result.is_ok() {
-            state.execution_queue.complete(job.id).await?;
-        } else {
-            state.execution_queue.fail(job.id).await?;
+            .await,
+    ))
+}
+
+pub(crate) async fn run_execution_job(
+    state: &AppState,
+    job_id: Uuid,
+) -> Result<ExecutionJob, AppError> {
+    let job = state.execution_queue.get(job_id).await?;
+    if job.status != ExecutionJobStatus::Queued {
+        return Err(AppError::bad_request("execution job is not queued"));
+    }
+    let approval = state.get_approval(job.approval_id).await?;
+    if approval.status != "approved" {
+        return Err(AppError::bad_request(
+            "execution job approval is not approved",
+        ));
+    }
+    let tool_call = state.get_tool_call(job.tool_call_id).await?;
+    state.execution_queue.start(job.id).await?;
+    let result = match tool_call.tool_name.as_str() {
+        "file.write" => execute_approved_file_write(state, &approval, &tool_call).await,
+        "shell.exec" => execute_approved_shell(state, &approval, &tool_call).await,
+        "codex.exec" => execute_approved_codex(state, &approval, &tool_call).await,
+        _ => {
+            state
+                .update_tool_call_status(
+                    tool_call.id,
+                    "completed",
+                    Some(json!({"approval": "approved"})),
+                    None,
+                )
+                .await?;
+            Ok(())
         }
-        result
+    };
+    if result.is_ok() {
+        state.execution_queue.complete(job.id).await
+    } else {
+        state.execution_queue.fail(job.id).await?;
+        result?;
+        unreachable!()
     }
 }
 

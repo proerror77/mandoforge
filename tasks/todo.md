@@ -27,6 +27,7 @@
 - [x] Add an in-process execution queue boundary for approved tool jobs before external worker extraction.
 - [x] Add `ExecutionWorker` trait and `InlineExecutionWorker` implementation for swappable worker execution.
 - [x] Add agent version read APIs.
+- [x] Add queue-backed execution worker mode and job-drain API for external worker handoff.
 - [x] Add SQL safety tests for `sql.query`.
 - [x] Add API integration test for Generic Runtime Diagnostics replay.
 - [x] Add artifact detail panel in UI.

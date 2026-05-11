@@ -113,8 +113,7 @@ cargo run -p mandoforge-api
 
 `shell.exec` still requires approval. Docker mode runs approved commands with `--network none`, a workspace mount, and basic CPU/memory limits.
 Approved shell and Codex execution outputs are truncated before entering `tool_calls`, `session_events`, and artifacts. Set `MANDOFORGE_EXECUTION_OUTPUT_LIMIT_BYTES` to tune the per-field limit.
-Approved execution also enters an in-process execution queue facade before it is drained, which keeps the boundary ready for a later external worker process.
-The current worker implementation is `InlineExecutionWorker`; the API depends on the `ExecutionWorker` interface so this can be replaced by an external worker later.
+Approved execution also enters an execution queue facade before it is drained. The default worker is `InlineExecutionWorker`; set `MANDOFORGE_EXECUTION_WORKER=queue` to enqueue approved jobs for an external worker loop, then drain a job through `POST /api/execution-jobs/:id/run`.
 
 Verify Docker shell runner mode against a running API started with `MANDOFORGE_SHELL_RUNNER=docker`:
 
@@ -155,6 +154,8 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/agents`
 - `GET /api/agents/:id/versions`
 - `GET /api/agents/:id/versions/:version`
+- `GET /api/execution-jobs`
+- `POST /api/execution-jobs/:id/run`
 - `POST /api/sessions`
 - `POST /api/sessions/:id/run`
 - `GET /api/sessions/:id/events`

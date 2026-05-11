@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -16,7 +17,7 @@ struct ExecutionQueueState {
     jobs: Vec<ExecutionJob>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct ExecutionJob {
     pub(crate) id: Uuid,
@@ -30,7 +31,8 @@ pub(crate) struct ExecutionJob {
     pub(crate) completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ExecutionJobStatus {
     Queued,
     Running,
@@ -74,9 +76,19 @@ impl ExecutionQueue {
         self.update(job_id, ExecutionJobStatus::Failed).await
     }
 
-    #[cfg(test)]
     pub(crate) async fn list(&self) -> Vec<ExecutionJob> {
         self.inner.read().await.jobs.clone()
+    }
+
+    pub(crate) async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+        self.inner
+            .read()
+            .await
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .cloned()
+            .ok_or_else(|| AppError::not_found("execution job not found"))
     }
 
     async fn update(

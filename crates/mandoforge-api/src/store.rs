@@ -825,6 +825,31 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn get_approval(&self, approval_id: Uuid) -> Result<Approval, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .approvals
+                .get(&approval_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("approval not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, session_id, tool_call_id, action, risk_level, reason, evidence, status, created_at, decided_at
+                     FROM approvals
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(approval_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("approval not found"))?;
+                approval_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn decide_approval(
         &self,
         approval_id: Uuid,
