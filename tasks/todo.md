@@ -9,8 +9,8 @@
 - [x] Add YAML governance policy.
 - [x] Add smoke script and CI.
 - [x] Write Stage 1 implementation plan.
-- [ ] Initialize git repository.
-- [ ] Create GitHub repository and push initial commit.
+- [x] Initialize git repository.
+- [x] Create GitHub repository and push initial commit.
 
 ## Next Slice
 
@@ -31,4 +31,3 @@
 - [ ] Load and enforce `config/policy.stage1.yaml`.
 - [ ] Add seeded anomaly generator for demo warehouse.
 - [ ] Add deployment guide and demo script.
-
