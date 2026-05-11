@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde_json::Value;
 
-use crate::AppError;
+use crate::{AgentVersion, AppError};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct PolicyConfig {
@@ -144,6 +145,37 @@ impl PolicyConfig {
             reason: format!("{name} is not allowed by config/policy.stage1.yaml"),
         }
     }
+
+    pub(crate) fn evaluate_tool_for_agent_version(
+        &self,
+        name: &str,
+        agent_version: &AgentVersion,
+    ) -> ToolPolicyDecision {
+        if self.blocked_tools.iter().any(|tool| tool == name) {
+            return ToolPolicyDecision {
+                decision: "denied",
+                risk_level: tool_risk_level(name).to_string(),
+                reason: format!("{name} is blocked by config/policy.stage1.yaml"),
+            };
+        }
+
+        if !agent_version_tool_enabled(agent_version, name) {
+            return ToolPolicyDecision {
+                decision: "denied",
+                risk_level: tool_risk_level(name).to_string(),
+                reason: format!(
+                    "{name} is not enabled for agent version {}",
+                    agent_version.version
+                ),
+            };
+        }
+
+        if let Some(decision) = evaluate_agent_version_policy(name, agent_version) {
+            return decision;
+        }
+
+        self.evaluate_tool(name)
+    }
 }
 
 pub(crate) async fn load_policy_config(path: &str) -> Result<PolicyConfig> {
@@ -192,6 +224,81 @@ fn tool_risk_level(name: &str) -> &'static str {
         "shell.exec" | "codex.exec" | "http.request" => "high",
         _ => "unknown",
     }
+}
+
+fn agent_version_tool_enabled(agent_version: &AgentVersion, name: &str) -> bool {
+    agent_version.tool_names.iter().any(|tool| tool == name)
+        || agent_version.tools.iter().any(|tool| tool == name)
+}
+
+fn evaluate_agent_version_policy(
+    name: &str,
+    agent_version: &AgentVersion,
+) -> Option<ToolPolicyDecision> {
+    let policy = &agent_version.approval_policy;
+    if json_string_array_contains(policy.get("blocked_tools"), name) {
+        return Some(ToolPolicyDecision {
+            decision: "denied",
+            risk_level: tool_risk_level(name).to_string(),
+            reason: format!(
+                "{name} is blocked by agent version {} policy",
+                agent_version.version
+            ),
+        });
+    }
+
+    if let Some(allowed_tools) = policy.get("allowed_tools") {
+        if !json_string_array_contains(Some(allowed_tools), name) {
+            return Some(ToolPolicyDecision {
+                decision: "denied",
+                risk_level: tool_risk_level(name).to_string(),
+                reason: format!(
+                    "{name} is not allowed by agent version {} policy",
+                    agent_version.version
+                ),
+            });
+        }
+    }
+
+    if let Some(risk) = approval_required_risk(policy.get("approval_required"), name) {
+        return Some(ToolPolicyDecision {
+            decision: "requires_approval",
+            risk_level: risk,
+            reason: format!(
+                "{name} requires approval by agent version {} policy",
+                agent_version.version
+            ),
+        });
+    }
+
+    None
+}
+
+fn json_string_array_contains(value: Option<&Value>, needle: &str) -> bool {
+    value
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(needle)))
+}
+
+fn approval_required_risk(value: Option<&Value>, name: &str) -> Option<String> {
+    value.and_then(Value::as_array).and_then(|items| {
+        items.iter().find_map(|item| {
+            if item.as_str() == Some(name) {
+                return Some(tool_risk_level(name).to_string());
+            }
+            let tool = item.get("tool").and_then(Value::as_str)?;
+            if tool == name {
+                Some(
+                    item.get("risk")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| tool_risk_level(name))
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        })
+    })
 }
 
 fn default_sql_max_rows() -> i64 {

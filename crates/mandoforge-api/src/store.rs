@@ -49,6 +49,7 @@ fn session_from_row(row: PgRow) -> Result<Session, AppError> {
     Ok(Session {
         id: row.try_get("id")?,
         agent_id: row.try_get("agent_id")?,
+        agent_version_id: row.try_get("agent_version_id")?,
         title: row.try_get("title")?,
         status: status.into(),
         created_at: row.try_get("created_at")?,
@@ -328,6 +329,89 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn current_agent_version(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<AgentVersion, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                if !store.agents.contains_key(&agent_id) {
+                    return Err(AppError::not_found("agent not found"));
+                }
+                store
+                    .agent_versions
+                    .get(&agent_id)
+                    .and_then(|versions| versions.iter().max_by_key(|version| version.version))
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("agent version not found"))
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.created_at
+                     FROM agents a
+                     JOIN agent_versions av ON av.agent_id = a.id AND av.version = a.current_version
+                     WHERE a.tenant_id = $1 AND a.id = $2 AND a.archived_at IS NULL",
+                )
+                .bind(self.tenant_id)
+                .bind(agent_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent version not found"))?;
+                agent_version_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn agent_version_for_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<AgentVersion, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                let session = store
+                    .sessions
+                    .get(&session_id)
+                    .ok_or_else(|| AppError::not_found("session not found"))?;
+                if let Some(agent_version_id) = session.agent_version_id {
+                    return store
+                        .agent_versions
+                        .values()
+                        .flat_map(|versions| versions.iter())
+                        .find(|version| version.id == agent_version_id)
+                        .cloned()
+                        .ok_or_else(|| AppError::not_found("agent version not found"));
+                }
+                store
+                    .agent_versions
+                    .get(&session.agent_id)
+                    .and_then(|versions| versions.iter().max_by_key(|version| version.version))
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("agent version not found"))
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.created_at
+                     FROM sessions s
+                     JOIN agents a ON a.id = s.agent_id
+                     JOIN agent_versions av ON av.agent_id = s.agent_id
+                     WHERE s.tenant_id = $1
+                       AND s.id = $2
+                       AND (av.id = s.agent_version_id OR (s.agent_version_id IS NULL AND av.version = a.current_version))
+                     ORDER BY CASE WHEN av.id = s.agent_version_id THEN 0 ELSE 1 END
+                     LIMIT 1",
+                )
+                .bind(self.tenant_id)
+                .bind(session_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent version not found"))?;
+                agent_version_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn list_sessions(&self) -> Result<Vec<Session>, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -335,7 +419,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, agent_id, title, status, created_at, updated_at
+                    "SELECT id, agent_id, agent_version_id, title, status, created_at, updated_at
                      FROM sessions
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
@@ -352,10 +436,12 @@ impl AppState {
         if !self.agent_exists(input.agent_id).await? {
             return Err(AppError::not_found("agent not found"));
         }
+        let agent_version = self.current_agent_version(input.agent_id).await?;
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4(),
             agent_id: input.agent_id,
+            agent_version_id: Some(agent_version.id),
             title: input.title,
             status: SessionStatus::Created,
             created_at: now,
@@ -371,12 +457,13 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO sessions (id, tenant_id, agent_id, title, status, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    "INSERT INTO sessions (id, tenant_id, agent_id, agent_version_id, title, status, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 )
                 .bind(session.id)
                 .bind(self.tenant_id)
                 .bind(session.agent_id)
+                .bind(session.agent_version_id)
                 .bind(&session.title)
                 .bind(session.status.as_str())
                 .bind(session.created_at)
@@ -425,7 +512,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("session not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, agent_id, title, status, created_at, updated_at
+                    "SELECT id, agent_id, agent_version_id, title, status, created_at, updated_at
                      FROM sessions
                      WHERE tenant_id = $1 AND id = $2",
                 )
@@ -460,7 +547,7 @@ impl AppState {
                     "UPDATE sessions
                      SET status = $1, updated_at = now()
                      WHERE tenant_id = $2 AND id = $3
-                     RETURNING id, agent_id, title, status, created_at, updated_at",
+                     RETURNING id, agent_id, agent_version_id, title, status, created_at, updated_at",
                 )
                 .bind(status.as_str())
                 .bind(self.tenant_id)

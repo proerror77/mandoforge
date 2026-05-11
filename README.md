@@ -7,6 +7,7 @@ MandoForge is a Rust-native Generic Agent OS Kernel. It is not a vertical commer
 - Rust API server with Axum.
 - Postgres-backed session/event/artifact/approval store with in-memory fallback.
 - Generic orchestrator agent config.
+- Session binding to agent versions with per-version tool allowlist enforcement.
 - Static Session Console UI with event timeline and approval queue.
 - Generic demo data: `platform_events`, `sample_documents`, and `sample_metrics`.
 - YAML governance policy for blocked and approval-required tools.

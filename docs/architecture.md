@@ -155,12 +155,14 @@ Stage 1 policy is defined in `config/policy.stage1.yaml`.
 
 Current enforced checks:
 
+- Sessions bind to an agent version at creation time.
+- Tool execution is constrained by the session agent version's enabled tools before global YAML policy is applied.
+- Agent version `approval_policy` can narrow allowed tools, block tools, or require approval for a tool.
 - `sql.query` rejects non-read SQL.
 - `codex.exec` only allows `read-only` and `workspace-write` sandbox modes without extra approval.
 
 Next enforcement work:
 
-- Check allowed tools per agent version rather than only the global policy file.
 - Expand policy coverage for later worker, HTTP, and MCP tools.
 
 ## Sandbox Boundary

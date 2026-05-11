@@ -28,6 +28,7 @@
 - [x] Add `ExecutionWorker` trait and `InlineExecutionWorker` implementation for swappable worker execution.
 - [x] Add agent version read APIs.
 - [x] Add queue-backed execution worker mode and job-drain API for external worker handoff.
+- [x] Bind sessions to agent versions and enforce agent-version tool allowlists.
 - [x] Add SQL safety tests for `sql.query`.
 - [x] Add API integration test for Generic Runtime Diagnostics replay.
 - [x] Add artifact detail panel in UI.

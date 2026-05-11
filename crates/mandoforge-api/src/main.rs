@@ -105,6 +105,7 @@ struct CreateAgent {
 struct Session {
     id: Uuid,
     agent_id: Uuid,
+    agent_version_id: Option<Uuid>,
     title: String,
     status: SessionStatus,
     created_at: DateTime<Utc>,
@@ -964,14 +965,17 @@ async fn execute_tool_invocation(
     name: &str,
     input: ExecuteTool,
 ) -> Result<Value, AppError> {
-    let policy_decision = state.policy.evaluate_tool(&name);
+    let agent_version = state.agent_version_for_session(input.session_id).await?;
+    let policy_decision = state
+        .policy
+        .evaluate_tool_for_agent_version(name, &agent_version);
     let call_event = state
         .append_event(
             "tool",
             None,
             input.session_id,
             "tool.call",
-            json!({"tool": name, "args": input.args.clone()}),
+            json!({"tool": name, "args": input.args.clone(), "agent_version_id": agent_version.id, "agent_version": agent_version.version}),
         )
         .await?;
     let tool_call = state
@@ -992,6 +996,8 @@ async fn execute_tool_invocation(
             policy_decision: json!({
                 "decision": policy_decision.decision,
                 "reason": policy_decision.reason.clone(),
+                "agent_version_id": agent_version.id,
+                "agent_version": agent_version.version,
             }),
             result: None,
             error: None,
@@ -1680,6 +1686,76 @@ not json
         .await;
         assert_eq!(version.id, versions[0].id);
         assert_eq!(version.system_prompt, created.system_prompt);
+    }
+
+    #[tokio::test]
+    async fn sessions_bind_agent_version_and_enforce_tool_allowlist() {
+        let app = test_app().await;
+        let created: Agent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Read Only Agent",
+                    "kind": "orchestrator",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Read only.",
+                    "tools": ["file.read"]
+                }),
+            ),
+        )
+        .await;
+        let versions: Vec<AgentVersion> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/agents/{}/versions", created.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let version = versions.first().expect("agent version");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": created.id, "title": "version policy"}),
+            ),
+        )
+        .await;
+        assert_eq!(session.agent_version_id, Some(version.id));
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/sql.get_schema/execute",
+                json!({"session_id": session.id, "args": {}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error["error"].as_str(),
+            Some("sql.get_schema is not enabled for agent version 1")
+        );
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(tool_calls.iter().any(|call| {
+            call.tool_name == "sql.get_schema"
+                && call.status == "denied"
+                && call.policy_decision["decision"] == "denied"
+                && call.policy_decision["agent_version_id"] == json!(version.id)
+        }));
     }
 
     #[test]
