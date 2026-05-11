@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 mod execution;
 mod execution_queue;
+mod execution_queue_broker;
 mod policy;
 mod provider;
 mod shell_runner;
@@ -43,7 +44,9 @@ use execution::{
 use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
 use execution_queue::ExecutionQueue;
 #[cfg(test)]
-use execution_queue::{ExecutionJobRequest, ExecutionJobStatus};
+use execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
+#[cfg(test)]
+use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueKind};
 #[cfg(test)]
 use policy::ensure_read_only_sql;
 use policy::{PolicyConfig, ensure_read_only_sql_with_policy, load_policy_config};
@@ -1789,6 +1792,26 @@ not json
         let completed = queue.complete(queued.id).await.expect("complete job");
         assert_eq!(completed.status, ExecutionJobStatus::Completed);
         assert!(completed.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn broker_execution_queue_is_reserved_until_implemented() {
+        for kind in [BrokerQueueKind::Redis, BrokerQueueKind::Nats] {
+            let queue = BrokerExecutionQueue::new(kind);
+            let request = ExecutionJobRequest {
+                session_id: Uuid::new_v4(),
+                approval_id: Uuid::new_v4(),
+                tool_call_id: Uuid::new_v4(),
+                tool_name: "file.write".to_string(),
+            };
+
+            assert!(queue.enqueue(request).await.is_err());
+            assert!(queue.start(Uuid::new_v4(), "worker").await.is_err());
+            assert!(queue.complete(Uuid::new_v4()).await.is_err());
+            assert!(queue.fail(Uuid::new_v4()).await.is_err());
+            assert!(queue.list().await.is_err());
+            assert!(queue.get(Uuid::new_v4()).await.is_err());
+        }
     }
 
     #[tokio::test]
