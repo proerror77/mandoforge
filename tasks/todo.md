@@ -28,6 +28,7 @@
 - [x] Add an execution queue backend trait so future broker-backed queues can plug in behind the same facade.
 - [x] Add fail-closed execution queue backend selection for future broker-backed queues.
 - [x] Add reserved broker execution queue backend skeleton and contract test.
+- [x] Add broker queue configuration and health-check boundaries before Redis/NATS implementation.
 - [x] Add `ExecutionWorker` trait and `InlineExecutionWorker` implementation for swappable worker execution.
 - [x] Add agent version read APIs.
 - [x] Add queue-backed execution worker mode and job-drain API for external worker handoff.
