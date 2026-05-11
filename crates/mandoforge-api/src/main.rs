@@ -1378,15 +1378,34 @@ async fn list_approvals(State(state): State<AppState>) -> Result<Json<Vec<Approv
 async fn approve(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Approval>, AppError> {
+    authorize_approval_decision(&state, &headers, id).await?;
     decide_approval(state, id, "approved").await
 }
 
 async fn reject(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Approval>, AppError> {
+    authorize_approval_decision(&state, &headers, id).await?;
     decide_approval(state, id, "rejected").await
+}
+
+async fn authorize_approval_decision(
+    state: &AppState,
+    headers: &HeaderMap,
+    approval_id: Uuid,
+) -> Result<(), AppError> {
+    let principal = principal_from_headers(state.tenant_id, headers)?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::ApprovalsDecide,
+        resource_type: "approval".to_string(),
+        resource_id: Some(approval_id),
+    };
+    state.authorizer.authorize(&principal, &request).await
 }
 
 async fn list_artifacts(
@@ -2701,6 +2720,82 @@ not json
                     && call.policy_decision["decision"] == "allowed"
             }));
         }
+    }
+
+    #[tokio::test]
+    async fn approval_decision_enforces_rbac_role() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "rbac approval"}),
+            ),
+        )
+        .await;
+
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "path": "rbac.md",
+                        "content": "denied"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let approvals: Vec<Approval> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/approvals")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let pending = approvals
+            .iter()
+            .find(|approval| approval.id.to_string() == approval_id)
+            .expect("approval remains visible");
+        assert_eq!(pending.status, "pending");
     }
 
     #[tokio::test]
