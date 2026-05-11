@@ -96,3 +96,4 @@
 - [x] Enforce RBAC on core write API paths with default demo operator compatibility.
 - [x] Enforce RBAC on the tool catalog API while keeping health/static public.
 - [x] Add local-verified HTTP MCP Gateway client boundary before enabling `mcp.call`.
+- [x] Add local-verified HTTP OTel exporter boundary before wiring runtime telemetry export.
