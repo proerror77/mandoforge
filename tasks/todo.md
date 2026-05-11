@@ -99,3 +99,4 @@
 - [x] Add local-verified HTTP OTel exporter boundary before wiring runtime telemetry export.
 - [x] Add local-verified Redis Stream command boundary before enabling a live broker queue backend.
 - [x] Add local-verified Redis RESP client boundary before enabling Redis queue backend selection.
+- [x] Add local-verified Redis worker read command boundary before enabling broker worker handoff.

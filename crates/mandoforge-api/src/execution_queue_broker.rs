@@ -188,6 +188,35 @@ impl RedisStreamCommand {
         })
     }
 
+    pub(crate) fn xreadgroup_next(
+        config: &BrokerQueueConfig,
+        consumer_name: impl Into<String>,
+        count: usize,
+        block_ms: u64,
+    ) -> Result<Self, AppError> {
+        if config.kind != BrokerQueueKind::Redis {
+            return Err(AppError::bad_request(
+                "Redis stream command requires Redis broker config",
+            ));
+        }
+        let count = count.max(1);
+        Ok(Self {
+            command: "XREADGROUP".to_string(),
+            args: vec![
+                "GROUP".to_string(),
+                config.consumer_group.clone(),
+                consumer_name.into(),
+                "COUNT".to_string(),
+                count.to_string(),
+                "BLOCK".to_string(),
+                block_ms.to_string(),
+                "STREAMS".to_string(),
+                config.stream.clone(),
+                ">".to_string(),
+            ],
+        })
+    }
+
     fn resp_args(&self) -> Vec<String> {
         std::iter::once(self.command.clone())
             .chain(self.args.iter().cloned())
@@ -452,6 +481,41 @@ mod tests {
     }
 
     #[test]
+    fn redis_stream_command_builds_readgroup_command() {
+        let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Redis, |key| match key {
+            "MANDOFORGE_REDIS_URL" => Some("redis://127.0.0.1:6379/0".to_string()),
+            "MANDOFORGE_REDIS_STREAM" => Some("custom-stream".to_string()),
+            "MANDOFORGE_EXECUTION_QUEUE_CONSUMER_GROUP" => Some("custom-workers".to_string()),
+            _ => None,
+        })
+        .expect("redis config");
+
+        let read = RedisStreamCommand::xreadgroup_next(&config, "worker-1", 0, 5000)
+            .expect("xreadgroup command");
+
+        assert_eq!(read.command, "XREADGROUP");
+        assert_eq!(
+            read.args,
+            vec![
+                "GROUP",
+                "custom-workers",
+                "worker-1",
+                "COUNT",
+                "1",
+                "BLOCK",
+                "5000",
+                "STREAMS",
+                "custom-stream",
+                ">"
+            ]
+        );
+        assert_eq!(
+            encode_resp_array(&read.resp_args()),
+            "*11\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$14\r\ncustom-workers\r\n$8\r\nworker-1\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n$5\r\nBLOCK\r\n$4\r\n5000\r\n$7\r\nSTREAMS\r\n$13\r\ncustom-stream\r\n$1\r\n>\r\n"
+        );
+    }
+
+    #[test]
     fn redis_stream_commands_reject_non_redis_config() {
         let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Nats, |key| match key {
             "MANDOFORGE_NATS_URL" => Some("nats://127.0.0.1:4222".to_string()),
@@ -461,6 +525,7 @@ mod tests {
 
         assert!(RedisStreamCommand::xgroup_create(&config).is_err());
         assert!(RedisStreamCommand::xack(&config, "1-0").is_err());
+        assert!(RedisStreamCommand::xreadgroup_next(&config, "worker-1", 1, 1000).is_err());
     }
 
     #[test]

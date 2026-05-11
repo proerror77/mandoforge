@@ -208,7 +208,7 @@ Current worker boundary:
 - Keep output-size limits on approved shell and Codex execution results.
 - Keep `execution_queue.rs` as the queue facade for approved tool jobs.
 - Keep `ExecutionQueueBackend` as the backend seam for memory, Postgres, and later broker-backed queues.
-- Keep `execution_queue_broker.rs` as the reserved Redis/NATS backend skeleton; it must fail closed until real broker operations are implemented. Redis Stream enqueue/group/ack command shape and narrow RESP TCP client boundary are locally verified before live Redis backend selection.
+- Keep `execution_queue_broker.rs` as the reserved Redis/NATS backend skeleton; it must fail closed until real broker operations are implemented. Redis Stream enqueue/group/read/ack command shape and narrow RESP TCP client boundary are locally verified before live Redis backend selection.
 - Keep `BrokerQueueConfig` and `BrokerQueueHealthCheck` as the broker configuration and readiness boundary before selecting a concrete Redis or NATS client.
 - Keep `MANDOFORGE_EXECUTION_QUEUE_BACKEND` fail-closed: `auto`, `memory`, and `postgres` are selectable now; `broker`, `redis`, and `nats` are reserved until implemented.
 - Keep `ExecutionWorker` as the swappable worker interface and `InlineExecutionWorker` as the current local implementation.
