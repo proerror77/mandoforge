@@ -22,7 +22,7 @@ Aligned:
 - Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh` or the `mandoforge-worker` Rust binary; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
 - Worker deployment entries exist for Docker Compose and Kubernetes.
 - Approval resume executes the approved tool, rebuilds harness context, resumes the provider for provider-run sessions, and then emits the final provider response before completing the session.
-- OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed on the default reserved provider. A Vault KV v2 HTTP client skeleton now defines the production URL/header/token shape behind that boundary.
+- OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed on the default reserved provider. `MANDOFORGE_SECRET_PROVIDER=vault` explicitly selects the Vault KV v2 provider boundary, while the default remains `reserved`.
 
 Not yet aligned:
 
@@ -232,7 +232,7 @@ Stage 2/3 target components:
 - `mcp-gateway` with `McpGatewayConfig` and `McpGatewayClient` as the reserved gateway boundary before enabling `mcp.call`.
 - `policy-engine` with `Principal`, `Permission`, and `Authorizer` as the RBAC boundary; session run, manual tool execution, approval decisions, and execution job drain are the first enforced request paths.
 - `otel-collector` with `ObservabilityConfig` and `TelemetryExporter` as the reserved exporter boundary before enabling OTLP export.
-- `vault` or compatible secret store with `SecretProviderConfig`, `SecretRef`, `SecretProvider`, and the reserved `VaultSecretProvider` KV v2 client skeleton as the boundary before enabling runtime secret reads by default.
+- `vault` or compatible secret store with `SecretProviderKind`, `SecretProviderConfig`, `SecretRef`, `SecretProvider`, and explicit `reserved` / `vault` provider selection before enabling runtime secret reads by default.
 - `postgres`
 - `redis-or-nats`
 - `object-storage`

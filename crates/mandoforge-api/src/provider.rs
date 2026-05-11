@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     AppError,
-    secrets::{ReservedSecretProvider, SecretProvider, SecretProviderConfig, SecretRef},
+    secrets::{SecretProvider, SecretProviderConfig, SecretRef, secret_provider_from_env},
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,9 +97,10 @@ impl ProviderClient for MockProviderClient {
 
 impl OpenAiCompatibleProviderClient {
     pub(crate) async fn from_env() -> Result<Option<Self>, AppError> {
+        let secret_provider = secret_provider_from_env()?;
         Self::from_lookup_with_secret_provider(
             |key| std::env::var(key).ok(),
-            &ReservedSecretProvider,
+            secret_provider.as_ref(),
         )
         .await
     }

@@ -90,3 +90,4 @@
 - [x] Route provider API key vault references through the reserved secret provider boundary.
 - [x] Enforce RBAC on session run with a default demo operator principal.
 - [x] Add Vault KV v2 secret provider client skeleton without enabling runtime secret reads by default.
+- [x] Add explicit reserved/vault secret provider selection while keeping reserved as the default.

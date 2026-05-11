@@ -16,6 +16,13 @@ pub(crate) struct SecretProviderConfig {
     pub(crate) token: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum SecretProviderKind {
+    Reserved,
+    Vault,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct SecretRef {
@@ -47,6 +54,24 @@ impl fmt::Debug for SecretValue {
             .debug_struct("SecretValue")
             .field("value", &"<redacted>")
             .finish()
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn secret_provider_from_env() -> Result<Box<dyn SecretProvider>, AppError> {
+    secret_provider_from_lookup(&|key| std::env::var(key).ok())
+}
+
+#[allow(dead_code)]
+pub(crate) fn secret_provider_from_lookup<F>(
+    lookup: &F,
+) -> Result<Box<dyn SecretProvider>, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match SecretProviderKind::from_lookup(lookup)? {
+        SecretProviderKind::Reserved => Ok(Box::new(ReservedSecretProvider)),
+        SecretProviderKind::Vault => Ok(Box::new(VaultSecretProvider::new()?)),
     }
 }
 
@@ -102,6 +127,26 @@ impl SecretProviderConfig {
 
     fn normalized_mount(&self) -> String {
         self.mount.trim_matches('/').to_string()
+    }
+}
+
+#[allow(dead_code)]
+impl SecretProviderKind {
+    pub(crate) fn from_lookup<F>(lookup: &F) -> Result<Self, AppError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let kind = lookup("MANDOFORGE_SECRET_PROVIDER")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "reserved".to_string());
+        match kind.as_str() {
+            "reserved" => Ok(Self::Reserved),
+            "vault" => Ok(Self::Vault),
+            _ => Err(AppError::bad_request(format!(
+                "unsupported MANDOFORGE_SECRET_PROVIDER '{kind}'"
+            ))),
+        }
     }
 }
 
@@ -264,14 +309,79 @@ fn validate_secret_component(label: &str, value: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ReservedSecretProvider, SecretProvider, SecretProviderConfig, SecretRef,
-        VaultSecretProvider, validate_secret_component,
+        ReservedSecretProvider, SecretProvider, SecretProviderConfig, SecretProviderKind,
+        SecretRef, VaultSecretProvider, secret_provider_from_lookup, validate_secret_component,
     };
+    use axum::http::StatusCode;
     use serde_json::json;
 
     #[test]
     fn secret_provider_config_requires_vault_addr() {
         assert!(SecretProviderConfig::from_lookup(|_| None).is_err());
+    }
+
+    #[test]
+    fn secret_provider_kind_defaults_to_reserved() {
+        let kind = SecretProviderKind::from_lookup(&|_| None).expect("kind");
+
+        assert_eq!(kind, SecretProviderKind::Reserved);
+    }
+
+    #[test]
+    fn secret_provider_kind_allows_explicit_vault() {
+        let kind = SecretProviderKind::from_lookup(&|key| match key {
+            "MANDOFORGE_SECRET_PROVIDER" => Some(" vault ".to_string()),
+            _ => None,
+        })
+        .expect("kind");
+
+        assert_eq!(kind, SecretProviderKind::Vault);
+    }
+
+    #[test]
+    fn secret_provider_kind_rejects_unknown_values() {
+        assert!(
+            SecretProviderKind::from_lookup(&|key| match key {
+                "MANDOFORGE_SECRET_PROVIDER" => Some("file".to_string()),
+                _ => None,
+            })
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_provider_selector_keeps_reserved_as_default() {
+        let provider = secret_provider_from_lookup(&|_| None).expect("provider");
+        let config = SecretProviderConfig::from_lookup(|key| match key {
+            "MANDOFORGE_VAULT_ADDR" => Some("http://vault:8200".to_string()),
+            _ => None,
+        })
+        .expect("vault config");
+        let secret_ref = SecretRef::new("providers/openai", "api_key").expect("secret ref");
+
+        assert!(provider.read_secret(&config, &secret_ref).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn secret_provider_selector_allows_explicit_vault() {
+        let provider = secret_provider_from_lookup(&|key| match key {
+            "MANDOFORGE_SECRET_PROVIDER" => Some("vault".to_string()),
+            _ => None,
+        })
+        .expect("provider");
+        let config = SecretProviderConfig::from_lookup(|key| match key {
+            "MANDOFORGE_VAULT_ADDR" => Some("http://vault:8200".to_string()),
+            _ => None,
+        })
+        .expect("vault config");
+
+        let error = provider
+            .health_check(&config)
+            .await
+            .expect_err("vault token");
+
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.message, "MANDOFORGE_VAULT_TOKEN is required");
     }
 
     #[test]
