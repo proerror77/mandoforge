@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mandoforge-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mandoforge-worker
+  template:
+    metadata:
+      labels:
+        app: mandoforge-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: worker
+          image: ghcr.io/proerror77/mandoforge:latest
+          imagePullPolicy: IfNotPresent
+          command: ["mandoforge-worker"]
+          env:
+            - name: BASE_URL
+              value: "http://mandoforge-api:8787"
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POLL_INTERVAL_SECONDS
+              value: "2"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "500m"
+              memory: 256Mi

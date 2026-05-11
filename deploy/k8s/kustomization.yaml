@@ -7,4 +7,4 @@ resources:
   - secret.example.yaml
   - postgres.yaml
   - api.yaml
-
+  - worker.yaml

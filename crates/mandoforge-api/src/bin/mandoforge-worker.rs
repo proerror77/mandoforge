@@ -30,13 +30,7 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(60))
         .build()
         .context("build worker http client")?;
-    client
-        .get(format!("{base_url}/healthz"))
-        .send()
-        .await
-        .context("call API healthz")?
-        .error_for_status()
-        .context("API healthz failed")?;
+    wait_for_api(&client, &base_url).await?;
 
     let mut processed = 0usize;
     loop {
@@ -87,4 +81,24 @@ async fn main() -> Result<()> {
         }
         sleep(Duration::from_secs(poll_interval)).await;
     }
+}
+
+async fn wait_for_api(client: &reqwest::Client, base_url: &str) -> Result<()> {
+    let mut last_error = None;
+    for _ in 0..60 {
+        match client.get(format!("{base_url}/healthz")).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                last_error = Some(format!("API healthz returned {}", response.status()));
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+            }
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "API healthz did not become ready: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    )
 }

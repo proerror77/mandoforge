@@ -24,6 +24,7 @@ services:
       MANDOFORGE_ADDR: 0.0.0.0:8787
       MANDOFORGE_WORKSPACE_ROOT: /var/lib/mandoforge/workspaces
       DATABASE_URL: postgres://mandoforge:mandoforge@postgres:5432/mandoforge
+      MANDOFORGE_EXECUTION_WORKER: ${MANDOFORGE_EXECUTION_WORKER:-queue}
       MANDOFORGE_PROVIDER_BASE_URL: ${MANDOFORGE_PROVIDER_BASE_URL:-}
       MANDOFORGE_PROVIDER_API_KEY: ${MANDOFORGE_PROVIDER_API_KEY:-}
       MANDOFORGE_PROVIDER_MODEL: ${MANDOFORGE_PROVIDER_MODEL:-gpt-5.4-mini}
@@ -36,6 +37,22 @@ services:
         condition: service_healthy
     volumes:
       - workspace-data:/var/lib/mandoforge/workspaces
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["mandoforge-worker"]
+    environment:
+      BASE_URL: http://api:8787
+      WORKER_ID: compose-worker-1
+      POLL_INTERVAL_SECONDS: ${MANDOFORGE_WORKER_POLL_INTERVAL_SECONDS:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
 
 volumes:
   postgres-data:

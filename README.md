@@ -157,6 +157,7 @@ docker compose up --build
 ```
 
 The API is served on `http://127.0.0.1:8787`. Postgres starts with the runtime schema and generic demo tables.
+Docker Compose also starts `mandoforge-worker`, which drains queued execution jobs through the API when `MANDOFORGE_EXECUTION_WORKER=queue`.
 
 ## Kubernetes
 
