@@ -476,7 +476,11 @@ async fn seed_demo_tenant(pool: &PgPool, tenant_id: Uuid) -> Result<()> {
     Ok(())
 }
 
-async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<Agent>>, AppError> {
+async fn list_agents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Agent>>, AppError> {
+    authorize_request(&state, &headers, Permission::AgentsRead, "agents", None).await?;
     Ok(Json(state.list_agents().await?))
 }
 
@@ -490,18 +494,26 @@ async fn create_agent(
 async fn list_agent_versions(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<AgentVersion>>, AppError> {
+    authorize_request(&state, &headers, Permission::AgentsRead, "agent", Some(id)).await?;
     Ok(Json(state.list_agent_versions(id).await?))
 }
 
 async fn get_agent_version(
     State(state): State<AppState>,
     Path((id, version)): Path<(Uuid, i32)>,
+    headers: HeaderMap,
 ) -> Result<Json<AgentVersion>, AppError> {
+    authorize_request(&state, &headers, Permission::AgentsRead, "agent", Some(id)).await?;
     Ok(Json(state.get_agent_version(id, version).await?))
 }
 
-async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Session>>, AppError> {
+async fn list_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Session>>, AppError> {
+    authorize_request(&state, &headers, Permission::SessionsRead, "sessions", None).await?;
     Ok(Json(state.list_sessions().await?))
 }
 
@@ -515,7 +527,16 @@ async fn create_session(
 async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Session>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
     Ok(Json(state.get_session(id).await?))
 }
 
@@ -762,12 +783,29 @@ async fn authorize_session_run(
     headers: &HeaderMap,
     session_id: Uuid,
 ) -> Result<(), AppError> {
+    authorize_request(
+        state,
+        headers,
+        Permission::SessionsRun,
+        "session",
+        Some(session_id),
+    )
+    .await
+}
+
+async fn authorize_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    permission: Permission,
+    resource_type: impl Into<String>,
+    resource_id: Option<Uuid>,
+) -> Result<(), AppError> {
     let principal = principal_from_headers(state.tenant_id, headers)?;
     let request = AuthorizationRequest {
         tenant_id: state.tenant_id,
-        permission: Permission::SessionsRun,
-        resource_type: "session".to_string(),
-        resource_id: Some(session_id),
+        permission,
+        resource_type: resource_type.into(),
+        resource_id,
     };
     state.authorizer.authorize(&principal, &request).await
 }
@@ -775,14 +813,33 @@ async fn authorize_session_run(
 async fn list_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<SessionEvent>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
     Ok(Json(state.list_events(id).await?))
 }
 
 async fn stream_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    headers: HeaderMap,
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>, AppError>
+{
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
     let events = state.list_events(id).await.unwrap_or_default();
     let stream = futures_util::stream::iter(events.into_iter().map(|event| {
         Ok(Event::default()
@@ -790,7 +847,7 @@ async fn stream_events(
             .json_data(event)
             .unwrap_or_else(|_| Event::default().event("error").data("serialization failed")))
     }));
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 #[async_trait]
@@ -1388,7 +1445,18 @@ async fn execute_tool_invocation(
     Ok(result)
 }
 
-async fn list_approvals(State(state): State<AppState>) -> Result<Json<Vec<Approval>>, AppError> {
+async fn list_approvals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Approval>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "approvals",
+        None,
+    )
+    .await?;
     Ok(Json(state.list_approvals().await?))
 }
 
@@ -1428,28 +1496,70 @@ async fn authorize_approval_decision(
 async fn list_artifacts(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<Artifact>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
     Ok(Json(state.list_artifacts(id).await?))
 }
 
-async fn list_tool_calls(State(state): State<AppState>) -> Result<Json<Vec<ToolCall>>, AppError> {
+async fn list_tool_calls(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ToolCall>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "tool_calls",
+        None,
+    )
+    .await?;
     Ok(Json(state.list_tool_calls(None).await?))
 }
 
 async fn list_session_tool_calls(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<ToolCall>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
     Ok(Json(state.list_tool_calls(Some(id)).await?))
 }
 
-async fn list_audit_logs(State(state): State<AppState>) -> Result<Json<Vec<AuditLog>>, AppError> {
+async fn list_audit_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AuditLog>>, AppError> {
+    authorize_request(&state, &headers, Permission::AuditRead, "audit_logs", None).await?;
     Ok(Json(state.list_audit_logs(None).await?))
 }
 
 async fn list_execution_jobs(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<execution_queue::ExecutionJob>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "execution_jobs",
+        None,
+    )
+    .await?;
     Ok(Json(state.execution_queue.list().await?))
 }
 
@@ -1487,7 +1597,9 @@ async fn authorize_execution_job_run(
 async fn list_session_audit_logs(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<AuditLog>>, AppError> {
+    authorize_request(&state, &headers, Permission::AuditRead, "session", Some(id)).await?;
     Ok(Json(state.list_audit_logs(Some(id)).await?))
 }
 
@@ -2446,6 +2558,44 @@ not json
         )
         .await;
         assert!(matches!(unchanged.status, SessionStatus::Created));
+    }
+
+    #[tokio::test]
+    async fn read_routes_enforce_rbac_role_header() {
+        let app = test_app().await;
+        for uri in [
+            "/api/agents",
+            "/api/sessions",
+            "/api/approvals",
+            "/api/tool-calls",
+            "/api/execution-jobs",
+            "/api/audit-logs",
+        ] {
+            let (status, error) = request_value(
+                app.clone(),
+                Request::builder()
+                    .uri(uri)
+                    .header("x-mandoforge-roles", "")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+            assert_eq!(error["error"], "principal has no roles");
+        }
+
+        let (status, _) = request_value(
+            app,
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
