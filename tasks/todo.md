@@ -25,6 +25,7 @@
 - [x] Split approved file, shell, and Codex execution into a dedicated `execution` module before worker-process extraction.
 - [x] Add output-size limits for approved shell and Codex execution results.
 - [x] Add an in-process execution queue boundary for approved tool jobs before external worker extraction.
+- [x] Add an execution queue backend trait so future broker-backed queues can plug in behind the same facade.
 - [x] Add `ExecutionWorker` trait and `InlineExecutionWorker` implementation for swappable worker execution.
 - [x] Add agent version read APIs.
 - [x] Add queue-backed execution worker mode and job-drain API for external worker handoff.
