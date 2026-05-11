@@ -27,6 +27,7 @@ mod provider;
 mod shell_runner;
 mod store;
 mod store_backend;
+mod store_entities;
 mod store_rows;
 
 use execution::{
