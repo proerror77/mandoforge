@@ -93,6 +93,7 @@ Next store work:
 - Keep session event log storage methods in `store_events`.
 - Keep tool-call storage methods in `store_tool_calls`.
 - Keep artifact storage methods in `store_artifacts`.
+- Keep approval storage methods in `store_approvals`.
 - Split store methods into smaller modules.
 
 ## Event Log Contract
