@@ -620,8 +620,8 @@ async fn run_provider_harness(
     Ok(response)
 }
 
-fn provider_client_from_env() -> Result<Box<dyn ProviderClient>, AppError> {
-    if let Some(provider) = OpenAiCompatibleProviderClient::from_env()? {
+async fn provider_client_from_env() -> Result<Box<dyn ProviderClient>, AppError> {
+    if let Some(provider) = OpenAiCompatibleProviderClient::from_env().await? {
         Ok(Box::new(provider))
     } else {
         Ok(Box::new(MockProviderClient))
@@ -645,7 +645,7 @@ async fn run_session(
         ))
         .await?;
 
-    let provider = provider_client_from_env()?;
+    let provider = provider_client_from_env().await?;
     let provider_response = run_provider_harness(&state, id, provider.as_ref()).await?;
 
     state
@@ -1571,7 +1571,7 @@ async fn resume_provider_after_approval(
     state
         .set_session_status(session_id, SessionStatus::Running)
         .await?;
-    let provider = provider_client_from_env()?;
+    let provider = provider_client_from_env().await?;
     let provider_response = run_provider_harness(state, session_id, provider.as_ref()).await?;
     state
         .append_event(

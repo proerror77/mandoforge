@@ -42,7 +42,7 @@ impl SecretProviderConfig {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
-    fn from_lookup<F>(lookup: F) -> Result<Self, AppError>
+    pub(crate) fn from_lookup<F>(lookup: F) -> Result<Self, AppError>
     where
         F: Fn(&str) -> Option<String>,
     {

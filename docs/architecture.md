@@ -22,12 +22,13 @@ Aligned:
 - Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh` or the `mandoforge-worker` Rust binary; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
 - Worker deployment entries exist for Docker Compose and Kubernetes.
 - Approval resume executes the approved tool, rebuilds harness context, resumes the provider for provider-run sessions, and then emits the final provider response before completing the session.
+- OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed until a production provider exists.
 
 Not yet aligned:
 
 - External worker mode is still API-drained; a separate broker-backed queue remains later-stage work.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
-- MCP Gateway, OTel, RBAC, and Vault are later-stage work.
+- MCP Gateway, OTel export, full request-path RBAC coverage, and production Vault providers remain later-stage work.
 
 ## Runtime Layers
 

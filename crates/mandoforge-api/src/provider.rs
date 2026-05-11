@@ -6,7 +6,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::AppError;
+use crate::{
+    AppError,
+    secrets::{ReservedSecretProvider, SecretProvider, SecretProviderConfig, SecretRef},
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HarnessContext {
@@ -93,19 +96,35 @@ impl ProviderClient for MockProviderClient {
 }
 
 impl OpenAiCompatibleProviderClient {
-    pub(crate) fn from_env() -> Result<Option<Self>, AppError> {
-        let Ok(base_url) = std::env::var("MANDOFORGE_PROVIDER_BASE_URL") else {
+    pub(crate) async fn from_env() -> Result<Option<Self>, AppError> {
+        Self::from_lookup_with_secret_provider(
+            |key| std::env::var(key).ok(),
+            &ReservedSecretProvider,
+        )
+        .await
+    }
+
+    async fn from_lookup_with_secret_provider<F>(
+        lookup: F,
+        secret_provider: &dyn SecretProvider,
+    ) -> Result<Option<Self>, AppError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let Some(base_url) = lookup("MANDOFORGE_PROVIDER_BASE_URL") else {
             return Ok(None);
         };
-        let Ok(api_key) = std::env::var("MANDOFORGE_PROVIDER_API_KEY") else {
+        let Some(api_key) = lookup("MANDOFORGE_PROVIDER_API_KEY") else {
             return Ok(None);
         };
         let base_url = base_url.trim().trim_end_matches('/').to_string();
         if base_url.is_empty() || api_key.trim().is_empty() {
             return Ok(None);
         }
-        let model = std::env::var("MANDOFORGE_PROVIDER_MODEL")
-            .unwrap_or_else(|_| "gpt-5.4-mini".to_string())
+        let api_key =
+            provider_api_key_from_env_value(api_key.trim(), &lookup, secret_provider).await?;
+        let model = lookup("MANDOFORGE_PROVIDER_MODEL")
+            .unwrap_or_else(|| "gpt-5.4-mini".to_string())
             .trim()
             .to_string();
         let client = reqwest::Client::builder()
@@ -118,6 +137,34 @@ impl OpenAiCompatibleProviderClient {
             client,
         }))
     }
+}
+
+async fn provider_api_key_from_env_value<F>(
+    value: &str,
+    lookup: &F,
+    secret_provider: &dyn SecretProvider,
+) -> Result<String, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(secret_ref) = provider_api_key_secret_ref(value)? else {
+        return Ok(value.to_string());
+    };
+    let config = SecretProviderConfig::from_lookup(lookup)?;
+    let secret = secret_provider.read_secret(&config, &secret_ref).await?;
+    Ok(secret.expose_for_provider_use().to_string())
+}
+
+fn provider_api_key_secret_ref(value: &str) -> Result<Option<SecretRef>, AppError> {
+    let Some(reference) = value.strip_prefix("vault:") else {
+        return Ok(None);
+    };
+    let Some((path, key)) = reference.split_once('#') else {
+        return Err(AppError::bad_request(
+            "vault provider API key reference must use vault:path#key",
+        ));
+    };
+    Ok(Some(SecretRef::new(path, key)?))
 }
 
 #[async_trait]
@@ -298,4 +345,75 @@ fn redact_provider_error(value: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("provider returned an error")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        OpenAiCompatibleProviderClient, provider_api_key_from_env_value,
+        provider_api_key_secret_ref,
+    };
+    use crate::secrets::ReservedSecretProvider;
+
+    #[test]
+    fn parses_provider_api_key_vault_reference() {
+        let secret_ref =
+            provider_api_key_secret_ref("vault:providers/openai#api_key").expect("valid ref");
+        let secret_ref = secret_ref.expect("secret ref");
+
+        assert_eq!(secret_ref.path, "providers/openai");
+        assert_eq!(secret_ref.key, "api_key");
+        assert!(
+            provider_api_key_secret_ref("plain-key")
+                .expect("plain")
+                .is_none()
+        );
+        assert!(provider_api_key_secret_ref("vault:providers/openai").is_err());
+    }
+
+    #[tokio::test]
+    async fn openai_provider_uses_direct_env_api_key_without_secret_provider() {
+        let provider = OpenAiCompatibleProviderClient::from_lookup_with_secret_provider(
+            |key| match key {
+                "MANDOFORGE_PROVIDER_BASE_URL" => Some("https://provider.example".to_string()),
+                "MANDOFORGE_PROVIDER_API_KEY" => Some("direct-key".to_string()),
+                "MANDOFORGE_PROVIDER_MODEL" => Some("model-a".to_string()),
+                _ => None,
+            },
+            &ReservedSecretProvider,
+        )
+        .await
+        .expect("provider")
+        .expect("configured provider");
+
+        assert_eq!(provider.base_url, "https://provider.example");
+        assert_eq!(provider.api_key, "direct-key");
+        assert_eq!(provider.model, "model-a");
+    }
+
+    #[tokio::test]
+    async fn openai_provider_vault_key_fails_closed_with_reserved_secret_provider() {
+        let result = OpenAiCompatibleProviderClient::from_lookup_with_secret_provider(
+            |key| match key {
+                "MANDOFORGE_PROVIDER_BASE_URL" => Some("https://provider.example".to_string()),
+                "MANDOFORGE_PROVIDER_API_KEY" => Some("vault:providers/openai#api_key".to_string()),
+                "MANDOFORGE_VAULT_ADDR" => Some("http://vault:8200".to_string()),
+                _ => None,
+            },
+            &ReservedSecretProvider,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_api_key_value_keeps_plaintext_value() {
+        let api_key =
+            provider_api_key_from_env_value("direct-key", &|_| None, &ReservedSecretProvider)
+                .await
+                .expect("direct key");
+
+        assert_eq!(api_key, "direct-key");
+    }
 }
