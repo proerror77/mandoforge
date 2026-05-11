@@ -24,6 +24,11 @@ services:
       MANDOFORGE_ADDR: 0.0.0.0:8787
       MANDOFORGE_WORKSPACE_ROOT: /var/lib/mandoforge/workspaces
       DATABASE_URL: postgres://mandoforge:mandoforge@postgres:5432/mandoforge
+      MANDOFORGE_PROVIDER_BASE_URL: ${MANDOFORGE_PROVIDER_BASE_URL:-}
+      MANDOFORGE_PROVIDER_API_KEY: ${MANDOFORGE_PROVIDER_API_KEY:-}
+      MANDOFORGE_PROVIDER_MODEL: ${MANDOFORGE_PROVIDER_MODEL:-gpt-5.4-mini}
+      MANDOFORGE_SHELL_RUNNER: ${MANDOFORGE_SHELL_RUNNER:-host}
+      MANDOFORGE_SHELL_DOCKER_IMAGE: ${MANDOFORGE_SHELL_DOCKER_IMAGE:-alpine:3.20}
     ports:
       - "8787:8787"
     depends_on:
@@ -35,4 +40,3 @@ services:
 volumes:
   postgres-data:
   workspace-data:
-

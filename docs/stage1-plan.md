@@ -158,17 +158,28 @@ Implemented:
 - Generic demo migrations and seed data.
 - Mock Generic Runtime Diagnostics Demo.
 - Tool call and audit log persistence for the demo path.
-- Stage 1 YAML policy.
-- Static UI for timeline/report/approval queue.
+- Harness context builder plus mock OpenAI-compatible provider request/response loop.
+- Env-gated OpenAI-compatible HTTP provider transport.
+- Provider-emitted tool calls now execute through the shared Tool Router path.
+- `ToolExecutor` trait and registry for `file.read`, `sql.get_schema`, and `sql.query`.
+- `artifact.create` and `approval.request` executors.
+- Postgres `sql.query` execution path with read-only validation and JSON row normalization.
+- Stage 1 YAML policy loading and enforcement.
+- Approval resume execution for `file.write` and `shell.exec`.
+- Optional Docker sandbox wrapper for approved `shell.exec`.
+- Approved `codex.exec` adapter path with JSONL event ingestion and final-message artifact capture.
+- Static UI for Agent Builder, timeline/report/approval queue, artifact/tool-call details, and audit details.
+- Stage 1 demo script and deployment guide.
+- Stage 1 final gate script.
+- Live Postgres `sql.query` verification script.
+- Live Docker shell runner verification script.
+- Final gate coverage for approved `codex.exec` JSONL ingestion and final-message artifact capture.
+- Repeatable `generic_demo.platform_events` seed generator.
 - Docker Compose.
 - K8s skeleton under `deploy/k8s`.
-- SQL safety tests.
+- SQL safety and approval resume tests.
 
-Not yet implemented:
+Post-Stage 1 hardening:
 
-- Real provider/harness loop.
-- Real Tool trait and registry.
-- Full `tool_calls` / `audit_logs` coverage for provider-driven and worker paths.
-- Approval resume semantics.
-- Docker sandbox runner.
-- Codex JSONL event parsing.
+- Split worker processes for sandbox/Codex execution.
+- Run a credentialed external provider smoke test when provider credentials are available.

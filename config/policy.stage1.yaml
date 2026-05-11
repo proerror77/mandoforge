@@ -24,6 +24,7 @@ allowed_tools:
   generic-orchestrator-agent:
     - file.read
     - file.write
+    - sql.get_schema
     - sql.query
     - shell.exec
     - codex.exec

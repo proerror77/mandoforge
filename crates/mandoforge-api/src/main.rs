@@ -1,6 +1,13 @@
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::{Component, Path as FsPath, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -26,6 +33,7 @@ struct AppState {
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
+    policy: PolicyConfig,
 }
 
 #[derive(Default)]
@@ -173,6 +181,41 @@ struct ToolCall {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct HarnessContext {
+    session_id: Uuid,
+    event_count: usize,
+    last_user_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProviderToolCall {
+    tool_name: String,
+    args: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProviderResponse {
+    plan: Vec<String>,
+    tool_calls: Vec<ProviderToolCall>,
+}
+
+#[async_trait]
+trait ProviderClient: Send + Sync {
+    fn name(&self) -> &'static str;
+
+    async fn complete(&self, context: HarnessContext) -> Result<ProviderResponse, AppError>;
+}
+
+struct MockProviderClient;
+
+struct OpenAiCompatibleProviderClient {
+    base_url: String,
+    api_key: String,
+    model: String,
+    client: reqwest::Client,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AuditLog {
     id: Uuid,
@@ -204,10 +247,131 @@ struct ToolDescriptor {
     description: &'static str,
 }
 
+#[async_trait]
+trait ToolExecutor: Send + Sync {
+    fn descriptor(&self) -> ToolDescriptor;
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        tool_call: &ToolCall,
+    ) -> Result<Value, AppError>;
+}
+
+struct FileReadTool;
+struct SqlSchemaTool;
+struct SqlQueryTool;
+struct ArtifactCreateTool;
+struct ApprovalRequestTool;
+
 #[derive(Debug, Deserialize)]
 struct ExecuteTool {
     session_id: Uuid,
     args: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PolicyConfig {
+    #[serde(default)]
+    blocked_tools: Vec<String>,
+    #[serde(default)]
+    approval_required: Vec<ApprovalRequiredRule>,
+    #[serde(default)]
+    allowed_tools: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    sql_policy: SqlPolicy,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApprovalRequiredRule {
+    tool: String,
+    risk: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SqlPolicy {
+    #[serde(default = "default_sql_max_rows")]
+    max_rows: i64,
+    #[serde(default)]
+    blocked_keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolPolicyDecision {
+    decision: &'static str,
+    risk_level: String,
+    reason: String,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            blocked_tools: vec![
+                "secret.read".to_string(),
+                "production_db.write".to_string(),
+                "system.network.unrestricted".to_string(),
+                "shell.exec.unrestricted".to_string(),
+            ],
+            approval_required: vec![
+                ApprovalRequiredRule {
+                    tool: "shell.exec".to_string(),
+                    risk: "high".to_string(),
+                },
+                ApprovalRequiredRule {
+                    tool: "codex.exec".to_string(),
+                    risk: "high".to_string(),
+                },
+                ApprovalRequiredRule {
+                    tool: "file.write".to_string(),
+                    risk: "medium".to_string(),
+                },
+                ApprovalRequiredRule {
+                    tool: "http.request".to_string(),
+                    risk: "high".to_string(),
+                },
+            ],
+            allowed_tools: HashMap::from([(
+                "generic-orchestrator-agent".to_string(),
+                vec![
+                    "file.read".to_string(),
+                    "file.write".to_string(),
+                    "sql.get_schema".to_string(),
+                    "sql.query".to_string(),
+                    "shell.exec".to_string(),
+                    "codex.exec".to_string(),
+                    "approval.request".to_string(),
+                    "artifact.create".to_string(),
+                ],
+            )]),
+            sql_policy: SqlPolicy {
+                max_rows: default_sql_max_rows(),
+                blocked_keywords: vec![
+                    "INSERT".to_string(),
+                    "UPDATE".to_string(),
+                    "DELETE".to_string(),
+                    "DROP".to_string(),
+                    "ALTER".to_string(),
+                    "CREATE".to_string(),
+                    "TRUNCATE".to_string(),
+                    "GRANT".to_string(),
+                    "REVOKE".to_string(),
+                    "COPY".to_string(),
+                    "CALL".to_string(),
+                    "DO".to_string(),
+                ],
+            },
+        }
+    }
+}
+
+impl Default for SqlPolicy {
+    fn default() -> Self {
+        Self {
+            max_rows: default_sql_max_rows(),
+            blocked_keywords: PolicyConfig::default().sql_policy.blocked_keywords,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -228,6 +392,7 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".mandoforge/workspaces"));
     tokio::fs::create_dir_all(&workspace_root).await?;
+    let policy = load_policy_config("config/policy.stage1.yaml").await?;
 
     let tenant_id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid");
     let store = match std::env::var("DATABASE_URL") {
@@ -248,13 +413,27 @@ async fn main() -> Result<()> {
         store,
         workspace_root,
         tenant_id,
+        policy,
     };
     state
         .seed_demo_agent()
         .await
         .map_err(|error| anyhow::anyhow!(error.message))?;
 
-    let app = Router::new()
+    let app = build_router(state);
+
+    let addr: SocketAddr = std::env::var("MANDOFORGE_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8787".to_string())
+        .parse()
+        .context("invalid MANDOFORGE_ADDR")?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(%addr, "mandoforge api listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn build_router(state: AppState) -> Router {
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -282,20 +461,18 @@ async fn main() -> Result<()> {
         .fallback_service(ServeDir::new("web"))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
-
-    let addr: SocketAddr = std::env::var("MANDOFORGE_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:8787".to_string())
-        .parse()
-        .context("invalid MANDOFORGE_ADDR")?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "mandoforge api listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
+}
+
+async fn load_policy_config(path: &str) -> Result<PolicyConfig> {
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("failed to read policy config {path}"))?;
+    serde_yml::from_str(&content).with_context(|| format!("failed to parse policy config {path}"))
 }
 
 async fn run_migrations(pool: &PgPool) -> Result<()> {
@@ -822,6 +999,31 @@ impl AppState {
         }
     }
 
+    async fn get_tool_call(&self, id: Uuid) -> Result<ToolCall, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .tool_calls
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("tool call not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at
+                     FROM tool_calls
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("tool call not found"))?;
+                tool_call_from_row(row)
+            }
+        }
+    }
+
     async fn list_tool_calls(&self, session_id: Option<Uuid>) -> Result<Vec<ToolCall>, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -1201,75 +1403,289 @@ fn new_audit_log(
     }
 }
 
-async fn record_completed_tool_call(
+#[async_trait]
+impl ProviderClient for MockProviderClient {
+    fn name(&self) -> &'static str {
+        "mock-openai-compatible"
+    }
+
+    async fn complete(&self, _context: HarnessContext) -> Result<ProviderResponse, AppError> {
+        Ok(ProviderResponse {
+            plan: vec![
+                "Read README and Stage 1 policy/config from the workspace".to_string(),
+                "Query generic_demo.platform_events for recent session health".to_string(),
+                "Request approval before shell execution or writing diagnostics.md".to_string(),
+                "Create diagnostics.md as an artifact and emit a final summary".to_string(),
+            ],
+            tool_calls: vec![
+                ProviderToolCall {
+                    tool_name: "file.read".to_string(),
+                    args: json!({"paths": ["README.md", "config/policy.stage1.yaml"]}),
+                },
+                ProviderToolCall {
+                    tool_name: "sql.get_schema".to_string(),
+                    args: json!({"schema": "generic_demo"}),
+                },
+                ProviderToolCall {
+                    tool_name: "sql.query".to_string(),
+                    args: json!({"sql": "select event_type, status, count(*) from generic_demo.platform_events where created_at >= now() - interval '24 hours' group by event_type, status"}),
+                },
+                ProviderToolCall {
+                    tool_name: "shell.exec".to_string(),
+                    args: json!({"command": "pwd"}),
+                },
+            ],
+        })
+    }
+}
+
+impl OpenAiCompatibleProviderClient {
+    fn from_env() -> Result<Option<Self>, AppError> {
+        let Ok(base_url) = std::env::var("MANDOFORGE_PROVIDER_BASE_URL") else {
+            return Ok(None);
+        };
+        let Ok(api_key) = std::env::var("MANDOFORGE_PROVIDER_API_KEY") else {
+            return Ok(None);
+        };
+        let base_url = base_url.trim().trim_end_matches('/').to_string();
+        if base_url.is_empty() || api_key.trim().is_empty() {
+            return Ok(None);
+        }
+        let model = std::env::var("MANDOFORGE_PROVIDER_MODEL")
+            .unwrap_or_else(|_| default_model())
+            .trim()
+            .to_string();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()?;
+        Ok(Some(Self {
+            base_url,
+            api_key,
+            model,
+            client,
+        }))
+    }
+}
+
+#[async_trait]
+impl ProviderClient for OpenAiCompatibleProviderClient {
+    fn name(&self) -> &'static str {
+        "openai-compatible-http"
+    }
+
+    async fn complete(&self, context: HarnessContext) -> Result<ProviderResponse, AppError> {
+        let endpoint = format!("{}/v1/chat/completions", self.base_url);
+        let body = json!({
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are MandoForge's Stage 1 provider harness. Return tool calls only for the supplied generic runtime session. Use available tools through the runtime policy path."
+                },
+                {
+                    "role": "user",
+                    "content": serde_json::to_string(&context)?
+                }
+            ],
+            "tools": provider_tool_schemas(),
+            "tool_choice": "auto"
+        });
+        let response = self
+            .client
+            .post(endpoint)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        let value: Value = response.json().await?;
+        if !status.is_success() {
+            return Err(AppError::bad_request(format!(
+                "provider request failed with status {status}: {}",
+                redact_provider_error(&value)
+            )));
+        }
+        parse_openai_compatible_provider_response(&value)
+    }
+}
+
+fn provider_tool_schemas() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "file.read",
+                "description": "Read summarized files from the session workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"paths": {"type": "array", "items": {"type": "string"}}},
+                    "required": ["paths"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "sql.get_schema",
+                "description": "Return the generic demo database schema.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"schema": {"type": "string"}},
+                    "required": ["schema"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "sql.query",
+                "description": "Execute read-only SQL against generic demo data.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"sql": {"type": "string"}},
+                    "required": ["sql"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "shell.exec",
+                "description": "Request approval to run a shell command in the session workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"]
+                }
+            }
+        }
+    ])
+}
+
+fn parse_openai_compatible_provider_response(value: &Value) -> Result<ProviderResponse, AppError> {
+    let message = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .ok_or_else(|| AppError::bad_request("provider response missing choices[0].message"))?;
+    let content = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(parse_provider_tool_call)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let plan = provider_plan_from_content(content).unwrap_or_else(|| {
+        vec![format!(
+            "Provider returned {} runtime tool call(s)",
+            tool_calls.len()
+        )]
+    });
+    Ok(ProviderResponse { plan, tool_calls })
+}
+
+fn parse_provider_tool_call(value: &Value) -> Option<ProviderToolCall> {
+    let function = value.get("function")?;
+    let tool_name = function.get("name")?.as_str()?.to_string();
+    let arguments = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
+    let args =
+        serde_json::from_str(arguments).unwrap_or_else(|_| json!({"raw_arguments": arguments}));
+    Some(ProviderToolCall { tool_name, args })
+}
+
+fn provider_plan_from_content(content: &str) -> Option<Vec<String>> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(plan) = value.get("plan").and_then(Value::as_array) {
+            let steps: Vec<_> = plan
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            if !steps.is_empty() {
+                return Some(steps);
+            }
+        }
+    }
+    Some(
+        trimmed
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+fn redact_provider_error(value: &Value) -> String {
+    value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("provider returned an error")
+        .to_string()
+}
+
+async fn build_harness_context(
     state: &AppState,
     session_id: Uuid,
-    tool_name: &str,
-    risk_level: &str,
-    args: Value,
-    content: Value,
-    summary: &str,
-) -> Result<ToolCall, AppError> {
-    let call_event = state
+) -> Result<HarnessContext, AppError> {
+    let events = state.list_events(session_id).await?;
+    let last_user_message = events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == "user.message")
+        .and_then(|event| event.payload.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(HarnessContext {
+        session_id,
+        event_count: events.len(),
+        last_user_message,
+    })
+}
+
+async fn run_provider_harness(
+    state: &AppState,
+    session_id: Uuid,
+    provider: &dyn ProviderClient,
+) -> Result<ProviderResponse, AppError> {
+    let context = build_harness_context(state, session_id).await?;
+    let provider_name = provider.name();
+    state
         .append_event(
-            "tool",
+            "agent",
             None,
             session_id,
-            "tool.call",
-            json!({"tool": tool_name, "args": args}),
+            "llm.request",
+            json!({"provider": provider_name, "context": context}),
         )
         .await?;
-    let tool_call = state
-        .insert_tool_call(ToolCall {
-            id: Uuid::new_v4(),
-            session_id,
-            event_id: Some(call_event.id),
-            tool_name: tool_name.to_string(),
-            args,
-            status: "running".to_string(),
-            risk_level: risk_level.to_string(),
-            policy_decision: json!({"decision": "allowed"}),
-            result: None,
-            error: None,
-            started_at: Some(Utc::now()),
-            completed_at: None,
-            created_at: Utc::now(),
-        })
-        .await?;
+    let response = provider.complete(context).await?;
     state
         .append_event(
-            "system",
+            "agent",
             None,
             session_id,
-            "policy.allowed",
-            json!({"tool_call_id": tool_call.id, "tool": tool_name, "risk_level": risk_level}),
+            "llm.response",
+            json!({"provider": provider_name, "tool_calls": response.tool_calls}),
         )
         .await?;
-    let result = json!({"tool": tool_name, "summary": summary, "content": content});
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            session_id,
-            "tool.result",
-            result.clone(),
-        )
-        .await?;
-    let tool_call = state
-        .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(session_id),
-            "tool",
-            Some(tool_call.id),
-            "tool.completed",
-            "tool_call",
-            Some(tool_call.id),
-            json!({"tool": tool_name, "risk_level": risk_level, "summary": summary}),
-        ))
-        .await?;
-    Ok(tool_call)
+    Ok(response)
 }
 
 async fn run_session(
@@ -1289,6 +1705,14 @@ async fn run_session(
         ))
         .await?;
 
+    let provider: Box<dyn ProviderClient> =
+        if let Some(provider) = OpenAiCompatibleProviderClient::from_env()? {
+            Box::new(provider)
+        } else {
+            Box::new(MockProviderClient)
+        };
+    let provider_response = run_provider_harness(&state, id, provider.as_ref()).await?;
+
     state
         .append_event(
             "agent",
@@ -1296,48 +1720,27 @@ async fn run_session(
             id,
             "agent.plan",
             json!({
-                "steps": [
-                    "Read README and Stage 1 policy/config from the workspace",
-                    "Query generic_demo.platform_events for recent session health",
-                    "Request approval before shell execution or writing diagnostics.md",
-                    "Create diagnostics.md as an artifact and emit a final summary"
-                ]
+                "steps": provider_response.plan
             }),
         )
         .await?;
 
-    record_completed_tool_call(
-        &state,
-        id,
-        "file.read",
-        "low",
-        json!({"paths": ["README.md", "config/policy.stage1.yaml"]}),
-        generic_file_read_summary(),
-        "Read workspace README and config policy summary",
-    )
-    .await?;
-
-    record_completed_tool_call(
-        &state,
-        id,
-        "sql.get_schema",
-        "low",
-        json!({"schema": "generic_demo"}),
-        generic_schema(),
-        "Generic demo SQL schema loaded",
-    )
-    .await?;
-
-    record_completed_tool_call(
-        &state,
-        id,
-        "sql.query",
-        "medium",
-        json!({"sql": "select event_type, status, count(*) from generic_demo.platform_events where created_at >= now() - interval '24 hours' group by event_type, status"}),
-        generic_diagnostics(),
-        "Recent platform_events status query completed",
-    )
-    .await?;
+    let mut waiting_for_approval = false;
+    for tool_call in provider_response.tool_calls {
+        let result = execute_tool_invocation(
+            &state,
+            &tool_call.tool_name,
+            ExecuteTool {
+                session_id: id,
+                args: tool_call.args,
+            },
+        )
+        .await?;
+        if result.get("status").and_then(Value::as_str) == Some("approval_required") {
+            waiting_for_approval = true;
+            break;
+        }
+    }
 
     let artifact = Artifact {
         id: Uuid::new_v4(),
@@ -1372,90 +1775,6 @@ async fn run_session(
         ))
         .await?;
 
-    let shell_call_event = state
-        .append_event(
-            "tool",
-            None,
-            id,
-            "tool.call",
-            json!({"tool": "shell.exec", "args": {"command": "ls -la && test -f README.md"}}),
-        )
-        .await?;
-    let shell_tool_call = state
-        .insert_tool_call(ToolCall {
-            id: Uuid::new_v4(),
-            session_id: id,
-            event_id: Some(shell_call_event.id),
-            tool_name: "shell.exec".to_string(),
-            args: json!({"command": "ls -la && test -f README.md"}),
-            status: "waiting_approval".to_string(),
-            risk_level: "high".to_string(),
-            policy_decision: json!({
-                "decision": "requires_approval",
-                "reason": "shell.exec requires human approval in Stage 1",
-            }),
-            result: None,
-            error: None,
-            started_at: None,
-            completed_at: None,
-            created_at: Utc::now(),
-        })
-        .await?;
-    state
-        .append_event(
-            "system",
-            None,
-            id,
-            "policy.requires_approval",
-            json!({"tool_call_id": shell_tool_call.id, "tool": "shell.exec", "risk_level": "high"}),
-        )
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(id),
-            "system",
-            None,
-            "policy.requires_approval",
-            "tool_call",
-            Some(shell_tool_call.id),
-            json!({"tool": "shell.exec", "risk_level": "high"}),
-        ))
-        .await?;
-
-    let approval = Approval {
-        id: Uuid::new_v4(),
-        session_id: id,
-        tool_call_id: Some(shell_tool_call.id),
-        action: "shell.exec".to_string(),
-        risk_level: "high".to_string(),
-        reason: "The diagnostics task requested a shell command. Stage 1 policy requires human approval before shell execution.".to_string(),
-        evidence: json!({"command": "ls -la && test -f README.md", "sandbox_mode": "workspace_write", "network": "disabled"}),
-        status: "pending".to_string(),
-        created_at: Utc::now(),
-        decided_at: None,
-    };
-    let approval = state.insert_approval(approval).await?;
-    state
-        .append_event(
-        "system",
-        Some(approval.id),
-        id,
-        "approval.requested",
-        json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence}),
-    )
-    .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(id),
-            "system",
-            None,
-            "approval.requested",
-            "approval",
-            Some(approval.id),
-            json!({"tool_call_id": approval.tool_call_id, "action": approval.action, "risk_level": approval.risk_level}),
-        ))
-        .await?;
-
     state
         .append_event(
         "agent",
@@ -1470,19 +1789,34 @@ async fn run_session(
                 "policy_events": ["policy.requires_approval for shell.exec"],
                 "artifacts": ["diagnostics.md"],
                 "next_steps": [
-                    "Implement real Tool trait execution for file.read, sql.query, shell.exec, and file.write",
-                    "Persist tool_calls and audit_logs for every tool path",
-                    "Replace mock harness events with provider-driven tool-call parsing",
-                    "Wire approval resume to continue the same session after human decision"
+                    "Add live external provider transport behind the ProviderClient trait",
+                    "Add Docker-backed sandbox execution for shell workers",
+                    "Run Postgres-backed sql.query integration verification"
                 ]
             }
         }),
     )
     .await?;
 
-    let session = state
-        .set_session_status(id, SessionStatus::WaitingApproval)
-        .await?;
+    let session = if waiting_for_approval {
+        state
+            .set_session_status(id, SessionStatus::WaitingApproval)
+            .await?
+    } else {
+        let session = state
+            .set_session_status(id, SessionStatus::Completed)
+            .await?;
+        state
+            .append_event(
+                "system",
+                None,
+                id,
+                "session.completed",
+                json!({"reason": "provider tool loop completed"}),
+            )
+            .await?;
+        session
+    };
     Ok(Json(session))
 }
 
@@ -1507,27 +1841,256 @@ async fn stream_events(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-async fn list_tools() -> Json<Vec<ToolDescriptor>> {
-    Json(vec![
+#[async_trait]
+impl ToolExecutor for FileReadTool {
+    fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "file.read",
             risk: "low",
             description: "Read files inside the session workspace",
-        },
-        ToolDescriptor {
-            name: "file.write",
-            risk: "medium",
-            description: "Write files inside the session workspace after approval",
-        },
+        }
+    }
+
+    async fn execute(
+        &self,
+        _state: &AppState,
+        _input: &ExecuteTool,
+        _tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        Ok(generic_file_read_summary())
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for SqlSchemaTool {
+    fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "sql.get_schema",
             risk: "low",
             description: "Return generic demo SQL schema",
-        },
+        }
+    }
+
+    async fn execute(
+        &self,
+        _state: &AppState,
+        _input: &ExecuteTool,
+        _tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        Ok(generic_schema())
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for SqlQueryTool {
+    fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "sql.query",
             risk: "medium",
             description: "Execute read-only SQL against generic demo data",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        _tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        let sql = input
+            .args
+            .get("sql")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        ensure_read_only_sql_with_policy(sql, &state.policy.sql_policy)?;
+        match &state.store {
+            StoreBackend::Postgres(pool) => {
+                execute_postgres_sql_query(pool, sql, state.policy.sql_policy.max_rows).await
+            }
+            StoreBackend::Memory(_) => Ok(json!({"rows": generic_diagnostics(), "row_count": 4})),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for ArtifactCreateTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "artifact.create",
+            risk: "low",
+            description: "Create a session artifact from normalized tool output",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        let name = input
+            .args
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("artifact.json")
+            .to_string();
+        let artifact_type = input
+            .args
+            .get("artifact_type")
+            .or_else(|| input.args.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("json")
+            .to_string();
+        let path = input
+            .args
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let content = input
+            .args
+            .get("content")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            artifact_type,
+            name,
+            path,
+            content,
+            created_at: Utc::now(),
+        };
+        let artifact = state.insert_artifact(artifact).await?;
+        state
+            .append_event(
+                "system",
+                Some(artifact.id),
+                input.session_id,
+                "artifact.created",
+                json!({"artifact_id": artifact.id, "name": artifact.name, "path": artifact.path, "artifact_type": artifact.artifact_type, "tool_call_id": tool_call.id}),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "tool",
+                Some(tool_call.id),
+                "artifact.created",
+                "artifact",
+                Some(artifact.id),
+                json!({"name": artifact.name, "artifact_type": artifact.artifact_type}),
+            ))
+            .await?;
+        Ok(
+            json!({"artifact_id": artifact.id, "name": artifact.name, "path": artifact.path, "artifact_type": artifact.artifact_type}),
+        )
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for ApprovalRequestTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "approval.request",
+            risk: "low",
+            description: "Create an approval request linked to the current tool call",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        let action = input
+            .args
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("manual.approval")
+            .to_string();
+        let risk_level = input
+            .args
+            .get("risk_level")
+            .or_else(|| input.args.get("risk"))
+            .and_then(Value::as_str)
+            .unwrap_or("medium")
+            .to_string();
+        let reason = input
+            .args
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("Tool requested human approval.")
+            .to_string();
+        let evidence = input
+            .args
+            .get("evidence")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let approval = Approval {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            tool_call_id: Some(tool_call.id),
+            action,
+            risk_level,
+            reason,
+            evidence,
+            status: "pending".to_string(),
+            created_at: Utc::now(),
+            decided_at: None,
+        };
+        let approval = state.insert_approval(approval).await?;
+        state
+            .append_event(
+                "system",
+                Some(approval.id),
+                input.session_id,
+                "approval.requested",
+                json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence, "tool_call_id": tool_call.id}),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "tool",
+                Some(tool_call.id),
+                "approval.requested",
+                "approval",
+                Some(approval.id),
+                json!({"action": approval.action, "risk_level": approval.risk_level}),
+            ))
+            .await?;
+        state
+            .set_session_status(input.session_id, SessionStatus::WaitingApproval)
+            .await?;
+        Ok(json!({"status": "approval_requested", "approval_id": approval.id}))
+    }
+}
+
+fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
+    let tools: Vec<Box<dyn ToolExecutor>> = vec![
+        Box::new(ArtifactCreateTool),
+        Box::new(ApprovalRequestTool),
+        Box::new(FileReadTool),
+        Box::new(SqlSchemaTool),
+        Box::new(SqlQueryTool),
+    ];
+    tools
+        .into_iter()
+        .map(|tool| (tool.descriptor().name, tool))
+        .collect()
+}
+
+fn tool_descriptors() -> Vec<ToolDescriptor> {
+    let mut descriptors: Vec<_> = tool_registry()
+        .into_values()
+        .map(|tool| tool.descriptor())
+        .collect();
+    descriptors.extend([
+        ToolDescriptor {
+            name: "file.write",
+            risk: "medium",
+            description: "Write files inside the session workspace after approval",
         },
         ToolDescriptor {
             name: "shell.exec",
@@ -1539,7 +2102,13 @@ async fn list_tools() -> Json<Vec<ToolDescriptor>> {
             risk: "high",
             description: "Run Codex CLI in a session workspace",
         },
-    ])
+    ]);
+    descriptors.sort_by_key(|descriptor| descriptor.name);
+    descriptors
+}
+
+async fn list_tools() -> Json<Vec<ToolDescriptor>> {
+    Json(tool_descriptors())
 }
 
 async fn execute_tool(
@@ -1547,15 +2116,22 @@ async fn execute_tool(
     Path(name): Path<String>,
     Json(input): Json<ExecuteTool>,
 ) -> Result<Json<Value>, AppError> {
-    let risk_level = tool_risk_level(&name);
-    let requires_approval = matches!(name.as_str(), "file.write" | "shell.exec" | "codex.exec");
+    Ok(Json(execute_tool_invocation(&state, &name, input).await?))
+}
+
+async fn execute_tool_invocation(
+    state: &AppState,
+    name: &str,
+    input: ExecuteTool,
+) -> Result<Value, AppError> {
+    let policy_decision = state.policy.evaluate_tool(&name);
     let call_event = state
         .append_event(
             "tool",
             None,
             input.session_id,
             "tool.call",
-            json!({"tool": name, "args": input.args}),
+            json!({"tool": name, "args": input.args.clone()}),
         )
         .await?;
     let tool_call = state
@@ -1563,35 +2139,88 @@ async fn execute_tool(
             id: Uuid::new_v4(),
             session_id: input.session_id,
             event_id: Some(call_event.id),
-            tool_name: name.clone(),
+            tool_name: name.to_string(),
             args: input.args.clone(),
-            status: if requires_approval {
-                "waiting_approval".to_string()
-            } else {
-                "running".to_string()
-            },
-            risk_level: risk_level.to_string(),
-            policy_decision: if requires_approval {
-                json!({"decision": "requires_approval", "reason": format!("{name} requires approval in Stage 1")})
-            } else {
-                json!({"decision": "allowed"})
-            },
+            status: (match policy_decision.decision {
+                "allowed" => "running",
+                "requires_approval" => "waiting_approval",
+                "denied" => "denied",
+                _ => "denied",
+            })
+            .to_string(),
+            risk_level: policy_decision.risk_level.clone(),
+            policy_decision: json!({
+                "decision": policy_decision.decision,
+                "reason": policy_decision.reason.clone(),
+            }),
             result: None,
             error: None,
-            started_at: Some(Utc::now()),
+            started_at: if policy_decision.decision == "allowed" {
+                Some(Utc::now())
+            } else {
+                None
+            },
             completed_at: None,
             created_at: Utc::now(),
         })
         .await?;
-    if requires_approval {
-        let result = json!({"status": "approval_required", "reason": format!("{name} requires approval in Stage 1")});
+
+    if policy_decision.decision == "denied" {
+        let result = json!({"status": "denied", "reason": policy_decision.reason.clone()});
+        state
+            .append_event(
+                "system",
+                Some(tool_call.id),
+                input.session_id,
+                "policy.denied",
+                json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "denied", Some(result.clone()), None)
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "system",
+                Some(tool_call.id),
+                "policy.denied",
+                "tool_call",
+                Some(tool_call.id),
+                json!({"tool": name, "risk_level": policy_decision.risk_level.clone(), "status": "denied"}),
+            ))
+            .await?;
+        return Err(AppError::forbidden(
+            result["reason"].as_str().unwrap_or("tool denied"),
+        ));
+    }
+
+    if policy_decision.decision == "requires_approval" {
+        let approval = Approval {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            tool_call_id: Some(tool_call.id),
+            action: name.to_string(),
+            risk_level: policy_decision.risk_level.clone(),
+            reason: policy_decision.reason.clone(),
+            evidence: json!({"tool": name, "args": input.args}),
+            status: "pending".to_string(),
+            created_at: Utc::now(),
+            decided_at: None,
+        };
+        let approval = state.insert_approval(approval).await?;
+        let result = json!({
+            "status": "approval_required",
+            "approval_id": approval.id,
+            "reason": policy_decision.reason.clone()
+        });
         state
             .append_event(
                 "system",
                 Some(tool_call.id),
                 input.session_id,
                 "policy.requires_approval",
-                json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+                json!({"tool_call_id": tool_call.id, "tool": name, "approval_id": approval.id, "content": result}),
             )
             .await?;
         state
@@ -1600,29 +2229,107 @@ async fn execute_tool(
         state
             .append_audit_log(new_audit_log(
                 Some(input.session_id),
-                "tool",
+                "system",
                 Some(tool_call.id),
-                "tool.waiting_approval",
+                "policy.requires_approval",
                 "tool_call",
                 Some(tool_call.id),
-                json!({"tool": name, "risk_level": risk_level, "status": "waiting_approval"}),
+                json!({"tool": name, "risk_level": policy_decision.risk_level.clone(), "status": "waiting_approval", "approval_id": approval.id}),
             ))
             .await?;
-        return Ok(Json(result));
+        state
+            .append_event(
+                "system",
+                Some(approval.id),
+                input.session_id,
+                "approval.requested",
+                json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence}),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "system",
+                None,
+                "approval.requested",
+                "approval",
+                Some(approval.id),
+                json!({"tool_call_id": approval.tool_call_id, "action": approval.action, "risk_level": approval.risk_level}),
+            ))
+            .await?;
+        state
+            .set_session_status(input.session_id, SessionStatus::WaitingApproval)
+            .await?;
+        return Ok(result);
     }
-    let result = match name.as_str() {
-        "sql.get_schema" => generic_schema(),
-        "sql.query" => {
-            let sql = input
-                .args
-                .get("sql")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            ensure_read_only_sql(sql)?;
-            json!({"rows": generic_diagnostics(), "row_count": 4})
+
+    state
+        .append_event(
+            "system",
+            Some(tool_call.id),
+            input.session_id,
+            "policy.allowed",
+            json!({"tool_call_id": tool_call.id, "tool": name, "risk_level": policy_decision.risk_level.clone()}),
+        )
+        .await?;
+
+    let registry = tool_registry();
+    let Some(executor) = registry.get(name) else {
+        let error_payload = json!({"error": "unknown tool"});
+        state
+            .append_event(
+                "tool",
+                Some(tool_call.id),
+                input.session_id,
+                "tool.error",
+                json!({"tool_call_id": tool_call.id, "tool": name, "content": error_payload}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "tool",
+                Some(tool_call.id),
+                "tool.failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({"tool": name, "error": error_payload}),
+            ))
+            .await?;
+        return Err(AppError::not_found("unknown tool"));
+    };
+    let result = match executor.execute(&state, &input, &tool_call).await {
+        Ok(result) => result,
+        Err(error) => {
+            let error_payload = json!({"error": error.message.clone()});
+            state
+                .append_event(
+                    "tool",
+                    Some(tool_call.id),
+                    input.session_id,
+                    "tool.error",
+                    json!({"tool_call_id": tool_call.id, "tool": name, "content": error_payload}),
+                )
+                .await?;
+            state
+                .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+                .await?;
+            state
+                .append_audit_log(new_audit_log(
+                    Some(input.session_id),
+                    "tool",
+                    Some(tool_call.id),
+                    "tool.failed",
+                    "tool_call",
+                    Some(tool_call.id),
+                    json!({"tool": name, "error": error_payload}),
+                ))
+                .await?;
+            return Err(error);
         }
-        "file.read" => generic_file_read_summary(),
-        _ => return Err(AppError::not_found("unknown tool")),
     };
     let status = if result.get("status").and_then(Value::as_str) == Some("approval_required") {
         "waiting_approval"
@@ -1662,10 +2369,10 @@ async fn execute_tool(
             },
             "tool_call",
             Some(tool_call.id),
-            json!({"tool": name, "risk_level": risk_level, "status": status}),
+            json!({"tool": name, "risk_level": policy_decision.risk_level, "status": status}),
         ))
         .await?;
-    Ok(Json(result))
+    Ok(result)
 }
 
 async fn list_approvals(State(state): State<AppState>) -> Result<Json<Vec<Approval>>, AppError> {
@@ -1715,6 +2422,303 @@ async fn list_session_audit_logs(
     Ok(Json(state.list_audit_logs(Some(id)).await?))
 }
 
+async fn execute_approved_tool(state: &AppState, approval: &Approval) -> Result<(), AppError> {
+    let Some(tool_call_id) = approval.tool_call_id else {
+        return Ok(());
+    };
+    let tool_call = state.get_tool_call(tool_call_id).await?;
+    match tool_call.tool_name.as_str() {
+        "file.write" => execute_approved_file_write(state, approval, &tool_call).await,
+        "shell.exec" => execute_approved_shell(state, approval, &tool_call).await,
+        "codex.exec" => execute_approved_codex(state, approval, &tool_call).await,
+        _ => {
+            state
+                .update_tool_call_status(
+                    tool_call_id,
+                    "completed",
+                    Some(json!({"approval": "approved"})),
+                    None,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+async fn execute_approved_file_write(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<(), AppError> {
+    let relative_path = tool_call
+        .args
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("diagnostics.md");
+    let content = tool_call
+        .args
+        .get("content")
+        .or_else(|| tool_call.args.get("markdown"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let workspace = session_workspace(state, approval.session_id).await?;
+    let output_path = safe_workspace_path(&workspace, relative_path)?;
+    if let Some(parent) = output_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(&output_path, content).await?;
+
+    let result = json!({
+        "approval": "approved",
+        "path": relative_path,
+        "bytes": content.len(),
+    });
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+        )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
+        .await?;
+    let artifact = Artifact {
+        id: Uuid::new_v4(),
+        session_id: approval.session_id,
+        artifact_type: "file".to_string(),
+        name: FsPath::new(relative_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(relative_path)
+            .to_string(),
+        path: Some(relative_path.to_string()),
+        content: json!({"text": content}),
+        created_at: Utc::now(),
+    };
+    let artifact = state.insert_artifact(artifact).await?;
+    state
+        .append_event(
+            "system",
+            Some(artifact.id),
+            approval.session_id,
+            "artifact.created",
+            json!({"artifact_id": artifact.id, "name": artifact.name, "path": artifact.path, "artifact_type": artifact.artifact_type}),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "tool.completed",
+            "tool_call",
+            Some(tool_call.id),
+            json!({"tool": tool_call.tool_name, "path": relative_path, "resumed_after_approval": true}),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn execute_approved_shell(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<(), AppError> {
+    let command = tool_call
+        .args
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("shell.exec requires command"))?;
+    let workspace = session_workspace(state, approval.session_id).await?;
+    let runner = shell_runner();
+    let mut process = shell_command(&runner, &workspace, command);
+    let output = tokio::time::timeout(Duration::from_secs(30), process.output())
+        .await
+        .map_err(|_| AppError::bad_request("shell.exec timed out"))??;
+
+    let result = json!({
+        "approval": "approved",
+        "command": command,
+        "runner": runner,
+        "workspace": workspace.display().to_string(),
+        "exit_code": output.status.code(),
+        "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+        "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+    });
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+        )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "tool.completed",
+            "tool_call",
+            Some(tool_call.id),
+            json!({"tool": tool_call.tool_name, "command": command, "runner": runner, "exit_code": output.status.code(), "resumed_after_approval": true}),
+        ))
+        .await?;
+    Ok(())
+}
+
+fn shell_runner() -> String {
+    std::env::var("MANDOFORGE_SHELL_RUNNER")
+        .unwrap_or_else(|_| "host".to_string())
+        .trim()
+        .to_string()
+}
+
+fn shell_command(runner: &str, workspace: &FsPath, command: &str) -> Command {
+    if runner == "docker" {
+        let image = std::env::var("MANDOFORGE_SHELL_DOCKER_IMAGE")
+            .unwrap_or_else(|_| "alpine:3.20".to_string());
+        let mut process = Command::new("docker");
+        process.args(docker_shell_args(workspace, &image, command));
+        process
+    } else {
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(command).current_dir(workspace);
+        process
+    }
+}
+
+fn docker_shell_args(workspace: &FsPath, image: &str, command: &str) -> Vec<String> {
+    vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--network".to_string(),
+        "none".to_string(),
+        "--cpus".to_string(),
+        "1".to_string(),
+        "--memory".to_string(),
+        "512m".to_string(),
+        "-v".to_string(),
+        format!("{}:/workspace", workspace.display()),
+        "-w".to_string(),
+        "/workspace".to_string(),
+        image.to_string(),
+        "sh".to_string(),
+        "-lc".to_string(),
+        command.to_string(),
+    ]
+}
+
+async fn execute_approved_codex(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<(), AppError> {
+    let request: CodexRequest = serde_json::from_value(tool_call.args.clone())?;
+    match run_codex(state, approval.session_id, request).await {
+        Ok(result) => {
+            state
+                .append_event(
+                    "tool",
+                    Some(tool_call.id),
+                    approval.session_id,
+                    "tool.result",
+                    json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+                )
+                .await?;
+            state
+                .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
+                .await?;
+            state
+                .append_audit_log(new_audit_log(
+                    Some(approval.session_id),
+                    "tool",
+                    Some(tool_call.id),
+                    "tool.completed",
+                    "tool_call",
+                    Some(tool_call.id),
+                    json!({"tool": tool_call.tool_name, "resumed_after_approval": true}),
+                ))
+                .await?;
+            Ok(())
+        }
+        Err(error) => {
+            let error_payload = json!({"error": error.message.clone()});
+            state
+                .append_event(
+                    "tool",
+                    Some(tool_call.id),
+                    approval.session_id,
+                    "tool.error",
+                    json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
+                )
+                .await?;
+            state
+                .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+                .await?;
+            state
+                .append_audit_log(new_audit_log(
+                    Some(approval.session_id),
+                    "tool",
+                    Some(tool_call.id),
+                    "tool.failed",
+                    "tool_call",
+                    Some(tool_call.id),
+                    json!({"tool": tool_call.tool_name, "error": error_payload, "resumed_after_approval": true}),
+                ))
+                .await?;
+            Err(error)
+        }
+    }
+}
+
+async fn session_workspace(state: &AppState, session_id: Uuid) -> Result<PathBuf, AppError> {
+    let workspace = state.workspace_root.join(session_id.to_string());
+    tokio::fs::create_dir_all(&workspace).await?;
+    Ok(workspace)
+}
+
+fn safe_workspace_path(workspace: &FsPath, relative_path: &str) -> Result<PathBuf, AppError> {
+    let path = FsPath::new(relative_path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(AppError::bad_request(
+            "file.write path must stay inside the session workspace",
+        ));
+    }
+    Ok(workspace.join(path))
+}
+
+async fn execute_postgres_sql_query(
+    pool: &PgPool,
+    sql: &str,
+    max_rows: i64,
+) -> Result<Value, AppError> {
+    let query = wrap_read_only_sql_for_json(sql, max_rows);
+    let rows: Value = sqlx::query_scalar(&query).fetch_one(pool).await?;
+    let row_count = rows.as_array().map_or(0, Vec::len);
+    Ok(json!({"rows": rows, "row_count": row_count}))
+}
+
+fn wrap_read_only_sql_for_json(sql: &str, max_rows: i64) -> String {
+    let bounded_max_rows = max_rows.clamp(1, 5_000);
+    let inner = sql.trim().trim_end_matches(';').trim();
+    format!(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(t)), '[]'::jsonb) \
+         FROM (SELECT * FROM ({inner}) AS query_result LIMIT {bounded_max_rows}) AS t"
+    )
+}
+
 async fn decide_approval(
     state: AppState,
     approval_id: Uuid,
@@ -1731,16 +2735,7 @@ async fn decide_approval(
         )
         .await?;
     if status == "approved" {
-        if let Some(tool_call_id) = updated.tool_call_id {
-            state
-                .update_tool_call_status(
-                    tool_call_id,
-                    "completed",
-                    Some(json!({"approval": "approved"})),
-                    None,
-                )
-                .await?;
-        }
+        execute_approved_tool(&state, &updated).await?;
         state
             .set_session_status(updated.session_id, SessionStatus::Completed)
             .await?;
@@ -1815,6 +2810,38 @@ async fn run_codex(
     let final_message = tokio::fs::read_to_string(&last_message)
         .await
         .unwrap_or_default();
+    for event in parse_codex_jsonl(&stdout) {
+        state
+            .append_event(
+                "tool",
+                None,
+                session_id,
+                "codex.event",
+                json!({"codex_event_type": codex_jsonl_event_type(&event), "event": event}),
+            )
+            .await?;
+    }
+    if !final_message.trim().is_empty() {
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id,
+            artifact_type: "markdown".to_string(),
+            name: "codex-final-message.md".to_string(),
+            path: Some("codex-final-message.md".to_string()),
+            content: json!({"markdown": final_message.clone()}),
+            created_at: Utc::now(),
+        };
+        let artifact = state.insert_artifact(artifact).await?;
+        state
+            .append_event(
+                "system",
+                Some(artifact.id),
+                session_id,
+                "artifact.created",
+                json!({"artifact_id": artifact.id, "name": artifact.name, "path": artifact.path, "artifact_type": artifact.artifact_type}),
+            )
+            .await?;
+    }
     let event_type = if output.status.success() {
         "codex.task.completed"
     } else {
@@ -1834,19 +2861,38 @@ async fn run_codex(
     )
 }
 
-fn ensure_read_only_sql(sql: &str) -> Result<(), AppError> {
+fn parse_codex_jsonl(stdout: &str) -> Vec<Value> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<Value>(line).ok()
+        })
+        .collect()
+}
+
+fn codex_jsonl_event_type(event: &Value) -> String {
+    event
+        .get("type")
+        .or_else(|| event.get("event"))
+        .or_else(|| event.get("msg"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn ensure_read_only_sql_with_policy(sql: &str, policy: &SqlPolicy) -> Result<(), AppError> {
     let lowered = sql.trim().to_lowercase();
     if lowered.matches(';').count() > 1 {
         return Err(AppError::bad_request("only one SQL statement is allowed"));
     }
-    let blocked = [
-        "insert", "update", "delete", "drop", "alter", "create", "truncate", "grant", "revoke",
-        "copy", "call", "do",
-    ];
-    if blocked
-        .iter()
-        .any(|keyword| lowered.starts_with(keyword) || lowered.contains(&format!(" {keyword} ")))
-    {
+    if policy.blocked_keywords.iter().any(|keyword| {
+        let keyword = keyword.to_lowercase();
+        lowered.starts_with(&keyword) || lowered.contains(&format!(" {keyword} "))
+    }) {
         return Err(AppError::bad_request(
             "sql.query only accepts read-only SQL",
         ));
@@ -1860,6 +2906,49 @@ fn ensure_read_only_sql(sql: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn ensure_read_only_sql(sql: &str) -> Result<(), AppError> {
+    ensure_read_only_sql_with_policy(sql, &PolicyConfig::default().sql_policy)
+}
+
+impl PolicyConfig {
+    fn evaluate_tool(&self, name: &str) -> ToolPolicyDecision {
+        if self.blocked_tools.iter().any(|tool| tool == name) {
+            return ToolPolicyDecision {
+                decision: "denied",
+                risk_level: tool_risk_level(name).to_string(),
+                reason: format!("{name} is blocked by config/policy.stage1.yaml"),
+            };
+        }
+
+        if let Some(rule) = self.approval_required.iter().find(|rule| rule.tool == name) {
+            return ToolPolicyDecision {
+                decision: "requires_approval",
+                risk_level: rule.risk.clone(),
+                reason: format!("{name} requires approval by config/policy.stage1.yaml"),
+            };
+        }
+
+        if self
+            .allowed_tools
+            .values()
+            .any(|tools| tools.iter().any(|tool| tool == name))
+        {
+            return ToolPolicyDecision {
+                decision: "allowed",
+                risk_level: tool_risk_level(name).to_string(),
+                reason: format!("{name} is allowed by config/policy.stage1.yaml"),
+            };
+        }
+
+        ToolPolicyDecision {
+            decision: "denied",
+            risk_level: "unknown".to_string(),
+            reason: format!("{name} is not allowed by config/policy.stage1.yaml"),
+        }
+    }
 }
 
 fn tool_risk_level(name: &str) -> &'static str {
@@ -1930,6 +3019,10 @@ fn default_model() -> String {
     "gpt-5.4-mini".to_string()
 }
 
+fn default_sql_max_rows() -> i64 {
+    500
+}
+
 fn default_session_title() -> String {
     "Untitled session".to_string()
 }
@@ -1956,6 +3049,13 @@ impl AppError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: message.into(),
         }
     }
@@ -1999,6 +3099,16 @@ impl From<sqlx::Error> for AppError {
     }
 }
 
+impl From<reqwest::Error> for AppError {
+    fn from(error: reqwest::Error) -> Self {
+        error!(%error, "provider transport error");
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: "provider transport error".to_string(),
+        }
+    }
+}
+
 impl From<tokio::time::error::Elapsed> for AppError {
     fn from(_: tokio::time::error::Elapsed) -> Self {
         Self::bad_request("operation timed out")
@@ -2023,6 +3133,11 @@ impl From<anyhow::Error> for Box<AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
 
     #[test]
     fn allows_read_only_sql() {
@@ -2044,5 +3159,775 @@ mod tests {
         ] {
             assert!(ensure_read_only_sql(sql).is_err(), "{sql}");
         }
+    }
+
+    #[test]
+    fn registry_contains_allowed_stage1_tools() {
+        let registry = tool_registry();
+        for expected in [
+            "artifact.create",
+            "approval.request",
+            "file.read",
+            "sql.get_schema",
+            "sql.query",
+        ] {
+            assert!(registry.contains_key(expected), "missing {expected}");
+        }
+
+        let descriptors = tool_descriptors();
+        for expected in ["file.write", "shell.exec", "codex.exec"] {
+            assert!(
+                descriptors
+                    .iter()
+                    .any(|descriptor| descriptor.name == expected),
+                "missing descriptor {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn wraps_read_only_sql_for_json_with_row_limit() {
+        let wrapped =
+            wrap_read_only_sql_for_json("select event_type from generic_demo.platform_events;", 25);
+        assert!(wrapped.contains("jsonb_agg"));
+        assert!(wrapped.contains("LIMIT 25"));
+        assert!(wrapped.contains("select event_type from generic_demo.platform_events"));
+        assert!(!wrapped.contains("platform_events;"));
+    }
+
+    #[test]
+    fn parses_codex_jsonl_events_and_ignores_non_json_lines() {
+        let events = parse_codex_jsonl(
+            r#"{"type":"session.started","id":"a"}
+not json
+{"msg":"agent.message","text":"done"}
+"#,
+        );
+        assert_eq!(events.len(), 2);
+        assert_eq!(codex_jsonl_event_type(&events[0]), "session.started");
+        assert_eq!(codex_jsonl_event_type(&events[1]), "agent.message");
+    }
+
+    #[test]
+    fn parses_openai_compatible_tool_calls() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "{\"plan\":[\"Read files\",\"Query demo data\"]}",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "file.read",
+                                "arguments": "{\"paths\":[\"README.md\"]}"
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "sql.query",
+                                "arguments": "{\"sql\":\"select * from generic_demo.platform_events limit 1\"}"
+                            }
+                        }
+                    ]
+                }
+            }]
+        });
+        let parsed =
+            parse_openai_compatible_provider_response(&response).expect("provider response parses");
+        assert_eq!(parsed.plan, vec!["Read files", "Query demo data"]);
+        assert_eq!(parsed.tool_calls.len(), 2);
+        assert_eq!(parsed.tool_calls[0].tool_name, "file.read");
+        assert_eq!(parsed.tool_calls[0].args["paths"][0], "README.md");
+        assert_eq!(parsed.tool_calls[1].tool_name, "sql.query");
+    }
+
+    #[test]
+    fn builds_docker_shell_runner_args_with_workspace_sandbox() {
+        let workspace = FsPath::new("/tmp/mandoforge-session");
+        let args = docker_shell_args(workspace, "alpine:3.20", "pwd");
+        assert_eq!(args[0], "run");
+        assert!(args.contains(&"--network".to_string()));
+        assert!(args.contains(&"none".to_string()));
+        assert!(args.contains(&"--memory".to_string()));
+        assert!(args.contains(&"512m".to_string()));
+        assert!(args.contains(&"/workspace".to_string()));
+        assert!(args.contains(&"alpine:3.20".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("pwd"));
+    }
+
+    async fn test_app() -> Router {
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: PolicyConfig::default(),
+        };
+        state.seed_demo_agent().await.expect("seed demo agent");
+        build_router(state)
+    }
+
+    fn test_workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.mandoforge/test-workspaces")
+    }
+
+    async fn request_json<T: for<'de> Deserialize<'de>>(app: Router, request: Request<Body>) -> T {
+        let response = app.oneshot(request).await.expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        serde_json::from_slice(&body).expect("json response")
+    }
+
+    async fn request_value(app: Router, request: Request<Body>) -> (StatusCode, Value) {
+        let response = app.oneshot(request).await.expect("request succeeds");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+        (status, value)
+    }
+
+    fn json_request(method: &str, uri: &str, body: Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("valid request")
+    }
+
+    #[tokio::test]
+    async fn generic_runtime_diagnostics_replay_api_flow() {
+        let app = test_app().await;
+
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.name == "Generic Orchestrator Agent")
+            .expect("seeded generic orchestrator agent");
+
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "Generic runtime diagnostics",
+                    "message": "Read README and config, query demo platform_events, request approval before shell or file write, and generate diagnostics.md."
+                }),
+            ),
+        )
+        .await;
+        assert!(matches!(session.status, SessionStatus::Created));
+
+        let running: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(running.status, SessionStatus::WaitingApproval));
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let event_types: Vec<_> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        for expected in [
+            "user.message",
+            "llm.request",
+            "agent.plan",
+            "tool.call",
+            "tool.result",
+            "policy.allowed",
+            "policy.requires_approval",
+            "approval.requested",
+            "artifact.created",
+            "llm.response",
+        ] {
+            assert!(
+                event_types.contains(&expected),
+                "missing event type {expected}: {event_types:?}"
+            );
+        }
+        assert!(events.iter().any(|event| {
+            event.event_type == "llm.response"
+                && event
+                    .payload
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| calls.iter().any(|call| call["tool_name"] == "shell.exec"))
+        }));
+
+        let artifacts: Vec<Artifact> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/artifacts", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.name == "diagnostics.md")
+        );
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in ["file.read", "sql.get_schema", "sql.query", "shell.exec"] {
+            assert!(
+                tool_calls.iter().any(|call| call.tool_name == expected),
+                "missing tool call {expected}"
+            );
+        }
+        assert!(tool_calls.iter().any(|call| call.tool_name == "shell.exec"
+            && call.status == "waiting_approval"
+            && call.policy_decision["decision"] == "requires_approval"));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/audit-logs", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "session.started",
+            "tool.completed",
+            "artifact.created",
+            "policy.requires_approval",
+            "approval.requested",
+        ] {
+            assert!(
+                audit_logs.iter().any(|log| log.action == expected),
+                "missing audit log {expected}"
+            );
+        }
+
+        let approvals: Vec<Approval> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let approval = approvals
+            .iter()
+            .find(|approval| approval.session_id == session.id && approval.status == "pending")
+            .expect("pending shell approval");
+
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{}/approve", approval.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+
+        let completed: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(completed.status, SessionStatus::Completed));
+
+        let events_after_approval: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let event_types_after_approval: Vec<_> = events_after_approval
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        assert!(event_types_after_approval.contains(&"approval.approved"));
+        assert!(event_types_after_approval.contains(&"session.completed"));
+        let tool_calls_after_approval: Vec<ToolCall> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let shell_call = tool_calls_after_approval
+            .iter()
+            .find(|call| call.tool_name == "shell.exec")
+            .expect("shell call after approval");
+        assert_eq!(shell_call.status, "completed");
+        assert!(
+            shell_call
+                .result
+                .as_ref()
+                .and_then(|result| result["stdout"].as_str())
+                .unwrap_or_default()
+                .contains(&session.id.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn loads_stage1_policy_from_yaml() {
+        let policy_path = format!(
+            "{}/../../config/policy.stage1.yaml",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let policy = load_policy_config(&policy_path)
+            .await
+            .expect("load stage 1 policy");
+
+        let shell = policy.evaluate_tool("shell.exec");
+        assert_eq!(shell.decision, "requires_approval");
+        assert_eq!(shell.risk_level, "high");
+
+        let secret = policy.evaluate_tool("secret.read");
+        assert_eq!(secret.decision, "denied");
+
+        let file_read = policy.evaluate_tool("file.read");
+        assert_eq!(file_read.decision, "allowed");
+
+        let schema = policy.evaluate_tool("sql.get_schema");
+        assert_eq!(schema.decision, "allowed");
+    }
+
+    #[tokio::test]
+    async fn manual_tool_execution_uses_policy_for_approval_and_denial() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "manual tools"}),
+            ),
+        )
+        .await;
+
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/shell.exec/execute",
+                json!({"session_id": session.id, "args": {"command": "pwd"}}),
+            ),
+        )
+        .await;
+        assert_eq!(approval_result["status"], "approval_required");
+        assert!(approval_result.get("approval_id").is_some());
+
+        let approvals: Vec<Approval> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(approvals.iter().any(|approval| {
+            approval.session_id == session.id
+                && approval.action == "shell.exec"
+                && approval.status == "pending"
+        }));
+
+        let waiting: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(waiting.status, SessionStatus::WaitingApproval));
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/secret.read/execute",
+                json!({"session_id": session.id, "args": {"name": "api_key"}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("blocked")
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "policy.denied")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "approval.requested")
+        );
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(tool_calls.iter().any(|call| {
+            call.tool_name == "shell.exec"
+                && call.status == "waiting_approval"
+                && call.policy_decision["decision"] == "requires_approval"
+        }));
+        assert!(tool_calls.iter().any(|call| {
+            call.tool_name == "secret.read"
+                && call.status == "denied"
+                && call.policy_decision["decision"] == "denied"
+        }));
+    }
+
+    #[tokio::test]
+    async fn sql_query_policy_failure_records_failed_tool_call() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "bad sql"}),
+            ),
+        )
+        .await;
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/sql.query/execute",
+                json!({"session_id": session.id, "args": {"sql": "delete from generic_demo.platform_events"}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("read-only")
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| event.event_type == "tool.error"));
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(tool_calls.iter().any(|call| {
+            call.tool_name == "sql.query" && call.status == "failed" && call.error.is_some()
+        }));
+    }
+
+    #[tokio::test]
+    async fn artifact_and_approval_tools_execute_through_registry() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "artifact and approval tools"}),
+            ),
+        )
+        .await;
+
+        let artifact_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/artifact.create/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "name": "summary.json",
+                        "artifact_type": "json",
+                        "content": {"summary": "ok"}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(artifact_result["name"], "summary.json");
+
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/approval.request/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "action": "manual.review",
+                        "risk_level": "medium",
+                        "reason": "Review generated summary",
+                        "evidence": {"artifact": "summary.json"}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(approval_result["status"], "approval_requested");
+
+        let artifacts: Vec<Artifact> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/artifacts", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.name == "summary.json")
+        );
+
+        let approvals: Vec<Approval> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(approvals.iter().any(|approval| {
+            approval.session_id == session.id
+                && approval.action == "manual.review"
+                && approval.status == "pending"
+        }));
+
+        let waiting: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(waiting.status, SessionStatus::WaitingApproval));
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in ["artifact.create", "approval.request"] {
+            assert!(tool_calls.iter().any(|call| {
+                call.tool_name == expected
+                    && call.status == "completed"
+                    && call.policy_decision["decision"] == "allowed"
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn approving_file_write_resumes_tool_and_creates_artifact() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "file write approval"}),
+            ),
+        )
+        .await;
+
+        let content = "# Diagnostics\n\nApproved write.";
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "path": "diagnostics.md",
+                        "content": content
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+
+        let written = tokio::fs::read_to_string(
+            test_workspace_root()
+                .join(session.id.to_string())
+                .join("diagnostics.md"),
+        )
+        .await
+        .expect("approved file.write created workspace file");
+        assert_eq!(written, content);
+
+        let artifacts: Vec<Artifact> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/artifacts", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.name == "diagnostics.md" && artifact.path.as_deref() == Some("diagnostics.md")
+        }));
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(tool_calls.iter().any(|call| {
+            call.tool_name == "file.write"
+                && call.status == "completed"
+                && call
+                    .result
+                    .as_ref()
+                    .and_then(|result| result["path"].as_str())
+                    == Some("diagnostics.md")
+        }));
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| event.event_type == "tool.result"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "artifact.created")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "session.completed")
+        );
     }
 }

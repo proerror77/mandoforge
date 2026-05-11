@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MandoForge Agent OS Kernel</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -14,6 +15,28 @@
           <h1>Agent OS Kernel</h1>
         </div>
         <button id="new-session">Run Diagnostics Demo</button>
+        <section>
+          <h2>Agent Builder</h2>
+          <form id="agent-form" class="stack-form">
+            <label>
+              Name
+              <input name="name" required value="Operations Review Agent" />
+            </label>
+            <label>
+              Model
+              <input name="model" required value="gpt-5.4-mini" />
+            </label>
+            <label>
+              Tools
+              <input name="tools" value="file.read,sql.get_schema,sql.query,shell.exec,file.write" />
+            </label>
+            <label>
+              Instructions
+              <textarea name="system_prompt" rows="4">Use runtime tools through policy and preserve an auditable session timeline.</textarea>
+            </label>
+            <button type="submit">Create Agent</button>
+          </form>
+        </section>
         <section>
           <h2>Agents</h2>
           <div id="agents" class="list"></div>
@@ -33,6 +56,21 @@
           <span id="session-status" class="status">idle</span>
         </header>
         <div id="final-report" class="report"></div>
+        <section class="detail-section">
+          <h2>Artifacts</h2>
+          <div id="artifacts" class="list"></div>
+          <div id="artifact-detail" class="detail-panel"></div>
+        </section>
+        <section class="detail-section">
+          <h2>Tool Calls</h2>
+          <div id="tool-calls" class="list"></div>
+          <div id="tool-detail" class="detail-panel"></div>
+        </section>
+        <section class="detail-section">
+          <h2>Audit Log</h2>
+          <div id="audit-logs" class="list"></div>
+          <div id="audit-detail" class="detail-panel"></div>
+        </section>
       </section>
 
       <section class="timeline">

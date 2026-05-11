@@ -54,6 +54,71 @@ Smoke check:
 BASE_URL=http://127.0.0.1:8787 ./scripts/smoke.sh
 ```
 
+Full Stage 1 approval/artifact demo:
+
+```bash
+BASE_URL=http://127.0.0.1:8787 ./scripts/stage1-demo.sh
+```
+
+Static plus in-memory demo final gate:
+
+```bash
+./scripts/stage1-final-gate.sh
+```
+
+Live final gate, with API, Postgres, and Docker available:
+
+```bash
+RUN_LIVE=1 BASE_URL=http://127.0.0.1:8787 ./scripts/stage1-final-gate.sh
+```
+
+Live final gate with self-started Postgres and host API, when Docker Desktop is running:
+
+```bash
+RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh
+```
+
+Refresh Postgres demo facts:
+
+```bash
+DATABASE_URL=postgres://mandoforge:mandoforge@127.0.0.1:5432/mandoforge ./scripts/seed-platform-events.sh
+```
+
+Verify that `sql.query` is executing against live Postgres, not the in-memory fallback:
+
+```bash
+DATABASE_URL=postgres://mandoforge:mandoforge@127.0.0.1:5432/mandoforge \
+BASE_URL=http://127.0.0.1:8787 \
+./scripts/verify-postgres-sql-query.sh
+```
+
+Optional OpenAI-compatible provider transport:
+
+```bash
+MANDOFORGE_PROVIDER_BASE_URL=https://api.openai.com \
+MANDOFORGE_PROVIDER_API_KEY=... \
+MANDOFORGE_PROVIDER_MODEL=gpt-5.4-mini \
+cargo run -p mandoforge-api
+```
+
+If either provider env var is missing, the runtime uses the deterministic mock provider.
+
+Optional Docker shell sandbox:
+
+```bash
+MANDOFORGE_SHELL_RUNNER=docker \
+MANDOFORGE_SHELL_DOCKER_IMAGE=alpine:3.20 \
+cargo run -p mandoforge-api
+```
+
+`shell.exec` still requires approval. Docker mode runs approved commands with `--network none`, a workspace mount, and basic CPU/memory limits.
+
+Verify Docker shell runner mode against a running API started with `MANDOFORGE_SHELL_RUNNER=docker`:
+
+```bash
+BASE_URL=http://127.0.0.1:8787 ./scripts/verify-docker-shell-runner.sh
+```
+
 ## Docker
 
 ```bash
@@ -77,6 +142,8 @@ The manifests are a starting point, not a production hardening claim. Before sha
 
 - [Runtime Architecture](docs/architecture.md)
 - [Stage 1 Plan](docs/stage1-plan.md)
+- [Stage 1 Completion Audit](docs/stage1-completion-audit.md)
+- [Stage 1 Deployment And Demo Guide](docs/deployment-guide.md)
 - [Kubernetes Skeleton](deploy/k8s/README.md)
 
 ## Important APIs
@@ -101,6 +168,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - Tool Router is the only intended external execution path.
 - `sql.query` rejects non-read SQL commands.
 - `shell.exec`, `file.write`, `codex.exec`, and `http.request` require approval by Stage 1 policy.
+- `shell.exec` can run through the optional Docker sandbox runner via `MANDOFORGE_SHELL_RUNNER=docker`.
 - `codex.exec` only allows `read-only` and `workspace-write` sandbox modes without extra approval.
 - Production secrets must not be passed into prompts, event logs, or Codex workspaces.
 
@@ -112,14 +180,28 @@ Already aligned:
 - Generic diagnostics demo instead of GMV demo.
 - Postgres event log with in-memory fallback.
 - Tool names moved toward `file.*`, `sql.*`, `shell.exec`, `codex.exec`.
+- Harness context builder plus mock OpenAI-compatible provider request/response loop.
+- Env-gated OpenAI-compatible HTTP provider transport.
+- Provider-emitted tool calls execute through the shared Tool Router, policy, approval, and audit path.
 - Approval queue and replayable timeline.
 - Tool call records and audit log records for the generic diagnostics path.
+- `ToolExecutor` trait and registry for the current read/query tools.
+- `artifact.create` and `approval.request` executors.
+- Postgres `sql.query` execution path with JSON row normalization.
+- YAML policy loading for allowed, blocked, and approval-required tool paths.
+- Approval resume execution for approved `file.write` and `shell.exec` tool calls.
+- Approved `codex.exec` adapter path with JSONL event ingestion and final-message artifact capture.
+- Agent Builder plus artifact, tool-call, and audit detail panels in the static UI.
+- Stage 1 demo script and deployment guide.
+- Stage 1 final gate script.
+- Live Postgres `sql.query` verification script.
+- Live Docker shell runner verification script.
+- Final gate coverage for approved `codex.exec` JSONL ingestion and final-message artifact capture.
+- Repeatable `generic_demo.platform_events` seed generator.
 - Docker Compose and K8s skeleton.
+- Optional Docker sandbox wrapper for approved `shell.exec`.
 
-Still incomplete:
+Post-Stage 1 hardening:
 
-- Real provider/harness loop and tool-call parsing.
-- Real Tool trait implementations for file, SQL, shell, artifact, approval.
-- Resume semantics after approval.
-- Docker sandbox wrapper and split worker processes.
-- Agent Builder form and detailed Tool/Audit panels.
+- Split sandbox and Codex execution into separate worker processes.
+- Run a credentialed external provider smoke test when provider credentials are available.

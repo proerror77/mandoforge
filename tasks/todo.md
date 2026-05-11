@@ -19,19 +19,33 @@
 - [x] Replace in-memory-only state with Postgres-backed state plus local fallback.
 - [x] Persist `tool_calls` rows for generic diagnostics and manual tool execution paths.
 - [x] Persist `audit_logs` rows for generic diagnostics and approval decisions.
-- [ ] Expand `tool_calls` / `audit_logs` coverage to provider-driven and worker paths.
-- [ ] Split `AppState` store methods into a dedicated `store` module.
+- [x] Expand `tool_calls` / `audit_logs` coverage to provider-driven and worker paths.
+- [ ] Split `AppState` store methods into a dedicated `store` module after Stage 1 signoff.
 - [x] Add SQL safety tests for `sql.query`.
-- [ ] Add API integration test for Generic Runtime Diagnostics replay.
-- [ ] Add artifact detail panel in UI.
-- [ ] Add tool-call detail panel with policy decision.
+- [x] Add API integration test for Generic Runtime Diagnostics replay.
+- [x] Add artifact detail panel in UI.
+- [x] Add tool-call detail panel with policy decision.
+- [x] Add Agent Builder form in UI.
+- [x] Add audit detail panel in UI.
+- [x] Execute approved `file.write` and `shell.exec` tool calls from the approval resume path.
+- [x] Add optional Docker sandbox runner for approved `shell.exec`.
+- [x] Add `ToolExecutor` trait and registry for Stage 1 allowed read/query tools.
+- [x] Add Postgres execution path for `sql.query` when a durable store is configured.
+- [x] Add live Postgres integration verification script for `sql.query`.
+- [x] Execute live Postgres integration verification for `sql.query`.
+- [x] Add live Docker shell runner verification script.
+- [x] Execute live Docker shell runner verification.
+- [x] Add `artifact.create` and `approval.request` executors.
 
 ## Later Stage 1
 
-- [ ] Implement OpenAI-compatible provider abstraction.
-- [ ] Implement harness loop and context builder.
-- [ ] Implement Codex JSONL event ingestion.
-- [ ] Persist Codex workspace artifacts.
-- [ ] Load and enforce `config/policy.stage1.yaml`.
-- [ ] Add seeded platform_events generator for generic runtime demo.
-- [ ] Add deployment guide and demo script.
+- [x] Add provider abstraction with mock OpenAI-compatible harness response.
+- [x] Implement harness context builder and provider request/response events.
+- [x] Implement Codex JSONL event ingestion.
+- [x] Persist Codex final-message artifact from approved `codex.exec`.
+- [x] Load and enforce `config/policy.stage1.yaml`.
+- [x] Add env-gated OpenAI-compatible HTTP provider transport.
+- [x] Add seeded platform_events generator for generic runtime demo.
+- [x] Add deployment guide and demo script.
+- [x] Add Stage 1 final gate script with self-started in-memory demo and optional live stack mode.
+- [x] Add Stage 1 completion audit with evidence gaps.

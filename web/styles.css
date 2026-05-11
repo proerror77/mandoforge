@@ -90,8 +90,51 @@ button.reject {
   color: var(--danger);
 }
 
+.stack-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.stack-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.stack-form input,
+.stack-form textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 9px 10px;
+}
+
+.stack-form textarea {
+  resize: vertical;
+}
+
+.stack-form button {
+  margin: 6px 0 0;
+}
+
 section + section {
   margin-top: 28px;
+}
+
+.detail-section {
+  margin-top: 24px;
+}
+
+.detail-section h2 {
+  margin-bottom: 12px;
 }
 
 .list {
@@ -102,7 +145,8 @@ section + section {
 
 .item,
 .event,
-.report {
+.report,
+.detail-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -119,6 +163,36 @@ section + section {
 .event pre {
   color: var(--muted);
   font-size: 12px;
+}
+
+.item-button {
+  display: block;
+  width: 100%;
+  min-height: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: var(--ink);
+  text-align: left;
+}
+
+.item-button.selected {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.item-button strong,
+.item-button span {
+  display: block;
+}
+
+.item-button span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 header {
@@ -143,6 +217,36 @@ header {
   min-height: 260px;
   white-space: pre-wrap;
   line-height: 1.5;
+}
+
+.detail-panel {
+  margin-top: 12px;
+}
+
+.detail-panel pre {
+  overflow: auto;
+  max-height: 220px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.detail-panel dl {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0 0;
+}
+
+.detail-panel dt {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.detail-panel dd {
+  margin: 0;
 }
 
 .events {
@@ -173,4 +277,3 @@ header {
     border-bottom: 1px solid var(--line);
   }
 }
-
