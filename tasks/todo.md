@@ -40,6 +40,7 @@
 - [x] Split tool-call store methods out of the remaining store module.
 - [x] Split artifact store methods out of the remaining store module.
 - [x] Split approval store methods out of the remaining store module.
+- [x] Split audit-log store methods out of the remaining store module.
 - [x] Bind sessions to agent versions and enforce agent-version tool allowlists.
 - [x] Add SQL safety tests for `sql.query`.
 - [x] Add API integration test for Generic Runtime Diagnostics replay.

@@ -28,6 +28,7 @@ mod shell_runner;
 mod store;
 mod store_approvals;
 mod store_artifacts;
+mod store_audit;
 mod store_backend;
 mod store_entities;
 mod store_events;
