@@ -33,6 +33,7 @@
 - [x] Add execution job worker claims and lease-based stale running job reclaim.
 - [x] Add Rust `mandoforge-worker` binary for API-drained execution jobs.
 - [x] Add Docker Compose and Kubernetes worker deployment entries.
+- [x] Split Postgres row mappers out of the store module.
 - [x] Bind sessions to agent versions and enforce agent-version tool allowlists.
 - [x] Add SQL safety tests for `sql.query`.
 - [x] Add API integration test for Generic Runtime Diagnostics replay.

@@ -26,6 +26,7 @@ mod policy;
 mod provider;
 mod shell_runner;
 mod store;
+mod store_rows;
 
 use execution::{
     ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker, QueueBackedExecutionWorker,

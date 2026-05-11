@@ -87,6 +87,7 @@ Next store work:
 
 - Keep the dedicated `store` module as the persistence boundary.
 - Keep agent version read APIs available for agent/version inspection.
+- Keep Postgres row mapping in `store_rows` so storage queries and row decoding can evolve separately.
 - Split store methods into smaller modules.
 
 ## Event Log Contract
