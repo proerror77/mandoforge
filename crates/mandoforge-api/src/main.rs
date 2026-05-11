@@ -26,6 +26,7 @@ mod policy;
 mod provider;
 mod shell_runner;
 mod store;
+mod store_artifacts;
 mod store_backend;
 mod store_entities;
 mod store_events;

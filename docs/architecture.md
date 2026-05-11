@@ -92,6 +92,7 @@ Next store work:
 - Keep agent, agent-version, and session storage methods in `store_entities`.
 - Keep session event log storage methods in `store_events`.
 - Keep tool-call storage methods in `store_tool_calls`.
+- Keep artifact storage methods in `store_artifacts`.
 - Split store methods into smaller modules.
 
 ## Event Log Contract
