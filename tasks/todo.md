@@ -170,6 +170,7 @@
 - [x] Add static Provider Settings form for creating/updating stored providers with budget and pricing config.
 - [x] Add static Provider Settings fields for base URL and API key env/ref config.
 - [x] Add audited external `/v1/models` provider health probes for env-key OpenAI-compatible providers.
+- [x] Add Vault secret-ref-backed `/v1/models` provider health probes without exposing secret values.
 - [x] Add static Codex App Server steering panel for health, thread, turn, command, interrupt, and fail-closed responses.
 - [x] Add Codex App Server artifact synchronization into artifacts, timeline, and audit logs.
 - [x] Add CLI/App Server fallback orchestration for approved Codex worker execution.

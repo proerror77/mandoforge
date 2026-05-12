@@ -194,12 +194,28 @@ pub(crate) async fn provider_api_key_from_stored_value(
     value: &str,
     secret_provider: &dyn SecretProvider,
 ) -> Result<String, AppError> {
+    provider_api_key_from_stored_value_with_lookup(
+        value,
+        &|key| std::env::var(key).ok(),
+        secret_provider,
+    )
+    .await
+}
+
+pub(crate) async fn provider_api_key_from_stored_value_with_lookup<F>(
+    value: &str,
+    lookup: &F,
+    secret_provider: &dyn SecretProvider,
+) -> Result<String, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let Some(secret_ref) = provider_api_key_secret_ref(value.trim())? else {
         return Err(AppError::bad_request(
             "stored provider API key must use a vault:path#key reference",
         ));
     };
-    let config = SecretProviderConfig::from_env()?;
+    let config = SecretProviderConfig::from_lookup(lookup)?;
     let secret = secret_provider.read_secret(&config, &secret_ref).await?;
     Ok(secret.expose_for_provider_use().to_string())
 }

@@ -42,7 +42,7 @@ Aligned:
 Not yet aligned:
 
 - External worker mode is API-drained for memory/Postgres/Redis queues. Redis Streams enqueue and drain are available through `MANDOFORGE_EXECUTION_QUEUE_BACKEND=redis`; NATS remains later-stage work.
-- Credentialed external provider verification exists, but only runs when provider credentials are supplied.
+- Credentialed external provider verification exists for both env-key and Vault-reference OpenAI-compatible provider configs; secret values are resolved only through the `SecretProvider` boundary and are not persisted in health/audit payloads.
 - MCP Gateway execution is now available through `mcp.call` when configured; global server allowlists are enforced by the gateway config, and team-scoped sessions must also pass the persisted MCP server registry/tool allowlist before the HTTP call. Admins can call the team MCP server discovery endpoint to import gateway-discovered tools into the persisted allowlist. The team MCP server lifecycle APIs can patch transport/config/allowlists, activate/disable/archive connectors, run audited single-server health checks, and run audited team-level batch health checks covering registration status, gateway configuration, gateway allowlists, and gateway reachability. Disabled/archived connectors fail closed before the MCP Gateway call. The static Admin Console can manage config JSON, allowlists, health checks, discovery import, and status changes.
 - Adding production-grade telemetry spans/metrics, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
 

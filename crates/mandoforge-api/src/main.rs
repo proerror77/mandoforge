@@ -4321,6 +4321,29 @@ async fn get_provider_health(
 }
 
 async fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
+    let secret_provider = secret_provider_from_env();
+    let (secret_provider, secret_provider_error) = match secret_provider {
+        Ok(secret_provider) => (Some(secret_provider), None),
+        Err(error) => (None, Some(error.message)),
+    };
+    provider_health_from_lookup(
+        provider,
+        &|key| std::env::var(key).ok(),
+        secret_provider.as_deref(),
+        secret_provider_error,
+    )
+    .await
+}
+
+async fn provider_health_from_lookup<F>(
+    provider: &ProviderRecord,
+    lookup: &F,
+    secret_provider: Option<&dyn SecretProvider>,
+    secret_provider_error: Option<String>,
+) -> ProviderHealth
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut issues = Vec::new();
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
     if provider.status != "active" {
@@ -4344,7 +4367,8 @@ async fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
         .get("api_key_ref")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
-    let api_key_env_present = api_key_env.is_some_and(|env_key| std::env::var(env_key).is_ok());
+    let api_key_env_present = api_key_env.is_some_and(|env_key| lookup(env_key).is_some());
+    let mut api_key_ref_resolved = false;
     let mut external_probe = "not_applicable".to_string();
     let mut external_probe_status = Value::Null;
 
@@ -4363,30 +4387,61 @@ async fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
             if api_key_env.is_some() && !api_key_env_present {
                 issues.push("configured api_key_env is not present in the environment".to_string());
             }
-            if provider.status == "active" && has_base_url && api_key_env_present {
-                let env_key = api_key_env.expect("checked present");
-                match std::env::var(env_key) {
-                    Ok(api_key) => {
-                        let probe = probe_openai_compatible_provider(
-                            provider.base_url.as_deref().unwrap_or_default(),
-                            &api_key,
+            let mut api_key_for_probe = None;
+            if let Some(env_key) = api_key_env.filter(|_| api_key_env_present) {
+                api_key_for_probe = lookup(env_key);
+            } else if let Some(api_key_ref) = api_key_ref {
+                match secret_provider {
+                    Some(secret_provider) => {
+                        match provider::provider_api_key_from_stored_value_with_lookup(
+                            api_key_ref,
+                            lookup,
+                            secret_provider,
                         )
-                        .await;
-                        external_probe = probe.0;
-                        external_probe_status = probe.1;
-                        if let Some(issue) = probe.2 {
-                            issues.push(issue);
+                        .await
+                        {
+                            Ok(api_key) => {
+                                api_key_ref_resolved = true;
+                                api_key_for_probe = Some(api_key);
+                            }
+                            Err(error) => {
+                                external_probe = "failed_api_key_ref".to_string();
+                                issues.push(format!(
+                                    "configured api_key_ref could not be read: {}",
+                                    error.message
+                                ));
+                            }
                         }
                     }
-                    Err(_) => {
-                        external_probe = "skipped".to_string();
+                    None => {
+                        external_probe = "failed_api_key_ref".to_string();
+                        issues.push(format!(
+                            "configured api_key_ref could not be read: {}",
+                            secret_provider_error
+                                .as_deref()
+                                .unwrap_or("secret provider is not configured")
+                        ));
                     }
                 }
-            } else if api_key_ref.is_some() && has_base_url {
-                external_probe = "skipped_api_key_ref".to_string();
+            }
+            if provider.status == "active" && has_base_url {
+                if let Some(api_key) = api_key_for_probe {
+                    let probe = probe_openai_compatible_provider(
+                        provider.base_url.as_deref().unwrap_or_default(),
+                        &api_key,
+                    )
+                    .await;
+                    external_probe = probe.0;
+                    external_probe_status = probe.1;
+                    if let Some(issue) = probe.2 {
+                        issues.push(issue);
+                    }
+                } else if external_probe == "not_applicable" {
+                    external_probe = "skipped_configuration".to_string();
+                }
             } else if provider.status != "active" {
                 external_probe = "skipped_inactive".to_string();
-            } else if !has_base_url || !api_key_env_present {
+            } else if !has_base_url || (!api_key_env_present && api_key_ref.is_none()) {
                 external_probe = "skipped_configuration".to_string();
             }
         }
@@ -4406,6 +4461,7 @@ async fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
             "has_api_key_env": api_key_env.is_some(),
             "api_key_env_present": api_key_env_present,
             "has_api_key_ref": api_key_ref.is_some(),
+            "api_key_ref_resolved": api_key_ref_resolved,
             "external_probe": external_probe,
             "external_probe_status": external_probe_status,
         }),
@@ -7377,6 +7433,78 @@ not json
                 .is_some_and(|value| value.starts_with("Bearer "))
         );
         Json(json!({"data": [{"id": "gpt-5.4-mini"}]}))
+    }
+
+    async fn mock_vault_health() -> StatusCode {
+        StatusCode::OK
+    }
+
+    async fn mock_vault_provider_key(headers: HeaderMap) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("x-vault-token")
+                .and_then(|value| value.to_str().ok()),
+            Some("test-vault-token")
+        );
+        Json(json!({"data": {"data": {"api_key": "vault-backed-provider-key"}}}))
+    }
+
+    #[tokio::test]
+    async fn provider_health_resolves_vault_api_key_ref_for_external_probe() {
+        let vault_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("vault listener");
+        let vault_addr = vault_listener.local_addr().expect("vault addr");
+        let vault = Router::new()
+            .route("/v1/sys/health", get(mock_vault_health))
+            .route("/v1/kv/data/providers/openai", get(mock_vault_provider_key));
+        let vault_server = tokio::spawn(async move {
+            axum::serve(vault_listener, vault)
+                .await
+                .expect("mock vault");
+        });
+
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("provider listener");
+        let provider_addr = provider_listener.local_addr().expect("provider addr");
+        let provider_probe = Router::new().route("/v1/models", get(mock_provider_models));
+        let provider_server = tokio::spawn(async move {
+            axum::serve(provider_listener, provider_probe)
+                .await
+                .expect("mock provider models");
+        });
+
+        let record = ProviderRecord {
+            id: Uuid::new_v4(),
+            provider_type: "openai-compatible".to_string(),
+            name: "vault-probed-openai-compatible".to_string(),
+            base_url: Some(format!("http://{provider_addr}")),
+            default_model: Some("gpt-5.4-mini".to_string()),
+            config: json!({"api_key_ref": "vault:providers/openai#api_key"}),
+            status: "active".to_string(),
+            created_at: Utc::now(),
+        };
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_SECRET_PROVIDER" => Some("vault".to_string()),
+            "MANDOFORGE_VAULT_ADDR" => Some(format!("http://{vault_addr}")),
+            "MANDOFORGE_VAULT_MOUNT" => Some("kv".to_string()),
+            "MANDOFORGE_VAULT_TOKEN" => Some("test-vault-token".to_string()),
+            _ => None,
+        };
+        let secret_provider = VaultSecretProvider::new().expect("vault provider");
+        let health =
+            provider_health_from_lookup(&record, &lookup, Some(&secret_provider), None).await;
+
+        assert!(health.healthy);
+        assert!(health.issues.is_empty());
+        assert_eq!(health.checks["has_api_key_ref"], true);
+        assert_eq!(health.checks["api_key_ref_resolved"], true);
+        assert_eq!(health.checks["external_probe"], "healthy");
+        assert_eq!(health.checks["external_probe_status"]["status"], 200);
+
+        vault_server.abort();
+        provider_server.abort();
     }
 
     #[tokio::test]
