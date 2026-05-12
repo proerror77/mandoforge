@@ -22,6 +22,7 @@ const state = {
   evalCases: [],
   evalRuns: [],
   evalJudgeProfiles: [],
+  evalSuiteBootstrap: null,
   evalGates: {},
   evalDrifts: {},
   agentReleases: {},
@@ -97,6 +98,7 @@ const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
 const evalJudgeProfileRoot = document.querySelector("#eval-judge-profiles");
+const evalSuiteBootstrapRoot = document.querySelector("#eval-suite-bootstrap");
 const agentReleaseRoot = document.querySelector("#agent-releases");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
@@ -129,6 +131,7 @@ const evalJudgeProfileForm = document.querySelector("#eval-judge-profile-form");
 const evalDatasetForm = document.querySelector("#eval-dataset-form");
 const evalCaseForm = document.querySelector("#eval-case-form");
 const evalRunForm = document.querySelector("#eval-run-form");
+const bootstrapEvalSuiteButton = document.querySelector("#bootstrap-eval-suite");
 const mcpForm = document.querySelector("#mcp-form");
 const loadMcpButton = document.querySelector("#load-mcp");
 const runMcpHealthButton = document.querySelector("#run-mcp-health");
@@ -173,6 +176,7 @@ rollbackPolicyRolloutButton.addEventListener("click", rollbackPolicyRollout);
 evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
 evalRunForm.addEventListener("submit", createEvalRun);
+bootstrapEvalSuiteButton.addEventListener("click", bootstrapEvalSuite);
 mcpForm.addEventListener("submit", createMcpServer);
 loadMcpButton.addEventListener("click", loadMcpServers);
 runMcpHealthButton.addEventListener("click", runMcpHealth);
@@ -655,6 +659,19 @@ async function createEvalRun(event) {
     }),
   });
   setEvalDatasetId(datasetId);
+  await refreshOps();
+}
+
+async function bootstrapEvalSuite() {
+  const judgeProfile = state.evalJudgeProfiles[0]?.name || "";
+  state.evalSuiteBootstrap = await api("/api/eval/suites/stage2-regression", {
+    method: "POST",
+    body: JSON.stringify({
+      judge_profile: judgeProfile || null,
+    }),
+  });
+  setEvalDatasetId(state.evalSuiteBootstrap.dataset.id);
+  state.evalCases = state.evalSuiteBootstrap.cases;
   await refreshOps();
 }
 
@@ -1210,6 +1227,7 @@ function renderOps() {
   renderApprovalGovernance();
   renderPolicy();
   renderEvalJudgeProfiles();
+  renderEvalSuiteBootstrap();
   renderEvalDatasets();
   renderEvalCases();
   renderEvalRuns();
@@ -2292,6 +2310,16 @@ function renderEvalJudgeProfiles() {
         )
         .join("")
     : `<div class="muted">No eval judge profiles</div>`;
+}
+
+function renderEvalSuiteBootstrap() {
+  evalSuiteBootstrapRoot.innerHTML = state.evalSuiteBootstrap
+    ? `<div class="item">
+        <strong>Stage 2 suite bootstrapped</strong>
+        <div class="muted">${escapeHtml(state.evalSuiteBootstrap.dataset.name)} · ${escapeHtml(state.evalSuiteBootstrap.dataset.id)}</div>
+        <div class="muted">${formatInteger(state.evalSuiteBootstrap.cases.length)} eval cases created</div>
+      </div>`
+    : `<div class="muted">No bootstrapped eval suite yet.</div>`;
 }
 
 function renderAgentReleases() {

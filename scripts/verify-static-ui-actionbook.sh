@@ -67,6 +67,7 @@ wait_for_static_ui() {
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
     hasEvalJudgeProfiles: text.includes('Create Judge Profile') && text.includes('Judge profile') && Array.from(document.querySelectorAll('#eval-judge-profile-form input')).some((input) => input.value.includes('vault:eval/judges/default#api_key')) && Boolean(document.querySelector('#eval-judge-profiles')),
+    hasEvalSuiteBootstrap: text.includes('Bootstrap Stage 2 Suite') && Boolean(document.querySelector('#eval-suite-bootstrap')),
     hasAgentReleases: text.includes('AGENT RELEASES') && Boolean(document.querySelector('#agent-releases')),
     hasWorkerDashboard: text.includes('Worker Dashboard') && text.includes('Attempts'),
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
@@ -92,6 +93,7 @@ wait_for_static_ui() {
     && result.hasEvalGateAction
     && result.hasEvalDriftAction
     && result.hasEvalJudgeProfiles
+    && result.hasEvalSuiteBootstrap
     && result.hasAgentReleases
     && result.hasWorkerDashboard
     && result.hasProviderHealthAction
@@ -140,7 +142,9 @@ grep -q "Archive Provider" /tmp/mandoforge-actionbook-index.html
 grep -q "pollCodexRun" /tmp/mandoforge-actionbook-app.js
 grep -q "data-poll-codex-run" /tmp/mandoforge-actionbook-app.js
 grep -q "createEvalJudgeProfile" /tmp/mandoforge-actionbook-app.js
+grep -q "bootstrapEvalSuite" /tmp/mandoforge-actionbook-app.js
 grep -q "Create Judge Profile" /tmp/mandoforge-actionbook-index.html
+grep -q "Bootstrap Stage 2 Suite" /tmp/mandoforge-actionbook-index.html
 curl -fsS "$BASE_URL/api/usage" \
   -H 'x-mandoforge-subject: actionbook-smoke' \
   -H 'x-mandoforge-roles: admin' \
