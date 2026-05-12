@@ -23,7 +23,7 @@ Aligned:
 - Worker deployment entries exist for Docker Compose and Kubernetes.
 - Approval resume executes the approved tool, rebuilds harness context, resumes the provider for provider-run sessions, and then emits the final provider response before completing the session.
 - Approval v2 groundwork includes an `approver` role and `POST /api/approvals/:id/modify`, which updates pending tool-call arguments, appends `approval.modified`, and leaves the approval pending for approve/reject.
-- Stage 2 governance groundwork includes `organizations`, `teams`, `projects`, and `memberships` tables plus Admin-only CRUD/list routes for the hierarchy.
+- Stage 2 governance groundwork includes `organizations`, `teams`, `projects`, and `memberships` tables plus Admin-only CRUD/list routes for the hierarchy; principals can derive roles from persisted memberships when role headers are absent.
 - Provider governance groundwork includes `provider_access` rows per team, Admin-only provider-access routes, and model allowlist enforcement when creating a team-scoped agent.
 - Evaluation groundwork includes eval datasets, cases, and version-bound run records with a first skeleton runner that persists case count and agent version evidence.
 - OTel groundwork is now wired into the session event append path, so session, provider, tool, approval, sandbox, and worker events can be exported through the configured telemetry exporter.

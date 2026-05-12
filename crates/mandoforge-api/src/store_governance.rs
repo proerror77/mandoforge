@@ -9,7 +9,7 @@ use crate::store_rows::{
 };
 use crate::{
     AppError, AppState, CreateMembership, CreateOrganization, CreateProject, CreateProviderAccess,
-    CreateTeam, Membership, Organization, Project, ProviderAccess, Team,
+    CreateTeam, Membership, Organization, Project, ProviderAccess, Role, Team,
 };
 
 impl AppState {
@@ -286,6 +286,43 @@ impl AppState {
         Ok(membership)
     }
 
+    pub(crate) async fn membership_roles_for_subject(
+        &self,
+        subject_id: &str,
+    ) -> Result<Vec<Role>, AppError> {
+        let role_names: Vec<String> = match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .memberships
+                .values()
+                .filter(|membership| membership.user_id == subject_id)
+                .map(|membership| membership.role.clone())
+                .collect(),
+            StoreBackend::Postgres(pool) => {
+                let rows: Vec<(String,)> = sqlx::query_as(
+                    "SELECT role
+                     FROM memberships
+                     WHERE tenant_id = $1 AND user_id = $2
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .bind(subject_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(|row| row.0).collect()
+            }
+        };
+        let mut roles = Vec::new();
+        for role_name in role_names {
+            let role = membership_role_from_str(&role_name)?;
+            if !roles.contains(&role) {
+                roles.push(role);
+            }
+        }
+        Ok(roles)
+    }
+
     async fn ensure_organization_exists(&self, organization_id: Uuid) -> Result<(), AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -478,5 +515,17 @@ impl AppState {
                 "team is not allowed to use model {model} for provider {provider_name}"
             )))
         }
+    }
+}
+
+fn membership_role_from_str(role: &str) -> Result<Role, AppError> {
+    match role.trim() {
+        "admin" => Ok(Role::Admin),
+        "operator" => Ok(Role::Operator),
+        "approver" => Ok(Role::Approver),
+        "viewer" => Ok(Role::Viewer),
+        other => Err(AppError::bad_request(format!(
+            "unsupported membership role value: {other}"
+        ))),
     }
 }

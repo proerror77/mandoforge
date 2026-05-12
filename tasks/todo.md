@@ -103,7 +103,8 @@
 - [x] Add Stage 2 gap audit mapping PRD requirements to current code evidence and remaining gaps.
 - [x] Add Stage 2 approver role and pending approval modify endpoint that updates waiting tool args before approval.
 - [x] Add persistent org/team/project/membership schema and Admin-only hierarchy APIs.
-- [ ] Scope Agent/Session/Tool routes through project or team and derive authorization from memberships.
+- [x] Derive principal roles from persisted memberships when role headers are absent.
+- [ ] Scope Agent/Session/Tool routes through project or team and enforce resource-level membership checks.
 - [x] Add provider access/model allowlist enforcement for team-scoped agent creation.
 - [ ] Add provider budgets and runtime provider selection from stored provider rows.
 - [x] Add eval dataset/case/run schema and a first version-bound eval runner skeleton.

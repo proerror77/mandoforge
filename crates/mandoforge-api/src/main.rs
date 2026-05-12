@@ -1048,7 +1048,7 @@ async fn authorize_request(
     resource_type: impl Into<String>,
     resource_id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let principal = principal_from_headers(state.tenant_id, headers)?;
+    let principal = principal_from_request(state, headers).await?;
     let request = AuthorizationRequest {
         tenant_id: state.tenant_id,
         permission,
@@ -1388,7 +1388,7 @@ async fn authorize_tool_execution(
     headers: &HeaderMap,
     tool_name: &str,
 ) -> Result<(), AppError> {
-    let principal = principal_from_headers(state.tenant_id, headers)?;
+    let principal = principal_from_request(state, headers).await?;
     let request = AuthorizationRequest {
         tenant_id: state.tenant_id,
         permission: Permission::ToolsExecute,
@@ -1398,20 +1398,25 @@ async fn authorize_tool_execution(
     state.authorizer.authorize(&principal, &request).await
 }
 
-fn principal_from_headers(tenant_id: Uuid, headers: &HeaderMap) -> Result<Principal, AppError> {
-    let subject_id = header_value(headers, "x-mandoforge-subject")
-        .unwrap_or("demo-operator")
-        .to_string();
-    let roles = header_value(headers, "x-mandoforge-roles")
-        .map(parse_roles_header)
-        .transpose()?
-        .unwrap_or_else(|| vec![Role::Operator]);
+async fn principal_from_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Principal, AppError> {
+    let explicit_subject = header_value(headers, "x-mandoforge-subject");
+    let subject_id = explicit_subject.unwrap_or("demo-operator").to_string();
+    let roles = if let Some(value) = header_value(headers, "x-mandoforge-roles") {
+        parse_roles_header(value)?
+    } else if explicit_subject.is_some() {
+        state.membership_roles_for_subject(&subject_id).await?
+    } else {
+        vec![Role::Operator]
+    };
     if roles.is_empty() {
         return Err(AppError::forbidden("principal has no roles"));
     }
 
     Ok(Principal {
-        tenant_id,
+        tenant_id: state.tenant_id,
         subject_id,
         roles,
     })
@@ -2003,7 +2008,7 @@ async fn authorize_approval_decision(
     headers: &HeaderMap,
     approval_id: Uuid,
 ) -> Result<(), AppError> {
-    let principal = principal_from_headers(state.tenant_id, headers)?;
+    let principal = principal_from_request(state, headers).await?;
     let request = AuthorizationRequest {
         tenant_id: state.tenant_id,
         permission: Permission::ApprovalsDecide,
@@ -2104,7 +2109,7 @@ async fn authorize_execution_job_run(
     headers: &HeaderMap,
     job_id: Uuid,
 ) -> Result<(), AppError> {
-    let principal = principal_from_headers(state.tenant_id, headers)?;
+    let principal = principal_from_request(state, headers).await?;
     let request = AuthorizationRequest {
         tenant_id: state.tenant_id,
         permission: Permission::ExecutionJobsRun,
@@ -3824,6 +3829,17 @@ not json
         .await;
         assert_eq!(membership.organization_id, Some(organization.id));
         assert_eq!(membership.team_id, Some(team.id));
+
+        let derived_approver_approvals: Vec<Approval> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals")
+                .header("x-mandoforge-subject", "approver-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(derived_approver_approvals.is_empty());
 
         let (status, provider_error) = request_value(
             app.clone(),

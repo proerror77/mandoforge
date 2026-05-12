@@ -6,8 +6,8 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 | Stage 2 area | Current state | Gap |
 | --- | --- | --- |
-| Multi-tenancy org/team/project | Single default tenant remains the runtime scope, but `organizations`, `teams`, `projects`, and `memberships` tables plus Admin-only hierarchy APIs are implemented. | Existing Agent/Session/Tool routes are not yet scoped by team/project, and membership-derived authorization is not enforced. |
-| RBAC | Role-based authorizer guards read, write, run, tool, approval, execution job, audit, and governance admin paths. `admin`, `operator`, `approver`, and `viewer` are recognized. | Persistent memberships are stored but not yet used by the authorizer; production policy administration is not implemented. |
+| Multi-tenancy org/team/project | Single default tenant remains the runtime scope, but `organizations`, `teams`, `projects`, and `memberships` tables plus Admin-only hierarchy APIs are implemented. | Existing Agent/Session/Tool routes are not yet fully scoped by team/project. |
+| RBAC | Role-based authorizer guards read, write, run, tool, approval, execution job, audit, and governance admin paths. `admin`, `operator`, `approver`, and `viewer` are recognized. If role headers are absent for a subject, roles are derived from persisted memberships. | Production policy administration and resource-level membership scoping are not implemented. |
 | Provider governance | OpenAI-compatible provider transport exists; API keys can be direct env values or Vault references. Team-level `provider_access` rows and model allowlist enforcement are implemented for team-scoped agent creation. | Provider budgets, provider settings UI, and runtime provider selection from stored provider rows are not implemented. |
 | Vault | Reserved provider and Vault KV v2 HTTP client boundary exist. | Production secret storage, secret CRUD, rotation, and scoped secret references are not implemented. |
 | Worker queue | Postgres/in-memory execution queue, worker binary, lease claims, and reclaim boundary exist; Redis command/client boundary is reserved. | Live Redis/NATS backend and separate broker worker handoff are not enabled. |
@@ -21,7 +21,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 ## Next Stage 2 Slices
 
-1. Scope Agent/Session/Tool routes through project or team and derive authorization from memberships.
+1. Scope Agent/Session/Tool routes through project or team and enforce resource-level membership checks.
 2. Add provider budgets and runtime provider selection from stored provider rows.
 3. Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
 4. Add rich OTel spans/metrics for session run, provider call, tool execution, approval, and worker queue paths.
