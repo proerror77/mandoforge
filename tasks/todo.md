@@ -134,6 +134,7 @@
 - [x] Add eval drift detection API and static run drift action.
 - [x] Add eval-gated agent release promotion API.
 - [x] Add agent release rollback API.
+- [x] Add env-gated eval judge client boundary with fail-closed unconfigured behavior.
 - [x] Add static release promotion and rollback controls.
 - [x] Add static Eval Dashboard controls for datasets, cases, and runs.
 - [x] Wire OTel export into append-only session event paths.

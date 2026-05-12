@@ -4,6 +4,7 @@ use serde_json::Value;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::eval_judge::EvalJudgeRequest;
 use crate::policy::ensure_read_only_sql_with_policy;
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{eval_case_from_row, eval_dataset_from_row, eval_run_from_row};
@@ -227,7 +228,7 @@ impl AppState {
                 "runner": "stage2-rule-graders",
                 "case_count": case_count,
                 "passed_count": passed_count,
-                "coverage": ["policy", "tool_selection", "sql_safety", "sandbox", "final_answer", "agent_version_binding"],
+                "coverage": ["policy", "tool_selection", "sql_safety", "sandbox", "final_answer", "judge", "agent_version_binding"],
                 "cases": case_results,
             }),
             created_at: Utc::now(),
@@ -273,11 +274,64 @@ impl AppState {
             "sql_safety" => self.grade_sql_safety_case(case).await,
             "sandbox" => grade_sandbox_case(case),
             "final_answer" => grade_final_answer_case(case),
+            "judge" => self.grade_judge_case(case, agent_version).await,
             other => EvalCaseResult::fail(
                 case.id,
                 kind,
                 format!("unsupported eval grading kind: {other}"),
                 json!({}),
+            ),
+        }
+    }
+
+    async fn grade_judge_case(
+        &self,
+        case: &EvalCase,
+        agent_version: &crate::AgentVersion,
+    ) -> EvalCaseResult {
+        let Some(config) = self.eval_judge_config.as_ref() else {
+            return EvalCaseResult::fail(
+                case.id,
+                "judge",
+                "eval judge is not configured",
+                json!({
+                    "configured": false,
+                    "required_env": ["MANDOFORGE_EVAL_JUDGE_URL"],
+                }),
+            );
+        };
+
+        let request = EvalJudgeRequest {
+            case_id: case.id,
+            input: case.input.clone(),
+            expected: case.expected.clone(),
+            grading_policy: case.grading_policy.clone(),
+            agent_id: agent_version.agent_id,
+            agent_version_id: agent_version.id,
+        };
+        match self.eval_judge_client.grade(config, request).await {
+            Ok(response) => EvalCaseResult::from_match(
+                case.id,
+                "judge",
+                response.passed,
+                response.message,
+                json!({
+                    "configured": true,
+                    "score": response.score,
+                    "judge_details": response.details,
+                    "agent_id": agent_version.agent_id,
+                    "agent_version_id": agent_version.id,
+                }),
+            ),
+            Err(error) => EvalCaseResult::fail(
+                case.id,
+                "judge",
+                error.message,
+                json!({
+                    "configured": true,
+                    "agent_id": agent_version.agent_id,
+                    "agent_version_id": agent_version.id,
+                }),
             ),
         }
     }

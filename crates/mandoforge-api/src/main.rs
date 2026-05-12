@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 mod authorization;
 mod codex_app_server;
+mod eval_judge;
 mod execution;
 mod execution_queue;
 mod execution_queue_broker;
@@ -63,6 +64,10 @@ use codex_app_server::{
     CodexAppServerClient, CodexAppServerConfig, CodexCommandRequest, CodexCommandResponse,
     CodexInterruptResponse, CodexThreadRequest, CodexThreadResponse, CodexTurnRequest,
     CodexTurnResponse, HttpCodexAppServerClient, ReservedCodexAppServerClient,
+};
+use eval_judge::{
+    EvalJudgeClient, EvalJudgeConfig, EvalJudgeRequest, EvalJudgeResponse, HttpEvalJudgeClient,
+    ReservedEvalJudgeClient,
 };
 use execution::{
     ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker, QueueBackedExecutionWorker,
@@ -111,6 +116,8 @@ struct AppState {
     mcp_gateway_client: Arc<dyn McpGatewayClient>,
     codex_app_server_config: Option<CodexAppServerConfig>,
     codex_app_server_client: Arc<dyn CodexAppServerClient>,
+    eval_judge_config: Option<EvalJudgeConfig>,
+    eval_judge_client: Arc<dyn EvalJudgeClient>,
     cost_alert_webhook_url: Option<String>,
     approval_webhook_url: Option<String>,
     #[allow(dead_code)]
@@ -1053,6 +1060,8 @@ async fn main() -> Result<()> {
         mcp_gateway_client: mcp_gateway_client_from_env()?,
         codex_app_server_config: codex_app_server_config_from_env()?,
         codex_app_server_client: codex_app_server_client_from_env()?,
+        eval_judge_config: eval_judge_config_from_env()?,
+        eval_judge_client: eval_judge_client_from_env()?,
         cost_alert_webhook_url: cost_alert_webhook_url_from_env(),
         approval_webhook_url: approval_webhook_url_from_env(),
         workspace_root,
@@ -1375,6 +1384,28 @@ fn codex_app_server_client_from_env() -> Result<Arc<dyn CodexAppServerClient>> {
         ))
     } else {
         Ok(Arc::new(ReservedCodexAppServerClient))
+    }
+}
+
+fn eval_judge_config_from_env() -> Result<Option<EvalJudgeConfig>> {
+    match std::env::var("MANDOFORGE_EVAL_JUDGE_URL") {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(
+            EvalJudgeConfig::from_env().map_err(|error| anyhow::anyhow!(error.message))?,
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn eval_judge_client_from_env() -> Result<Arc<dyn EvalJudgeClient>> {
+    if std::env::var("MANDOFORGE_EVAL_JUDGE_URL")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        Ok(Arc::new(
+            HttpEvalJudgeClient::new().map_err(|error| anyhow::anyhow!(error.message))?,
+        ))
+    } else {
+        Ok(Arc::new(ReservedEvalJudgeClient))
     }
 }
 
@@ -6704,6 +6735,8 @@ not json
             mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
@@ -6771,6 +6804,8 @@ not json
             mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             approval_webhook_url: Some(approval_webhook_url),
             workspace_root: test_workspace_root(),
@@ -6799,6 +6834,28 @@ not json
         ) -> Result<(), AppError> {
             self.events.lock().await.push(event);
             Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingEvalJudgeClient {
+        requests: tokio::sync::Mutex<Vec<EvalJudgeRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl EvalJudgeClient for RecordingEvalJudgeClient {
+        async fn grade(
+            &self,
+            _config: &EvalJudgeConfig,
+            request: EvalJudgeRequest,
+        ) -> Result<EvalJudgeResponse, AppError> {
+            self.requests.lock().await.push(request);
+            Ok(EvalJudgeResponse {
+                passed: true,
+                score: Some(0.92),
+                message: "judge accepted answer".to_string(),
+                details: json!({"criterion": "answer_quality"}),
+            })
         }
     }
 
@@ -6953,6 +7010,8 @@ not json
             mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
@@ -7036,6 +7095,8 @@ not json
                 timeout_seconds: 5,
             }),
             codex_app_server_client: codex_client.clone(),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
@@ -7278,6 +7339,8 @@ not json
                 timeout_seconds: 5,
             }),
             codex_app_server_client: codex_client.clone(),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
@@ -7423,6 +7486,8 @@ not json
             mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: Some(format!("http://{addr}/alerts")),
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
@@ -7660,6 +7725,8 @@ not json
             mcp_gateway_client: mcp_client.clone(),
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
@@ -11167,6 +11234,112 @@ not json
         assert!(runs.iter().any(|listed| listed.id == run.id));
         assert!(runs.iter().any(|listed| listed.id == second_run.id));
         assert!(runs.iter().any(|listed| listed.id == failing_run.id));
+    }
+
+    #[tokio::test]
+    async fn eval_judge_case_uses_configured_client_and_agent_version() {
+        let judge = Arc::new(RecordingEvalJudgeClient::default());
+        let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.eval_judge_config = Some(EvalJudgeConfig {
+            endpoint: "http://judge.test".to_string(),
+            timeout_seconds: 5,
+        });
+        state.eval_judge_client = judge.clone();
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("list agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let dataset = state
+            .create_eval_dataset(CreateEvalDataset {
+                name: "judge eval".to_string(),
+                description: Some("Uses external judge boundary.".to_string()),
+            })
+            .await
+            .expect("create dataset");
+        let case = state
+            .create_eval_case(
+                dataset.id,
+                CreateEvalCase {
+                    input: json!({"final_answer": "root cause and evidence included"}),
+                    expected: Some(json!({"rubric": "structured evidence"})),
+                    grading_policy: json!({"kind": "judge", "rubric": "answer_quality"}),
+                },
+            )
+            .await
+            .expect("create judge case");
+
+        let run = state
+            .create_eval_run(dataset.id, CreateEvalRun { agent_id: agent.id })
+            .await
+            .expect("create eval run");
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.score, Some(1.0));
+        assert_eq!(run.details["cases"][0]["kind"], "judge");
+        assert_eq!(run.details["cases"][0]["details"]["score"], 0.92);
+
+        let requests = judge.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].case_id, case.id);
+        assert_eq!(requests[0].agent_id, agent.id);
+        assert_eq!(
+            requests[0].agent_version_id,
+            Uuid::parse_str(
+                run.details["cases"][0]["details"]["agent_version_id"]
+                    .as_str()
+                    .expect("agent version id")
+            )
+            .expect("valid uuid")
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_judge_case_fails_closed_when_unconfigured() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("list agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let dataset = state
+            .create_eval_dataset(CreateEvalDataset {
+                name: "unconfigured judge eval".to_string(),
+                description: None,
+            })
+            .await
+            .expect("create dataset");
+        state
+            .create_eval_case(
+                dataset.id,
+                CreateEvalCase {
+                    input: json!({"final_answer": "needs a judge"}),
+                    expected: Some(json!({"rubric": "answer_quality"})),
+                    grading_policy: json!({"kind": "judge"}),
+                },
+            )
+            .await
+            .expect("create judge case");
+
+        let run = state
+            .create_eval_run(dataset.id, CreateEvalRun { agent_id: agent.id })
+            .await
+            .expect("create eval run");
+        assert_eq!(run.status, "failed");
+        assert_eq!(run.score, Some(0.0));
+        assert_eq!(run.details["cases"][0]["kind"], "judge");
+        assert_eq!(run.details["cases"][0]["details"]["configured"], false);
+        assert!(
+            run.details["cases"][0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not configured")
+        );
     }
 
     #[tokio::test]
