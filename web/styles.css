@@ -61,6 +61,13 @@ h3 {
   line-height: 1.25;
 }
 
+h4 {
+  margin: 18px 0 8px;
+  font-size: 12px;
+  line-height: 1.25;
+  text-transform: uppercase;
+}
+
 .eyebrow {
   margin-bottom: 8px;
   color: var(--muted);
@@ -279,6 +286,53 @@ header {
 
 .detail-panel dd {
   margin: 0;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.metric {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.metric strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 18px;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.usage-table th,
+.usage-table td {
+  border-top: 1px solid var(--line);
+  padding: 8px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.usage-table th {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
 }
 
 .events {

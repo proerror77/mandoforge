@@ -124,5 +124,6 @@
 - [x] Add usage/cost aggregation API for provider requests, tool runtime, approvals, and configured provider pricing.
 - [x] Add token-level provider usage and cost accounting for OpenAI-compatible responses.
 - [x] Add persisted usage/cost rollup snapshots and static rollup UI.
+- [x] Add static cost dashboard breakdowns for provider cost and tool runtime.
 - [x] Add static Admin Console panels for usage, providers, eval runs, and governance status.
 - [x] Add static Provider Settings form for creating/updating stored providers with budget and pricing config.

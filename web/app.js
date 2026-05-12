@@ -333,35 +333,134 @@ function renderUsage() {
     usageRoot.innerHTML = `<div class="muted">Usage data is not loaded.</div>`;
     return;
   }
+  const providerEntries = Object.entries(usage.by_provider || {}).sort(
+    ([, left], [, right]) =>
+      Number(right.estimated_cost_cents || 0) - Number(left.estimated_cost_cents || 0),
+  );
+  const toolEntries = Object.entries(usage.by_tool || {}).sort(
+    ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
+  );
+  const averageToolDurationMs =
+    usage.tool_call_count > 0 ? usage.total_tool_duration_ms / usage.tool_call_count : 0;
   usageRoot.innerHTML = `
+    <div class="metric-grid">
+      <div class="metric">
+        <span>Provider cost</span>
+        <strong>${formatCents(usage.estimated_provider_cost_cents)}</strong>
+      </div>
+      <div class="metric">
+        <span>Provider tokens</span>
+        <strong>${formatInteger(usage.total_tokens)}</strong>
+      </div>
+      <div class="metric">
+        <span>Tool calls</span>
+        <strong>${formatInteger(usage.tool_call_count)}</strong>
+      </div>
+      <div class="metric">
+        <span>Avg tool runtime</span>
+        <strong>${formatDurationMs(averageToolDurationMs)}</strong>
+      </div>
+    </div>
     <dl>
       <dt>Sessions</dt>
-      <dd>${usage.session_count}</dd>
+      <dd>${formatInteger(usage.session_count)} sessions · ${formatInteger(usage.event_count)} events</dd>
       <dt>Provider requests</dt>
-      <dd>${usage.provider_request_count}</dd>
+      <dd>${formatInteger(usage.provider_request_count)} requests · ${formatInteger(usage.provider_response_count)} responses</dd>
       <dt>Provider tokens</dt>
-      <dd>${usage.total_tokens} total · ${usage.prompt_tokens} prompt · ${usage.completion_tokens} completion</dd>
+      <dd>${formatInteger(usage.total_tokens)} total · ${formatInteger(usage.prompt_tokens)} prompt · ${formatInteger(usage.completion_tokens)} completion</dd>
       <dt>Tool calls</dt>
-      <dd>${usage.tool_call_count} total · ${usage.tool_success_count} completed · ${usage.tool_failed_count} failed</dd>
+      <dd>${formatInteger(usage.tool_call_count)} total · ${formatInteger(usage.tool_success_count)} completed · ${formatInteger(usage.tool_failed_count)} failed</dd>
       <dt>Approval records</dt>
-      <dd>${usage.approval_count}</dd>
-      <dt>Estimated provider cost</dt>
-      <dd>${Number(usage.estimated_provider_cost_cents || 0).toFixed(2)} cents</dd>
+      <dd>${formatInteger(usage.approval_count)}</dd>
     </dl>
+    <h4>Provider Cost Breakdown</h4>
+    ${
+      providerEntries.length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Requests</th>
+                <th>Tokens</th>
+                <th>Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${providerEntries
+                .map(
+                  ([provider, summary]) => `
+                    <tr>
+                      <td>${escapeHtml(provider)}</td>
+                      <td>${formatInteger(summary.request_count)} / ${formatInteger(summary.response_count)}</td>
+                      <td>${formatInteger(summary.total_tokens)}</td>
+                      <td>${formatCents(summary.estimated_cost_cents)}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : `<div class="muted">No provider usage yet.</div>`
+    }
+    <h4>Tool Runtime Breakdown</h4>
+    ${
+      toolEntries.length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Calls</th>
+                <th>Status</th>
+                <th>Runtime</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${toolEntries
+                .map(
+                  ([tool, summary]) => `
+                    <tr>
+                      <td>${escapeHtml(tool)}</td>
+                      <td>${formatInteger(summary.call_count)}</td>
+                      <td>${formatInteger(summary.success_count)} ok · ${formatInteger(summary.failed_count)} failed</td>
+                      <td>${formatDurationMs(summary.total_duration_ms)}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : `<div class="muted">No tool runtime data yet.</div>`
+    }
   `;
   usageRollupRoot.innerHTML = state.usageRollups.length
     ? state.usageRollups
         .map(
           (rollup) => `
             <div class="item">
-              <strong>${escapeHtml(Number(rollup.summary.estimated_provider_cost_cents || 0).toFixed(2))} cents</strong>
+              <strong>${escapeHtml(formatCents(rollup.summary.estimated_provider_cost_cents))}</strong>
               <div class="muted">${escapeHtml(rollup.period_start)} to ${escapeHtml(rollup.period_end)}</div>
-              <div class="muted">${escapeHtml(rollup.summary.total_tokens || 0)} provider tokens · ${escapeHtml(rollup.summary.tool_call_count || 0)} tool calls</div>
+              <div class="muted">${escapeHtml(formatInteger(rollup.summary.total_tokens))} provider tokens · ${escapeHtml(formatInteger(rollup.summary.tool_call_count))} tool calls</div>
             </div>
           `,
         )
         .join("")
     : `<div class="muted">No persisted usage rollups</div>`;
+}
+
+function formatInteger(value) {
+  return Number(value || 0).toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+function formatCents(value) {
+  return `${Number(value || 0).toFixed(2)} cents`;
+}
+
+function formatDurationMs(value) {
+  const milliseconds = Number(value || 0);
+  if (milliseconds >= 1000) {
+    return `${(milliseconds / 1000).toFixed(2)}s`;
+  }
+  return `${milliseconds.toFixed(0)}ms`;
 }
 
 function renderProviders() {
