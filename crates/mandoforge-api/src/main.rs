@@ -246,6 +246,7 @@ struct AgentRelease {
     decision_reason: Option<String>,
     promoted_by: Option<String>,
     promoted_at: Option<DateTime<Utc>>,
+    automation_policy: Value,
     created_at: DateTime<Utc>,
 }
 
@@ -268,12 +269,28 @@ struct RequestAgentReleasePromotion {
     approver_subject: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    auto_approve: Option<bool>,
+    #[serde(default)]
+    activate_after: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RejectAgentReleasePromotion {
     #[serde(default)]
     reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AgentReleaseAutomationRun {
+    checked_at: DateTime<Utc>,
+    pending_count: usize,
+    promoted_count: usize,
+    rejected_count: usize,
+    skipped_count: usize,
+    results: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1504,6 +1521,10 @@ fn build_router(state: AppState) -> Router {
             post(request_agent_release_promotion),
         )
         .route(
+            "/api/agents/releases/run-due",
+            post(run_due_agent_release_promotions),
+        )
+        .route(
             "/api/agents/{id}/releases/{release_id}/approve",
             post(approve_agent_release_promotion),
         )
@@ -2247,6 +2268,11 @@ async fn request_agent_release_promotion(
             principal.subject_id.clone(),
             optional_trimmed(input.approver_subject.as_deref()),
             optional_trimmed(input.reason.as_deref()),
+            normalize_release_automation_policy(
+                input.auto_approve,
+                input.activate_after.as_deref(),
+                input.expires_at.as_deref(),
+            )?,
         )
         .await?;
     state
@@ -2268,6 +2294,196 @@ async fn request_agent_release_promotion(
         ))
         .await?;
     Ok(Json(release))
+}
+
+async fn run_due_agent_release_promotions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AgentReleaseAutomationRun>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "agent_release", None).await?;
+    let checked_at = Utc::now();
+    let releases = state.list_pending_agent_releases().await?;
+    let pending_count = releases.len();
+    let mut promoted_count = 0usize;
+    let mut rejected_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut results = Vec::new();
+    for release in releases {
+        if release_automation_is_expired(&release, checked_at) {
+            let rejected = state
+                .automate_agent_release_decision(
+                    release.agent_id,
+                    release.id,
+                    "rejected",
+                    "system".to_string(),
+                    "release automation expired".to_string(),
+                )
+                .await?;
+            rejected_count += 1;
+            results.push(json!({
+                "release_id": rejected.id,
+                "agent_id": rejected.agent_id,
+                "status": "rejected",
+                "reason": "expired",
+            }));
+            state
+                .append_audit_log(new_audit_log(
+                    None,
+                    "system",
+                    None,
+                    "agent.release_promotion_auto_rejected",
+                    "agent_release",
+                    Some(rejected.id),
+                    json!({
+                        "agent_id": rejected.agent_id,
+                        "environment": rejected.environment,
+                        "reason": "expired",
+                    }),
+                ))
+                .await?;
+            continue;
+        }
+        match release_automation_due_decision(&release, checked_at) {
+            ReleaseAutomationDecision::Promote => {
+                let promoted = state
+                    .automate_agent_release_decision(
+                        release.agent_id,
+                        release.id,
+                        "promoted",
+                        "system".to_string(),
+                        "release automation auto-approved".to_string(),
+                    )
+                    .await?;
+                promoted_count += 1;
+                results.push(json!({
+                    "release_id": promoted.id,
+                    "agent_id": promoted.agent_id,
+                    "status": "promoted",
+                    "reason": "auto_approved",
+                }));
+                state
+                    .append_audit_log(new_audit_log(
+                        None,
+                        "system",
+                        None,
+                        "agent.release_promotion_auto_approved",
+                        "agent_release",
+                        Some(promoted.id),
+                        json!({
+                            "agent_id": promoted.agent_id,
+                            "environment": promoted.environment,
+                            "eval_score": promoted.eval_score,
+                            "min_score": promoted.min_score,
+                        }),
+                    ))
+                    .await?;
+            }
+            ReleaseAutomationDecision::Skip(reason) => {
+                skipped_count += 1;
+                results.push(json!({
+                    "release_id": release.id,
+                    "agent_id": release.agent_id,
+                    "status": "skipped",
+                    "reason": reason,
+                }));
+            }
+        }
+    }
+    let run = AgentReleaseAutomationRun {
+        checked_at,
+        pending_count,
+        promoted_count,
+        rejected_count,
+        skipped_count,
+        results,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "agent.release_promotion_due_run",
+            "agent_release",
+            None,
+            json!({
+                "pending_count": run.pending_count,
+                "promoted_count": run.promoted_count,
+                "rejected_count": run.rejected_count,
+                "skipped_count": run.skipped_count,
+            }),
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
+enum ReleaseAutomationDecision {
+    Promote,
+    Skip(String),
+}
+
+fn normalize_release_automation_policy(
+    auto_approve: Option<bool>,
+    activate_after: Option<&str>,
+    expires_at: Option<&str>,
+) -> Result<Value, AppError> {
+    let activate_after = parse_optional_rfc3339("activate_after", activate_after)?;
+    let expires_at = parse_optional_rfc3339("expires_at", expires_at)?;
+    if let (Some(activate_after), Some(expires_at)) = (activate_after, expires_at)
+        && activate_after >= expires_at
+    {
+        return Err(AppError::bad_request(
+            "release automation activate_after must be before expires_at",
+        ));
+    }
+    Ok(json!({
+        "auto_approve": auto_approve.unwrap_or(false),
+        "activate_after": activate_after,
+        "expires_at": expires_at,
+    }))
+}
+
+fn release_automation_due_decision(
+    release: &AgentRelease,
+    now: DateTime<Utc>,
+) -> ReleaseAutomationDecision {
+    if release
+        .approver_subject
+        .as_deref()
+        .is_some_and(|subject| !subject.trim().is_empty() && subject.trim() != "system")
+    {
+        return ReleaseAutomationDecision::Skip("delegated_human_approver".to_string());
+    }
+    if release
+        .automation_policy
+        .get("auto_approve")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return ReleaseAutomationDecision::Skip("auto_approve_disabled".to_string());
+    }
+    if let Some(activate_after) = release_automation_time(release, "activate_after")
+        && now < activate_after
+    {
+        return ReleaseAutomationDecision::Skip("activation_window_not_open".to_string());
+    }
+    let score = release.eval_score.unwrap_or(0.0);
+    if score < release.min_score {
+        return ReleaseAutomationDecision::Skip("eval_score_below_minimum".to_string());
+    }
+    ReleaseAutomationDecision::Promote
+}
+
+fn release_automation_is_expired(release: &AgentRelease, now: DateTime<Utc>) -> bool {
+    release_automation_time(release, "expires_at").is_some_and(|expires_at| now > expires_at)
+}
+
+fn release_automation_time(release: &AgentRelease, field: &str) -> Option<DateTime<Utc>> {
+    release
+        .automation_policy
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
 }
 
 async fn approve_agent_release_promotion(
@@ -17882,6 +18098,75 @@ not json
             Some("needs more evidence")
         );
 
+        let activate_after = (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let expires_at = (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
+        let auto_request: AgentRelease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{}/release-requests", agent.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "release-requester-2")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "eval_run_id": run.id,
+                        "environment": "prod",
+                        "min_score": 1.0,
+                        "approver_subject": "system",
+                        "auto_approve": true,
+                        "activate_after": activate_after,
+                        "expires_at": expires_at,
+                        "reason": "eligible for automated promotion"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(auto_request.status, "pending_approval");
+        assert_eq!(auto_request.automation_policy["auto_approve"], true);
+
+        let expired_at = (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let expired_request: AgentRelease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{}/release-requests", agent.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "release-requester-3")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "eval_run_id": run.id,
+                        "environment": "prod",
+                        "min_score": 1.0,
+                        "expires_at": expired_at,
+                        "reason": "expired automation should fail closed"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(expired_request.status, "pending_approval");
+
+        let automation_run: AgentReleaseAutomationRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents/releases/run-due")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(automation_run.pending_count, 2);
+        assert_eq!(automation_run.promoted_count, 1);
+        assert_eq!(automation_run.rejected_count, 1);
+        assert_eq!(automation_run.skipped_count, 0);
+
         let releases: Vec<AgentRelease> = request_json(
             app.clone(),
             Request::builder()
@@ -17893,6 +18178,16 @@ not json
         )
         .await;
         assert!(releases.iter().any(|listed| listed.id == release.id));
+        assert!(releases.iter().any(|listed| {
+            listed.id == auto_request.id
+                && listed.status == "promoted"
+                && listed.promoted_by.as_deref() == Some("system")
+        }));
+        assert!(releases.iter().any(|listed| {
+            listed.id == expired_request.id
+                && listed.status == "rejected"
+                && listed.decision_reason.as_deref() == Some("release automation expired")
+        }));
 
         let (status, viewer_rollback_error) = request_value(
             app.clone(),
@@ -18045,6 +18340,19 @@ not json
         assert!(audit_logs.iter().any(|log| {
             log.action == "agent.release_promotion_rejected"
                 && log.resource_id == Some(rejected_request.id)
+        }));
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| { log.action == "agent.release_promotion_due_run" })
+        );
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent.release_promotion_auto_approved"
+                && log.resource_id == Some(auto_request.id)
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent.release_promotion_auto_rejected"
+                && log.resource_id == Some(expired_request.id)
         }));
     }
 

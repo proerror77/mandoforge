@@ -1,12 +1,13 @@
 use anyhow::Result;
 use chrono::Utc;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::agent_release_from_row;
 use crate::{AgentRelease, AppError, AppState, CreateAgentRelease};
 
-const AGENT_RELEASE_COLUMNS: &str = "id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, created_at";
+const AGENT_RELEASE_COLUMNS: &str = "id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at";
 
 impl AppState {
     pub(crate) async fn list_agent_releases(
@@ -45,6 +46,36 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn list_pending_agent_releases(&self) -> Result<Vec<AgentRelease>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut releases: Vec<_> = inner
+                    .read()
+                    .await
+                    .agent_releases
+                    .values()
+                    .filter(|release| release.status == "pending_approval")
+                    .cloned()
+                    .collect();
+                releases.sort_by_key(|release| release.created_at);
+                Ok(releases)
+            }
+            StoreBackend::Postgres(pool) => {
+                let sql = format!(
+                    "SELECT {AGENT_RELEASE_COLUMNS}
+                     FROM agent_releases
+                     WHERE tenant_id = $1 AND status = 'pending_approval'
+                     ORDER BY created_at ASC"
+                );
+                let rows = sqlx::query(&sql)
+                    .bind(self.tenant_id)
+                    .fetch_all(pool)
+                    .await?;
+                rows.into_iter().map(agent_release_from_row).collect()
+            }
+        }
+    }
+
     pub(crate) async fn create_agent_release(
         &self,
         agent_id: Uuid,
@@ -72,6 +103,7 @@ impl AppState {
             decision_reason: Some("direct promotion".to_string()),
             promoted_by: Some(promoted_by),
             promoted_at: Some(now),
+            automation_policy: json!({}),
             created_at: now,
         };
         match &self.store {
@@ -84,8 +116,8 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO agent_releases (id, tenant_id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
+                    "INSERT INTO agent_releases (id, tenant_id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
                 )
                 .bind(release.id)
                 .bind(self.tenant_id)
@@ -105,6 +137,7 @@ impl AppState {
                 .bind(&release.decision_reason)
                 .bind(&release.promoted_by)
                 .bind(release.promoted_at)
+                .bind(&release.automation_policy)
                 .bind(release.created_at)
                 .execute(pool)
                 .await?;
@@ -120,6 +153,7 @@ impl AppState {
         requested_by: String,
         approver_subject: Option<String>,
         request_reason: Option<String>,
+        automation_policy: Value,
     ) -> Result<AgentRelease, AppError> {
         let (agent_version_id, environment, eval_run_id, score, min_score) =
             self.validate_agent_release_input(agent_id, &input).await?;
@@ -142,6 +176,7 @@ impl AppState {
             decision_reason: None,
             promoted_by: None,
             promoted_at: None,
+            automation_policy,
             created_at: now,
         };
         match &self.store {
@@ -154,8 +189,8 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO agent_releases (id, tenant_id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
+                    "INSERT INTO agent_releases (id, tenant_id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
                 )
                 .bind(release.id)
                 .bind(self.tenant_id)
@@ -175,6 +210,7 @@ impl AppState {
                 .bind(&release.decision_reason)
                 .bind(&release.promoted_by)
                 .bind(release.promoted_at)
+                .bind(&release.automation_policy)
                 .bind(release.created_at)
                 .execute(pool)
                 .await?;
@@ -253,7 +289,7 @@ impl AppState {
                     "UPDATE agent_releases
                      SET status = 'rolled_back'
                      WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
-                     RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, created_at",
+                     RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
                 .bind(self.tenant_id)
                 .bind(agent_id)
@@ -363,7 +399,96 @@ impl AppState {
                          promoted_by = $8,
                          promoted_at = $9
                      WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
-                     RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, created_at",
+                     RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
+                )
+                .bind(self.tenant_id)
+                .bind(agent_id)
+                .bind(release_id)
+                .bind(next_status)
+                .bind(&decided_by)
+                .bind(now)
+                .bind(&reason)
+                .bind(&promoted_by)
+                .bind(promoted_at)
+                .fetch_one(pool)
+                .await?;
+                agent_release_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn automate_agent_release_decision(
+        &self,
+        agent_id: Uuid,
+        release_id: Uuid,
+        next_status: &str,
+        decided_by: String,
+        reason: String,
+    ) -> Result<AgentRelease, AppError> {
+        self.get_agent(agent_id).await?;
+        if !matches!(next_status, "promoted" | "rejected") {
+            return Err(AppError::bad_request(
+                "unsupported automated release decision",
+            ));
+        }
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let release = store
+                    .agent_releases
+                    .get_mut(&release_id)
+                    .ok_or_else(|| AppError::not_found("agent release not found"))?;
+                if release.agent_id != agent_id {
+                    return Err(AppError::not_found("agent release not found"));
+                }
+                if release.status != "pending_approval" {
+                    return Err(AppError::bad_request(
+                        "agent release is not pending approval",
+                    ));
+                }
+                let now = Utc::now();
+                release.status = next_status.to_string();
+                release.decision_by = Some(decided_by.clone());
+                release.decided_at = Some(now);
+                release.decision_reason = Some(reason);
+                if next_status == "promoted" {
+                    release.promoted_by = Some(decided_by);
+                    release.promoted_at = Some(now);
+                }
+                Ok(release.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let sql = format!(
+                    "SELECT {AGENT_RELEASE_COLUMNS}
+                     FROM agent_releases
+                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3"
+                );
+                let existing = sqlx::query(&sql)
+                    .bind(self.tenant_id)
+                    .bind(agent_id)
+                    .bind(release_id)
+                    .fetch_optional(pool)
+                    .await?
+                    .ok_or_else(|| AppError::not_found("agent release not found"))
+                    .and_then(agent_release_from_row)?;
+                if existing.status != "pending_approval" {
+                    return Err(AppError::bad_request(
+                        "agent release is not pending approval",
+                    ));
+                }
+                let now = Utc::now();
+                let promoted_by = (next_status == "promoted").then_some(decided_by.clone());
+                let promoted_at = (next_status == "promoted").then_some(now);
+                let row = sqlx::query(
+                    "UPDATE agent_releases
+                     SET status = $4,
+                         decision_by = $5,
+                         decided_at = $6,
+                         decision_reason = $7,
+                         promoted_by = $8,
+                         promoted_at = $9
+                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
+                     RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
                 .bind(self.tenant_id)
                 .bind(agent_id)

@@ -26,6 +26,7 @@ const state = {
   evalGates: {},
   evalDrifts: {},
   agentReleases: {},
+  agentReleaseAutomationRun: null,
   mcpServers: [],
   mcpTeamId: "",
   mcpHealth: {},
@@ -102,6 +103,7 @@ const evalRunRoot = document.querySelector("#eval-runs");
 const evalJudgeProfileRoot = document.querySelector("#eval-judge-profiles");
 const evalSuiteBootstrapRoot = document.querySelector("#eval-suite-bootstrap");
 const agentReleaseRoot = document.querySelector("#agent-releases");
+const runDueAgentReleasesButton = document.querySelector("#run-due-agent-releases");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
 const usageRoot = document.querySelector("#usage-summary");
@@ -181,6 +183,7 @@ evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
 evalRunForm.addEventListener("submit", createEvalRun);
 bootstrapEvalSuiteButton.addEventListener("click", bootstrapEvalSuite);
+runDueAgentReleasesButton.addEventListener("click", runDueAgentReleaseAutomation);
 mcpForm.addEventListener("submit", createMcpServer);
 loadMcpButton.addEventListener("click", loadMcpServers);
 runMcpHealthButton.addEventListener("click", runMcpHealth);
@@ -714,6 +717,7 @@ async function promoteEvalRun(runId, environment) {
 async function requestEvalRunPromotion(runId) {
   const run = state.evalRuns.find((candidate) => candidate.id === runId);
   if (!run) return;
+  const activateAfter = new Date(Date.now() - 60_000).toISOString();
   await api(`/api/agents/${run.agent_id}/release-requests`, {
     method: "POST",
     body: JSON.stringify({
@@ -723,7 +727,36 @@ async function requestEvalRunPromotion(runId) {
       min_score: 1.0,
       approver_subject: "release-approver-1",
       reason: "Production release requires separation of duties",
+      auto_approve: false,
+      activate_after: activateAfter,
     }),
+  });
+  await refreshAgentReleases();
+}
+
+async function requestEvalRunAutoPromotion(runId) {
+  const run = state.evalRuns.find((candidate) => candidate.id === runId);
+  if (!run) return;
+  const activateAfter = new Date(Date.now() - 60_000).toISOString();
+  await api(`/api/agents/${run.agent_id}/release-requests`, {
+    method: "POST",
+    body: JSON.stringify({
+      eval_run_id: run.id,
+      agent_version_id: run.agent_version_id,
+      environment: "prod",
+      min_score: 1.0,
+      approver_subject: "system",
+      reason: "Production release is eligible for system due-run automation",
+      auto_approve: true,
+      activate_after: activateAfter,
+    }),
+  });
+  await refreshAgentReleases();
+}
+
+async function runDueAgentReleaseAutomation() {
+  state.agentReleaseAutomationRun = await api("/api/agents/releases/run-due", {
+    method: "POST",
   });
   await refreshAgentReleases();
 }
@@ -2369,6 +2402,7 @@ function renderEvalRuns() {
               <button class="secondary" data-eval-gate="${run.id}">Gate 100%</button>
               <button class="secondary" data-eval-drift="${run.id}">Check Drift</button>
               <button class="secondary" data-eval-request-prod="${run.id}">Request Prod Approval</button>
+              <button class="secondary" data-eval-request-auto-prod="${run.id}">Request Auto Prod</button>
               <button class="secondary" data-eval-promote-staging="${run.id}">Promote Staging</button>
               <button class="secondary" data-eval-promote-prod="${run.id}">Promote Prod</button>
               ${
@@ -2403,6 +2437,11 @@ function renderEvalRuns() {
   });
   evalRunRoot.querySelectorAll("[data-eval-request-prod]").forEach((button) => {
     button.addEventListener("click", () => requestEvalRunPromotion(button.dataset.evalRequestProd));
+  });
+  evalRunRoot.querySelectorAll("[data-eval-request-auto-prod]").forEach((button) => {
+    button.addEventListener("click", () =>
+      requestEvalRunAutoPromotion(button.dataset.evalRequestAutoProd),
+    );
   });
   evalRunRoot.querySelectorAll("[data-eval-promote-prod]").forEach((button) => {
     button.addEventListener("click", () =>
@@ -2453,6 +2492,13 @@ function renderEvalSuiteBootstrap() {
 }
 
 function renderAgentReleases() {
+  const automationRun = state.agentReleaseAutomationRun;
+  const automationSummary = automationRun
+    ? `<div class="item">
+        <strong>Release automation run</strong>
+        <div class="muted">${formatInteger(automationRun.pending_count)} pending · ${formatInteger(automationRun.promoted_count)} promoted · ${formatInteger(automationRun.rejected_count)} rejected · ${formatInteger(automationRun.skipped_count)} skipped · ${escapeHtml(automationRun.checked_at)}</div>
+      </div>`
+    : "";
   const releaseGroups = state.agents
     .map((agent) => ({
       agent,
@@ -2460,7 +2506,7 @@ function renderAgentReleases() {
     }))
     .filter((group) => group.releases.length);
   agentReleaseRoot.innerHTML = releaseGroups.length
-    ? releaseGroups
+    ? `${automationSummary}${releaseGroups
         .map(
           ({ agent, releases }) => `
             <div class="item">
@@ -2475,6 +2521,7 @@ function renderAgentReleases() {
                       <div class="muted">Version: ${escapeHtml(release.agent_version_id)}</div>
                       <div class="muted">Eval run: ${escapeHtml(release.eval_run_id || "none")}</div>
                       <div class="muted">Requested by: ${escapeHtml(release.requested_by || "none")} · Approver: ${escapeHtml(release.approver_subject || "any separate admin")}</div>
+                      <div class="muted">Automation: ${escapeHtml(release.automation_policy?.auto_approve ? "auto approve" : "manual")} · after ${escapeHtml(release.automation_policy?.activate_after || "n/a")} · expires ${escapeHtml(release.automation_policy?.expires_at || "n/a")}</div>
                       <div class="muted">Decision by: ${escapeHtml(release.decision_by || "pending")} · Reason: ${escapeHtml(release.decision_reason || release.request_reason || "none")}</div>
                       ${
                         release.status === "pending_approval"
@@ -2494,8 +2541,8 @@ function renderAgentReleases() {
             </div>
           `,
         )
-        .join("")
-    : `<div class="muted">No promoted or rolled back releases</div>`;
+        .join("")}`
+    : `${automationSummary}<div class="muted">No promoted or rolled back releases</div>`;
   agentReleaseRoot.querySelectorAll("[data-release-rollback]").forEach((button) => {
     button.addEventListener("click", () =>
       rollbackAgentRelease(button.dataset.releaseAgent, button.dataset.releaseRollback),

@@ -74,6 +74,9 @@ pub(crate) fn agent_release_from_row(row: PgRow) -> Result<AgentRelease, AppErro
         decision_reason: row.try_get("decision_reason")?,
         promoted_by: row.try_get("promoted_by")?,
         promoted_at: row.try_get("promoted_at")?,
+        automation_policy: row
+            .try_get("automation_policy")
+            .unwrap_or_else(|_| json!({})),
         created_at: row.try_get("created_at")?,
     })
 }
