@@ -15,6 +15,7 @@ const state = {
   evalRuns: [],
   evalGates: {},
   evalDrifts: {},
+  agentReleases: {},
   mcpServers: [],
   mcpTeamId: "",
   executionJobs: [],
@@ -53,6 +54,7 @@ const policyDecisionRoot = document.querySelector("#policy-decision");
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
+const agentReleaseRoot = document.querySelector("#agent-releases");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
 const usageRoot = document.querySelector("#usage-summary");
@@ -313,6 +315,28 @@ async function driftEvalRun(runId) {
   renderEvalRuns();
 }
 
+async function promoteEvalRun(runId, environment) {
+  const run = state.evalRuns.find((candidate) => candidate.id === runId);
+  if (!run) return;
+  await api(`/api/agents/${run.agent_id}/releases`, {
+    method: "POST",
+    body: JSON.stringify({
+      eval_run_id: run.id,
+      agent_version_id: run.agent_version_id,
+      environment,
+      min_score: 1.0,
+    }),
+  });
+  await refreshAgentReleases();
+}
+
+async function rollbackAgentRelease(agentId, releaseId) {
+  await api(`/api/agents/${agentId}/releases/${releaseId}/rollback`, {
+    method: "POST",
+  });
+  await refreshAgentReleases();
+}
+
 async function createMcpServer(event) {
   event.preventDefault();
   const form = new FormData(mcpForm);
@@ -433,6 +457,7 @@ async function refreshOps() {
   state.usageRollups = usageRollups;
   state.organizations = organizations;
   state.executionJobs = executionJobs;
+  await refreshAgentReleases(false);
   if (
     state.selectedOrganizationId &&
     !organizations.some((organization) => organization.id === state.selectedOrganizationId)
@@ -465,6 +490,16 @@ async function refreshOps() {
     ? await api(`/api/teams/${state.selectedTeamId}/projects`)
     : [];
   renderOps();
+}
+
+async function refreshAgentReleases(render = true) {
+  const releaseEntries = await Promise.all(
+    state.agents.map(async (agent) => [agent.id, await api(`/api/agents/${agent.id}/releases`)]),
+  );
+  state.agentReleases = Object.fromEntries(releaseEntries);
+  if (render) {
+    renderAgentReleases();
+  }
 }
 
 async function refreshSession() {
@@ -530,6 +565,7 @@ function renderOps() {
   renderEvalDatasets();
   renderEvalCases();
   renderEvalRuns();
+  renderAgentReleases();
   renderMcpServers();
   renderExecutionJobs();
   governanceRoot.innerHTML = `
@@ -963,8 +999,11 @@ function renderEvalRuns() {
             <div class="item">
               <strong>${escapeHtml(run.status)} · score ${escapeHtml(run.score ?? "n/a")}</strong>
               <div class="muted">${escapeHtml(run.created_at)}</div>
+              <div class="muted">Agent: ${escapeHtml(run.agent_id)} · Version: ${escapeHtml(run.agent_version_id)}</div>
               <button class="secondary" data-eval-gate="${run.id}">Gate 100%</button>
               <button class="secondary" data-eval-drift="${run.id}">Check Drift</button>
+              <button class="secondary" data-eval-promote-staging="${run.id}">Promote Staging</button>
+              <button class="secondary" data-eval-promote-prod="${run.id}">Promote Prod</button>
               ${
                 gate
                   ? `<div class="muted">Gate: ${escapeHtml(gate.status)} · min ${escapeHtml(gate.min_score)}</div>
@@ -989,6 +1028,59 @@ function renderEvalRuns() {
   });
   evalRunRoot.querySelectorAll("[data-eval-drift]").forEach((button) => {
     button.addEventListener("click", () => driftEvalRun(button.dataset.evalDrift));
+  });
+  evalRunRoot.querySelectorAll("[data-eval-promote-staging]").forEach((button) => {
+    button.addEventListener("click", () =>
+      promoteEvalRun(button.dataset.evalPromoteStaging, "staging"),
+    );
+  });
+  evalRunRoot.querySelectorAll("[data-eval-promote-prod]").forEach((button) => {
+    button.addEventListener("click", () =>
+      promoteEvalRun(button.dataset.evalPromoteProd, "prod"),
+    );
+  });
+}
+
+function renderAgentReleases() {
+  const releaseGroups = state.agents
+    .map((agent) => ({
+      agent,
+      releases: state.agentReleases[agent.id] || [],
+    }))
+    .filter((group) => group.releases.length);
+  agentReleaseRoot.innerHTML = releaseGroups.length
+    ? releaseGroups
+        .map(
+          ({ agent, releases }) => `
+            <div class="item">
+              <strong>${escapeHtml(agent.name)}</strong>
+              <div class="muted">${escapeHtml(agent.id)}</div>
+              ${releases
+                .map(
+                  (release) => `
+                    <div class="nested-item">
+                      <strong>${escapeHtml(release.environment)} · ${escapeHtml(release.status)}</strong>
+                      <div class="muted">Score: ${escapeHtml(release.eval_score ?? "n/a")} · Min: ${escapeHtml(release.min_score)}</div>
+                      <div class="muted">Version: ${escapeHtml(release.agent_version_id)}</div>
+                      <div class="muted">Eval run: ${escapeHtml(release.eval_run_id || "none")}</div>
+                      ${
+                        release.status === "promoted"
+                          ? `<button class="secondary" data-release-rollback="${release.id}" data-release-agent="${agent.id}">Rollback</button>`
+                          : ""
+                      }
+                    </div>
+                  `,
+                )
+                .join("")}
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No promoted or rolled back releases</div>`;
+  agentReleaseRoot.querySelectorAll("[data-release-rollback]").forEach((button) => {
+    button.addEventListener("click", () =>
+      rollbackAgentRelease(button.dataset.releaseAgent, button.dataset.releaseRollback),
+    );
   });
 }
 

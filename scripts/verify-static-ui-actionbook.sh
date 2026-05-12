@@ -59,6 +59,7 @@ wait_for_static_ui() {
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
+    hasAgentReleases: text.includes('AGENT RELEASES') && Boolean(document.querySelector('#agent-releases')),
     hasWorkerDashboard: text.includes('Worker Dashboard'),
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
     metricCards: document.querySelectorAll('.metric').length,
@@ -75,6 +76,7 @@ wait_for_static_ui() {
     && result.hasTenantGovernance
     && result.hasEvalGateAction
     && result.hasEvalDriftAction
+    && result.hasAgentReleases
     && result.hasWorkerDashboard
     && result.hasProviderHealthAction
     && result.metricCards >= 4

@@ -189,6 +189,12 @@ section + section {
   margin-bottom: 6px;
 }
 
+.nested-item {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
 .muted,
 .event pre {
   color: var(--muted);
