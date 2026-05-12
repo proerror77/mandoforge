@@ -486,6 +486,10 @@ struct ApprovalNotificationDelivery {
     channel: String,
     webhook_configured: bool,
     approval_id: Uuid,
+    target_count: usize,
+    target_subjects: Vec<String>,
+    group_id: Option<Uuid>,
+    group_name: Option<String>,
     delivered_at: DateTime<Utc>,
 }
 
@@ -11408,6 +11412,14 @@ async fn deliver_approval_notification(
     approval: &Approval,
     delivered_at: DateTime<Utc>,
 ) -> Result<ApprovalNotificationDelivery, AppError> {
+    let approval_group_id = delegated_approver_group_id(approval);
+    let approval_group = if let Some(group_id) = approval_group_id {
+        state.get_approval_group(group_id).await.ok()
+    } else {
+        None
+    };
+    let target_subjects = approval_notification_targets(approval, approval_group.as_ref());
+    let group_name = approval_group.as_ref().map(|group| group.name.clone());
     let Some(webhook_url) = state.approval_webhook_url.as_ref() else {
         return Ok(ApprovalNotificationDelivery {
             status: "reserved".to_string(),
@@ -11415,18 +11427,12 @@ async fn deliver_approval_notification(
             channel: "webhook".to_string(),
             webhook_configured: false,
             approval_id: approval.id,
+            target_count: target_subjects.len(),
+            target_subjects,
+            group_id: approval_group_id,
+            group_name,
             delivered_at,
         });
-    };
-    let approval_group_id = approval
-        .evidence
-        .get("approver_group_id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok());
-    let approval_group = if let Some(group_id) = approval_group_id {
-        state.get_approval_group(group_id).await.ok()
-    } else {
-        None
     };
     let response = tokio::time::timeout(
         Duration::from_secs(10),
@@ -11436,6 +11442,8 @@ async fn deliver_approval_notification(
                 "type": "mandoforge.approval_requested",
                 "approval": approval,
                 "approval_group": approval_group,
+                "target_subjects": target_subjects.clone(),
+                "target_count": target_subjects.len(),
                 "delivered_at": delivered_at,
             }))
             .send(),
@@ -11453,6 +11461,10 @@ async fn deliver_approval_notification(
         channel: "webhook".to_string(),
         webhook_configured: true,
         approval_id: approval.id,
+        target_count: target_subjects.len(),
+        target_subjects,
+        group_id: approval_group_id,
+        group_name,
         delivered_at,
     };
     state
@@ -11467,6 +11479,18 @@ async fn deliver_approval_notification(
         ))
         .await?;
     Ok(delivery)
+}
+
+fn approval_notification_targets(
+    approval: &Approval,
+    group: Option<&ApprovalGroup>,
+) -> Vec<String> {
+    if let Some(group) = group {
+        return group.subjects.clone();
+    }
+    delegated_approver_subject(approval)
+        .map(|subject| vec![subject.to_string()])
+        .unwrap_or_default()
 }
 
 async fn authorize_approval_decision(
@@ -14388,6 +14412,7 @@ not json
     async fn mock_approval_webhook(Json(payload): Json<Value>) -> Json<Value> {
         assert_eq!(payload["type"], "mandoforge.approval_requested");
         assert!(payload["approval"]["id"].as_str().is_some());
+        assert!(payload["target_count"].as_u64().unwrap_or_default() >= 1);
         Json(json!({"accepted": true}))
     }
 
@@ -17514,7 +17539,8 @@ not json
                     "args": {
                         "action": "manual.review",
                         "risk_level": "medium",
-                        "reason": "Notify an approver."
+                        "reason": "Notify an approver.",
+                        "approver_subject": "approver-1"
                     }
                 }),
             ),
@@ -17537,6 +17563,8 @@ not json
         assert_eq!(delivery.status, "delivered");
         assert!(delivery.delivered);
         assert_eq!(delivery.approval_id.to_string(), approval_id);
+        assert_eq!(delivery.target_count, 1);
+        assert_eq!(delivery.target_subjects, vec!["approver-1".to_string()]);
 
         let audit_logs: Vec<AuditLog> = request_json(
             app,
@@ -17857,6 +17885,25 @@ not json
         .await;
         assert_eq!(escalated.evidence["approver_group_id"], json!(group.id));
         assert_eq!(escalated.evidence["escalation"]["rule_id"], json!(rule.id));
+        let delivery: ApprovalNotificationDelivery = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/deliver"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(delivery.status, "reserved");
+        assert_eq!(delivery.group_id, Some(group.id));
+        assert_eq!(delivery.group_name.as_deref(), Some("risk-approvers"));
+        assert_eq!(delivery.target_count, 2);
+        assert_eq!(
+            delivery.target_subjects,
+            vec!["approver-2".to_string(), "approver-3".to_string()]
+        );
 
         let (status, error) = request_value(
             app.clone(),

@@ -3388,7 +3388,7 @@ function renderApproval(approval) {
       }
       ${
         delivery
-          ? `<div class="muted">Delivery: ${escapeHtml(delivery.status)} · ${escapeHtml(delivery.channel)} · ${escapeHtml(delivery.webhook_configured ? "webhook configured" : "webhook not configured")}</div>`
+          ? `<div class="muted">Delivery: ${escapeHtml(delivery.status)} · ${escapeHtml(delivery.channel)} · ${escapeHtml(delivery.webhook_configured ? "webhook configured" : "webhook not configured")} · ${formatInteger(delivery.target_count)} targets</div>`
           : ""
       }
     </div>
