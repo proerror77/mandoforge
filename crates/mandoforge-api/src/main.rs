@@ -1068,20 +1068,50 @@ fn copy_payload_key(attributes: &mut Value, payload: &Value, key: &str) {
 }
 
 async fn run_migrations(pool: &PgPool) -> Result<()> {
-    for path in [
-        "db/migrations/0001_core.sql",
-        "db/migrations/0002_generic_demo.sql",
-        "db/migrations/0003_stage2_governance.sql",
-    ] {
-        let sql = tokio::fs::read_to_string(path)
+    for path in migration_paths().await? {
+        let display_path = path.display().to_string();
+        let sql = tokio::fs::read_to_string(&path)
             .await
-            .with_context(|| format!("failed to read migration {path}"))?;
+            .with_context(|| format!("failed to read migration {display_path}"))?;
         sqlx::raw_sql(&sql)
             .execute(pool)
             .await
-            .with_context(|| format!("failed to execute migration {path}"))?;
+            .with_context(|| format!("failed to execute migration {display_path}"))?;
     }
     Ok(())
+}
+
+async fn migration_paths() -> Result<Vec<PathBuf>> {
+    let candidates = std::env::var("MANDOFORGE_MIGRATIONS_DIR")
+        .map(|path| vec![PathBuf::from(path)])
+        .unwrap_or_else(|_| {
+            vec![
+                PathBuf::from("db/migrations"),
+                PathBuf::from("../../db/migrations"),
+            ]
+        });
+    let mut last_error = None;
+    for directory in candidates {
+        match tokio::fs::read_dir(&directory).await {
+            Ok(mut entries) => {
+                let mut paths = Vec::new();
+                while let Some(entry) = entries.next_entry().await? {
+                    let path = entry.path();
+                    if path.extension().and_then(|extension| extension.to_str()) == Some("sql") {
+                        paths.push(path);
+                    }
+                }
+                paths.sort();
+                return Ok(paths);
+            }
+            Err(error) => last_error = Some((directory, error)),
+        }
+    }
+    let (directory, error) = last_error.expect("at least one migration directory candidate");
+    Err(anyhow::anyhow!(
+        "failed to read migrations directory {}: {error}",
+        directory.display()
+    ))
 }
 
 async fn seed_demo_tenant(pool: &PgPool, tenant_id: Uuid) -> Result<()> {
@@ -4564,6 +4594,24 @@ not json
         assert!(
             select_execution_queue_backend(Some("redis"), true).is_err(),
             "broker-backed queue names are reserved until implemented"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_paths_include_stage2_migrations_in_order() {
+        let paths = migration_paths().await.expect("migration paths");
+        let names: Vec<_> = paths
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect();
+
+        assert!(names.contains(&"0001_core.sql"));
+        assert!(names.contains(&"0003_stage2_governance.sql"));
+        assert!(names.contains(&"0004_usage_rollups.sql"));
+        assert!(names.contains(&"0005_approval_expiry.sql"));
+        assert!(
+            names.windows(2).all(|window| window[0] <= window[1]),
+            "migrations should run lexicographically: {names:?}"
         );
     }
 

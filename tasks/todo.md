@@ -111,6 +111,7 @@
 - [x] Add static approval JSON-path diff visualization for modified args.
 - [x] Add delegated approval subject enforcement and UI visibility.
 - [x] Add persistent org/team/project/membership schema and Admin-only hierarchy APIs.
+- [x] Make Postgres migration runner execute all SQL files under `db/migrations`.
 - [x] Derive principal roles from persisted memberships when role headers are absent.
 - [x] Enforce team membership for scoped agent/session/tool/approval/job resource paths.
 - [x] Filter agent/session list APIs by principal membership scope.
