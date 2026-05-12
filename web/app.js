@@ -627,6 +627,7 @@ function renderUsage() {
     ([, left], [, right]) =>
       Number(right.estimated_cost_cents || 0) - Number(left.estimated_cost_cents || 0),
   );
+  const budgetEntries = usage.provider_budgets || [];
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
     ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
   );
@@ -692,6 +693,37 @@ function renderUsage() {
           </table>`
         : `<div class="muted">No provider usage yet.</div>`
     }
+    <h4>Provider Budget Forecast</h4>
+    ${
+      budgetEntries.length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Status</th>
+                <th>Requests</th>
+                <th>Cost</th>
+                <th>Messages</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${budgetEntries
+                .map(
+                  (budget) => `
+                    <tr>
+                      <td>${escapeHtml(budget.provider_name)}</td>
+                      <td><span class="budget-status ${escapeHtml(budget.status)}">${escapeHtml(budget.status)}</span></td>
+                      <td>${formatInteger(budget.request_count)} / ${formatOptionalInteger(budget.daily_request_limit)} · ${formatOptionalPercent(budget.request_budget_used_percent)}</td>
+                      <td>${formatCents(budget.estimated_cost_cents)} / ${formatOptionalCents(budget.daily_cost_limit_cents)} · ${formatOptionalPercent(budget.cost_budget_used_percent)}</td>
+                      <td>${escapeHtml((budget.messages || []).join(" | ") || "No budget pressure")}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : `<div class="muted">No provider budgets configured.</div>`
+    }
     <h4>Tool Runtime Breakdown</h4>
     ${
       toolEntries.length
@@ -743,6 +775,18 @@ function formatInteger(value) {
 
 function formatCents(value) {
   return `${Number(value || 0).toFixed(2)} cents`;
+}
+
+function formatOptionalCents(value) {
+  return value === null || value === undefined ? "none" : formatCents(value);
+}
+
+function formatOptionalInteger(value) {
+  return value === null || value === undefined ? "none" : formatInteger(value);
+}
+
+function formatOptionalPercent(value) {
+  return value === null || value === undefined ? "n/a" : `${Number(value || 0).toFixed(1)}%`;
 }
 
 function formatDurationMs(value) {

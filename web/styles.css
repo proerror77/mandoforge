@@ -382,6 +382,28 @@ header {
   color: var(--warn);
 }
 
+.budget-status {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: white;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.budget-status.ok {
+  color: var(--accent);
+}
+
+.budget-status.warning {
+  color: var(--warn);
+}
+
+.budget-status.critical {
+  color: var(--danger);
+}
+
 .events {
   display: grid;
   gap: 12px;

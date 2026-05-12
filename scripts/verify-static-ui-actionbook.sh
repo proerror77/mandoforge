@@ -52,6 +52,7 @@ wait_for_static_ui() {
     title: document.title,
     hasProviderBreakdown: text.includes('PROVIDER COST BREAKDOWN'),
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
+    hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasWorkerDashboard: text.includes('Worker Dashboard'),
@@ -63,6 +64,7 @@ wait_for_static_ui() {
   result.ok = result.title === 'MandoForge Agent OS Kernel'
     && result.hasProviderBreakdown
     && result.hasToolBreakdown
+    && result.hasProviderBudgetForecast
     && result.hasTenantGovernance
     && result.hasEvalGateAction
     && result.hasWorkerDashboard

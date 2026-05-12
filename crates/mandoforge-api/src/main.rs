@@ -300,6 +300,7 @@ struct UsageSummary {
     estimated_provider_cost_cents: f64,
     by_provider: HashMap<String, ProviderUsageSummary>,
     by_tool: HashMap<String, ToolUsageSummary>,
+    provider_budgets: Vec<ProviderBudgetStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -319,6 +320,21 @@ struct ToolUsageSummary {
     success_count: usize,
     failed_count: usize,
     total_duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderBudgetStatus {
+    provider_name: String,
+    status: String,
+    window_hours: i64,
+    request_count: i64,
+    daily_request_limit: Option<i64>,
+    request_budget_used_percent: Option<f64>,
+    estimated_cost_cents: f64,
+    projected_daily_cost_cents: f64,
+    daily_cost_limit_cents: Option<f64>,
+    cost_budget_used_percent: Option<f64>,
+    messages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2881,6 +2897,7 @@ async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError>
     if estimated_provider_cost_cents == 0.0 {
         estimated_provider_cost_cents = 0.0;
     }
+    let provider_budgets = build_provider_budget_statuses(state, &providers).await?;
     Ok(UsageSummary {
         session_count: sessions.len(),
         event_count,
@@ -2897,7 +2914,95 @@ async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError>
         estimated_provider_cost_cents,
         by_provider,
         by_tool,
+        provider_budgets,
     })
+}
+
+async fn build_provider_budget_statuses(
+    state: &AppState,
+    providers: &[ProviderRecord],
+) -> Result<Vec<ProviderBudgetStatus>, AppError> {
+    let since = Utc::now() - chrono::Duration::hours(24);
+    let mut statuses = Vec::new();
+    for provider in providers {
+        let daily_request_limit = provider_daily_request_limit(provider);
+        let daily_cost_limit_cents = provider_daily_cost_limit_cents(provider);
+        if daily_request_limit.is_none() && daily_cost_limit_cents.is_none() {
+            continue;
+        }
+        let request_count = state
+            .provider_request_count_since(&provider.name, since)
+            .await?;
+        let estimated_cost_cents =
+            provider_estimated_cost_cents_since(state, provider, since).await?;
+        let request_budget_used_percent =
+            daily_request_limit.map(|limit| percent_used(request_count as f64, limit as f64));
+        let cost_budget_used_percent =
+            daily_cost_limit_cents.map(|limit| percent_used(estimated_cost_cents, limit));
+        let max_used_percent = request_budget_used_percent
+            .into_iter()
+            .chain(cost_budget_used_percent)
+            .fold(0.0, f64::max);
+        let status = if max_used_percent >= 100.0 {
+            "critical"
+        } else if max_used_percent >= 80.0 {
+            "warning"
+        } else {
+            "ok"
+        }
+        .to_string();
+        let mut messages = Vec::new();
+        if let (Some(limit), Some(percent)) = (daily_request_limit, request_budget_used_percent) {
+            messages.push(format!(
+                "{request_count} of {limit} daily requests used ({percent:.1}%)"
+            ));
+        }
+        if let (Some(limit), Some(percent)) = (daily_cost_limit_cents, cost_budget_used_percent) {
+            messages.push(format!(
+                "{estimated_cost_cents:.2} of {limit:.2} daily cost cents used ({percent:.1}%)"
+            ));
+        }
+        statuses.push(ProviderBudgetStatus {
+            provider_name: provider.name.clone(),
+            status,
+            window_hours: 24,
+            request_count,
+            daily_request_limit,
+            request_budget_used_percent,
+            estimated_cost_cents,
+            projected_daily_cost_cents: estimated_cost_cents,
+            daily_cost_limit_cents,
+            cost_budget_used_percent,
+            messages,
+        });
+    }
+    statuses.sort_by(|left, right| {
+        budget_rank(&right.status)
+            .cmp(&budget_rank(&left.status))
+            .then_with(|| {
+                right
+                    .projected_daily_cost_cents
+                    .total_cmp(&left.projected_daily_cost_cents)
+            })
+            .then_with(|| left.provider_name.cmp(&right.provider_name))
+    });
+    Ok(statuses)
+}
+
+fn percent_used(used: f64, limit: f64) -> f64 {
+    if limit <= 0.0 {
+        if used > 0.0 { 100.0 } else { 0.0 }
+    } else {
+        (used / limit) * 100.0
+    }
+}
+
+fn budget_rank(status: &str) -> i32 {
+    match status {
+        "critical" => 3,
+        "warning" => 2,
+        _ => 1,
+    }
 }
 
 fn token_cost_cents(tokens: i64, price_per_1k_cents: Option<f64>) -> f64 {
@@ -5835,6 +5940,22 @@ not json
         assert_eq!(usage.by_provider["governed-mock"].total_tokens, 240);
         assert!((usage.by_provider["governed-mock"].token_cost_cents - 0.3).abs() < 0.000001);
         assert!((usage.estimated_provider_cost_cents - 2.8).abs() < 0.000001);
+        let governed_budget = usage
+            .provider_budgets
+            .iter()
+            .find(|budget| budget.provider_name == "governed-mock")
+            .expect("governed mock budget status");
+        assert_eq!(governed_budget.status, "critical");
+        assert_eq!(governed_budget.request_count, 1);
+        assert_eq!(governed_budget.daily_request_limit, Some(1));
+        assert_eq!(governed_budget.request_budget_used_percent, Some(100.0));
+        assert!((governed_budget.estimated_cost_cents - 2.8).abs() < 0.000001);
+        assert!(
+            governed_budget
+                .messages
+                .iter()
+                .any(|message| message.contains("daily requests used"))
+        );
 
         let rollup: UsageRollup = request_json(
             app.clone(),
