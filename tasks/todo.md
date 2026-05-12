@@ -121,6 +121,7 @@
 - [x] Add eval dataset/case/run schema and a first version-bound eval runner skeleton.
 - [x] Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
 - [x] Add eval regression gate API and static run gate action.
+- [x] Add eval drift detection API and static run drift action.
 - [x] Add static Eval Dashboard controls for datasets, cases, and runs.
 - [x] Wire OTel export into append-only session event paths.
 - [x] Add rich OTel spans/metrics for session/provider/tool/approval/worker paths.

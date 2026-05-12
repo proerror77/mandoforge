@@ -57,6 +57,7 @@ wait_for_static_ui() {
     hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
+    hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
     hasWorkerDashboard: text.includes('Worker Dashboard'),
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
     metricCards: document.querySelectorAll('.metric').length,
@@ -71,6 +72,7 @@ wait_for_static_ui() {
     && result.hasPolicyConsole
     && result.hasTenantGovernance
     && result.hasEvalGateAction
+    && result.hasEvalDriftAction
     && result.hasWorkerDashboard
     && result.hasProviderHealthAction
     && result.metricCards >= 4

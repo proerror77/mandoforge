@@ -556,6 +556,18 @@ struct EvalGateDecision {
     checked_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct EvalDriftDecision {
+    run_id: Uuid,
+    baseline_run_id: Option<Uuid>,
+    status: String,
+    score_delta: Option<f64>,
+    passed_count_delta: Option<i64>,
+    case_count_delta: Option<i64>,
+    messages: Vec<String>,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageRollup {
     id: Uuid,
@@ -789,6 +801,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/eval/runs", get(list_eval_runs))
         .route("/api/eval/runs/{id}/gate", post(gate_eval_run))
+        .route("/api/eval/runs/{id}/drift", get(get_eval_run_drift))
         .route("/api/usage", get(get_usage_summary))
         .route(
             "/api/usage/rollups",
@@ -2704,6 +2717,28 @@ async fn gate_eval_run(
     )))
 }
 
+async fn get_eval_run_drift(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<EvalDriftDecision>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "eval_run", Some(id)).await?;
+    let run = state
+        .list_eval_runs(None)
+        .await?
+        .into_iter()
+        .find(|run| run.id == id)
+        .ok_or_else(|| AppError::not_found("eval run not found"))?;
+    let baseline = state
+        .list_eval_runs(Some(run.dataset_id))
+        .await?
+        .into_iter()
+        .filter(|candidate| candidate.id != run.id && candidate.agent_id == run.agent_id)
+        .filter(|candidate| candidate.created_at <= run.created_at)
+        .max_by_key(|candidate| candidate.created_at);
+    Ok(Json(build_eval_drift_decision(&run, baseline.as_ref())))
+}
+
 fn build_eval_gate_decision(
     run: &EvalRun,
     min_score: f64,
@@ -2747,6 +2782,54 @@ fn build_eval_gate_decision(
         failure_reasons,
         checked_at: Utc::now(),
     }
+}
+
+fn build_eval_drift_decision(run: &EvalRun, baseline: Option<&EvalRun>) -> EvalDriftDecision {
+    let Some(baseline) = baseline else {
+        return EvalDriftDecision {
+            run_id: run.id,
+            baseline_run_id: None,
+            status: "no_baseline".to_string(),
+            score_delta: None,
+            passed_count_delta: None,
+            case_count_delta: None,
+            messages: vec!["no previous eval run found for the same dataset and agent".to_string()],
+            checked_at: Utc::now(),
+        };
+    };
+    let current_score = run.score.unwrap_or(0.0);
+    let baseline_score = baseline.score.unwrap_or(0.0);
+    let score_delta = current_score - baseline_score;
+    let current_passed = eval_run_detail_i64(run, "passed_count");
+    let baseline_passed = eval_run_detail_i64(baseline, "passed_count");
+    let current_case_count = eval_run_detail_i64(run, "case_count");
+    let baseline_case_count = eval_run_detail_i64(baseline, "case_count");
+    let passed_count_delta = current_passed - baseline_passed;
+    let case_count_delta = current_case_count - baseline_case_count;
+    let status = if score_delta < -0.0001 || passed_count_delta < 0 {
+        "regressed"
+    } else if score_delta > 0.0001 || passed_count_delta > 0 {
+        "improved"
+    } else {
+        "stable"
+    }
+    .to_string();
+    EvalDriftDecision {
+        run_id: run.id,
+        baseline_run_id: Some(baseline.id),
+        status,
+        score_delta: Some(score_delta),
+        passed_count_delta: Some(passed_count_delta),
+        case_count_delta: Some(case_count_delta),
+        messages: vec![format!(
+            "score delta {score_delta:.4}; passed cases delta {passed_count_delta}; case count delta {case_count_delta}"
+        )],
+        checked_at: Utc::now(),
+    }
+}
+
+fn eval_run_detail_i64(run: &EvalRun, key: &str) -> i64 {
+    run.details.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
 async fn get_usage_summary(
@@ -6457,6 +6540,33 @@ not json
         assert_eq!(gate.status, "passed");
         assert!(gate.failure_reasons.is_empty());
 
+        let second_run: EvalRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/datasets/{}/runs", dataset.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"agent_id": agent.id}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        let drift: EvalDriftDecision = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/eval/runs/{}/drift", second_run.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(drift.run_id, second_run.id);
+        assert_eq!(drift.baseline_run_id, Some(run.id));
+        assert_eq!(drift.status, "stable");
+        assert_eq!(drift.score_delta, Some(0.0));
+
         let (status, gate_error) = request_value(
             app.clone(),
             Request::builder()
@@ -6557,8 +6667,9 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(runs.len(), 2);
+        assert_eq!(runs.len(), 3);
         assert!(runs.iter().any(|listed| listed.id == run.id));
+        assert!(runs.iter().any(|listed| listed.id == second_run.id));
         assert!(runs.iter().any(|listed| listed.id == failing_run.id));
     }
 

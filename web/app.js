@@ -13,6 +13,7 @@ const state = {
   evalCases: [],
   evalRuns: [],
   evalGates: {},
+  evalDrifts: {},
   mcpServers: [],
   mcpTeamId: "",
   executionJobs: [],
@@ -296,6 +297,12 @@ async function gateEvalRun(runId) {
     body: JSON.stringify({ min_score: 1.0, require_completed: true }),
   });
   state.evalGates[runId] = decision;
+  renderEvalRuns();
+}
+
+async function driftEvalRun(runId) {
+  const decision = await api(`/api/eval/runs/${runId}/drift`);
+  state.evalDrifts[runId] = decision;
   renderEvalRuns();
 }
 
@@ -912,15 +919,23 @@ function renderEvalRuns() {
         .map(
           (run) => {
             const gate = state.evalGates[run.id];
+            const drift = state.evalDrifts[run.id];
             return `
             <div class="item">
               <strong>${escapeHtml(run.status)} · score ${escapeHtml(run.score ?? "n/a")}</strong>
               <div class="muted">${escapeHtml(run.created_at)}</div>
               <button class="secondary" data-eval-gate="${run.id}">Gate 100%</button>
+              <button class="secondary" data-eval-drift="${run.id}">Check Drift</button>
               ${
                 gate
                   ? `<div class="muted">Gate: ${escapeHtml(gate.status)} · min ${escapeHtml(gate.min_score)}</div>
                      <pre>${escapeHtml(JSON.stringify(gate.failure_reasons, null, 2))}</pre>`
+                  : ""
+              }
+              ${
+                drift
+                  ? `<div class="muted">Drift: ${escapeHtml(drift.status)} · baseline ${escapeHtml(drift.baseline_run_id || "none")}</div>
+                     <pre>${escapeHtml(JSON.stringify(drift.messages, null, 2))}</pre>`
                   : ""
               }
               <pre>${escapeHtml(JSON.stringify(run.details, null, 2))}</pre>
@@ -932,6 +947,9 @@ function renderEvalRuns() {
     : `<div class="muted">No eval runs</div>`;
   evalRunRoot.querySelectorAll("[data-eval-gate]").forEach((button) => {
     button.addEventListener("click", () => gateEvalRun(button.dataset.evalGate));
+  });
+  evalRunRoot.querySelectorAll("[data-eval-drift]").forEach((button) => {
+    button.addEventListener("click", () => driftEvalRun(button.dataset.evalDrift));
   });
 }
 
