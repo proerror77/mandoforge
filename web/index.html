@@ -155,7 +155,31 @@
             <div>
               <h3>Vault</h3>
               <button type="button" class="secondary form-inline-action" id="check-vault-health">Check Vault Health</button>
+              <form id="secret-form" class="stack-form compact-form">
+                <label>
+                  Name
+                  <input name="name" required value="openai-api-key" />
+                </label>
+                <label>
+                  Vault path
+                  <input name="path" required value="providers/openai" />
+                </label>
+                <label>
+                  Key
+                  <input name="key" required value="api_key" />
+                </label>
+                <label>
+                  Scope type
+                  <input name="scope_type" value="tenant" />
+                </label>
+                <label>
+                  Scope ID
+                  <input name="scope_id" placeholder="Optional team/project UUID" />
+                </label>
+                <button type="submit">Register Secret Ref</button>
+              </form>
               <div id="vault-health" class="list"></div>
+              <div id="secret-records" class="list"></div>
             </div>
             <div>
               <h3>Policy Console</h3>

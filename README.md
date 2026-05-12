@@ -236,6 +236,9 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/policy`
 - `POST /api/policy/simulate`
 - `POST /api/policy/test`
+- `GET /api/vault/secrets`
+- `POST /api/vault/secrets`
+- `POST /api/vault/secrets/:id/rotate`
 - `GET /api/organizations`
 - `POST /api/organizations`
 - `GET /api/organizations/:id/teams`

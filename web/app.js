@@ -8,6 +8,7 @@ const state = {
   providers: [],
   providerHealth: {},
   vaultHealth: null,
+  secretRecords: [],
   policy: null,
   policyDecision: null,
   policyTest: null,
@@ -50,6 +51,7 @@ const auditLogRoot = document.querySelector("#audit-logs");
 const auditDetailRoot = document.querySelector("#audit-detail");
 const providerRoot = document.querySelector("#providers");
 const vaultHealthRoot = document.querySelector("#vault-health");
+const secretRecordRoot = document.querySelector("#secret-records");
 const checkVaultHealthButton = document.querySelector("#check-vault-health");
 const policyRoot = document.querySelector("#policy-summary");
 const policyForm = document.querySelector("#policy-simulate-form");
@@ -74,6 +76,7 @@ const teamForm = document.querySelector("#team-form");
 const projectForm = document.querySelector("#project-form");
 const membershipForm = document.querySelector("#membership-form");
 const providerForm = document.querySelector("#provider-form");
+const secretForm = document.querySelector("#secret-form");
 const evalDatasetForm = document.querySelector("#eval-dataset-form");
 const evalCaseForm = document.querySelector("#eval-case-form");
 const evalRunForm = document.querySelector("#eval-run-form");
@@ -91,6 +94,7 @@ teamForm.addEventListener("submit", createTeam);
 projectForm.addEventListener("submit", createProject);
 membershipForm.addEventListener("submit", createMembership);
 providerForm.addEventListener("submit", createProvider);
+secretForm.addEventListener("submit", createSecretRecord);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
 policyForm.addEventListener("submit", simulatePolicy);
 policyTestForm.addEventListener("submit", testPolicy);
@@ -245,6 +249,32 @@ async function createProvider(event) {
       default_model: form.get("default_model"),
       config,
     }),
+  });
+  await refreshOps();
+}
+
+async function createSecretRecord(event) {
+  event.preventDefault();
+  const form = new FormData(secretForm);
+  const scopeId = String(form.get("scope_id") || "").trim();
+  const payload = {
+    name: String(form.get("name") || "").trim(),
+    path: String(form.get("path") || "").trim(),
+    key: String(form.get("key") || "").trim(),
+    scope_type: String(form.get("scope_type") || "tenant").trim(),
+  };
+  if (scopeId) payload.scope_id = scopeId;
+  await api("/api/vault/secrets", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  await refreshOps();
+}
+
+async function rotateSecretRecord(id, path, key) {
+  await api(`/api/vault/secrets/${id}/rotate`, {
+    method: "POST",
+    body: JSON.stringify({ path, key }),
   });
   await refreshOps();
 }
@@ -469,9 +499,20 @@ async function runDemo() {
 }
 
 async function refreshOps() {
-  const [providers, policy, evalDatasets, evalRuns, usage, usageRollups, organizations, executionJobs] =
+  const [
+    providers,
+    secretRecords,
+    policy,
+    evalDatasets,
+    evalRuns,
+    usage,
+    usageRollups,
+    organizations,
+    executionJobs,
+  ] =
     await Promise.all([
       api("/api/providers"),
+      api("/api/vault/secrets"),
       api("/api/policy"),
       api("/api/eval/datasets"),
       api("/api/eval/runs"),
@@ -481,6 +522,7 @@ async function refreshOps() {
       api("/api/execution-jobs"),
     ]);
   state.providers = providers;
+  state.secretRecords = secretRecords;
   state.policy = policy;
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
@@ -604,6 +646,7 @@ function renderOps() {
   renderTenantGovernance();
   renderProviders();
   renderVaultHealth();
+  renderSecretRecords();
   renderPolicy();
   renderEvalDatasets();
   renderEvalCases();
@@ -1058,6 +1101,32 @@ function renderVaultHealth() {
         <pre>${escapeHtml(JSON.stringify({ issues: state.vaultHealth.issues, checks: state.vaultHealth.checks }, null, 2))}</pre>
       </div>`
     : `<div class="muted">No Vault health check run yet.</div>`;
+}
+
+function renderSecretRecords() {
+  secretRecordRoot.innerHTML = state.secretRecords.length
+    ? state.secretRecords
+        .map(
+          (secret) => `
+            <div class="item">
+              <strong>${escapeHtml(secret.name)}</strong>
+              <div class="muted">${escapeHtml(secret.scope_type)} · ${escapeHtml(secret.scope_id || "tenant")} · v${escapeHtml(secret.version)}</div>
+              <div class="muted">vault:${escapeHtml(secret.path)}#${escapeHtml(secret.key)}</div>
+              <button class="secondary" data-secret-rotate="${secret.id}" data-secret-path="${escapeHtml(secret.path)}" data-secret-key="${escapeHtml(secret.key)}">Rotate Ref</button>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No registered secret refs</div>`;
+  secretRecordRoot.querySelectorAll("[data-secret-rotate]").forEach((button) => {
+    button.addEventListener("click", () =>
+      rotateSecretRecord(
+        button.dataset.secretRotate,
+        button.dataset.secretPath,
+        button.dataset.secretKey,
+      ),
+    );
+  });
 }
 
 function renderEvalRuns() {

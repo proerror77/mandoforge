@@ -5,7 +5,7 @@ use sqlx::{Row, postgres::PgRow};
 use crate::{
     Agent, AgentRelease, AgentVersion, AppError, Approval, Artifact, AuditLog, EvalCase,
     EvalDataset, EvalRun, McpServerRecord, Membership, Organization, Project, ProviderAccess,
-    ProviderRecord, Session, SessionEvent, Team, ToolCall, UsageRollup,
+    ProviderRecord, SecretRecord, Session, SessionEvent, Team, ToolCall, UsageRollup,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -67,6 +67,21 @@ pub(crate) fn agent_release_from_row(row: PgRow) -> Result<AgentRelease, AppErro
         promoted_by: row.try_get("promoted_by")?,
         promoted_at: row.try_get("promoted_at")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn secret_record_from_row(row: PgRow) -> Result<SecretRecord, AppError> {
+    Ok(SecretRecord {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        path: row.try_get("path")?,
+        key: row.try_get("key")?,
+        scope_type: row.try_get("scope_type")?,
+        scope_id: row.try_get("scope_id")?,
+        status: row.try_get("status")?,
+        version: row.try_get("version")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 

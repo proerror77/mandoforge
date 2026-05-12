@@ -41,6 +41,7 @@ mod store_events;
 mod store_governance;
 mod store_releases;
 mod store_rows;
+mod store_secret_records;
 mod store_seed;
 mod store_tool_calls;
 mod store_usage_rollups;
@@ -82,7 +83,7 @@ use provider::{
     ProviderResponse,
 };
 use secrets::{
-    SecretProvider, SecretProviderConfig, SecretProviderKind, VaultSecretProvider,
+    SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, VaultSecretProvider,
     secret_provider_from_env,
 };
 #[cfg(test)]
@@ -571,6 +572,37 @@ struct SecretProviderHealth {
     checked_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecretRecord {
+    id: Uuid,
+    name: String,
+    path: String,
+    key: String,
+    scope_type: String,
+    scope_id: Option<Uuid>,
+    status: String,
+    version: i32,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSecretRecord {
+    name: String,
+    path: String,
+    key: String,
+    #[serde(default = "default_secret_scope_type")]
+    scope_type: String,
+    #[serde(default)]
+    scope_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RotateSecretRecord {
+    path: String,
+    key: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ProviderHealth {
     provider_id: Uuid,
@@ -919,6 +951,11 @@ fn build_router(state: AppState) -> Router {
         .route("/api/policy/simulate", post(simulate_policy))
         .route("/api/policy/test", post(test_policy))
         .route("/api/vault/health", get(get_vault_health))
+        .route(
+            "/api/vault/secrets",
+            get(list_secret_records).post(create_secret_record),
+        )
+        .route("/api/vault/secrets/{id}/rotate", post(rotate_secret_record))
         .route(
             "/api/codex-app-server/health",
             get(get_codex_app_server_health),
@@ -2829,6 +2866,106 @@ async fn get_vault_health(
     ))
 }
 
+async fn list_secret_records(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SecretRecord>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
+    Ok(Json(state.list_secret_records().await?))
+}
+
+async fn create_secret_record(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSecretRecord>,
+) -> Result<Json<SecretRecord>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "vault".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let input = validate_secret_record_input(input)?;
+    let record = state.create_secret_record(input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "secret.created",
+            "secret_record",
+            Some(record.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": record.name,
+                "scope_type": record.scope_type,
+                "scope_id": record.scope_id,
+                "version": record.version
+            }),
+        ))
+        .await?;
+    Ok(Json(record))
+}
+
+async fn rotate_secret_record(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RotateSecretRecord>,
+) -> Result<Json<SecretRecord>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "secret_record".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    SecretRef::new(input.path.as_str(), input.key.as_str())?;
+    let record = state.rotate_secret_record(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "secret.rotated",
+            "secret_record",
+            Some(record.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": record.name,
+                "scope_type": record.scope_type,
+                "scope_id": record.scope_id,
+                "version": record.version
+            }),
+        ))
+        .await?;
+    Ok(Json(record))
+}
+
+fn validate_secret_record_input(
+    mut input: CreateSecretRecord,
+) -> Result<CreateSecretRecord, AppError> {
+    input.name = input.name.trim().to_string();
+    input.path = input.path.trim().to_string();
+    input.key = input.key.trim().to_string();
+    input.scope_type = input.scope_type.trim().to_string();
+    if input.name.is_empty() {
+        return Err(AppError::bad_request("secret name is required"));
+    }
+    if !matches!(input.scope_type.as_str(), "tenant" | "team" | "project") {
+        return Err(AppError::bad_request(
+            "secret scope_type must be tenant, team, or project",
+        ));
+    }
+    SecretRef::new(input.path.as_str(), input.key.as_str())?;
+    Ok(input)
+}
+
 async fn get_codex_app_server_health(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4464,6 +4601,10 @@ fn default_release_environment() -> String {
     "staging".to_string()
 }
 
+fn default_secret_scope_type() -> String {
+    "tenant".to_string()
+}
+
 fn default_provider() -> String {
     "openai-compatible".to_string()
 }
@@ -4945,6 +5086,7 @@ not json
         assert!(names.contains(&"0004_usage_rollups.sql"));
         assert!(names.contains(&"0005_approval_expiry.sql"));
         assert!(names.contains(&"0006_agent_releases.sql"));
+        assert!(names.contains(&"0007_secret_records.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -7158,6 +7300,80 @@ not json
                 .iter()
                 .any(|issue| issue.contains("secret reads are disabled"))
         );
+
+        let secret_record: SecretRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/vault/secrets")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "openai-api-key",
+                        "path": "providers/openai",
+                        "key": "api_key",
+                        "scope_type": "team",
+                        "scope_id": team.id
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(secret_record.version, 1);
+        assert_eq!(secret_record.scope_id, Some(team.id));
+
+        let rotated_secret: SecretRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/vault/secrets/{}/rotate", secret_record.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "path": "providers/openai/rotated",
+                        "key": "api_key"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rotated_secret.version, 2);
+        assert_eq!(rotated_secret.path, "providers/openai/rotated");
+
+        let secret_records: Vec<SecretRecord> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/vault/secrets")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            secret_records
+                .iter()
+                .any(|record| record.id == secret_record.id)
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| log.action == "secret.created"));
+        assert!(audit_logs.iter().any(|log| log.action == "secret.rotated"));
 
         let governed_provider: ProviderRecord = request_json(
             app.clone(),
