@@ -100,6 +100,7 @@ struct AppState {
     mcp_gateway_client: Arc<dyn McpGatewayClient>,
     codex_app_server_config: Option<CodexAppServerConfig>,
     codex_app_server_client: Arc<dyn CodexAppServerClient>,
+    cost_alert_webhook_url: Option<String>,
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
@@ -346,6 +347,36 @@ struct ProviderBudgetStatus {
     daily_cost_limit_cents: Option<f64>,
     cost_budget_used_percent: Option<f64>,
     messages: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CostAlert {
+    provider_name: String,
+    severity: String,
+    message: String,
+    messages: Vec<String>,
+    window_hours: i64,
+    request_budget_used_percent: Option<f64>,
+    cost_budget_used_percent: Option<f64>,
+    estimated_cost_cents: f64,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CostAlertSummary {
+    webhook_configured: bool,
+    min_status: String,
+    alerts: Vec<CostAlert>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CostAlertDelivery {
+    status: String,
+    delivered: bool,
+    channel: String,
+    webhook_configured: bool,
+    alerts: Vec<CostAlert>,
+    delivered_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -679,6 +710,7 @@ async fn main() -> Result<()> {
         mcp_gateway_client: mcp_gateway_client_from_env()?,
         codex_app_server_config: codex_app_server_config_from_env()?,
         codex_app_server_client: codex_app_server_client_from_env()?,
+        cost_alert_webhook_url: cost_alert_webhook_url_from_env(),
         workspace_root,
         tenant_id,
         policy,
@@ -844,6 +876,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/eval/runs/{id}/gate", post(gate_eval_run))
         .route("/api/eval/runs/{id}/drift", get(get_eval_run_drift))
         .route("/api/usage", get(get_usage_summary))
+        .route("/api/usage/alerts", get(get_cost_alerts))
+        .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
         .route(
             "/api/usage/rollups",
             get(list_usage_rollups).post(create_usage_rollup),
@@ -928,6 +962,13 @@ fn codex_app_server_client_from_env() -> Result<Arc<dyn CodexAppServerClient>> {
     } else {
         Ok(Arc::new(ReservedCodexAppServerClient))
     }
+}
+
+fn cost_alert_webhook_url_from_env() -> Option<String> {
+    std::env::var("MANDOFORGE_COST_ALERT_WEBHOOK_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 async fn healthz() -> Json<Value> {
@@ -3155,6 +3196,75 @@ async fn get_usage_summary(
     Ok(Json(build_usage_summary(&state).await?))
 }
 
+async fn get_cost_alerts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CostAlertSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "usage_alerts", None).await?;
+    let summary = build_usage_summary(&state).await?;
+    Ok(Json(CostAlertSummary {
+        webhook_configured: state.cost_alert_webhook_url.is_some(),
+        min_status: "warning".to_string(),
+        alerts: build_cost_alerts(&summary.provider_budgets, Utc::now()),
+    }))
+}
+
+async fn deliver_cost_alerts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CostAlertDelivery>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "usage_alerts", None).await?;
+    let delivered_at = Utc::now();
+    let summary = build_usage_summary(&state).await?;
+    let alerts = build_cost_alerts(&summary.provider_budgets, delivered_at);
+    if alerts.is_empty() {
+        return Ok(Json(CostAlertDelivery {
+            status: "no_alerts".to_string(),
+            delivered: false,
+            channel: "webhook".to_string(),
+            webhook_configured: state.cost_alert_webhook_url.is_some(),
+            alerts,
+            delivered_at,
+        }));
+    }
+    let Some(webhook_url) = state.cost_alert_webhook_url.as_ref() else {
+        return Ok(Json(CostAlertDelivery {
+            status: "reserved".to_string(),
+            delivered: false,
+            channel: "webhook".to_string(),
+            webhook_configured: false,
+            alerts,
+            delivered_at,
+        }));
+    };
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        reqwest::Client::new()
+            .post(webhook_url)
+            .json(&json!({
+                "type": "mandoforge.cost_alerts",
+                "alerts": alerts,
+                "delivered_at": delivered_at,
+            }))
+            .send(),
+    )
+    .await??;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "cost alert webhook returned status {}",
+            response.status()
+        )));
+    }
+    Ok(Json(CostAlertDelivery {
+        status: "delivered".to_string(),
+        delivered: true,
+        channel: "webhook".to_string(),
+        webhook_configured: true,
+        alerts,
+        delivered_at,
+    }))
+}
+
 async fn list_usage_rollups(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3421,6 +3531,30 @@ fn percent_used(used: f64, limit: f64) -> f64 {
     } else {
         (used / limit) * 100.0
     }
+}
+
+fn build_cost_alerts(
+    budgets: &[ProviderBudgetStatus],
+    created_at: DateTime<Utc>,
+) -> Vec<CostAlert> {
+    budgets
+        .iter()
+        .filter(|budget| budget_rank(&budget.status) >= budget_rank("warning"))
+        .map(|budget| CostAlert {
+            provider_name: budget.provider_name.clone(),
+            severity: budget.status.clone(),
+            message: format!(
+                "provider {} budget status is {}",
+                budget.provider_name, budget.status
+            ),
+            messages: budget.messages.clone(),
+            window_hours: budget.window_hours,
+            request_budget_used_percent: budget.request_budget_used_percent,
+            cost_budget_used_percent: budget.cost_budget_used_percent,
+            estimated_cost_cents: budget.estimated_cost_cents,
+            created_at,
+        })
+        .collect()
 }
 
 fn budget_rank(status: &str) -> i32 {
@@ -4453,6 +4587,7 @@ not json
             mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            cost_alert_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -4599,6 +4734,16 @@ not json
         }
     }
 
+    async fn mock_cost_alert_webhook(Json(payload): Json<Value>) -> Json<Value> {
+        assert_eq!(payload["type"], "mandoforge.cost_alerts");
+        assert!(
+            payload["alerts"]
+                .as_array()
+                .is_some_and(|alerts| !alerts.is_empty())
+        );
+        Json(json!({"accepted": true}))
+    }
+
     #[tokio::test]
     async fn appended_session_events_export_telemetry_when_enabled() {
         let exporter = Arc::new(RecordingTelemetryExporter::default());
@@ -4617,6 +4762,7 @@ not json
             mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            cost_alert_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -4698,6 +4844,7 @@ not json
                 timeout_seconds: 5,
             }),
             codex_app_server_client: codex_client.clone(),
+            cost_alert_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -4810,6 +4957,142 @@ not json
     }
 
     #[tokio::test]
+    async fn cost_alert_delivery_posts_budget_alerts_to_webhook() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let webhook = Router::new().route("/alerts", post(mock_cost_alert_webhook));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, webhook)
+                .await
+                .expect("mock cost alert webhook");
+        });
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(InlineExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: None,
+            codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            cost_alert_webhook_url: Some(format!("http://{addr}/alerts")),
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: PolicyConfig::default(),
+        };
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state);
+
+        let _provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "alert-mock",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {
+                            "budget": {"daily_request_limit": 1},
+                            "pricing": {"per_request_cents": 1.0}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let agent: Agent = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "alert agent",
+                        "kind": "orchestrator",
+                        "provider": "alert-mock",
+                        "model": "gpt-5.4-mini",
+                        "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agent.id, "title": "alert session"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _run: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        let alerts: CostAlertSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/usage/alerts")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(alerts.webhook_configured);
+        assert_eq!(alerts.alerts[0].provider_name, "alert-mock");
+        assert_eq!(alerts.alerts[0].severity, "critical");
+
+        let delivered: CostAlertDelivery = request_json(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/usage/alerts/deliver")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(delivered.status, "delivered");
+        assert!(delivered.delivered);
+        assert_eq!(delivered.alerts[0].provider_name, "alert-mock");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
         let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
         let state = AppState {
@@ -4831,6 +5114,7 @@ not json
             mcp_gateway_client: mcp_client.clone(),
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            cost_alert_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),

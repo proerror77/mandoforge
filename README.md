@@ -170,6 +170,15 @@ cargo run -p mandoforge-api
 
 When configured, Admin-only routes under `/api/codex-app-server/*` can health-check the App Server, create threads, create turns, execute turn-scoped commands, and interrupt turns. When unset, the adapter fails closed and approved `codex.exec` continues to use the Codex CLI path.
 
+Optional provider cost alert webhook:
+
+```bash
+MANDOFORGE_COST_ALERT_WEBHOOK_URL=https://alerts.example.internal/mandoforge \
+cargo run -p mandoforge-api
+```
+
+`GET /api/usage/alerts` lists warning/critical provider budget alerts. `POST /api/usage/alerts/deliver` sends the active alerts to the configured webhook; when no webhook is set, delivery stays reserved and no external request is made.
+
 ## Docker
 
 ```bash
@@ -237,6 +246,8 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/eval/datasets/:id/runs`
 - `POST /api/eval/datasets/:id/runs`
 - `GET /api/eval/runs`
+- `GET /api/usage/alerts`
+- `POST /api/usage/alerts/deliver`
 - `GET /api/codex-app-server/health`
 - `POST /api/codex-app-server/threads`
 - `POST /api/codex-app-server/threads/:thread_id/turns`

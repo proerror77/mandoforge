@@ -20,6 +20,7 @@ const state = {
   executionJobs: [],
   usageRollups: [],
   usage: null,
+  costAlertDelivery: null,
   organizations: [],
   teams: [],
   projects: [],
@@ -75,6 +76,7 @@ const loadMcpButton = document.querySelector("#load-mcp");
 const loadEvalCasesButton = document.querySelector("#load-eval-cases");
 const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jobs");
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
+const deliverCostAlertsButton = document.querySelector("#deliver-cost-alerts");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
@@ -93,6 +95,7 @@ loadMcpButton.addEventListener("click", loadMcpServers);
 loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
+deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -334,6 +337,13 @@ async function createUsageRollup() {
   await api("/api/usage/rollups", {
     method: "POST",
     body: JSON.stringify({}),
+  });
+  await refreshOps();
+}
+
+async function deliverCostAlerts() {
+  state.costAlertDelivery = await api("/api/usage/alerts/deliver", {
+    method: "POST",
   });
   await refreshOps();
 }
@@ -668,6 +678,7 @@ function renderUsage() {
       Number(right.estimated_cost_cents || 0) - Number(left.estimated_cost_cents || 0),
   );
   const budgetEntries = usage.provider_budgets || [];
+  const costAlertDelivery = state.costAlertDelivery;
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
     ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
   );
@@ -734,6 +745,14 @@ function renderUsage() {
         : `<div class="muted">No provider usage yet.</div>`
     }
     <h4>Provider Budget Forecast</h4>
+    ${
+      costAlertDelivery
+        ? `<div class="item">
+            <strong>Cost alert delivery: ${escapeHtml(costAlertDelivery.status)}</strong>
+            <div class="muted">${escapeHtml(costAlertDelivery.channel)} · ${escapeHtml(costAlertDelivery.webhook_configured ? "webhook configured" : "webhook not configured")} · ${formatInteger((costAlertDelivery.alerts || []).length)} alerts</div>
+          </div>`
+        : ""
+    }
     ${
       budgetEntries.length
         ? `<table class="usage-table">
