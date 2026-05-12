@@ -178,7 +178,15 @@ MANDOFORGE_COST_ALERT_WEBHOOK_URL=https://alerts.example.internal/mandoforge \
 cargo run -p mandoforge-api
 ```
 
-`GET /api/usage/alerts` lists warning/critical provider budget alerts. `GET/POST /api/usage/alert-routes` manages audited alert routes for webhook, Slack, and email channels. `POST /api/usage/alerts/deliver` sends active alerts through configured routes; non-webhook channels stay reserved until their production adapters are configured.
+Optional direct SMTP relay for email cost alert routes:
+
+```bash
+MANDOFORGE_COST_ALERT_SMTP_ADDR=127.0.0.1:25 \
+MANDOFORGE_COST_ALERT_SMTP_FROM=alerts@mandoforge.local \
+cargo run -p mandoforge-api
+```
+
+`GET /api/usage/alerts` lists warning/critical provider budget alerts. `GET/POST /api/usage/alert-routes` manages audited alert routes for webhook, Slack, and email channels. `POST /api/usage/alerts/deliver` sends active alerts through configured routes; email routes use `MANDOFORGE_COST_ALERT_EMAIL_RELAY_URL` when set, otherwise they can send directly through the SMTP relay configured with `MANDOFORGE_COST_ALERT_SMTP_ADDR` and `MANDOFORGE_COST_ALERT_SMTP_FROM`.
 
 ## Docker
 

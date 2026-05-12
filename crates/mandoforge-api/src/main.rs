@@ -21,7 +21,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use tokio::sync::RwLock;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpStream,
+    sync::RwLock,
+};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -119,6 +123,7 @@ struct AppState {
     eval_judge_client: Arc<dyn EvalJudgeClient>,
     cost_alert_webhook_url: Option<String>,
     cost_alert_email_relay_url: Option<String>,
+    cost_alert_smtp_config: Option<CostAlertSmtpConfig>,
     approval_webhook_url: Option<String>,
     #[allow(dead_code)]
     workspace_root: PathBuf,
@@ -599,6 +604,13 @@ struct CostAlertRouteDelivery {
     delivered: bool,
     matched_alert_count: usize,
     target: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CostAlertSmtpConfig {
+    addr: String,
+    from: String,
+    helo_domain: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1195,6 +1207,7 @@ async fn main() -> Result<()> {
         eval_judge_client: eval_judge_client_from_env()?,
         cost_alert_webhook_url: cost_alert_webhook_url_from_env(),
         cost_alert_email_relay_url: cost_alert_email_relay_url_from_env(),
+        cost_alert_smtp_config: cost_alert_smtp_config_from_env(),
         approval_webhook_url: approval_webhook_url_from_env(),
         workspace_root,
         tenant_id,
@@ -1591,6 +1604,27 @@ fn cost_alert_email_relay_url_from_env() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn cost_alert_smtp_config_from_env() -> Option<CostAlertSmtpConfig> {
+    let addr = std::env::var("MANDOFORGE_COST_ALERT_SMTP_ADDR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let from = std::env::var("MANDOFORGE_COST_ALERT_SMTP_FROM")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let helo_domain = std::env::var("MANDOFORGE_COST_ALERT_SMTP_HELO")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "mandoforge.local".to_string());
+    Some(CostAlertSmtpConfig {
+        addr,
+        from,
+        helo_domain,
+    })
 }
 
 fn approval_webhook_url_from_env() -> Option<String> {
@@ -6218,6 +6252,29 @@ async fn deliver_cost_alert_route(
             target: route.target.clone(),
         });
     }
+    if route.channel == "email" && state.cost_alert_email_relay_url.is_none() {
+        let Some(smtp_config) = state.cost_alert_smtp_config.as_ref() else {
+            return Ok(CostAlertRouteDelivery {
+                route_id: Some(route.id),
+                route_name: route.name.clone(),
+                channel: route.channel.clone(),
+                status: "reserved".to_string(),
+                delivered: false,
+                matched_alert_count: matched_alerts.len(),
+                target: route.target.clone(),
+            });
+        };
+        deliver_cost_alert_email_smtp(smtp_config, route, &matched_alerts, delivered_at).await?;
+        return Ok(CostAlertRouteDelivery {
+            route_id: Some(route.id),
+            route_name: route.name.clone(),
+            channel: route.channel.clone(),
+            status: "delivered".to_string(),
+            delivered: true,
+            matched_alert_count: matched_alerts.len(),
+            target: route.target.clone(),
+        });
+    }
     let webhook_url = match route.channel.as_str() {
         "webhook" => route
             .target
@@ -6333,11 +6390,171 @@ fn slack_cost_alert_payload(
     })
 }
 
+async fn deliver_cost_alert_email_smtp(
+    config: &CostAlertSmtpConfig,
+    route: &CostAlertRoute,
+    alerts: &[&CostAlert],
+    delivered_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let email = cost_alert_email_message(config, route, alerts, delivered_at)?;
+    let mut stream =
+        tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&config.addr)).await??;
+    smtp_expect(&mut stream, 220).await?;
+    smtp_command(
+        &mut stream,
+        format!("EHLO {}\r\n", smtp_sanitize_header(&config.helo_domain)),
+        250,
+    )
+    .await?;
+    smtp_command(
+        &mut stream,
+        format!("MAIL FROM:<{}>\r\n", smtp_sanitize_addr(&config.from)?),
+        250,
+    )
+    .await?;
+    smtp_command(
+        &mut stream,
+        format!("RCPT TO:<{}>\r\n", smtp_sanitize_addr(&email.to)?),
+        250,
+    )
+    .await?;
+    smtp_command(&mut stream, "DATA\r\n".to_string(), 354).await?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        stream.write_all(email.raw.as_bytes()),
+    )
+    .await??;
+    smtp_expect(&mut stream, 250).await?;
+    let _ = smtp_command(&mut stream, "QUIT\r\n".to_string(), 221).await;
+    Ok(())
+}
+
+struct CostAlertEmailMessage {
+    to: String,
+    raw: String,
+}
+
+fn cost_alert_email_message(
+    config: &CostAlertSmtpConfig,
+    route: &CostAlertRoute,
+    alerts: &[&CostAlert],
+    delivered_at: DateTime<Utc>,
+) -> Result<CostAlertEmailMessage, AppError> {
+    let (to, subject, body) = cost_alert_email_parts(route, alerts)?;
+    let from = smtp_sanitize_addr(&config.from)?;
+    let to_addr = smtp_sanitize_addr(&to)?;
+    let subject = smtp_sanitize_header(&subject);
+    let body = smtp_escape_body(&body);
+    Ok(CostAlertEmailMessage {
+        to,
+        raw: format!(
+            "From: <{from}>\r\nTo: <{to_addr}>\r\nSubject: {subject}\r\nDate: {delivered_at}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n.\r\n"
+        ),
+    })
+}
+
+async fn smtp_command(
+    stream: &mut TcpStream,
+    command: String,
+    expected_code: u16,
+) -> Result<(), AppError> {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        stream.write_all(command.as_bytes()),
+    )
+    .await??;
+    smtp_expect(stream, expected_code).await
+}
+
+async fn smtp_expect(stream: &mut TcpStream, expected_code: u16) -> Result<(), AppError> {
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        let read =
+            tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line)).await??;
+        if read == 0 {
+            return Err(AppError::bad_request("SMTP server closed connection"));
+        }
+        if line.len() < 4 {
+            return Err(AppError::bad_request(format!(
+                "SMTP server returned malformed response: {}",
+                line.trim_end()
+            )));
+        }
+        let code: u16 = line[0..3].parse().map_err(|_| {
+            AppError::bad_request(format!(
+                "SMTP server returned non-numeric response: {}",
+                line.trim_end()
+            ))
+        })?;
+        if code != expected_code {
+            return Err(AppError::bad_request(format!(
+                "SMTP server returned {}, expected {}: {}",
+                code,
+                expected_code,
+                line.trim_end()
+            )));
+        }
+        if line.as_bytes().get(3) != Some(&b'-') {
+            return Ok(());
+        }
+    }
+}
+
+fn smtp_sanitize_addr(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.contains(['\r', '\n', '<', '>'])
+        || value.contains(' ')
+        || !value.contains('@')
+    {
+        return Err(AppError::bad_request("SMTP email address is invalid"));
+    }
+    Ok(value.to_string())
+}
+
+fn smtp_sanitize_header(value: &str) -> String {
+    value.replace(['\r', '\n'], " ").trim().to_string()
+}
+
+fn smtp_escape_body(value: &str) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(|line| {
+            if line.starts_with('.') {
+                format!(".{line}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
 fn email_cost_alert_payload(
     route: &CostAlertRoute,
     alerts: &[&CostAlert],
     delivered_at: DateTime<Utc>,
 ) -> Result<Value, AppError> {
+    let (to, subject, body) = cost_alert_email_parts(route, alerts)?;
+    Ok(json!({
+        "type": "mandoforge.cost_alert_email",
+        "to": to,
+        "subject": subject,
+        "text": body,
+        "route_id": route.id,
+        "route_name": route.name,
+        "severity_filter": route.severity_filter,
+        "delivered_at": delivered_at,
+    }))
+}
+
+fn cost_alert_email_parts(
+    route: &CostAlertRoute,
+    alerts: &[&CostAlert],
+) -> Result<(String, String, String), AppError> {
     let Some(to) = route.target.as_ref() else {
         return Err(AppError::bad_request(
             "email cost alert route requires a recipient target",
@@ -6361,16 +6578,7 @@ fn email_cost_alert_payload(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    Ok(json!({
-        "type": "mandoforge.cost_alert_email",
-        "to": to,
-        "subject": subject,
-        "text": body,
-        "route_id": route.id,
-        "route_name": route.name,
-        "severity_filter": route.severity_filter,
-        "delivered_at": delivered_at,
-    }))
+    Ok((to.clone(), subject, body))
 }
 
 fn severity_rank(severity: &str) -> i32 {
@@ -8799,6 +9007,7 @@ not json
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -9137,6 +9346,7 @@ not json
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
             approval_webhook_url: Some(approval_webhook_url),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -9376,6 +9586,66 @@ not json
         Json(json!({"queued": true}))
     }
 
+    async fn run_mock_smtp_server(listener: tokio::net::TcpListener) -> String {
+        let (stream, _) = listener.accept().await.expect("smtp accept");
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        writer
+            .write_all(b"220 mock-smtp\r\n")
+            .await
+            .expect("greeting");
+        let mut transcript = String::new();
+        loop {
+            let mut line = String::new();
+            let read = reader.read_line(&mut line).await.expect("smtp command");
+            if read == 0 {
+                break;
+            }
+            transcript.push_str(&line);
+            let command = line.trim_end();
+            if command.starts_with("EHLO ") {
+                writer
+                    .write_all(b"250-mock-smtp\r\n250 PIPELINING\r\n")
+                    .await
+                    .expect("ehlo response");
+            } else if command.starts_with("MAIL FROM:") || command.starts_with("RCPT TO:") {
+                writer.write_all(b"250 ok\r\n").await.expect("ok response");
+            } else if command == "DATA" {
+                writer
+                    .write_all(b"354 end with dot\r\n")
+                    .await
+                    .expect("data response");
+                loop {
+                    let mut data_line = String::new();
+                    let read = reader.read_line(&mut data_line).await.expect("smtp data");
+                    if read == 0 {
+                        break;
+                    }
+                    transcript.push_str(&data_line);
+                    if data_line == ".\r\n" {
+                        break;
+                    }
+                }
+                writer
+                    .write_all(b"250 queued\r\n")
+                    .await
+                    .expect("queued response");
+            } else if command == "QUIT" {
+                writer
+                    .write_all(b"221 bye\r\n")
+                    .await
+                    .expect("bye response");
+                break;
+            } else {
+                writer
+                    .write_all(b"500 unknown\r\n")
+                    .await
+                    .expect("error response");
+            }
+        }
+        transcript
+    }
+
     async fn mock_approval_webhook(Json(payload): Json<Value>) -> Json<Value> {
         assert_eq!(payload["type"], "mandoforge.approval_requested");
         assert!(payload["approval"]["id"].as_str().is_some());
@@ -9486,6 +9756,7 @@ not json
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -9572,6 +9843,7 @@ not json
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -9853,6 +10125,7 @@ not json
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -9995,6 +10268,7 @@ not json
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -10178,6 +10452,7 @@ not json
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -10330,6 +10605,7 @@ not json
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: Some(format!("http://{addr}/alerts")),
             cost_alert_email_relay_url: Some(format!("http://{addr}/email")),
+            cost_alert_smtp_config: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -10573,6 +10849,77 @@ not json
     }
 
     #[tokio::test]
+    async fn cost_alert_email_route_can_deliver_through_direct_smtp() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("smtp listener");
+        let addr = listener.local_addr().expect("smtp addr");
+        let smtp_server = tokio::spawn(run_mock_smtp_server(listener));
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(InlineExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: None,
+            codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
+            cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: Some(CostAlertSmtpConfig {
+                addr: addr.to_string(),
+                from: "alerts@mandoforge.local".to_string(),
+                helo_domain: "mandoforge.test".to_string(),
+            }),
+            approval_webhook_url: None,
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: runtime_policy(PolicyConfig::default()),
+        };
+        let route = CostAlertRoute {
+            id: Uuid::new_v4(),
+            name: "smtp-email".to_string(),
+            channel: "email".to_string(),
+            target: Some("ops@example.com".to_string()),
+            severity_filter: "warning".to_string(),
+            status: "active".to_string(),
+            created_at: Utc::now(),
+        };
+        let alert = CostAlert {
+            provider_name: "smtp-provider".to_string(),
+            severity: "critical".to_string(),
+            message: "daily provider cost budget exceeded".to_string(),
+            messages: vec!["100% of budget used".to_string()],
+            window_hours: 24,
+            request_budget_used_percent: None,
+            cost_budget_used_percent: Some(100.0),
+            estimated_cost_cents: 42.0,
+            created_at: Utc::now(),
+        };
+
+        let delivery = deliver_cost_alert_route(&state, &route, &[alert], Utc::now())
+            .await
+            .expect("smtp delivery");
+        assert!(delivery.delivered);
+        assert_eq!(delivery.status, "delivered");
+        assert_eq!(delivery.target.as_deref(), Some("ops@example.com"));
+        let transcript = smtp_server.await.expect("smtp transcript");
+        assert!(transcript.contains("EHLO mandoforge.test"));
+        assert!(transcript.contains("MAIL FROM:<alerts@mandoforge.local>"));
+        assert!(transcript.contains("RCPT TO:<ops@example.com>"));
+        assert!(transcript.contains("Subject: MandoForge cost alert"));
+        assert!(transcript.contains("smtp-provider [critical]"));
+    }
+
+    #[tokio::test]
     async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
         let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
         let state = AppState {
@@ -10598,6 +10945,7 @@ not json
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
             cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
