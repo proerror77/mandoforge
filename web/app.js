@@ -1942,6 +1942,9 @@ function renderUsage() {
   const costAlertAcknowledgement = state.costAlertAcknowledgement;
   const trend = state.usageTrend;
   const budgetPressure = trend?.budget_pressure || {};
+  const forecast = trend?.forecast || {};
+  const forecastHorizons = forecast.horizons || [];
+  const budgetForecasts = forecast.provider_budget_exhaustion || [];
   const usageExportStatus = state.usageExportStatus;
   const usageExportDelivery = state.usageExportDelivery;
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
@@ -2030,6 +2033,64 @@ function renderUsage() {
             <dd>${escapeHtml((trend.recommendations || []).join(" · ") || "No active recommendation")}</dd>
           </dl>`
         : `<div class="muted">Usage trend data is not loaded.</div>`
+    }
+    <h4>Cost Forecast</h4>
+    ${
+      forecastHorizons.length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Horizon</th>
+                <th>Projected cost</th>
+                <th>Projected tokens</th>
+                <th>Projected tool calls</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${forecastHorizons
+                .map(
+                  (horizon) => `
+                    <tr>
+                      <td>${formatInteger(horizon.days)}d</td>
+                      <td>${formatCents(horizon.projected_cost_cents)}</td>
+                      <td>${formatInteger(horizon.projected_tokens)}</td>
+                      <td>${formatInteger(horizon.projected_tool_calls)}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>
+          <div class="muted">Basis: ${escapeHtml(forecast.basis || "unknown")}</div>`
+        : `<div class="muted">No forecast horizon data yet.</div>`
+    }
+    ${
+      budgetForecasts.length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Status</th>
+                <th>Daily run rate</th>
+                <th>Days to limit</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${budgetForecasts
+                .map(
+                  (forecastRow) => `
+                    <tr>
+                      <td>${escapeHtml(forecastRow.provider_name)}</td>
+                      <td><span class="budget-status ${escapeHtml(forecastRow.status)}">${escapeHtml(forecastRow.status)}</span></td>
+                      <td>${formatCents(forecastRow.current_daily_cost_cents)} / ${formatCents(forecastRow.daily_cost_limit_cents)}</td>
+                      <td>${escapeHtml(forecastRow.projected_days_to_limit == null ? "unknown" : `${Number(forecastRow.projected_days_to_limit).toFixed(1)}d`)} · ${escapeHtml(forecastRow.projected_exhaustion_at || "no projection")}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : `<div class="muted">No cost-limit forecasts configured.</div>`
     }
     ${
       usageExportStatus

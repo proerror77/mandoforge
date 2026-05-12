@@ -751,6 +751,7 @@ struct UsageTrendSummary {
     tool_call_delta_percent: Option<f64>,
     top_provider_by_cost: Option<UsageTrendProvider>,
     budget_pressure: UsageBudgetPressure,
+    forecast: UsageForecastSummary,
     recommendations: Vec<String>,
 }
 
@@ -779,6 +780,31 @@ struct UsageBudgetPressure {
     critical_count: usize,
     highest_status: String,
     highest_used_percent: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageForecastSummary {
+    basis: String,
+    horizons: Vec<UsageForecastHorizon>,
+    provider_budget_exhaustion: Vec<ProviderBudgetExhaustionForecast>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageForecastHorizon {
+    days: i64,
+    projected_cost_cents: f64,
+    projected_tokens: i64,
+    projected_tool_calls: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderBudgetExhaustionForecast {
+    provider_name: String,
+    status: String,
+    current_daily_cost_cents: f64,
+    daily_cost_limit_cents: f64,
+    projected_days_to_limit: Option<f64>,
+    projected_exhaustion_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10352,6 +10378,7 @@ fn build_usage_trend_from_parts(
     if rollups.is_empty() {
         recommendations.push("create_daily_usage_rollup".to_string());
     }
+    let forecast = build_usage_forecast(&current, &current_period, generated_at);
 
     UsageTrendSummary {
         generated_at,
@@ -10370,7 +10397,68 @@ fn build_usage_trend_from_parts(
         tool_call_delta_percent,
         top_provider_by_cost,
         budget_pressure,
+        forecast,
         recommendations,
+    }
+}
+
+fn build_usage_forecast(
+    current: &UsageSummary,
+    current_period: &UsageTrendPeriod,
+    generated_at: DateTime<Utc>,
+) -> UsageForecastSummary {
+    let horizons = [7_i64, 30_i64]
+        .into_iter()
+        .map(|days| UsageForecastHorizon {
+            days,
+            projected_cost_cents: current_period.cost_cents * days as f64,
+            projected_tokens: current_period.total_tokens.saturating_mul(days),
+            projected_tool_calls: current_period.tool_calls.saturating_mul(days),
+        })
+        .collect();
+    let mut provider_budget_exhaustion: Vec<_> = current
+        .provider_budgets
+        .iter()
+        .filter_map(|budget| {
+            let daily_cost_limit_cents = budget.daily_cost_limit_cents?;
+            let current_daily_cost_cents = if budget.projected_daily_cost_cents > 0.0 {
+                budget.projected_daily_cost_cents
+            } else {
+                budget.estimated_cost_cents
+            };
+            let projected_days_to_limit = if current_daily_cost_cents <= 0.0 {
+                None
+            } else {
+                Some(
+                    ((daily_cost_limit_cents - budget.estimated_cost_cents).max(0.0))
+                        / current_daily_cost_cents,
+                )
+            };
+            let projected_exhaustion_at = projected_days_to_limit.map(|days| {
+                generated_at + chrono::Duration::seconds((days * 86_400.0).round() as i64)
+            });
+            Some(ProviderBudgetExhaustionForecast {
+                provider_name: budget.provider_name.clone(),
+                status: budget.status.clone(),
+                current_daily_cost_cents,
+                daily_cost_limit_cents,
+                projected_days_to_limit,
+                projected_exhaustion_at,
+            })
+        })
+        .collect();
+    provider_budget_exhaustion.sort_by(|left, right| {
+        match (left.projected_days_to_limit, right.projected_days_to_limit) {
+            (Some(left_days), Some(right_days)) => left_days.total_cmp(&right_days),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.provider_name.cmp(&right.provider_name),
+        }
+    });
+    UsageForecastSummary {
+        basis: "current_24h_run_rate".to_string(),
+        horizons,
+        provider_budget_exhaustion,
     }
 }
 
@@ -10536,6 +10624,23 @@ fn build_usage_finance_csv(summary: &UsageSummary, trend: &UsageTrendSummary) ->
             ],
         );
     }
+    for horizon in &trend.forecast.horizons {
+        push_csv_row(
+            &mut csv,
+            vec![
+                "forecast".to_string(),
+                format!("{}d", horizon.days),
+                trend.forecast.basis.clone(),
+                String::new(),
+                String::new(),
+                horizon.projected_tokens.to_string(),
+                horizon.projected_tool_calls.to_string(),
+                format_csv_float(horizon.projected_cost_cents),
+                String::new(),
+                "projected_from_current_24h_run_rate".to_string(),
+            ],
+        );
+    }
     for budget in &summary.provider_budgets {
         push_csv_row(
             &mut csv,
@@ -10550,6 +10655,30 @@ fn build_usage_finance_csv(summary: &UsageSummary, trend: &UsageTrendSummary) ->
                 format_csv_float(budget.estimated_cost_cents),
                 optional_csv_float(budget_peak_percent(budget)),
                 budget.messages.join(" | "),
+            ],
+        );
+    }
+    for forecast in &trend.forecast.provider_budget_exhaustion {
+        push_csv_row(
+            &mut csv,
+            vec![
+                "budget_forecast".to_string(),
+                forecast.provider_name.clone(),
+                forecast.status.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                format_csv_float(forecast.current_daily_cost_cents),
+                optional_csv_float(forecast.projected_days_to_limit),
+                format!(
+                    "daily_limit_cents={};projected_exhaustion_at={}",
+                    format_csv_float(forecast.daily_cost_limit_cents),
+                    forecast
+                        .projected_exhaustion_at
+                        .map(|value| value.to_rfc3339())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ),
             ],
         );
     }
@@ -12129,6 +12258,20 @@ not json
         assert_eq!(trend.top_provider_by_cost.unwrap().provider_name, "mock");
         assert_eq!(trend.budget_pressure.warning_count, 1);
         assert_eq!(trend.budget_pressure.highest_status, "warning");
+        assert_eq!(trend.forecast.basis, "current_24h_run_rate");
+        assert_eq!(trend.forecast.horizons.len(), 2);
+        assert_eq!(trend.forecast.horizons[0].days, 7);
+        assert_eq!(trend.forecast.horizons[0].projected_tokens, 1400);
+        assert!((trend.forecast.horizons[0].projected_cost_cents - 105.0).abs() < 0.000001);
+        let budget_forecast = trend
+            .forecast
+            .provider_budget_exhaustion
+            .iter()
+            .find(|forecast| forecast.provider_name == "mock")
+            .expect("mock budget forecast");
+        assert_eq!(budget_forecast.status, "warning");
+        assert_eq!(budget_forecast.daily_cost_limit_cents, 20.0);
+        assert_eq!(budget_forecast.projected_days_to_limit, Some(1.0 / 3.0));
         assert!(
             trend
                 .recommendations
@@ -19622,6 +19765,7 @@ not json
         let export_csv = String::from_utf8(export_body.to_vec()).expect("csv utf8");
         assert!(export_csv.starts_with("section,name,status"));
         assert!(export_csv.contains("provider,governed-mock,usage"));
+        assert!(export_csv.contains("forecast,7d,current_24h_run_rate"));
         assert!(export_csv.contains("budget,governed-mock,critical"));
         assert!(export_csv.contains("recommendation,critical_provider_budget_review"));
         if usage_finance_export_webhook_url().is_none() {
