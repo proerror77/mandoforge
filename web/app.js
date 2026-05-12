@@ -68,6 +68,7 @@ const state = {
     sync: null,
     runs: [],
     traces: null,
+    traceDetail: null,
     error: null,
   },
   selectedArtifactId: null,
@@ -931,6 +932,14 @@ async function pollStaleCodexRuns() {
   });
 }
 
+async function loadCodexTraceDetail(traceKey) {
+  await captureCodexAppServer("traceDetail", async () => {
+    state.codexAppServer.traceDetail = await api(
+      `/api/codex-app-server/traces/${encodeURIComponent(traceKey)}`,
+    );
+  });
+}
+
 async function createCodexThread(event) {
   event.preventDefault();
   const form = new FormData(codexThreadForm);
@@ -1474,6 +1483,7 @@ function renderCodexAppServer() {
     ["Interrupt", codex.interrupt],
     ["Poll", codex.poll],
     ["Stale Poll", codex.stalePoll],
+    ["Trace Detail", codex.traceDetail],
     ["Sync", codex.sync],
   ]
     .filter(([, value]) => value)
@@ -1515,6 +1525,7 @@ function renderCodexAppServer() {
           <td>${formatInteger(trace.error_count)}</td>
           <td>${escapeHtml((trace.operations || []).join(", "))}</td>
           <td>${escapeHtml(trace.last_seen_at)}</td>
+          <td><button type="button" class="secondary" data-codex-trace="${escapeHtml(trace.trace_key)}">Detail</button></td>
         </tr>
       `,
     )
@@ -1538,6 +1549,7 @@ function renderCodexAppServer() {
                   <th>Errors</th>
                   <th>Operations</th>
                   <th>Last Seen</th>
+                  <th>Detail</th>
                 </tr>
               </thead>
               <tbody>${traceRows}</tbody>
@@ -1578,6 +1590,9 @@ function renderCodexAppServer() {
   `;
   codexAppServerRoot.querySelectorAll("[data-poll-codex-run]").forEach((button) => {
     button.addEventListener("click", () => pollCodexRun(button.dataset.pollCodexRun));
+  });
+  codexAppServerRoot.querySelectorAll("[data-codex-trace]").forEach((button) => {
+    button.addEventListener("click", () => loadCodexTraceDetail(button.dataset.codexTrace));
   });
 }
 

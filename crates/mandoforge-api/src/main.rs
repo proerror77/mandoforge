@@ -680,6 +680,26 @@ struct CodexTurnTrace {
     last_seen_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerTraceDetail {
+    generated_at: DateTime<Utc>,
+    trace: CodexTurnTrace,
+    runs: Vec<CodexAppServerRun>,
+    status_timeline: Vec<CodexAppServerStatusPoint>,
+    errors: Vec<Value>,
+    latest_response: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerStatusPoint {
+    run_id: Uuid,
+    operation: String,
+    status: String,
+    terminal: bool,
+    created_at: DateTime<Utc>,
+    error: Option<Value>,
+}
+
 fn default_codex_poll_attempts() -> u32 {
     3
 }
@@ -1947,6 +1967,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/codex-app-server/traces",
             get(get_codex_app_server_traces),
+        )
+        .route(
+            "/api/codex-app-server/traces/{trace_key}",
+            get(get_codex_app_server_trace_detail),
         )
         .route(
             "/api/codex-app-server/runs/{run_id}/poll",
@@ -5996,6 +6020,23 @@ async fn get_codex_app_server_traces(
     Ok(Json(build_codex_app_server_trace_summary(&runs)))
 }
 
+async fn get_codex_app_server_trace_detail(
+    State(state): State<AppState>,
+    Path(trace_key): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<CodexAppServerTraceDetail>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "codex_app_server",
+        None,
+    )
+    .await?;
+    let runs = state.list_codex_app_server_runs().await?;
+    build_codex_app_server_trace_detail(&runs, &trace_key).map(Json)
+}
+
 async fn poll_codex_app_server_run(
     State(state): State<AppState>,
     Path(run_id): Path<Uuid>,
@@ -6269,12 +6310,10 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
     for run in runs {
         increment_count(&mut by_status, run.status.as_str());
         increment_count(&mut by_operation, run.operation.as_str());
-        let trace_key = run
-            .turn_id
-            .clone()
-            .or_else(|| run.command_id.clone())
-            .unwrap_or_else(|| format!("run:{}", run.id));
-        grouped.entry(trace_key).or_default().push(run);
+        grouped
+            .entry(codex_app_server_trace_key(run))
+            .or_default()
+            .push(run);
     }
     let mut traces = Vec::new();
     for (trace_key, mut group) in grouped {
@@ -6336,6 +6375,61 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
         by_operation,
         traces,
     }
+}
+
+fn build_codex_app_server_trace_detail(
+    runs: &[CodexAppServerRun],
+    trace_key: &str,
+) -> Result<CodexAppServerTraceDetail, AppError> {
+    let mut matching = runs
+        .iter()
+        .filter(|run| codex_app_server_trace_key(run) == trace_key)
+        .cloned()
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return Err(AppError::not_found("Codex App Server trace not found"));
+    }
+    matching.sort_by_key(|run| run.created_at);
+    let summary = build_codex_app_server_trace_summary(&matching);
+    let trace = summary
+        .traces
+        .into_iter()
+        .find(|trace| trace.trace_key == trace_key)
+        .ok_or_else(|| AppError::not_found("Codex App Server trace not found"))?;
+    let status_timeline = matching
+        .iter()
+        .map(|run| CodexAppServerStatusPoint {
+            run_id: run.id,
+            operation: run.operation.clone(),
+            status: run.status.clone(),
+            terminal: codex_turn_status_is_terminal(&run.status),
+            created_at: run.created_at,
+            error: run.error.clone(),
+        })
+        .collect::<Vec<_>>();
+    let errors = matching
+        .iter()
+        .filter_map(|run| run.error.clone())
+        .collect::<Vec<_>>();
+    let latest_response = matching
+        .last()
+        .map(|run| run.response.clone())
+        .unwrap_or_else(|| json!({}));
+    Ok(CodexAppServerTraceDetail {
+        generated_at: Utc::now(),
+        trace,
+        runs: matching,
+        status_timeline,
+        errors,
+        latest_response,
+    })
+}
+
+fn codex_app_server_trace_key(run: &CodexAppServerRun) -> String {
+    run.turn_id
+        .clone()
+        .or_else(|| run.command_id.clone())
+        .unwrap_or_else(|| format!("run:{}", run.id))
 }
 
 fn codex_run_status_failed(status: &str) -> bool {
@@ -11957,6 +12051,12 @@ not json
         assert_eq!(turn_1.poll_count, 1);
         assert!(turn_1.terminal);
         assert!(turn_1.operations.contains(&"command.execute".to_string()));
+        let turn_1_detail = build_codex_app_server_trace_detail(&runs, "turn-1")
+            .expect("turn-1 detail should exist");
+        assert_eq!(turn_1_detail.trace.trace_key, "turn-1");
+        assert_eq!(turn_1_detail.runs.len(), 3);
+        assert_eq!(turn_1_detail.status_timeline.len(), 3);
+        assert_eq!(turn_1_detail.latest_response["status"], "completed");
         let turn_2 = summary
             .traces
             .iter()
@@ -14353,6 +14453,20 @@ not json
         assert_eq!(polled.attempts, 1);
         assert_eq!(polled.last_status, "completed");
         assert_eq!(polled.run.status, "completed");
+
+        let trace_detail: CodexAppServerTraceDetail = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/codex-app-server/traces/turn-1")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(trace_detail.trace.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(trace_detail.runs.len(), 3);
+        assert_eq!(trace_detail.status_timeline.len(), 3);
 
         let synced: CodexArtifactSyncResponse = request_json(
             app.clone(),
