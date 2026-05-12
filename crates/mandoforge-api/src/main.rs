@@ -1002,6 +1002,42 @@ struct UsageFinanceExportDelivery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageFinanceDashboardSummary {
+    generated_at: DateTime<Utc>,
+    current_cost_cents: f64,
+    current_total_tokens: i64,
+    current_tool_calls: i64,
+    comparison_basis: String,
+    budget_pressure_status: String,
+    budget_pressure_count: usize,
+    critical_budget_count: usize,
+    warning_budget_count: usize,
+    alert_count: usize,
+    critical_alert_count: usize,
+    warning_alert_count: usize,
+    alert_route_count: usize,
+    active_alert_route_count: usize,
+    rollup_count: usize,
+    latest_rollup_at: Option<DateTime<Utc>>,
+    latest_rollup_age_hours: Option<i64>,
+    finance_export_target_configured: bool,
+    finance_export_schedule_enabled: bool,
+    forecast_7d_cost_cents: Option<f64>,
+    forecast_30d_cost_cents: Option<f64>,
+    top_provider_by_cost: Option<UsageTrendProvider>,
+    recommendations: Vec<String>,
+    attention_items: Vec<UsageFinanceAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageFinanceAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
+    provider_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Organization {
     id: Uuid,
     name: String,
@@ -2096,6 +2132,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/eval/runs/{id}/drift", get(get_eval_run_drift))
         .route("/api/usage", get(get_usage_summary))
         .route("/api/usage/trends", get(get_usage_trends))
+        .route("/api/usage/finance-summary", get(get_usage_finance_summary))
         .route("/api/usage/export.csv", get(export_usage_csv))
         .route("/api/usage/export/deliver", post(deliver_usage_export))
         .route("/api/usage/alerts", get(get_cost_alerts))
@@ -9241,6 +9278,167 @@ async fn get_usage_trends(
     Ok(Json(build_usage_trend_summary(&state).await?))
 }
 
+async fn get_usage_finance_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<UsageFinanceDashboardSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "usage_finance", None).await?;
+    Ok(Json(build_usage_finance_dashboard_summary(&state).await?))
+}
+
+async fn build_usage_finance_dashboard_summary(
+    state: &AppState,
+) -> Result<UsageFinanceDashboardSummary, AppError> {
+    let generated_at = Utc::now();
+    let usage = build_usage_summary(state).await?;
+    let rollups = state.list_usage_rollups().await?;
+    let alerts = build_cost_alerts(&usage.provider_budgets, generated_at);
+    let trend = build_usage_trend_from_parts(usage, &rollups, generated_at);
+    let alert_routes = state.list_cost_alert_routes().await?;
+    Ok(build_usage_finance_dashboard_summary_from_parts(
+        trend,
+        &rollups,
+        &alert_routes,
+        &alerts,
+        usage_finance_export_webhook_url().is_some(),
+        usage_finance_export_schedule_enabled(),
+        generated_at,
+    ))
+}
+
+fn build_usage_finance_dashboard_summary_from_parts(
+    trend: UsageTrendSummary,
+    rollups: &[UsageRollup],
+    alert_routes: &[CostAlertRoute],
+    alerts: &[CostAlert],
+    finance_export_target_configured: bool,
+    finance_export_schedule_enabled: bool,
+    generated_at: DateTime<Utc>,
+) -> UsageFinanceDashboardSummary {
+    let latest_rollup_at = rollups
+        .iter()
+        .map(|rollup| rollup.period_end)
+        .max()
+        .or_else(|| rollups.iter().map(|rollup| rollup.created_at).max());
+    let latest_rollup_age_hours =
+        latest_rollup_at.map(|latest| (generated_at - latest).num_hours().max(0));
+    let active_alert_route_count = alert_routes
+        .iter()
+        .filter(|route| route.status == "active")
+        .count();
+    let critical_alert_count = alerts
+        .iter()
+        .filter(|alert| alert.severity == "critical")
+        .count();
+    let warning_alert_count = alerts
+        .iter()
+        .filter(|alert| alert.severity == "warning")
+        .count();
+    let forecast_7d_cost_cents = trend
+        .forecast
+        .horizons
+        .iter()
+        .find(|horizon| horizon.days == 7)
+        .map(|horizon| horizon.projected_cost_cents);
+    let forecast_30d_cost_cents = trend
+        .forecast
+        .horizons
+        .iter()
+        .find(|horizon| horizon.days == 30)
+        .map(|horizon| horizon.projected_cost_cents);
+    let mut attention_items = Vec::new();
+
+    for alert in alerts {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "budget_alert".to_string(),
+            severity: alert.severity.clone(),
+            message: alert.message.clone(),
+            provider_name: Some(alert.provider_name.clone()),
+        });
+    }
+    if alerts.is_empty() && trend.budget_pressure.pressure_count > 0 {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "budget_pressure_unrouted".to_string(),
+            severity: trend.budget_pressure.highest_status.clone(),
+            message: "budget pressure exists but no matching cost alert was generated".to_string(),
+            provider_name: None,
+        });
+    }
+    if !alerts.is_empty() && active_alert_route_count == 0 {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "missing_alert_route".to_string(),
+            severity: "critical".to_string(),
+            message: "cost alerts exist but no active alert route is configured".to_string(),
+            provider_name: None,
+        });
+    }
+    if rollups.is_empty() {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "missing_usage_rollup".to_string(),
+            severity: "warning".to_string(),
+            message: "no persisted usage rollup exists for finance comparison".to_string(),
+            provider_name: None,
+        });
+    } else if latest_rollup_age_hours.is_some_and(|hours| hours >= 30) {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "stale_usage_rollup".to_string(),
+            severity: "warning".to_string(),
+            message: "latest usage rollup is older than 30 hours".to_string(),
+            provider_name: None,
+        });
+    }
+    if !finance_export_target_configured {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "finance_export_target_missing".to_string(),
+            severity: "warning".to_string(),
+            message: "finance export webhook target is not configured".to_string(),
+            provider_name: None,
+        });
+    }
+    if trend
+        .cost_delta_percent
+        .is_some_and(|cost_delta_percent| cost_delta_percent >= 25.0)
+    {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "cost_growth".to_string(),
+            severity: "warning".to_string(),
+            message: "provider cost increased by at least 25 percent versus comparison period"
+                .to_string(),
+            provider_name: trend
+                .top_provider_by_cost
+                .as_ref()
+                .map(|provider| provider.provider_name.clone()),
+        });
+    }
+
+    UsageFinanceDashboardSummary {
+        generated_at,
+        current_cost_cents: trend.current_cost_cents,
+        current_total_tokens: trend.current_total_tokens,
+        current_tool_calls: trend.current_tool_calls,
+        comparison_basis: trend.comparison_basis,
+        budget_pressure_status: trend.budget_pressure.highest_status,
+        budget_pressure_count: trend.budget_pressure.pressure_count,
+        critical_budget_count: trend.budget_pressure.critical_count,
+        warning_budget_count: trend.budget_pressure.warning_count,
+        alert_count: alerts.len(),
+        critical_alert_count,
+        warning_alert_count,
+        alert_route_count: alert_routes.len(),
+        active_alert_route_count,
+        rollup_count: rollups.len(),
+        latest_rollup_at,
+        latest_rollup_age_hours,
+        finance_export_target_configured,
+        finance_export_schedule_enabled,
+        forecast_7d_cost_cents,
+        forecast_30d_cost_cents,
+        top_provider_by_cost: trend.top_provider_by_cost,
+        recommendations: trend.recommendations,
+        attention_items,
+    }
+}
+
 async fn export_usage_csv(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -12515,6 +12713,145 @@ not json
                 .recommendations
                 .iter()
                 .any(|recommendation| recommendation == "cost_growth_investigation")
+        );
+    }
+
+    #[test]
+    fn builds_usage_finance_dashboard_attention_items() {
+        let generated_at = "2026-05-13T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid time");
+        let usage = UsageSummary {
+            session_count: 1,
+            event_count: 2,
+            provider_request_count: 1,
+            provider_response_count: 1,
+            tool_call_count: 3,
+            tool_success_count: 2,
+            tool_failed_count: 1,
+            approval_count: 1,
+            prompt_tokens: 120,
+            completion_tokens: 80,
+            total_tokens: 200,
+            total_tool_duration_ms: 1000,
+            estimated_provider_cost_cents: 15.0,
+            by_provider: HashMap::from([(
+                "finance-mock".to_string(),
+                ProviderUsageSummary {
+                    request_count: 1,
+                    response_count: 1,
+                    prompt_tokens: 120,
+                    completion_tokens: 80,
+                    total_tokens: 200,
+                    token_cost_cents: 5.0,
+                    estimated_cost_cents: 15.0,
+                },
+            )]),
+            by_tool: HashMap::new(),
+            provider_budgets: vec![ProviderBudgetStatus {
+                provider_name: "finance-mock".to_string(),
+                status: "critical".to_string(),
+                window_hours: 24,
+                request_count: 11,
+                daily_request_limit: Some(10),
+                request_budget_used_percent: Some(110.0),
+                estimated_cost_cents: 15.0,
+                projected_daily_cost_cents: 15.0,
+                daily_cost_limit_cents: Some(20.0),
+                cost_budget_used_percent: Some(75.0),
+                messages: vec!["11 of 10 daily requests used (110.0%)".to_string()],
+            }],
+        };
+        let alerts = build_cost_alerts(&usage.provider_budgets, generated_at);
+        let trend = build_usage_trend_from_parts(usage, &[], generated_at);
+        let summary = build_usage_finance_dashboard_summary_from_parts(
+            trend,
+            &[],
+            &[],
+            &alerts,
+            false,
+            false,
+            generated_at,
+        );
+
+        assert_eq!(summary.budget_pressure_status, "critical");
+        assert_eq!(summary.alert_count, 1);
+        assert_eq!(summary.critical_alert_count, 1);
+        assert_eq!(summary.active_alert_route_count, 0);
+        assert_eq!(summary.rollup_count, 0);
+        assert_eq!(summary.forecast_7d_cost_cents, Some(105.0));
+        assert_eq!(summary.forecast_30d_cost_cents, Some(450.0));
+        assert_eq!(
+            summary.top_provider_by_cost.unwrap().provider_name,
+            "finance-mock"
+        );
+        assert!(
+            summary
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation == "critical_provider_budget_review")
+        );
+        assert!(summary.attention_items.iter().any(|item| {
+            item.kind == "budget_alert"
+                && item.severity == "critical"
+                && item.provider_name.as_deref() == Some("finance-mock")
+        }));
+        assert!(
+            summary
+                .attention_items
+                .iter()
+                .any(|item| { item.kind == "missing_alert_route" && item.severity == "critical" })
+        );
+        assert!(
+            summary
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "missing_usage_rollup")
+        );
+        assert!(summary.attention_items.iter().any(|item| {
+            item.kind == "finance_export_target_missing" && item.severity == "warning"
+        }));
+    }
+
+    #[tokio::test]
+    async fn usage_finance_summary_requires_admin_and_reports_dashboard() {
+        let app = test_app().await;
+        let (status, viewer_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .uri("/api/usage/finance-summary")
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            viewer_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let summary: UsageFinanceDashboardSummary = request_json(
+            app,
+            Request::builder()
+                .uri("/api/usage/finance-summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(summary.comparison_basis, "current_only");
+        assert_eq!(summary.rollup_count, 0);
+        assert_eq!(summary.budget_pressure_status, "ok");
+        assert!(
+            summary
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "missing_usage_rollup")
         );
     }
 

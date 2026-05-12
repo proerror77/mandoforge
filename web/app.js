@@ -39,6 +39,7 @@ const state = {
   executionJobs: [],
   usageRollups: [],
   usageTrend: null,
+  usageFinanceSummary: null,
   costAlertRoutes: [],
   usage: null,
   observability: null,
@@ -1276,6 +1277,7 @@ async function refreshOps() {
     evalRuns,
     usage,
     usageTrend,
+    usageFinanceSummary,
     observability,
     usageRollups,
     costAlertRoutes,
@@ -1296,6 +1298,7 @@ async function refreshOps() {
       api("/api/eval/runs"),
       api("/api/usage"),
       api("/api/usage/trends"),
+      api("/api/usage/finance-summary"),
       api("/api/observability"),
       api("/api/usage/rollups"),
       api("/api/usage/alert-routes"),
@@ -1315,6 +1318,7 @@ async function refreshOps() {
   state.evalRuns = evalRuns;
   state.usage = usage;
   state.usageTrend = usageTrend;
+  state.usageFinanceSummary = usageFinanceSummary;
   state.observability = observability;
   state.usageRollups = usageRollups;
   state.costAlertRoutes = costAlertRoutes;
@@ -1952,12 +1956,71 @@ function renderUsage() {
   const budgetForecasts = forecast.provider_budget_exhaustion || [];
   const usageExportStatus = state.usageExportStatus;
   const usageExportDelivery = state.usageExportDelivery;
+  const financeSummary = state.usageFinanceSummary;
+  const financeAttention = financeSummary?.attention_items || [];
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
     ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
   );
   const averageToolDurationMs =
     usage.tool_call_count > 0 ? usage.total_tool_duration_ms / usage.tool_call_count : 0;
   usageRoot.innerHTML = `
+    ${
+      financeSummary
+        ? `<div class="detail-panel">
+            <div class="metric-grid compact-metrics">
+              <div class="metric"><span>Finance Status</span><strong>${escapeHtml(financeSummary.budget_pressure_status || "ok")}</strong></div>
+              <div class="metric"><span>Alerts</span><strong>${formatInteger(financeSummary.alert_count)}</strong></div>
+              <div class="metric"><span>Routes</span><strong>${formatInteger(financeSummary.active_alert_route_count)}/${formatInteger(financeSummary.alert_route_count)}</strong></div>
+              <div class="metric"><span>Rollups</span><strong>${formatInteger(financeSummary.rollup_count)}</strong></div>
+              <div class="metric"><span>7d Forecast</span><strong>${formatOptionalCents(financeSummary.forecast_7d_cost_cents)}</strong></div>
+              <div class="metric"><span>30d Forecast</span><strong>${formatOptionalCents(financeSummary.forecast_30d_cost_cents)}</strong></div>
+              <div class="metric"><span>Export Target</span><strong>${escapeHtml(financeSummary.finance_export_target_configured ? "ready" : "missing")}</strong></div>
+              <div class="metric"><span>Attention</span><strong>${formatInteger(financeAttention.length)}</strong></div>
+            </div>
+            <dl>
+              <dt>Top provider</dt>
+              <dd>${
+                financeSummary.top_provider_by_cost
+                  ? `${escapeHtml(financeSummary.top_provider_by_cost.provider_name)} · ${formatCents(financeSummary.top_provider_by_cost.estimated_cost_cents)} · ${formatInteger(financeSummary.top_provider_by_cost.total_tokens)} tokens`
+                  : "none"
+              }</dd>
+              <dt>Latest rollup</dt>
+              <dd>${escapeHtml(financeSummary.latest_rollup_at || "none")} · ${escapeHtml(financeSummary.latest_rollup_age_hours == null ? "no age" : `${financeSummary.latest_rollup_age_hours}h old`)}</dd>
+              <dt>Recommendations</dt>
+              <dd>${escapeHtml((financeSummary.recommendations || []).join(" · ") || "No active finance recommendation")}</dd>
+            </dl>
+            ${
+              financeAttention.length
+                ? `<table class="usage-table">
+                    <thead>
+                      <tr>
+                        <th>Severity</th>
+                        <th>Signal</th>
+                        <th>Provider</th>
+                        <th>Message</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${financeAttention
+                        .map(
+                          (item) => `
+                            <tr>
+                              <td><span class="budget-status ${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</span></td>
+                              <td>${escapeHtml(item.kind)}</td>
+                              <td>${escapeHtml(item.provider_name || "global")}</td>
+                              <td>${escapeHtml(item.message)}</td>
+                            </tr>
+                          `,
+                        )
+                        .join("")}
+                    </tbody>
+                  </table>`
+                : `<div class="muted">No finance attention items.</div>`
+            }
+            <div class="muted">Generated: ${escapeHtml(financeSummary.generated_at)}</div>
+          </div>`
+        : ""
+    }
     <div class="metric-grid">
       <div class="metric">
         <span>Provider cost</span>
