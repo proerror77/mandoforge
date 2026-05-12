@@ -45,6 +45,7 @@ const state = {
   observability: null,
   observabilityRemediationPlan: null,
   observabilityRemediation: null,
+  schedulerDuePlan: null,
   schedulerDueRun: null,
   costAlertDelivery: null,
   costAlertAcknowledgement: null,
@@ -1301,6 +1302,7 @@ async function refreshOps() {
     usageFinanceSummary,
     observability,
     observabilityRemediationPlan,
+    schedulerDuePlan,
     usageRollups,
     costAlertRoutes,
     organizations,
@@ -1323,6 +1325,7 @@ async function refreshOps() {
       api("/api/usage/finance-summary"),
       api("/api/observability"),
       api("/api/observability/remediation/plan"),
+      api("/api/scheduler/due-plan"),
       api("/api/usage/rollups"),
       api("/api/usage/alert-routes"),
       api("/api/organizations"),
@@ -1344,6 +1347,7 @@ async function refreshOps() {
   state.usageFinanceSummary = usageFinanceSummary;
   state.observability = observability;
   state.observabilityRemediationPlan = observabilityRemediationPlan;
+  state.schedulerDuePlan = schedulerDuePlan;
   state.usageRollups = usageRollups;
   state.costAlertRoutes = costAlertRoutes;
   state.organizations = organizations;
@@ -1907,6 +1911,8 @@ function renderObservability() {
   const remediationPlan = state.observabilityRemediationPlan;
   const remediationPlanActions = remediationPlan?.actions || [];
   const remediation = state.observabilityRemediation;
+  const schedulerDuePlan = state.schedulerDuePlan;
+  const schedulerDuePlanActions = schedulerDuePlan?.actions || [];
   const schedulerDueRun = state.schedulerDueRun;
   observabilityRoot.innerHTML = `
     <div class="metric-grid">
@@ -1981,6 +1987,50 @@ function renderObservability() {
               : `<div class="muted">No remediation actions planned.</div>`
           }
           <div class="muted">Generated: ${escapeHtml(remediationPlan.generated_at)}</div>`
+        : ""
+    }
+    ${
+      schedulerDuePlan
+        ? `<h4>Scheduler Due Plan</h4>
+          <div class="metric-grid compact-metrics">
+            <div class="metric"><span>Status</span><strong>${escapeHtml(schedulerDuePlan.status)}</strong></div>
+            <div class="metric"><span>Teams</span><strong>${formatInteger(schedulerDuePlan.team_count)}</strong></div>
+            <div class="metric"><span>Items</span><strong>${formatInteger(schedulerDuePlan.item_count)}</strong></div>
+            <div class="metric"><span>Actionable</span><strong>${formatInteger(schedulerDuePlan.actionable_count)}</strong></div>
+          </div>
+          ${
+            schedulerDuePlanActions.length
+              ? `<table class="usage-table">
+                  <thead>
+                    <tr>
+                      <th>Area</th>
+                      <th>Action</th>
+                      <th>Status</th>
+                      <th>Due</th>
+                      <th>Targets</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${schedulerDuePlanActions
+                      .map(
+                        (action) => `
+                          <tr>
+                            <td>${escapeHtml(action.area)}</td>
+                            <td>${escapeHtml(action.action)}</td>
+                            <td><span class="budget-status ${escapeHtml(action.severity)}">${escapeHtml(action.status)}</span></td>
+                            <td>${formatInteger(action.due_count)}</td>
+                            <td>${formatInteger(action.target_count)}</td>
+                            <td>${escapeHtml(action.reason)}</td>
+                          </tr>
+                        `,
+                      )
+                      .join("")}
+                  </tbody>
+                </table>`
+              : `<div class="muted">No scheduler actions planned.</div>`
+          }
+          <div class="muted">Generated: ${escapeHtml(schedulerDuePlan.generated_at)}</div>`
         : ""
     }
     <h4>Recent Error Events</h4>

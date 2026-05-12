@@ -519,6 +519,29 @@ struct SchedulerDueRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchedulerDuePlan {
+    status: String,
+    generated_at: DateTime<Utc>,
+    team_count: usize,
+    item_count: usize,
+    actionable_count: usize,
+    actions: Vec<SchedulerDuePlanItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchedulerDuePlanItem {
+    area: String,
+    action: String,
+    mode: String,
+    status: String,
+    due_count: usize,
+    skipped_count: usize,
+    target_count: usize,
+    severity: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolCall {
     id: Uuid,
     session_id: Uuid,
@@ -2189,6 +2212,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/usage/alerts", get(get_cost_alerts))
         .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
+        .route("/api/scheduler/due-plan", get(get_scheduler_due_plan))
         .route("/api/scheduler/run-due", post(run_scheduler_due_tasks))
         .route(
             "/api/usage/alert-routes",
@@ -9813,6 +9837,250 @@ async fn run_scheduler_due_tasks(
 ) -> Result<Json<SchedulerDueRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
     Ok(Json(execute_scheduler_due_tasks(&state).await?))
+}
+
+async fn get_scheduler_due_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SchedulerDuePlan>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
+    Ok(Json(build_scheduler_due_plan(&state).await?))
+}
+
+async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, AppError> {
+    let generated_at = Utc::now();
+    let mut actions = Vec::new();
+    let policy_revisions = state.list_policy_revisions().await?;
+    let policy_due_count = policy_revisions
+        .iter()
+        .filter(|revision| policy_revision_is_due_for_scheduled_activation(revision, generated_at))
+        .count();
+    actions.push(scheduler_due_plan_item(
+        "policy",
+        "policy_rollout_activation",
+        "auto",
+        policy_due_count,
+        policy_revisions.len().saturating_sub(policy_due_count),
+        policy_revisions.len(),
+        if policy_due_count > 0 {
+            "activate earliest due passed policy revision"
+        } else {
+            "no passed draft policy revision is inside its activation window"
+        },
+    ));
+
+    let approvals = state.list_approvals().await?;
+    let approval_rules = state.list_approval_escalation_rules().await?;
+    let pending_approvals: Vec<_> = approvals
+        .iter()
+        .filter(|approval| approval.status == "pending")
+        .collect();
+    let expired_approval_count = pending_approvals
+        .iter()
+        .filter(|approval| approval_is_expired_at(approval, generated_at))
+        .count();
+    let escalation_due_count = pending_approvals
+        .iter()
+        .filter(|approval| {
+            !approval_is_expired_at(approval, generated_at)
+                && next_due_escalation_rule(approval, &approval_rules, generated_at).is_some()
+        })
+        .count();
+    let approval_due_count = expired_approval_count + escalation_due_count;
+    actions.push(scheduler_due_plan_item(
+        "approvals",
+        "approval_expiration_and_escalation",
+        "auto",
+        approval_due_count,
+        pending_approvals.len().saturating_sub(approval_due_count),
+        pending_approvals.len(),
+        if approval_due_count > 0 {
+            "expire overdue approvals and escalate pending approvals whose rules are due"
+        } else {
+            "no pending approval is expired or due for escalation"
+        },
+    ));
+
+    let pending_releases = state.list_pending_agent_releases().await?;
+    let release_due_count = pending_releases
+        .iter()
+        .filter(|release| {
+            release_automation_is_expired(release, generated_at)
+                || matches!(
+                    release_automation_due_decision(release, generated_at),
+                    ReleaseAutomationDecision::Promote
+                )
+        })
+        .count();
+    actions.push(scheduler_due_plan_item(
+        "agent_releases",
+        "release_promotion_automation",
+        "auto",
+        release_due_count,
+        pending_releases.len().saturating_sub(release_due_count),
+        pending_releases.len(),
+        if release_due_count > 0 {
+            "promote auto-approved releases or reject expired pending releases"
+        } else {
+            "no pending release is due for automated decision"
+        },
+    ));
+
+    let mut team_count = 0usize;
+    let mut mcp_server_count = 0usize;
+    let mut mcp_health_due_count = 0usize;
+    let mut mcp_rollout_due_count = 0usize;
+    let mut mcp_rollout_skipped_count = 0usize;
+    for organization in state
+        .list_organizations()
+        .await?
+        .into_iter()
+        .filter(|organization| organization.archived_at.is_none())
+    {
+        for team in state
+            .list_teams(organization.id)
+            .await?
+            .into_iter()
+            .filter(|team| team.archived_at.is_none())
+        {
+            team_count += 1;
+            let servers = state.list_mcp_servers(team.id).await?;
+            mcp_server_count += servers.len();
+            for server in servers {
+                if mcp_server_health_check_is_due(&server, generated_at) {
+                    mcp_health_due_count += 1;
+                }
+                match mcp_pending_rollout(&server) {
+                    Some(rollout)
+                        if mcp_rollout_is_due(rollout, generated_at)
+                            || mcp_rollout_is_expired(rollout, generated_at) =>
+                    {
+                        mcp_rollout_due_count += 1;
+                    }
+                    Some(_) => mcp_rollout_skipped_count += 1,
+                    None => {}
+                }
+            }
+        }
+    }
+    actions.push(scheduler_due_plan_item(
+        "mcp",
+        "mcp_scheduled_health_checks",
+        "auto",
+        mcp_health_due_count,
+        mcp_server_count.saturating_sub(mcp_health_due_count),
+        mcp_server_count,
+        if mcp_health_due_count > 0 {
+            "run scheduled MCP health checks for due connectors"
+        } else {
+            "no active MCP connector health check is due"
+        },
+    ));
+    actions.push(scheduler_due_plan_item(
+        "mcp",
+        "mcp_connector_rollouts",
+        "auto",
+        mcp_rollout_due_count,
+        mcp_rollout_skipped_count,
+        mcp_rollout_due_count + mcp_rollout_skipped_count,
+        if mcp_rollout_due_count > 0 {
+            "apply due MCP connector rollouts and expire overdue rollout windows"
+        } else {
+            "no pending MCP connector rollout is due"
+        },
+    ));
+
+    let codex_runs = state.list_codex_app_server_runs().await?;
+    let codex_stale_candidates = select_stale_codex_app_server_runs(
+        &codex_runs,
+        generated_at,
+        default_codex_stale_after_seconds(),
+    )
+    .len();
+    actions.push(scheduler_due_plan_item(
+        "codex_app_server",
+        "stale_turn_polling",
+        "auto",
+        codex_stale_candidates,
+        codex_runs.len().saturating_sub(codex_stale_candidates),
+        codex_runs.len(),
+        if codex_stale_candidates > 0 {
+            "poll stale non-terminal Codex App Server turns"
+        } else {
+            "no stale non-terminal Codex App Server turn is due"
+        },
+    ));
+
+    let usage_export_enabled = usage_finance_export_schedule_enabled();
+    let usage_export_ready = usage_finance_export_webhook_url().is_some();
+    let usage_export_due_count = usize::from(usage_export_enabled);
+    let mut usage_item = scheduler_due_plan_item(
+        "usage",
+        "usage_finance_export_delivery",
+        "auto",
+        usage_export_due_count,
+        usize::from(!usage_export_enabled),
+        1,
+        if usage_export_enabled && usage_export_ready {
+            "deliver the scheduled usage finance export to the configured webhook"
+        } else if usage_export_enabled {
+            "scheduled usage finance export is enabled but no target webhook is configured"
+        } else {
+            "scheduled usage finance export is disabled"
+        },
+    );
+    if !usage_export_enabled {
+        usage_item.status = "disabled".to_string();
+        usage_item.severity = "info".to_string();
+    } else if !usage_export_ready {
+        usage_item.status = "blocked".to_string();
+        usage_item.severity = "warning".to_string();
+    }
+    actions.push(usage_item);
+
+    let actionable_count = actions
+        .iter()
+        .filter(|item| item.due_count > 0 && item.status != "blocked")
+        .count();
+    let item_count = actions.len();
+    let status = if actions.iter().any(|item| item.status == "blocked") {
+        "blocked"
+    } else if actionable_count > 0 {
+        "ready"
+    } else {
+        "idle"
+    }
+    .to_string();
+    Ok(SchedulerDuePlan {
+        status,
+        generated_at,
+        team_count,
+        item_count,
+        actionable_count,
+        actions,
+    })
+}
+
+fn scheduler_due_plan_item(
+    area: &str,
+    action: &str,
+    mode: &str,
+    due_count: usize,
+    skipped_count: usize,
+    target_count: usize,
+    reason: &str,
+) -> SchedulerDuePlanItem {
+    SchedulerDuePlanItem {
+        area: area.to_string(),
+        action: action.to_string(),
+        mode: mode.to_string(),
+        status: if due_count > 0 { "due" } else { "idle" }.to_string(),
+        due_count,
+        skipped_count,
+        target_count,
+        severity: if due_count > 0 { "warning" } else { "info" }.to_string(),
+        reason: reason.to_string(),
+    }
 }
 
 async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun, AppError> {
@@ -19208,6 +19476,21 @@ not json
     #[tokio::test]
     async fn scheduler_due_run_orchestrates_due_automation_across_teams() {
         let app = test_app().await;
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .uri("/api/scheduler/due-plan")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("not allowed"))
+        );
+
         let organization: Organization = request_json(
             app.clone(),
             Request::builder()
@@ -19256,6 +19539,30 @@ not json
                 .expect("valid request"),
         )
         .await;
+
+        let plan: SchedulerDuePlan = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/scheduler/due-plan")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(plan.status, "ready");
+        assert_eq!(plan.team_count, 1);
+        assert!(plan.item_count >= 7);
+        assert!(plan.actionable_count >= 1);
+        let mcp_health_plan = plan
+            .actions
+            .iter()
+            .find(|item| item.action == "mcp_scheduled_health_checks")
+            .expect("mcp health plan item");
+        assert_eq!(mcp_health_plan.area, "mcp");
+        assert_eq!(mcp_health_plan.status, "due");
+        assert_eq!(mcp_health_plan.due_count, 1);
+        assert_eq!(mcp_health_plan.target_count, 1);
 
         let run: SchedulerDueRun = request_json(
             app.clone(),
