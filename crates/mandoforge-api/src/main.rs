@@ -15,7 +15,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -1343,6 +1343,7 @@ fn build_router(state: AppState) -> Router {
             "/api/organizations",
             get(list_organizations).post(create_organization),
         )
+        .route("/api/organizations/{id}", delete(delete_organization))
         .route(
             "/api/organizations/{id}/archive",
             post(archive_organization),
@@ -3388,6 +3389,39 @@ async fn archive_organization(
             "organization",
             Some(id),
             json!({"subject": principal.subject_id, "archived_at": organization.archived_at}),
+        ))
+        .await?;
+    Ok(Json(organization))
+}
+
+async fn delete_organization(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Organization>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let organization = state.delete_organization(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.deleted",
+            "organization",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "slug": organization.slug,
+                "owner_subject": organization.owner_subject
+            }),
         ))
         .await?;
     Ok(Json(organization))
@@ -8655,6 +8689,64 @@ not json
             transferred_organization.owner_subject.as_deref(),
             Some("platform-owner-2")
         );
+        let empty_organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/organizations")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Empty Org", "slug": "empty-org"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let (status, active_delete_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/organizations/{}", empty_organization.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            active_delete_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("must be archived")
+        );
+        let _archived_empty: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/archive",
+                    empty_organization.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let deleted_empty: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/organizations/{}", empty_organization.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(deleted_empty.id, empty_organization.id);
         let team: Team = request_json(
             app.clone(),
             Request::builder()
@@ -8811,6 +8903,25 @@ not json
         .await;
         assert!(archived_organization.archived_at.is_some());
 
+        let (status, archived_with_children_delete_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/organizations/{}", second_organization.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            archived_with_children_delete_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("child teams")
+        );
+
         let (status, archived_org_transfer_error) = request_value(
             app.clone(),
             Request::builder()
@@ -8929,6 +9040,11 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "organization.ownership_transferred")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "organization.deleted")
         );
         assert!(audit_logs.iter().any(|log| log.action == "team.archived"));
         assert!(

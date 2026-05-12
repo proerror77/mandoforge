@@ -284,6 +284,76 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn delete_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Organization, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let organization = store
+                    .organizations
+                    .get(&organization_id)
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("organization not found"))?;
+                if organization.archived_at.is_none() {
+                    return Err(AppError::bad_request(
+                        "organization must be archived before delete",
+                    ));
+                }
+                let has_children = store
+                    .teams
+                    .values()
+                    .any(|team| team.organization_id == organization_id)
+                    || store
+                        .memberships
+                        .values()
+                        .any(|membership| membership.organization_id == Some(organization_id))
+                    || store
+                        .tenant_invitations
+                        .values()
+                        .any(|invitation| invitation.organization_id == organization_id);
+                if has_children {
+                    return Err(AppError::bad_request(
+                        "organization has child teams, memberships, or invitations",
+                    ));
+                }
+                store.organizations.remove(&organization_id);
+                Ok(organization)
+            }
+            StoreBackend::Postgres(pool) => {
+                let child_count: i64 = sqlx::query_scalar(
+                    "SELECT
+                        (SELECT count(*) FROM teams WHERE tenant_id = $1 AND organization_id = $2)
+                      + (SELECT count(*) FROM memberships WHERE tenant_id = $1 AND organization_id = $2)
+                      + (SELECT count(*) FROM tenant_invitations WHERE tenant_id = $1 AND organization_id = $2)",
+                )
+                .bind(self.tenant_id)
+                .bind(organization_id)
+                .fetch_one(pool)
+                .await?;
+                if child_count > 0 {
+                    return Err(AppError::bad_request(
+                        "organization has child teams, memberships, or invitations",
+                    ));
+                }
+                let row = sqlx::query(
+                    "DELETE FROM organizations
+                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NOT NULL
+                     RETURNING id, name, slug, owner_subject, created_at, archived_at",
+                )
+                .bind(self.tenant_id)
+                .bind(organization_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| {
+                    AppError::bad_request("organization must be archived before delete")
+                })?;
+                organization_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn archive_team(&self, team_id: Uuid) -> Result<Team, AppError> {
         let archived_at = Utc::now();
         match &self.store {

@@ -337,6 +337,15 @@ async function transferOrganizationOwnership(event) {
   await refreshOps();
 }
 
+async function deleteOrganization(organizationId) {
+  await api(`/api/organizations/${organizationId}`, { method: "DELETE" });
+  if (state.selectedOrganizationId === organizationId) {
+    state.selectedOrganizationId = "";
+    state.selectedTeamId = "";
+  }
+  await refreshOps();
+}
+
 async function archiveTeam(teamId) {
   await api(`/api/teams/${teamId}/archive`, { method: "POST" });
   if (state.selectedTeamId === teamId) {
@@ -1300,7 +1309,7 @@ function renderTenantGovernance() {
               </button>
               ${
                 organization.archived_at
-                  ? ""
+                  ? `<button type="button" class="secondary" data-delete-organization="${escapeHtml(organization.id)}">Delete Organization</button>`
                   : `<button type="button" class="secondary" data-archive-organization="${escapeHtml(organization.id)}">Archive Organization</button>`
               }
             </div>
@@ -1317,6 +1326,9 @@ function renderTenantGovernance() {
   });
   organizationRoot.querySelectorAll("[data-archive-organization]").forEach((button) => {
     button.addEventListener("click", () => archiveOrganization(button.dataset.archiveOrganization));
+  });
+  organizationRoot.querySelectorAll("[data-delete-organization]").forEach((button) => {
+    button.addEventListener("click", () => deleteOrganization(button.dataset.deleteOrganization));
   });
 
   teamRoot.innerHTML = state.selectedOrganizationId
