@@ -38,6 +38,14 @@ const state = {
   approvalDeliveries: {},
   approvalGroups: [],
   approvalEscalationRules: [],
+  codexAppServer: {
+    health: null,
+    thread: null,
+    turn: null,
+    command: null,
+    interrupt: null,
+    error: null,
+  },
   selectedArtifactId: null,
   selectedToolCallId: null,
   selectedAuditLogId: null,
@@ -99,6 +107,12 @@ const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jo
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 const deliverCostAlertsButton = document.querySelector("#deliver-cost-alerts");
 const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
+const checkCodexHealthButton = document.querySelector("#check-codex-health");
+const codexThreadForm = document.querySelector("#codex-thread-form");
+const codexTurnForm = document.querySelector("#codex-turn-form");
+const codexCommandForm = document.querySelector("#codex-command-form");
+const interruptCodexTurnButton = document.querySelector("#interrupt-codex-turn");
+const codexAppServerRoot = document.querySelector("#codex-app-server");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
@@ -124,6 +138,11 @@ refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
+checkCodexHealthButton.addEventListener("click", checkCodexAppServerHealth);
+codexThreadForm.addEventListener("submit", createCodexThread);
+codexTurnForm.addEventListener("submit", createCodexTurn);
+codexCommandForm.addEventListener("submit", executeCodexCommand);
+interruptCodexTurnButton.addEventListener("click", interruptCodexTurn);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -518,6 +537,86 @@ async function createCostAlertRoute(event) {
   await refreshOps();
 }
 
+async function checkCodexAppServerHealth() {
+  await captureCodexAppServer("health", async () => {
+    state.codexAppServer.health = await api("/api/codex-app-server/health");
+  });
+}
+
+async function createCodexThread(event) {
+  event.preventDefault();
+  const form = new FormData(codexThreadForm);
+  await captureCodexAppServer("thread", async () => {
+    const thread = await api("/api/codex-app-server/threads", {
+      method: "POST",
+      body: JSON.stringify({
+        metadata: parseJsonField(form.get("metadata"), "Thread metadata JSON"),
+      }),
+    });
+    state.codexAppServer.thread = thread;
+    setCodexThreadId(thread.thread_id);
+  });
+}
+
+async function createCodexTurn(event) {
+  event.preventDefault();
+  const form = new FormData(codexTurnForm);
+  const threadId = String(form.get("thread_id") || "").trim();
+  await captureCodexAppServer("turn", async () => {
+    const turn = await api(`/api/codex-app-server/threads/${encodeURIComponent(threadId)}/turns`, {
+      method: "POST",
+      body: JSON.stringify({
+        message: String(form.get("message") || "").trim(),
+        metadata: parseJsonField(form.get("metadata"), "Turn metadata JSON"),
+      }),
+    });
+    state.codexAppServer.turn = turn;
+    setCodexTurnId(turn.turn_id);
+  });
+}
+
+async function executeCodexCommand(event) {
+  event.preventDefault();
+  const form = new FormData(codexCommandForm);
+  const turnId = String(form.get("turn_id") || "").trim();
+  await captureCodexAppServer("command", async () => {
+    state.codexAppServer.command = await api(
+      `/api/codex-app-server/turns/${encodeURIComponent(turnId)}/commands`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          command: String(form.get("command") || "").trim(),
+          args: parseJsonField(form.get("args"), "Args JSON"),
+        }),
+      },
+    );
+  });
+}
+
+async function interruptCodexTurn() {
+  const form = new FormData(codexCommandForm);
+  const turnId = String(form.get("turn_id") || "").trim();
+  await captureCodexAppServer("interrupt", async () => {
+    state.codexAppServer.interrupt = await api(
+      `/api/codex-app-server/turns/${encodeURIComponent(turnId)}/interrupt`,
+      { method: "POST" },
+    );
+  });
+}
+
+async function captureCodexAppServer(operation, action) {
+  state.codexAppServer.error = null;
+  try {
+    await action();
+  } catch (error) {
+    state.codexAppServer.error = {
+      operation,
+      message: error.message,
+    };
+  }
+  renderCodexAppServer();
+}
+
 async function acknowledgeCostAlert(providerName, severity) {
   state.costAlertAcknowledgement = await api("/api/usage/alerts/ack", {
     method: "POST",
@@ -777,6 +876,7 @@ function renderOps() {
   renderAgentReleases();
   renderMcpServers();
   renderExecutionJobs();
+  renderCodexAppServer();
   governanceRoot.innerHTML = `
     <dl>
       <dt>Policy</dt>
@@ -788,6 +888,42 @@ function renderOps() {
       <dt>MCP</dt>
       <dd>Gateway calls require global and team-scoped allowlists; discovery can import gateway tools into a team server allowlist</dd>
     </dl>
+  `;
+}
+
+function renderCodexAppServer() {
+  const codex = state.codexAppServer;
+  const responseCards = [
+    ["Health", codex.health],
+    ["Thread", codex.thread],
+    ["Turn", codex.turn],
+    ["Command", codex.command],
+    ["Interrupt", codex.interrupt],
+  ]
+    .filter(([, value]) => value)
+    .map(
+      ([label, value]) => `
+        <div class="item">
+          <strong>${escapeHtml(label)}</strong>
+          <pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>
+        </div>
+      `,
+    )
+    .join("");
+  codexAppServerRoot.innerHTML = `
+    <div class="item">
+      <strong>Codex steering</strong>
+      <div class="muted">Routes stay fail-closed unless MANDOFORGE_CODEX_APP_SERVER_URL is configured; codex.exec CLI remains the approved fallback path.</div>
+    </div>
+    ${
+      codex.error
+        ? `<div class="item danger">
+            <strong>${escapeHtml(codex.error.operation)} failed</strong>
+            <pre>${escapeHtml(codex.error.message)}</pre>
+          </div>`
+        : ""
+    }
+    ${responseCards || `<div class="muted">No Codex App Server responses yet.</div>`}
   `;
 }
 
@@ -1502,6 +1638,14 @@ function setTeamId(teamId) {
   projectForm.elements.team_id.value = teamId;
   membershipForm.elements.team_id.value = teamId;
   mcpForm.elements.team_id.value = teamId;
+}
+
+function setCodexThreadId(threadId) {
+  codexTurnForm.elements.thread_id.value = threadId;
+}
+
+function setCodexTurnId(turnId) {
+  codexCommandForm.elements.turn_id.value = turnId;
 }
 
 function parseJsonField(value, label) {

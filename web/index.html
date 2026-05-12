@@ -393,6 +393,49 @@
               <div id="execution-jobs" class="list"></div>
             </div>
             <div>
+              <h3>Codex App Server</h3>
+              <button type="button" class="secondary form-inline-action" id="check-codex-health">Check Codex Health</button>
+              <form id="codex-thread-form" class="stack-form compact-form">
+                <label>
+                  Thread metadata JSON
+                  <textarea name="metadata" rows="2">{"source":"static-console"}</textarea>
+                </label>
+                <button type="submit">Create Codex Thread</button>
+              </form>
+              <form id="codex-turn-form" class="stack-form compact-form">
+                <label>
+                  Thread ID
+                  <input name="thread_id" placeholder="Codex thread ID" />
+                </label>
+                <label>
+                  Turn message
+                  <textarea name="message" rows="3">Inspect the workspace and summarize the current runtime steering state.</textarea>
+                </label>
+                <label>
+                  Turn metadata JSON
+                  <textarea name="metadata" rows="2">{"source":"static-console"}</textarea>
+                </label>
+                <button type="submit">Create Codex Turn</button>
+              </form>
+              <form id="codex-command-form" class="stack-form compact-form">
+                <label>
+                  Turn ID
+                  <input name="turn_id" placeholder="Codex turn ID" />
+                </label>
+                <label>
+                  Command
+                  <input name="command" value="status" />
+                </label>
+                <label>
+                  Args JSON
+                  <textarea name="args" rows="2">{}</textarea>
+                </label>
+                <button type="submit">Execute Codex Command</button>
+                <button type="button" class="secondary form-inline-action" id="interrupt-codex-turn">Interrupt Codex Turn</button>
+              </form>
+              <div id="codex-app-server" class="list"></div>
+            </div>
+            <div>
               <h3>Governance</h3>
               <div id="governance-status" class="detail-panel"></div>
             </div>

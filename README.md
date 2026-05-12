@@ -168,7 +168,7 @@ MANDOFORGE_CODEX_APP_SERVER_TIMEOUT_SECONDS=30 \
 cargo run -p mandoforge-api
 ```
 
-When configured, Admin-only routes under `/api/codex-app-server/*` can health-check the App Server, create threads, create turns, execute turn-scoped commands, and interrupt turns. When unset, the adapter fails closed and approved `codex.exec` continues to use the Codex CLI path.
+When configured, Admin-only routes under `/api/codex-app-server/*` can health-check the App Server, create threads, create turns, execute turn-scoped commands, and interrupt turns. The static Admin Console includes a Codex App Server panel for those steering actions and shows the fail-closed reserved response when the URL is unset. Approved `codex.exec` continues to use the Codex CLI path; artifact sync and automatic CLI/App Server fallback orchestration are still later-stage work.
 
 Optional provider cost alert webhook:
 
