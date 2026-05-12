@@ -36,6 +36,7 @@ const state = {
   costAlertRoutes: [],
   usage: null,
   observability: null,
+  observabilityRemediation: null,
   costAlertDelivery: null,
   costAlertAcknowledgement: null,
   organizations: [],
@@ -104,6 +105,7 @@ const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
 const usageRoot = document.querySelector("#usage-summary");
 const observabilityRoot = document.querySelector("#observability-summary");
+const runObservabilityRemediationButton = document.querySelector("#run-observability-remediation");
 const usageRollupRoot = document.querySelector("#usage-rollups");
 const costAlertRouteRoot = document.querySelector("#cost-alert-routes");
 const governanceRoot = document.querySelector("#governance-status");
@@ -185,6 +187,7 @@ loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
+runObservabilityRemediationButton.addEventListener("click", runObservabilityRemediation);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
 checkCodexHealthButton.addEventListener("click", checkCodexAppServerHealth);
 loadCodexRunsButton.addEventListener("click", loadCodexAppServerRuns);
@@ -777,6 +780,14 @@ async function deliverCostAlerts() {
   state.costAlertDelivery = await api("/api/usage/alerts/deliver", {
     method: "POST",
   });
+  await refreshOps();
+}
+
+async function runObservabilityRemediation() {
+  state.observabilityRemediation = await api("/api/observability/remediation/run", {
+    method: "POST",
+  });
+  await refreshApprovals();
   await refreshOps();
 }
 
@@ -1576,6 +1587,7 @@ function renderObservability() {
   const backpressure = observability.backpressure || {};
   const telemetry = observability.telemetry || {};
   const errorEvents = observability.recent_error_events || [];
+  const remediation = state.observabilityRemediation;
   observabilityRoot.innerHTML = `
     <div class="metric-grid">
       <div class="metric">
@@ -1626,6 +1638,26 @@ function renderObservability() {
             )
             .join("")
         : `<div class="muted">No recent error events</div>`
+    }
+    ${
+      remediation
+        ? `<h4>Remediation Run</h4>
+          <div class="item">
+            <strong>${escapeHtml(remediation.status)}</strong>
+            <div class="muted">${escapeHtml(remediation.ran_at)} · ${escapeHtml((remediation.actions || []).join(", ") || "no action")}</div>
+            <pre>${escapeHtml(
+              JSON.stringify(
+                {
+                  before: remediation.before,
+                  after: remediation.after,
+                  approval_escalation_run: remediation.approval_escalation_run,
+                },
+                null,
+                2,
+              ),
+            )}</pre>
+          </div>`
+        : ""
     }
   `;
 }

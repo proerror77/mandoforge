@@ -607,6 +607,16 @@ struct ObservabilityBackpressure {
     oldest_queued_job_age_seconds: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityRemediationRun {
+    status: String,
+    ran_at: DateTime<Utc>,
+    actions: Vec<String>,
+    before: ObservabilityBackpressure,
+    after: ObservabilityBackpressure,
+    approval_escalation_run: Option<ApprovalEscalationDueRun>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ProviderUsageSummary {
     request_count: usize,
@@ -1676,6 +1686,10 @@ fn build_router(state: AppState) -> Router {
             get(list_usage_rollups).post(create_usage_rollup),
         )
         .route("/api/observability", get(get_observability_summary))
+        .route(
+            "/api/observability/remediation/run",
+            post(run_observability_remediation),
+        )
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
@@ -7038,6 +7052,53 @@ async fn get_observability_summary(
     Ok(Json(build_observability_summary(&state).await?))
 }
 
+async fn run_observability_remediation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ObservabilityRemediationRun>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
+    let before_summary = build_observability_summary(&state).await?;
+    let before = before_summary.backpressure;
+    let mut actions = Vec::new();
+    let approval_escalation_run = if before.pending_approvals > 0 {
+        actions.push("approval_escalation_due_run".to_string());
+        Some(execute_due_approval_escalations(&state).await?)
+    } else {
+        None
+    };
+    if before.queued_jobs > 0 || before.retryable_jobs > 0 {
+        actions.push("worker_drain_required".to_string());
+    }
+    if before.failed_jobs > 0 || before.failed_sessions > 0 || before.failed_tool_calls > 0 {
+        actions.push("manual_failure_triage_required".to_string());
+    }
+    let after_summary = build_observability_summary(&state).await?;
+    let run = ObservabilityRemediationRun {
+        status: if actions.is_empty() {
+            "no_action".to_string()
+        } else {
+            "completed".to_string()
+        },
+        ran_at: Utc::now(),
+        actions,
+        before,
+        after: after_summary.backpressure,
+        approval_escalation_run,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "observability.remediation_run",
+            "observability",
+            None,
+            serde_json::to_value(&run)?,
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
 async fn get_cost_alerts(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -8419,6 +8480,12 @@ async fn run_due_approval_escalations(
         None,
     )
     .await?;
+    Ok(Json(execute_due_approval_escalations(&state).await?))
+}
+
+async fn execute_due_approval_escalations(
+    state: &AppState,
+) -> Result<ApprovalEscalationDueRun, AppError> {
     let checked_at = Utc::now();
     let mut expired_count = 0;
     let mut escalated_count = 0;
@@ -8432,7 +8499,7 @@ async fn run_due_approval_escalations(
         .filter(|approval| approval.status == "pending")
     {
         if approval_is_expired_at(&approval, checked_at) {
-            expire_approval_record(&state, approval.id).await?;
+            expire_approval_record(state, approval.id).await?;
             expired_count += 1;
             continue;
         }
@@ -8446,7 +8513,7 @@ async fn run_due_approval_escalations(
             continue;
         }
         let updated = escalate_approval_record(
-            &state,
+            state,
             &approval,
             &group,
             Some(rule.id),
@@ -8458,7 +8525,7 @@ async fn run_due_approval_escalations(
         .await?;
         escalated_count += 1;
         notification_deliveries
-            .push(deliver_approval_notification(&state, &updated, checked_at).await?);
+            .push(deliver_approval_notification(state, &updated, checked_at).await?);
     }
     let run = ApprovalEscalationDueRun {
         status: "completed".to_string(),
@@ -8479,7 +8546,7 @@ async fn run_due_approval_escalations(
             serde_json::to_value(&run)?,
         ))
         .await?;
-    Ok(Json(run))
+    Ok(run)
 }
 
 async fn escalate_approval_record(
@@ -13476,7 +13543,7 @@ not json
         assert!(matches!(running.status, SessionStatus::WaitingApproval));
 
         let observability: ObservabilitySummary = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/observability")
                 .header("x-mandoforge-subject", "admin-1")
@@ -13507,6 +13574,42 @@ not json
                 .copied()
                 .unwrap_or(0)
                 >= 2
+        );
+
+        let remediation: ObservabilityRemediationRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/observability/remediation/run")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(remediation.status, "completed");
+        assert_eq!(remediation.before.pending_approvals, 1);
+        assert!(
+            remediation
+                .actions
+                .contains(&"approval_escalation_due_run".to_string())
+        );
+        assert!(remediation.approval_escalation_run.is_some());
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "observability.remediation_run")
         );
     }
 

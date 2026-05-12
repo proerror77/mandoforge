@@ -53,7 +53,7 @@ wait_for_static_ui() {
     hasProviderBreakdown: text.includes('PROVIDER COST BREAKDOWN'),
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
     hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
-    hasObservabilityDashboard: text.includes('Observability') && text.includes('Telemetry / Backpressure / Error Events') && Boolean(document.querySelector('#observability-summary')),
+    hasObservabilityDashboard: text.includes('Observability') && text.includes('Telemetry / Backpressure / Error Events') && text.includes('Run Remediation') && Boolean(document.querySelector('#observability-summary')),
     hasCostAlertRoutes: text.includes('Create Alert Route') && Array.from(document.querySelectorAll('#cost-alert-route-form input')).some((input) => input.placeholder.includes('SMTP recipient email')) && text.includes('No cost alert routes'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
     hasProviderApprovalWorkflow: text.includes('Request Provider Approval') && text.includes('Approver subject'),
@@ -146,6 +146,7 @@ grep -q "data-poll-codex-run" /tmp/mandoforge-actionbook-app.js
 grep -q "createEvalJudgeProfile" /tmp/mandoforge-actionbook-app.js
 grep -q "bootstrapEvalSuite" /tmp/mandoforge-actionbook-app.js
 grep -q "requestEvalRunPromotion" /tmp/mandoforge-actionbook-app.js
+grep -q "runObservabilityRemediation" /tmp/mandoforge-actionbook-app.js
 grep -q "Create Judge Profile" /tmp/mandoforge-actionbook-index.html
 grep -q "Bootstrap Stage 2 Suite" /tmp/mandoforge-actionbook-index.html
 curl -fsS "$BASE_URL/api/usage" \
