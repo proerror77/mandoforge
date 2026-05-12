@@ -291,6 +291,9 @@ struct UsageSummary {
     tool_success_count: usize,
     tool_failed_count: usize,
     approval_count: usize,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
     total_tool_duration_ms: i64,
     estimated_provider_cost_cents: f64,
     by_provider: HashMap<String, ProviderUsageSummary>,
@@ -301,6 +304,10 @@ struct UsageSummary {
 struct ProviderUsageSummary {
     request_count: usize,
     response_count: usize,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    token_cost_cents: f64,
     estimated_cost_cents: f64,
 }
 
@@ -1085,7 +1092,7 @@ async fn run_provider_harness(
             None,
             session_id,
             "llm.response",
-            json!({"provider": provider_label, "client": provider.name(), "tool_calls": &response.tool_calls, "final_message": &response.final_message}),
+            json!({"provider": provider_label, "client": provider.name(), "tool_calls": &response.tool_calls, "final_message": &response.final_message, "usage": &response.usage}),
         )
         .await?;
     Ok(response)
@@ -2383,7 +2390,7 @@ async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError>
     let tool_calls = state.list_tool_calls(None).await?;
     let approvals = state.list_approvals().await?;
     let providers = state.list_providers().await?;
-    let provider_prices: HashMap<_, _> = providers
+    let provider_request_prices: HashMap<_, _> = providers
         .iter()
         .filter_map(|provider| {
             provider
@@ -2394,10 +2401,35 @@ async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError>
                 .map(|price| (provider.name.clone(), price))
         })
         .collect();
+    let provider_prompt_token_prices: HashMap<_, _> = providers
+        .iter()
+        .filter_map(|provider| {
+            provider
+                .config
+                .get("pricing")
+                .and_then(|pricing| pricing.get("per_1k_prompt_tokens_cents"))
+                .and_then(Value::as_f64)
+                .map(|price| (provider.name.clone(), price))
+        })
+        .collect();
+    let provider_completion_token_prices: HashMap<_, _> = providers
+        .iter()
+        .filter_map(|provider| {
+            provider
+                .config
+                .get("pricing")
+                .and_then(|pricing| pricing.get("per_1k_completion_tokens_cents"))
+                .and_then(Value::as_f64)
+                .map(|price| (provider.name.clone(), price))
+        })
+        .collect();
 
     let mut event_count = 0;
     let mut provider_request_count = 0;
     let mut provider_response_count = 0;
+    let mut prompt_tokens = 0;
+    let mut completion_tokens = 0;
+    let mut total_tokens = 0;
     let mut by_provider = HashMap::<String, ProviderUsageSummary>::new();
     for session in &sessions {
         for event in state.list_events(session.id).await? {
@@ -2413,11 +2445,46 @@ async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError>
                 if event.event_type == "llm.request" {
                     provider_request_count += 1;
                     usage.request_count += 1;
-                    usage.estimated_cost_cents +=
-                        provider_prices.get(&provider).copied().unwrap_or(0.0);
+                    usage.estimated_cost_cents += provider_request_prices
+                        .get(&provider)
+                        .copied()
+                        .unwrap_or(0.0);
                 } else {
                     provider_response_count += 1;
                     usage.response_count += 1;
+                    let event_prompt_tokens = event
+                        .payload
+                        .get("usage")
+                        .and_then(|usage| usage.get("prompt_tokens"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    let event_completion_tokens = event
+                        .payload
+                        .get("usage")
+                        .and_then(|usage| usage.get("completion_tokens"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    let event_total_tokens = event
+                        .payload
+                        .get("usage")
+                        .and_then(|usage| usage.get("total_tokens"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(event_prompt_tokens + event_completion_tokens);
+                    usage.prompt_tokens += event_prompt_tokens;
+                    usage.completion_tokens += event_completion_tokens;
+                    usage.total_tokens += event_total_tokens;
+                    prompt_tokens += event_prompt_tokens;
+                    completion_tokens += event_completion_tokens;
+                    total_tokens += event_total_tokens;
+                    let token_cost = token_cost_cents(
+                        event_prompt_tokens,
+                        provider_prompt_token_prices.get(&provider).copied(),
+                    ) + token_cost_cents(
+                        event_completion_tokens,
+                        provider_completion_token_prices.get(&provider).copied(),
+                    );
+                    usage.token_cost_cents += token_cost;
+                    usage.estimated_cost_cents += token_cost;
                 }
             }
         }
@@ -2464,11 +2531,21 @@ async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError>
         tool_success_count,
         tool_failed_count,
         approval_count: approvals.len(),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
         total_tool_duration_ms,
         estimated_provider_cost_cents,
         by_provider,
         by_tool,
     })
+}
+
+fn token_cost_cents(tokens: i64, price_per_1k_cents: Option<f64>) -> f64 {
+    let Some(price) = price_per_1k_cents else {
+        return 0.0;
+    };
+    (tokens.max(0) as f64 / 1000.0) * price
 }
 
 async fn list_approvals(
@@ -3296,7 +3373,12 @@ not json
                         }
                     ]
                 }
-            }]
+            }],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18
+            }
         });
         let parsed =
             parse_openai_compatible_provider_response(&response).expect("provider response parses");
@@ -3309,6 +3391,10 @@ not json
             parsed.final_message.as_deref(),
             Some("{\"plan\":[\"Read files\",\"Query demo data\"]}")
         );
+        let usage = parsed.usage.expect("token usage");
+        assert_eq!(usage.prompt_tokens, 11);
+        assert_eq!(usage.completion_tokens, 7);
+        assert_eq!(usage.total_tokens, 18);
     }
 
     #[test]
@@ -4810,7 +4896,11 @@ not json
                         "default_model": "gpt-5.4-mini",
                         "config": {
                             "budget": {"daily_request_limit": 1},
-                            "pricing": {"per_request_cents": 2.5}
+                            "pricing": {
+                                "per_request_cents": 2.5,
+                                "per_1k_prompt_tokens_cents": 1.0,
+                                "per_1k_completion_tokens_cents": 2.0
+                            }
                         }
                     })
                     .to_string(),
@@ -4953,7 +5043,14 @@ not json
         .await;
         assert_eq!(usage.provider_request_count, 1);
         assert_eq!(usage.by_provider["governed-mock"].request_count, 1);
-        assert_eq!(usage.estimated_provider_cost_cents, 2.5);
+        assert_eq!(usage.prompt_tokens, 180);
+        assert_eq!(usage.completion_tokens, 60);
+        assert_eq!(usage.total_tokens, 240);
+        assert_eq!(usage.by_provider["governed-mock"].prompt_tokens, 180);
+        assert_eq!(usage.by_provider["governed-mock"].completion_tokens, 60);
+        assert_eq!(usage.by_provider["governed-mock"].total_tokens, 240);
+        assert!((usage.by_provider["governed-mock"].token_cost_cents - 0.3).abs() < 0.000001);
+        assert!((usage.estimated_provider_cost_cents - 2.8).abs() < 0.000001);
 
         let scoped_agent: Agent = request_json(
             app.clone(),

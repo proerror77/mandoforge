@@ -101,6 +101,14 @@
                   Per request cents
                   <input name="per_request_cents" type="number" min="0" step="0.01" value="0" />
                 </label>
+                <label>
+                  Prompt 1K token cents
+                  <input name="per_1k_prompt_tokens_cents" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <label>
+                  Completion 1K token cents
+                  <input name="per_1k_completion_tokens_cents" type="number" min="0" step="0.01" value="0" />
+                </label>
                 <button type="submit">Save Provider</button>
               </form>
               <div id="providers" class="list"></div>

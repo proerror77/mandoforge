@@ -89,6 +89,8 @@ async function createProvider(event) {
   const form = new FormData(providerForm);
   const dailyRequestLimit = Number(form.get("daily_request_limit") || 0);
   const perRequestCents = Number(form.get("per_request_cents") || 0);
+  const promptTokenCents = Number(form.get("per_1k_prompt_tokens_cents") || 0);
+  const completionTokenCents = Number(form.get("per_1k_completion_tokens_cents") || 0);
   await api("/api/providers", {
     method: "POST",
     body: JSON.stringify({
@@ -97,7 +99,11 @@ async function createProvider(event) {
       default_model: form.get("default_model"),
       config: {
         budget: { daily_request_limit: dailyRequestLimit },
-        pricing: { per_request_cents: perRequestCents },
+        pricing: {
+          per_request_cents: perRequestCents,
+          per_1k_prompt_tokens_cents: promptTokenCents,
+          per_1k_completion_tokens_cents: completionTokenCents,
+        },
       },
     }),
   });
@@ -240,6 +246,8 @@ function renderUsage() {
       <dd>${usage.session_count}</dd>
       <dt>Provider requests</dt>
       <dd>${usage.provider_request_count}</dd>
+      <dt>Provider tokens</dt>
+      <dd>${usage.total_tokens} total · ${usage.prompt_tokens} prompt · ${usage.completion_tokens} completion</dd>
       <dt>Tool calls</dt>
       <dd>${usage.tool_call_count} total · ${usage.tool_success_count} completed · ${usage.tool_failed_count} failed</dd>
       <dt>Approval records</dt>

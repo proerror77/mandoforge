@@ -30,6 +30,14 @@ pub(crate) struct ProviderResponse {
     pub(crate) plan: Vec<String>,
     pub(crate) tool_calls: Vec<ProviderToolCall>,
     pub(crate) final_message: Option<String>,
+    pub(crate) usage: Option<ProviderTokenUsage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProviderTokenUsage {
+    pub(crate) prompt_tokens: i64,
+    pub(crate) completion_tokens: i64,
+    pub(crate) total_tokens: i64,
 }
 
 #[async_trait]
@@ -63,6 +71,11 @@ impl ProviderClient for MockProviderClient {
                     "Approved execution completed. The session timeline now contains the approved tool result and final provider response."
                         .to_string(),
                 ),
+                usage: Some(ProviderTokenUsage {
+                    prompt_tokens: 120,
+                    completion_tokens: 45,
+                    total_tokens: 165,
+                }),
             });
         }
         Ok(ProviderResponse {
@@ -91,6 +104,11 @@ impl ProviderClient for MockProviderClient {
                 },
             ],
             final_message: None,
+            usage: Some(ProviderTokenUsage {
+                prompt_tokens: 180,
+                completion_tokens: 60,
+                total_tokens: 240,
+            }),
         })
     }
 }
@@ -323,10 +341,33 @@ pub(crate) fn parse_openai_compatible_provider_response(
         )]
     });
     let final_message = (!content.trim().is_empty()).then(|| content.trim().to_string());
+    let usage = parse_provider_token_usage(value.get("usage"));
     Ok(ProviderResponse {
         plan,
         tool_calls,
         final_message,
+        usage,
+    })
+}
+
+fn parse_provider_token_usage(value: Option<&Value>) -> Option<ProviderTokenUsage> {
+    let value = value?;
+    let prompt_tokens = value
+        .get("prompt_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let completion_tokens = value
+        .get("completion_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let total_tokens = value
+        .get("total_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(prompt_tokens + completion_tokens);
+    Some(ProviderTokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
     })
 }
 
