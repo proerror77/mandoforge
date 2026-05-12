@@ -40,6 +40,7 @@ const state = {
   usage: null,
   observability: null,
   observabilityRemediation: null,
+  schedulerDueRun: null,
   costAlertDelivery: null,
   costAlertAcknowledgement: null,
   usageExportStatus: null,
@@ -111,6 +112,7 @@ const executionJobRoot = document.querySelector("#execution-jobs");
 const usageRoot = document.querySelector("#usage-summary");
 const observabilityRoot = document.querySelector("#observability-summary");
 const runObservabilityRemediationButton = document.querySelector("#run-observability-remediation");
+const runSchedulerDueButton = document.querySelector("#run-scheduler-due");
 const usageRollupRoot = document.querySelector("#usage-rollups");
 const costAlertRouteRoot = document.querySelector("#cost-alert-routes");
 const governanceRoot = document.querySelector("#governance-status");
@@ -198,6 +200,7 @@ createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
 exportUsageCsvButton.addEventListener("click", exportUsageCsv);
 runObservabilityRemediationButton.addEventListener("click", runObservabilityRemediation);
+runSchedulerDueButton.addEventListener("click", runSchedulerDueTasks);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
 checkCodexHealthButton.addEventListener("click", checkCodexAppServerHealth);
 loadCodexRunsButton.addEventListener("click", loadCodexAppServerRuns);
@@ -846,6 +849,14 @@ async function exportUsageCsv() {
 
 async function runObservabilityRemediation() {
   state.observabilityRemediation = await api("/api/observability/remediation/run", {
+    method: "POST",
+  });
+  await refreshApprovals();
+  await refreshOps();
+}
+
+async function runSchedulerDueTasks() {
+  state.schedulerDueRun = await api("/api/scheduler/run-due", {
     method: "POST",
   });
   await refreshApprovals();
@@ -1711,6 +1722,7 @@ function renderObservability() {
   const telemetry = observability.telemetry || {};
   const errorEvents = observability.recent_error_events || [];
   const remediation = state.observabilityRemediation;
+  const schedulerDueRun = state.schedulerDueRun;
   observabilityRoot.innerHTML = `
     <div class="metric-grid">
       <div class="metric">
@@ -1774,6 +1786,28 @@ function renderObservability() {
                   before: remediation.before,
                   after: remediation.after,
                   approval_escalation_run: remediation.approval_escalation_run,
+                },
+                null,
+                2,
+              ),
+            )}</pre>
+          </div>`
+        : ""
+    }
+    ${
+      schedulerDueRun
+        ? `<h4>Scheduler Due Run</h4>
+          <div class="item">
+            <strong>${escapeHtml(schedulerDueRun.status)}</strong>
+            <div class="muted">${escapeHtml(schedulerDueRun.checked_at)} · ${formatInteger(schedulerDueRun.team_count)} teams · ${escapeHtml((schedulerDueRun.actions || []).join(", ") || "no action")}</div>
+            <pre>${escapeHtml(
+              JSON.stringify(
+                {
+                  policy_rollout: schedulerDueRun.policy_rollout,
+                  approval_escalations: schedulerDueRun.approval_escalations,
+                  agent_releases: schedulerDueRun.agent_releases,
+                  mcp_health_runs: schedulerDueRun.mcp_health_runs,
+                  mcp_rollout_runs: schedulerDueRun.mcp_rollout_runs,
                 },
                 null,
                 2,

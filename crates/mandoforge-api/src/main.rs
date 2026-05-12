@@ -453,6 +453,19 @@ struct ApprovalEscalationDueRun {
     notification_deliveries: Vec<ApprovalNotificationDelivery>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct SchedulerDueRun {
+    status: String,
+    checked_at: DateTime<Utc>,
+    team_count: usize,
+    actions: Vec<String>,
+    policy_rollout: PolicyScheduledRolloutRun,
+    approval_escalations: ApprovalEscalationDueRun,
+    agent_releases: AgentReleaseAutomationRun,
+    mcp_health_runs: Vec<McpServerScheduledHealthRun>,
+    mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolCall {
     id: Uuid,
@@ -1800,6 +1813,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/usage/alerts", get(get_cost_alerts))
         .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
+        .route("/api/scheduler/run-due", post(run_scheduler_due_tasks))
         .route(
             "/api/usage/alert-routes",
             get(list_cost_alert_routes).post(create_cost_alert_route),
@@ -2351,6 +2365,12 @@ async fn run_due_agent_release_promotions(
     headers: HeaderMap,
 ) -> Result<Json<AgentReleaseAutomationRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "agent_release", None).await?;
+    Ok(Json(execute_due_agent_release_promotions(&state).await?))
+}
+
+async fn execute_due_agent_release_promotions(
+    state: &AppState,
+) -> Result<AgentReleaseAutomationRun, AppError> {
     let checked_at = Utc::now();
     let releases = state.list_pending_agent_releases().await?;
     let pending_count = releases.len();
@@ -2463,7 +2483,7 @@ async fn run_due_agent_release_promotions(
             }),
         ))
         .await?;
-    Ok(Json(run))
+    Ok(run)
 }
 
 enum ReleaseAutomationDecision {
@@ -4787,6 +4807,16 @@ async fn run_due_policy_rollouts(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(
+        execute_due_policy_rollouts(&state, &principal.subject_id, "user").await?,
+    ))
+}
+
+async fn execute_due_policy_rollouts(
+    state: &AppState,
+    subject: &str,
+    actor_type: &str,
+) -> Result<PolicyScheduledRolloutRun, AppError> {
     let now = Utc::now();
     let revisions = state.list_policy_revisions().await?;
     let mut due_revisions = Vec::new();
@@ -4830,13 +4860,13 @@ async fn run_due_policy_rollouts(
     state
         .append_audit_log(new_audit_log(
             None,
-            "user",
+            actor_type,
             None,
             "policy.rollout_due_run",
             "policy",
             result.activated_revision_id,
             json!({
-                "subject": principal.subject_id,
+                "subject": subject,
                 "status": result.status,
                 "activated_revision_id": result.activated_revision_id,
                 "scanned_count": result.scanned_count,
@@ -4845,7 +4875,7 @@ async fn run_due_policy_rollouts(
             }),
         ))
         .await?;
-    Ok(Json(result))
+    Ok(result)
 }
 
 async fn create_policy_revision(
@@ -6765,6 +6795,15 @@ async fn run_due_mcp_server_health_checks(
     headers: HeaderMap,
 ) -> Result<Json<McpServerScheduledHealthRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    Ok(Json(
+        execute_due_mcp_server_health_checks(&state, team_id).await?,
+    ))
+}
+
+async fn execute_due_mcp_server_health_checks(
+    state: &AppState,
+    team_id: Uuid,
+) -> Result<McpServerScheduledHealthRun, AppError> {
     let checked_at = Utc::now();
     let servers = state.list_mcp_servers(team_id).await?;
     let mut skipped_count = 0usize;
@@ -6816,7 +6855,7 @@ async fn run_due_mcp_server_health_checks(
             }),
         ))
         .await?;
-    Ok(Json(run))
+    Ok(run)
 }
 
 async fn request_mcp_server_rollout(
@@ -7008,6 +7047,15 @@ async fn run_due_mcp_server_rollouts(
     headers: HeaderMap,
 ) -> Result<Json<McpServerRolloutDueRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    Ok(Json(
+        execute_due_mcp_server_rollouts(&state, team_id).await?,
+    ))
+}
+
+async fn execute_due_mcp_server_rollouts(
+    state: &AppState,
+    team_id: Uuid,
+) -> Result<McpServerRolloutDueRun, AppError> {
     let checked_at = Utc::now();
     let servers = state.list_mcp_servers(team_id).await?;
     let mut applied_count = 0usize;
@@ -7102,7 +7150,7 @@ async fn run_due_mcp_server_rollouts(
             }),
         ))
         .await?;
-    Ok(Json(run))
+    Ok(run)
 }
 
 struct BuiltMcpServerRollout {
@@ -8058,6 +8106,94 @@ async fn export_usage_csv(
         csv,
     )
         .into_response())
+}
+
+async fn run_scheduler_due_tasks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SchedulerDueRun>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
+    Ok(Json(execute_scheduler_due_tasks(&state).await?))
+}
+
+async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun, AppError> {
+    let checked_at = Utc::now();
+    let policy_rollout = execute_due_policy_rollouts(state, "scheduler", "system").await?;
+    let approval_escalations = execute_due_approval_escalations(state).await?;
+    let agent_releases = execute_due_agent_release_promotions(state).await?;
+    let mut mcp_health_runs = Vec::new();
+    let mut mcp_rollout_runs = Vec::new();
+    let mut team_count = 0usize;
+    for organization in state
+        .list_organizations()
+        .await?
+        .into_iter()
+        .filter(|organization| organization.archived_at.is_none())
+    {
+        for team in state
+            .list_teams(organization.id)
+            .await?
+            .into_iter()
+            .filter(|team| team.archived_at.is_none())
+        {
+            team_count += 1;
+            mcp_health_runs.push(execute_due_mcp_server_health_checks(state, team.id).await?);
+            mcp_rollout_runs.push(execute_due_mcp_server_rollouts(state, team.id).await?);
+        }
+    }
+    let mut actions = Vec::new();
+    if policy_rollout.status == "activated" {
+        actions.push("policy_rollout_activated".to_string());
+    }
+    if approval_escalations.expired_count > 0 || approval_escalations.escalated_count > 0 {
+        actions.push("approval_escalations_processed".to_string());
+    }
+    if agent_releases.promoted_count > 0 || agent_releases.rejected_count > 0 {
+        actions.push("agent_release_automation_processed".to_string());
+    }
+    if mcp_health_runs.iter().any(|run| run.due_count > 0) {
+        actions.push("mcp_health_checks_processed".to_string());
+    }
+    if mcp_rollout_runs
+        .iter()
+        .any(|run| run.applied_count > 0 || run.expired_count > 0 || run.failed_count > 0)
+    {
+        actions.push("mcp_rollouts_processed".to_string());
+    }
+    let status = if actions.is_empty() {
+        "noop"
+    } else {
+        "completed"
+    }
+    .to_string();
+    let run = SchedulerDueRun {
+        status,
+        checked_at,
+        team_count,
+        actions,
+        policy_rollout,
+        approval_escalations,
+        agent_releases,
+        mcp_health_runs,
+        mcp_rollout_runs,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "scheduler.run_due",
+            "scheduler",
+            None,
+            json!({
+                "status": run.status,
+                "team_count": run.team_count,
+                "actions": run.actions,
+                "checked_at": run.checked_at,
+            }),
+        ))
+        .await?;
+    Ok(run)
 }
 
 async fn get_observability_summary(
@@ -16530,6 +16666,98 @@ not json
                 .iter()
                 .any(|log| log.action == "approval.escalation_due_run")
         );
+    }
+
+    #[tokio::test]
+    async fn scheduler_due_run_orchestrates_due_automation_across_teams() {
+        let app = test_app().await;
+        let organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/organizations")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Scheduler Org", "slug": "scheduler-org"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/organizations/{}/teams", organization.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Scheduler Team", "slug": "scheduler-team"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _server: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/mcp-servers", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "scheduled-mcp",
+                        "transport": "http",
+                        "config": {"health_check": {"interval_seconds": 1}},
+                        "tool_allowlist": ["ping"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let run: SchedulerDueRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/run-due")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.team_count, 1);
+        assert_eq!(run.mcp_health_runs.len(), 1);
+        assert_eq!(run.mcp_health_runs[0].team_id, team.id);
+        assert_eq!(run.mcp_health_runs[0].due_count, 1);
+        assert_eq!(run.mcp_rollout_runs.len(), 1);
+        assert!(
+            run.actions
+                .iter()
+                .any(|action| action == "mcp_health_checks_processed")
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "scheduler.run_due"
+                && log.details["team_count"] == 1
+                && log.details["status"] == "completed"
+        }));
     }
 
     #[tokio::test]

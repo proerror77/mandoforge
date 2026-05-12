@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mandoforge-scheduler
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: mandoforge-scheduler
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: curlimages/curl:8.10.1
+              imagePullPolicy: IfNotPresent
+              args:
+                - -fsS
+                - -X
+                - POST
+                - -H
+                - "x-mandoforge-subject: scheduler"
+                - -H
+                - "x-mandoforge-roles: admin"
+                - http://mandoforge-api:8787/api/scheduler/run-due
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
