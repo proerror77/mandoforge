@@ -200,6 +200,14 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/audit-logs`
 - `GET /api/tools`
 - `POST /api/tools/:name/execute`
+- `GET /api/organizations`
+- `POST /api/organizations`
+- `GET /api/organizations/:id/teams`
+- `POST /api/organizations/:id/teams`
+- `GET /api/organizations/:id/memberships`
+- `POST /api/organizations/:id/memberships`
+- `GET /api/teams/:id/projects`
+- `POST /api/teams/:id/projects`
 
 ## Security Boundary
 

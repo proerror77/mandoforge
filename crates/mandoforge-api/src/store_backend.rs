@@ -4,7 +4,10 @@ use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::{Agent, AgentVersion, Approval, Artifact, AuditLog, Session, SessionEvent, ToolCall};
+use crate::{
+    Agent, AgentVersion, Approval, Artifact, AuditLog, Membership, Organization, Project, Session,
+    SessionEvent, Team, ToolCall,
+};
 
 #[derive(Default)]
 pub(crate) struct MemoryStore {
@@ -16,6 +19,10 @@ pub(crate) struct MemoryStore {
     pub(crate) artifacts: HashMap<Uuid, Artifact>,
     pub(crate) tool_calls: HashMap<Uuid, ToolCall>,
     pub(crate) audit_logs: HashMap<Uuid, AuditLog>,
+    pub(crate) organizations: HashMap<Uuid, Organization>,
+    pub(crate) teams: HashMap<Uuid, Team>,
+    pub(crate) projects: HashMap<Uuid, Project>,
+    pub(crate) memberships: HashMap<Uuid, Membership>,
 }
 
 #[derive(Clone)]

@@ -3,7 +3,8 @@ use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
 use crate::{
-    Agent, AgentVersion, AppError, Approval, Artifact, AuditLog, Session, SessionEvent, ToolCall,
+    Agent, AgentVersion, AppError, Approval, Artifact, AuditLog, Membership, Organization, Project,
+    Session, SessionEvent, Team, ToolCall,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -126,6 +127,46 @@ pub(crate) fn audit_log_from_row(row: PgRow) -> Result<AuditLog, AppError> {
         resource_type: row.try_get("resource_type")?,
         resource_id: row.try_get("resource_id")?,
         details: row.try_get("details")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn organization_from_row(row: PgRow) -> Result<Organization, AppError> {
+    Ok(Organization {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        slug: row.try_get("slug")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn team_from_row(row: PgRow) -> Result<Team, AppError> {
+    Ok(Team {
+        id: row.try_get("id")?,
+        organization_id: row.try_get("organization_id")?,
+        name: row.try_get("name")?,
+        slug: row.try_get("slug")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn project_from_row(row: PgRow) -> Result<Project, AppError> {
+    Ok(Project {
+        id: row.try_get("id")?,
+        team_id: row.try_get("team_id")?,
+        name: row.try_get("name")?,
+        slug: row.try_get("slug")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn membership_from_row(row: PgRow) -> Result<Membership, AppError> {
+    Ok(Membership {
+        id: row.try_get("id")?,
+        user_id: row.try_get("user_id")?,
+        organization_id: row.try_get("organization_id")?,
+        team_id: row.try_get("team_id")?,
+        role: row.try_get("role")?,
         created_at: row.try_get("created_at")?,
     })
 }

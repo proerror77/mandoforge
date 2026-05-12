@@ -36,6 +36,7 @@ mod store_audit;
 mod store_backend;
 mod store_entities;
 mod store_events;
+mod store_governance;
 mod store_rows;
 mod store_seed;
 mod store_tool_calls;
@@ -260,6 +261,68 @@ struct Artifact {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Organization {
+    id: Uuid,
+    name: String,
+    slug: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateOrganization {
+    name: String,
+    slug: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Team {
+    id: Uuid,
+    organization_id: Uuid,
+    name: String,
+    slug: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTeam {
+    name: String,
+    slug: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Project {
+    id: Uuid,
+    team_id: Uuid,
+    name: String,
+    slug: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateProject {
+    name: String,
+    slug: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Membership {
+    id: Uuid,
+    user_id: String,
+    organization_id: Option<Uuid>,
+    team_id: Option<Uuid>,
+    role: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateMembership {
+    user_id: String,
+    #[serde(default)]
+    team_id: Option<Uuid>,
+    role: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ToolDescriptor {
     name: &'static str,
@@ -423,6 +486,22 @@ fn build_router(state: AppState) -> Router {
         .route("/api/tools", get(list_tools))
         .route("/api/tools/{name}/execute", post(execute_tool))
         .route("/api/tool-calls", get(list_tool_calls))
+        .route(
+            "/api/organizations",
+            get(list_organizations).post(create_organization),
+        )
+        .route(
+            "/api/organizations/{id}/teams",
+            get(list_teams).post(create_team),
+        )
+        .route(
+            "/api/organizations/{id}/memberships",
+            get(list_memberships).post(create_membership),
+        )
+        .route(
+            "/api/teams/{id}/projects",
+            get(list_projects).post(create_project),
+        )
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
@@ -457,6 +536,7 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
     for path in [
         "db/migrations/0001_core.sql",
         "db/migrations/0002_generic_demo.sql",
+        "db/migrations/0003_stage2_governance.sql",
     ] {
         let sql = tokio::fs::read_to_string(path)
             .await
@@ -1479,6 +1559,108 @@ async fn execute_tool_invocation(
         ))
         .await?;
     Ok(result)
+}
+
+async fn list_organizations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Organization>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "organizations", None).await?;
+    Ok(Json(state.list_organizations().await?))
+}
+
+async fn create_organization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateOrganization>,
+) -> Result<Json<Organization>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "organizations", None).await?;
+    Ok(Json(state.create_organization(input).await?))
+}
+
+async fn list_teams(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Team>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_teams(id).await?))
+}
+
+async fn create_team(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateTeam>,
+) -> Result<Json<Team>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.create_team(id, input).await?))
+}
+
+async fn list_projects(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Project>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
+    Ok(Json(state.list_projects(id).await?))
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateProject>,
+) -> Result<Json<Project>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
+    Ok(Json(state.create_project(id, input).await?))
+}
+
+async fn list_memberships(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Membership>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_memberships(id).await?))
+}
+
+async fn create_membership(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateMembership>,
+) -> Result<Json<Membership>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.create_membership(id, input).await?))
 }
 
 async fn list_approvals(
@@ -3219,6 +3401,110 @@ not json
             .find(|approval| approval.id.to_string() == approval_id)
             .expect("approval remains visible");
         assert_eq!(pending.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn admin_can_manage_stage2_governance_scope() {
+        let app = test_app().await;
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/organizations",
+                json!({"name": "Denied Org", "slug": "denied"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/organizations")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Platform Org", "slug": "platform"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(organization.slug, "platform");
+
+        let team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/organizations/{}/teams", organization.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Runtime Team", "slug": "runtime"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(team.organization_id, organization.id);
+
+        let project: Project = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/projects", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Kernel Pilot", "slug": "kernel-pilot"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(project.team_id, team.id);
+
+        let membership: Membership = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/memberships",
+                    organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"user_id": "approver-1", "team_id": team.id, "role": "approver"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(membership.organization_id, Some(organization.id));
+        assert_eq!(membership.team_id, Some(team.id));
+
+        let projects: Vec<Project> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/teams/{}/projects", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].slug, "kernel-pilot");
     }
 
     #[tokio::test]

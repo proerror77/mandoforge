@@ -6,8 +6,8 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 | Stage 2 area | Current state | Gap |
 | --- | --- | --- |
-| Multi-tenancy org/team/project | Single default tenant is present in core tables. | Organization, team, project, memberships, and scoped route filters are not implemented. |
-| RBAC | Role-based authorizer guards read, write, run, tool, approval, execution job, and audit paths. `admin`, `operator`, `approver`, and `viewer` are recognized. | Persistent memberships and production policy administration are not implemented. |
+| Multi-tenancy org/team/project | Single default tenant remains the runtime scope, but `organizations`, `teams`, `projects`, and `memberships` tables plus Admin-only hierarchy APIs are implemented. | Existing Agent/Session/Tool routes are not yet scoped by team/project, and membership-derived authorization is not enforced. |
+| RBAC | Role-based authorizer guards read, write, run, tool, approval, execution job, audit, and governance admin paths. `admin`, `operator`, `approver`, and `viewer` are recognized. | Persistent memberships are stored but not yet used by the authorizer; production policy administration is not implemented. |
 | Provider governance | OpenAI-compatible provider transport exists; API keys can be direct env values or Vault references. | Team-level provider access, model allowlists, and budgets are not implemented. |
 | Vault | Reserved provider and Vault KV v2 HTTP client boundary exist. | Production secret storage, secret CRUD, rotation, and scoped secret references are not implemented. |
 | Worker queue | Postgres/in-memory execution queue, worker binary, lease claims, and reclaim boundary exist; Redis command/client boundary is reserved. | Live Redis/NATS backend and separate broker worker handoff are not enabled. |
@@ -21,7 +21,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 ## Next Stage 2 Slices
 
-1. Add persistent org/team/project/membership schema and scope reads/writes through project or team.
+1. Scope Agent/Session/Tool routes through project or team and derive authorization from memberships.
 2. Add provider access/model allowlist tables and enforce them in provider selection.
 3. Add eval dataset/case/run schema and a first policy/tool-selection eval runner.
 4. Wire OTel exporter into session run, provider call, tool execution, approval, and worker queue paths.
