@@ -509,6 +509,7 @@ async function createMcpServer(event) {
     body: JSON.stringify({
       name: form.get("name"),
       transport: form.get("transport"),
+      config: parseJsonField(form.get("config"), "MCP config"),
       tool_allowlist: toolAllowlist,
     }),
   });
@@ -693,6 +694,39 @@ async function discoverMcpTools(serverId) {
   if (!state.mcpTeamId) return;
   await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/discover`, {
     method: "POST",
+  });
+  await loadMcpServers();
+}
+
+async function updateMcpStatus(serverId, status) {
+  if (!state.mcpTeamId) return;
+  await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+  await loadMcpServers();
+}
+
+async function editMcpServer(serverId) {
+  if (!state.mcpTeamId) return;
+  const server = state.mcpServers.find((item) => item.id === serverId);
+  if (!server) return;
+  const transport = window.prompt("Transport", server.transport);
+  if (transport === null) return;
+  const tools = window.prompt("Tool allowlist", server.tool_allowlist.join(","));
+  if (tools === null) return;
+  const config = window.prompt("Config JSON", JSON.stringify(server.config, null, 2));
+  if (config === null) return;
+  await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      transport,
+      config: parseJsonField(config, "MCP config"),
+      tool_allowlist: tools
+        .split(",")
+        .map((tool) => tool.trim())
+        .filter(Boolean),
+    }),
   });
   await loadMcpServers();
 }
@@ -1716,7 +1750,11 @@ function renderMcpServers() {
               <strong>${escapeHtml(server.name)}</strong>
               <div class="muted">${escapeHtml(server.transport)} · ${escapeHtml(server.status)}</div>
               <div class="muted">Tools: ${escapeHtml(server.tool_allowlist.join(", ") || "none")}</div>
+              <button class="secondary" data-edit-mcp="${server.id}">Edit Config</button>
               <button class="secondary" data-discover-mcp="${server.id}">Discover Tools</button>
+              <button class="secondary" data-mcp-status="${server.id}" data-status="active">Activate</button>
+              <button class="secondary" data-mcp-status="${server.id}" data-status="disabled">Disable</button>
+              <button class="secondary" data-mcp-status="${server.id}" data-status="archived">Archive</button>
               <pre>${escapeHtml(JSON.stringify(server.config, null, 2))}</pre>
             </div>
           `,
@@ -1727,6 +1765,14 @@ function renderMcpServers() {
       : `<div class="muted">Enter a team ID to manage MCP servers</div>`;
   mcpServerRoot.querySelectorAll("[data-discover-mcp]").forEach((button) => {
     button.addEventListener("click", () => discoverMcpTools(button.dataset.discoverMcp));
+  });
+  mcpServerRoot.querySelectorAll("[data-edit-mcp]").forEach((button) => {
+    button.addEventListener("click", () => editMcpServer(button.dataset.editMcp));
+  });
+  mcpServerRoot.querySelectorAll("[data-mcp-status]").forEach((button) => {
+    button.addEventListener("click", () =>
+      updateMcpStatus(button.dataset.mcpStatus, button.dataset.status),
+    );
   });
 }
 

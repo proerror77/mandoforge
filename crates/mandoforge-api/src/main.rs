@@ -826,6 +826,21 @@ struct CreateMcpServerRecord {
     tool_allowlist: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateMcpServerRecord {
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    config: Option<Value>,
+    #[serde(default)]
+    tool_allowlist: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateMcpServerStatus {
+    status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EvalDataset {
     id: Uuid,
@@ -1136,6 +1151,14 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{id}/mcp-servers",
             get(list_mcp_servers).post(create_mcp_server),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/{server_id}",
+            patch(update_mcp_server),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/{server_id}/status",
+            patch(update_mcp_server_status),
         )
         .route(
             "/api/teams/{team_id}/mcp-servers/{server_id}/discover",
@@ -3892,6 +3915,49 @@ fn normalize_provider_status(status: &str) -> Result<String, AppError> {
     }
 }
 
+fn normalize_mcp_name(name: &str) -> Result<String, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::bad_request("MCP server name is required"));
+    }
+    Ok(name.to_string())
+}
+
+fn normalize_mcp_transport(transport: &str) -> Result<String, AppError> {
+    let transport = transport.trim();
+    if transport.is_empty() {
+        return Err(AppError::bad_request("MCP server transport is required"));
+    }
+    Ok(transport.to_string())
+}
+
+fn normalize_mcp_status(status: &str) -> Result<String, AppError> {
+    match status.trim() {
+        "active" => Ok("active".to_string()),
+        "disabled" => Ok("disabled".to_string()),
+        "archived" => Ok("archived".to_string()),
+        other => Err(AppError::bad_request(format!(
+            "unsupported MCP server status: {other}"
+        ))),
+    }
+}
+
+fn normalize_mcp_tool_allowlist(tool_allowlist: Vec<String>) -> Result<Vec<String>, AppError> {
+    let mut tools: Vec<_> = tool_allowlist
+        .into_iter()
+        .map(|tool| tool.trim().to_string())
+        .filter(|tool| !tool.is_empty())
+        .collect();
+    tools.sort();
+    tools.dedup();
+    if tools.len() > 100 {
+        return Err(AppError::bad_request(
+            "MCP server tool allowlist cannot exceed 100 tools",
+        ));
+    }
+    Ok(tools)
+}
+
 async fn get_provider_health(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -3983,10 +4049,94 @@ async fn create_mcp_server(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
-    Json(input): Json<CreateMcpServerRecord>,
+    Json(mut input): Json<CreateMcpServerRecord>,
 ) -> Result<Json<McpServerRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
-    Ok(Json(state.create_mcp_server(id, input).await?))
+    input.name = normalize_mcp_name(&input.name)?;
+    input.transport = normalize_mcp_transport(&input.transport)?;
+    input.tool_allowlist = normalize_mcp_tool_allowlist(input.tool_allowlist)?;
+    let server = state.create_mcp_server(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "mcp.server_saved",
+            "mcp_server",
+            Some(server.id),
+            json!({
+                "team_id": id,
+                "name": server.name,
+                "transport": server.transport,
+                "status": server.status,
+                "tool_allowlist": server.tool_allowlist,
+            }),
+        ))
+        .await?;
+    Ok(Json(server))
+}
+
+async fn update_mcp_server(
+    State(state): State<AppState>,
+    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(mut input): Json<UpdateMcpServerRecord>,
+) -> Result<Json<McpServerRecord>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    if let Some(transport) = input.transport.as_deref() {
+        input.transport = Some(normalize_mcp_transport(transport)?);
+    }
+    if let Some(tool_allowlist) = input.tool_allowlist.take() {
+        input.tool_allowlist = Some(normalize_mcp_tool_allowlist(tool_allowlist)?);
+    }
+    let server = state.update_mcp_server(team_id, server_id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "mcp.server_updated",
+            "mcp_server",
+            Some(server.id),
+            json!({
+                "team_id": team_id,
+                "name": server.name,
+                "transport": server.transport,
+                "status": server.status,
+                "tool_allowlist": server.tool_allowlist,
+            }),
+        ))
+        .await?;
+    Ok(Json(server))
+}
+
+async fn update_mcp_server_status(
+    State(state): State<AppState>,
+    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateMcpServerStatus>,
+) -> Result<Json<McpServerRecord>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    let status = normalize_mcp_status(&input.status)?;
+    let server = state
+        .update_mcp_server_status(team_id, server_id, &status)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "mcp.server_status_updated",
+            "mcp_server",
+            Some(server.id),
+            json!({
+                "team_id": team_id,
+                "name": server.name,
+                "status": server.status,
+            }),
+        ))
+        .await?;
+    Ok(Json(server))
 }
 
 async fn discover_mcp_server_tools(
@@ -7259,6 +7409,32 @@ not json
         .await;
         assert_eq!(discovered.tool_allowlist, vec!["search".to_string()]);
 
+        let patched: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}",
+                    team.id, mcp_server.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "transport": "http+json",
+                        "config": {"source": "patched"},
+                        "tool_allowlist": ["search", "search", ""]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(patched.transport, "http+json");
+        assert_eq!(patched.config["source"], "patched");
+        assert_eq!(patched.tool_allowlist, vec!["search".to_string()]);
+
         let result: Value = request_json(
             app.clone(),
             Request::builder()
@@ -7288,6 +7464,70 @@ not json
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].tool, "search");
         drop(requests);
+
+        let disabled: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}/status",
+                    team.id, mcp_server.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"status": "disabled"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(disabled.status, "disabled");
+
+        let (status, inactive) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/mcp.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": scoped_session.id,
+                        "args": {
+                            "server": "docs",
+                            "tool": "search",
+                            "args": {"q": "policy"}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            inactive["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not registered")
+        );
+
+        let active: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}/status",
+                    team.id, mcp_server.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"status": "active"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(active.status, "active");
 
         let (status, denied) = request_value(
             app.clone(),
@@ -7320,7 +7560,7 @@ not json
         );
 
         let tool_calls: Vec<ToolCall> = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri(format!("/api/sessions/{}/tool-calls", scoped_session.id))
                 .header("x-mandoforge-subject", "admin-1")
@@ -7334,6 +7574,29 @@ not json
                 && call.status == "completed"
                 && call.policy_decision["decision"] == "allowed"
         }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .filter(|log| log.action == "mcp.server_status_updated")
+                .count()
+                >= 2
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "mcp.server_updated")
+        );
     }
 
     fn test_workspace_root() -> PathBuf {

@@ -10,7 +10,7 @@ use crate::store_rows::{
 use crate::{
     AppError, AppState, CreateMcpServerRecord, CreateMembership, CreateOrganization, CreateProject,
     CreateProviderAccess, CreateProviderRecord, CreateTeam, McpServerRecord, Membership,
-    Organization, Project, ProviderAccess, ProviderRecord, Role, Team,
+    Organization, Project, ProviderAccess, ProviderRecord, Role, Team, UpdateMcpServerRecord,
 };
 
 impl AppState {
@@ -866,7 +866,8 @@ impl AppState {
                 }) {
                     let mut updated = server.clone();
                     updated.id = existing_id;
-                    store.mcp_servers.insert(existing_id, updated);
+                    store.mcp_servers.insert(existing_id, updated.clone());
+                    return Ok(updated);
                 } else {
                     store.mcp_servers.insert(server.id, server.clone());
                 }
@@ -955,6 +956,84 @@ impl AppState {
                      RETURNING id, team_id, name, transport, config, tool_allowlist, status, created_at",
                 )
                 .bind(serde_json::json!(tool_allowlist))
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .bind(server_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("mcp server not found"))?;
+                mcp_server_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn update_mcp_server(
+        &self,
+        team_id: Uuid,
+        server_id: Uuid,
+        input: UpdateMcpServerRecord,
+    ) -> Result<McpServerRecord, AppError> {
+        let current = self.get_mcp_server(team_id, server_id).await?;
+        let updated = McpServerRecord {
+            transport: input.transport.unwrap_or(current.transport),
+            config: input.config.unwrap_or(current.config),
+            tool_allowlist: input.tool_allowlist.unwrap_or(current.tool_allowlist),
+            ..current
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                store.mcp_servers.insert(server_id, updated.clone());
+                Ok(updated)
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE mcp_servers
+                     SET transport = $1,
+                         config = $2,
+                         tool_allowlist = $3
+                     WHERE tenant_id = $4 AND team_id = $5 AND id = $6
+                     RETURNING id, team_id, name, transport, config, tool_allowlist, status, created_at",
+                )
+                .bind(&updated.transport)
+                .bind(&updated.config)
+                .bind(serde_json::json!(updated.tool_allowlist))
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .bind(server_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("mcp server not found"))?;
+                mcp_server_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn update_mcp_server_status(
+        &self,
+        team_id: Uuid,
+        server_id: Uuid,
+        status: &str,
+    ) -> Result<McpServerRecord, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let server = store
+                    .mcp_servers
+                    .get_mut(&server_id)
+                    .filter(|server| server.team_id == team_id)
+                    .ok_or_else(|| AppError::not_found("mcp server not found"))?;
+                server.status = status.to_string();
+                Ok(server.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE mcp_servers
+                     SET status = $1
+                     WHERE tenant_id = $2 AND team_id = $3 AND id = $4
+                     RETURNING id, team_id, name, transport, config, tool_allowlist, status, created_at",
+                )
+                .bind(status)
                 .bind(self.tenant_id)
                 .bind(team_id)
                 .bind(server_id)

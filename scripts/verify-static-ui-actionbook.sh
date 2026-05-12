@@ -59,6 +59,7 @@ wait_for_static_ui() {
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),
     hasApprovalGovernance: text.includes('Approval Governance') && text.includes('Create Approval Group') && text.includes('Create Escalation Rule'),
     hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering'),
+    hasMcpLifecycle: text.includes('MCP Servers') && text.includes('Config JSON') && text.includes('Load Team Servers'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
@@ -79,6 +80,7 @@ wait_for_static_ui() {
     && result.hasVaultHealthAction
     && result.hasApprovalGovernance
     && result.hasCodexAppServer
+    && result.hasMcpLifecycle
     && result.hasTenantGovernance
     && result.hasEvalGateAction
     && result.hasEvalDriftAction

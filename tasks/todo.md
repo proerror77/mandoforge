@@ -142,6 +142,7 @@
 - [x] Add MCP server registry and per-team tool allowlist enforcement before `mcp.call`.
 - [x] Add MCP tool discovery import from the configured MCP Gateway into team server allowlists.
 - [x] Add static MCP UI management for team server allowlists and discovery import.
+- [x] Add MCP connector lifecycle APIs/UI for config patching and activate/disable/archive status.
 - [x] Add usage/cost aggregation API for provider requests, tool runtime, approvals, and configured provider pricing.
 - [x] Add token-level provider usage and cost accounting for OpenAI-compatible responses.
 - [x] Add persisted usage/cost rollup snapshots and static rollup UI.
