@@ -335,6 +335,53 @@ header {
   text-transform: uppercase;
 }
 
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.diff-table th,
+.diff-table td {
+  border-top: 1px solid var(--line);
+  padding: 8px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.diff-table th {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.diff-table pre {
+  max-height: 110px;
+  margin: 0;
+}
+
+.diff-kind {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: white;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.diff-kind.added {
+  color: var(--accent);
+}
+
+.diff-kind.removed {
+  color: var(--danger);
+}
+
+.diff-kind.changed {
+  color: var(--warn);
+}
+
 .events {
   display: grid;
   gap: 12px;

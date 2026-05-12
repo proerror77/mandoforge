@@ -105,6 +105,7 @@
 - [x] Add Stage 2 approver role and pending approval modify endpoint that updates waiting tool args before approval.
 - [x] Add approval expiry persistence, expire API, timeline events, and decision fail-closed behavior.
 - [x] Add static approval argument review and modify UI.
+- [x] Add static approval JSON-path diff visualization for modified args.
 - [x] Add persistent org/team/project/membership schema and Admin-only hierarchy APIs.
 - [x] Derive principal roles from persisted memberships when role headers are absent.
 - [x] Enforce team membership for scoped agent/session/tool/approval/job resource paths.

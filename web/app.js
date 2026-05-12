@@ -1059,6 +1059,7 @@ function renderApproval(approval) {
             ? `<dt>Modified args</dt><dd><pre>${escapeHtml(JSON.stringify(modifiedArgs, null, 2))}</pre></dd>`
             : ""
         }
+        ${renderApprovalArgumentDiff(originalArgs, modifiedArgs)}
         <dt>Decision payload</dt>
         <dd><pre>${escapeHtml(JSON.stringify(approval.decision_payload ?? {}, null, 2))}</pre></dd>
       </dl>
@@ -1080,6 +1081,88 @@ function renderApproval(approval) {
       }
     </div>
   `;
+}
+
+function renderApprovalArgumentDiff(originalArgs, modifiedArgs) {
+  if (!modifiedArgs) return "";
+  const rows = jsonDiffRows(originalArgs, modifiedArgs);
+  const body = rows.length
+    ? `<table class="diff-table">
+        <thead>
+          <tr>
+            <th>Change</th>
+            <th>Path</th>
+            <th>Original</th>
+            <th>Modified</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              (row) => `
+                <tr>
+                  <td><span class="diff-kind ${escapeHtml(row.kind)}">${escapeHtml(row.kind)}</span></td>
+                  <td><code>${escapeHtml(row.path)}</code></td>
+                  <td><pre>${escapeHtml(formatDiffValue(row.before, row.beforeMissing))}</pre></td>
+                  <td><pre>${escapeHtml(formatDiffValue(row.after, row.afterMissing))}</pre></td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>`
+    : `<div class="muted">No argument changes detected.</div>`;
+  return `<dt>Argument diff</dt><dd>${body}</dd>`;
+}
+
+function jsonDiffRows(before, after, path = "$", beforeMissing = false, afterMissing = false) {
+  if (beforeMissing) {
+    return [{ kind: "added", path, before, after, beforeMissing, afterMissing }];
+  }
+  if (afterMissing) {
+    return [{ kind: "removed", path, before, after, beforeMissing, afterMissing }];
+  }
+  if (jsonEqual(before, after)) {
+    return [];
+  }
+  if (Array.isArray(before) && Array.isArray(after)) {
+    const maxLength = Math.max(before.length, after.length);
+    return Array.from({ length: maxLength }, (_, index) =>
+      jsonDiffRows(before[index], after[index], `${path}[${index}]`, index >= before.length, index >= after.length),
+    ).flat();
+  }
+  if (isPlainObject(before) && isPlainObject(after)) {
+    const keys = Array.from(new Set([...Object.keys(before), ...Object.keys(after)])).sort();
+    return keys
+      .map((key) =>
+        jsonDiffRows(
+          before[key],
+          after[key],
+          appendJsonPath(path, key),
+          !Object.prototype.hasOwnProperty.call(before, key),
+          !Object.prototype.hasOwnProperty.call(after, key),
+        ),
+      )
+      .flat();
+  }
+  return [{ kind: "changed", path, before, after, beforeMissing, afterMissing }];
+}
+
+function appendJsonPath(path, key) {
+  return /^[A-Za-z_$][\w$]*$/.test(key) ? `${path}.${key}` : `${path}[${JSON.stringify(key)}]`;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function jsonEqual(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function formatDiffValue(value, missing) {
+  if (missing) return "(missing)";
+  return JSON.stringify(value, null, 2);
 }
 
 function renderArtifact(artifact) {
