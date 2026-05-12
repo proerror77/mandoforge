@@ -81,6 +81,8 @@ const policyRevisionForm = document.querySelector("#policy-revision-form");
 const policyRevisionRoot = document.querySelector("#policy-revisions");
 const policyGateCasesInput = document.querySelector("#policy-gate-cases");
 const policyRolloutPercentInput = document.querySelector("#policy-rollout-percent");
+const policyActivateAfterInput = document.querySelector("#policy-activate-after");
+const policyActivateBeforeInput = document.querySelector("#policy-activate-before");
 const cancelPolicyRolloutButton = document.querySelector("#cancel-policy-rollout");
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
@@ -428,6 +430,8 @@ async function gatePolicyRevision(id) {
     body: JSON.stringify({
       cases: parseJsonField(policyGateCasesInput.value, "Gate cases JSON"),
       rollout_percent: Number(policyRolloutPercentInput.value || 100),
+      activate_after: policyActivateAfterInput.value.trim() || null,
+      activate_before: policyActivateBeforeInput.value.trim() || null,
     }),
   });
   state.policyRevisions = await api("/api/policy/revisions");
@@ -1498,7 +1502,7 @@ function renderPolicy() {
                 return `
                   <div class="item">
                     <strong>${escapeHtml(revision.name)}</strong>
-                    <div class="muted">${escapeHtml(revision.status)} · gate ${escapeHtml(revision.gate_status || "not_run")} · rollout ${escapeHtml(gate?.rollout_percent ?? "n/a")}% · ${escapeHtml(revision.created_at)}</div>
+                    <div class="muted">${escapeHtml(revision.status)} · gate ${escapeHtml(revision.gate_status || "not_run")} · rollout ${escapeHtml(gate?.rollout_percent ?? "n/a")}% · ${escapeHtml(policyActivationWindowLabel(gate))} · ${escapeHtml(revision.created_at)}</div>
                     <pre>${escapeHtml(JSON.stringify(revision.body, null, 2))}</pre>
                     <button type="button" data-policy-diff="${escapeHtml(revision.id)}">Diff</button>
                     <button type="button" data-policy-gate="${escapeHtml(revision.id)}">Gate</button>
@@ -1537,6 +1541,14 @@ function renderPolicy() {
     button.addEventListener("click", () => activatePolicyRevision(button.dataset.policyActivate));
   });
   cancelPolicyRolloutButton.disabled = !state.policyRuntime?.rollout_active;
+}
+
+function policyActivationWindowLabel(gate) {
+  const window = gate?.activation_window;
+  if (!window) return "no activation window";
+  const after = window.activate_after || "now";
+  const before = window.activate_before || "open-ended";
+  return `${after} to ${before}`;
 }
 
 function renderPolicyDiffSummary(diff) {
@@ -1606,6 +1618,7 @@ function renderPolicyGateSummary(gate, loadedDiff) {
       <div class="metric-grid compact-metrics">
         <div class="metric"><span>Gate Status</span><strong>${escapeHtml(gate.status || "unknown")}</strong></div>
         <div class="metric"><span>Rollout</span><strong>${escapeHtml(gate.rollout_percent === null || gate.rollout_percent === undefined ? "n/a" : `${gate.rollout_percent}%`)}</strong></div>
+        <div class="metric"><span>Activation Window</span><strong>${escapeHtml(policyActivationWindowLabel(gate))}</strong></div>
         <div class="metric"><span>Cases Passed</span><strong>${formatInteger(passed)}/${formatInteger(cases.length)}</strong></div>
         <div class="metric"><span>Cases Failed</span><strong>${formatInteger(failed)}</strong></div>
       </div>

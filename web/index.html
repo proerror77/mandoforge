@@ -266,6 +266,14 @@
                 Rollout %
                 <input id="policy-rollout-percent" type="number" min="0" max="100" value="100" />
               </label>
+              <label>
+                Activate after
+                <input id="policy-activate-after" placeholder="optional RFC3339 timestamp" />
+              </label>
+              <label>
+                Activate before
+                <input id="policy-activate-before" placeholder="optional RFC3339 timestamp" />
+              </label>
               <button id="cancel-policy-rollout" type="button" class="secondary">Cancel Staged Rollout</button>
               <div id="policy-summary" class="detail-panel"></div>
               <div id="policy-decision" class="list"></div>

@@ -774,9 +774,16 @@ struct PolicyRevisionGate {
     status: String,
     suite_source: String,
     rollout_percent: u8,
+    activation_window: Option<PolicyActivationWindow>,
     cases: Vec<PolicyGateCaseResult>,
     diff: PolicyRevisionDiff,
     checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyActivationWindow {
+    activate_after: Option<DateTime<Utc>>,
+    activate_before: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -785,6 +792,10 @@ struct PolicyRevisionGateRequest {
     cases: Vec<PolicyGateCaseInput>,
     #[serde(default)]
     rollout_percent: Option<u8>,
+    #[serde(default)]
+    activate_after: Option<String>,
+    #[serde(default)]
+    activate_before: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3549,6 +3560,8 @@ async fn activate_policy_revision(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
+    let pending_revision = state.get_policy_revision(id).await?;
+    enforce_policy_activation_window(&pending_revision, Utc::now())?;
     let revision = state.activate_policy_revision(id).await?;
     let activated_policy = serde_json::from_value::<PolicyConfig>(revision.body.clone())
         .map_err(|error| AppError::bad_request(format!("invalid activated policy: {error}")))?;
@@ -3574,6 +3587,45 @@ async fn activate_policy_revision(
         ))
         .await?;
     Ok(Json(revision))
+}
+
+fn enforce_policy_activation_window(
+    revision: &PolicyRevision,
+    now: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let Some(window) = revision.gate_result.get("activation_window") else {
+        return Ok(());
+    };
+    if window.is_null() {
+        return Ok(());
+    }
+    let activate_after = window
+        .get("activate_after")
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    if let Some(activate_after) = activate_after
+        && now < activate_after
+    {
+        return Err(AppError::bad_request(format!(
+            "policy activation window is not open until {}",
+            activate_after.to_rfc3339()
+        )));
+    }
+    let activate_before = window
+        .get("activate_before")
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    if let Some(activate_before) = activate_before
+        && now > activate_before
+    {
+        return Err(AppError::bad_request(format!(
+            "policy activation window closed at {}",
+            activate_before.to_rfc3339()
+        )));
+    }
+    Ok(())
 }
 
 fn policy_revision_rollout_percent(revision: &PolicyRevision) -> u8 {
@@ -3675,6 +3727,10 @@ fn build_policy_revision_gate(
             "policy rollout percent must be between 0 and 100",
         ));
     }
+    let activation_window = normalize_policy_activation_window(
+        input.activate_after.as_deref(),
+        input.activate_before.as_deref(),
+    )?;
     let (suite_source, suite_cases) = normalize_policy_gate_cases(input.cases)?;
     let cases = suite_cases
         .into_iter()
@@ -3703,10 +3759,45 @@ fn build_policy_revision_gate(
         status,
         suite_source,
         rollout_percent,
+        activation_window,
         cases,
         diff: build_policy_revision_diff(current_policy, revision)?,
         checked_at: Utc::now(),
     })
+}
+
+fn normalize_policy_activation_window(
+    activate_after: Option<&str>,
+    activate_before: Option<&str>,
+) -> Result<Option<PolicyActivationWindow>, AppError> {
+    let activate_after = parse_optional_rfc3339("activate_after", activate_after)?;
+    let activate_before = parse_optional_rfc3339("activate_before", activate_before)?;
+    if let (Some(after), Some(before)) = (activate_after, activate_before)
+        && after >= before
+    {
+        return Err(AppError::bad_request(
+            "policy activation window activate_after must be before activate_before",
+        ));
+    }
+    if activate_after.is_none() && activate_before.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(PolicyActivationWindow {
+        activate_after,
+        activate_before,
+    }))
+}
+
+fn parse_optional_rfc3339(
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| Some(value.with_timezone(&Utc)))
+        .map_err(|error| AppError::bad_request(format!("{field} must be RFC3339: {error}")))
 }
 
 fn normalize_policy_gate_cases(
@@ -10791,6 +10882,80 @@ not json
         assert_eq!(custom_policy_revision_gate.suite_source, "custom");
         assert_eq!(custom_policy_revision_gate.rollout_percent, 25);
         assert_eq!(custom_policy_revision_gate.cases.len(), 2);
+
+        let future_activation = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let future_window_gate: PolicyRevisionGate = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/policy/revisions/{}/gate", policy_revision.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "rollout_percent": 25,
+                        "activate_after": future_activation,
+                        "cases": [
+                            {"tool_name": "secret.read", "expected_decision": "denied"}
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            future_window_gate
+                .activation_window
+                .as_ref()
+                .and_then(|window| window.activate_after)
+                .map(|value| value.to_rfc3339()),
+            Some(future_activation)
+        );
+        let (status, window_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/activate",
+                    policy_revision.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            window_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("activation window")
+        );
+        let custom_policy_revision_gate: PolicyRevisionGate = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/policy/revisions/{}/gate", policy_revision.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "rollout_percent": 25,
+                        "cases": [
+                            {"tool_name": "secret.read", "expected_decision": "denied"},
+                            {"tool_name": "sql.query", "expected_decision": "allowed"}
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert!(custom_policy_revision_gate.activation_window.is_none());
 
         let partial_policy_revision: PolicyRevision = request_json(
             app.clone(),

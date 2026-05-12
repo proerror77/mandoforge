@@ -165,6 +165,7 @@
 - [x] Add policy revision diff and safety gate before activation.
 - [x] Add table-based policy diff and gate summaries to the static Policy Console.
 - [x] Add configurable policy revision gate suites and rollout percentage metadata.
+- [x] Add optional policy activation windows enforced before rollout activation.
 - [x] Hot-swap the active runtime policy when a gated revision is activated.
 - [x] Enforce partial policy rollout percentages by deterministic session bucket.
 - [x] Add runtime rollout status and audited staged rollout cancellation controls.
