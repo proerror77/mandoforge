@@ -46,6 +46,7 @@ const state = {
   costAlertDelivery: null,
   costAlertAcknowledgement: null,
   usageExportStatus: null,
+  usageExportDelivery: null,
   organizations: [],
   teams: [],
   projects: [],
@@ -156,6 +157,7 @@ const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jo
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 const deliverCostAlertsButton = document.querySelector("#deliver-cost-alerts");
 const exportUsageCsvButton = document.querySelector("#export-usage-csv");
+const deliverUsageExportButton = document.querySelector("#deliver-usage-export");
 const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
 const checkCodexHealthButton = document.querySelector("#check-codex-health");
 const loadCodexRunsButton = document.querySelector("#load-codex-runs");
@@ -205,6 +207,7 @@ refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
 exportUsageCsvButton.addEventListener("click", exportUsageCsv);
+deliverUsageExportButton.addEventListener("click", deliverUsageExport);
 runObservabilityRemediationButton.addEventListener("click", runObservabilityRemediation);
 runSchedulerDueButton.addEventListener("click", runSchedulerDueTasks);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
@@ -852,6 +855,13 @@ async function exportUsageCsv() {
     preview: csv.split("\n").slice(0, 6).join("\n"),
   };
   renderUsage();
+}
+
+async function deliverUsageExport() {
+  state.usageExportDelivery = await api("/api/usage/export/deliver", {
+    method: "POST",
+  });
+  await refreshOps();
 }
 
 async function runObservabilityRemediation() {
@@ -1905,6 +1915,7 @@ function renderObservability() {
                   mcp_health_runs: schedulerDueRun.mcp_health_runs,
                   mcp_rollout_runs: schedulerDueRun.mcp_rollout_runs,
                   codex_app_server_stale_polls: schedulerDueRun.codex_app_server_stale_polls,
+                  usage_finance_export: schedulerDueRun.usage_finance_export,
                 },
                 null,
                 2,
@@ -1932,6 +1943,7 @@ function renderUsage() {
   const trend = state.usageTrend;
   const budgetPressure = trend?.budget_pressure || {};
   const usageExportStatus = state.usageExportStatus;
+  const usageExportDelivery = state.usageExportDelivery;
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
     ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
   );
@@ -2025,6 +2037,15 @@ function renderUsage() {
             <strong>Finance CSV export: ${escapeHtml(usageExportStatus.status)}</strong>
             <div class="muted">${formatInteger(usageExportStatus.bytes)} bytes generated from /api/usage/export.csv</div>
             <pre>${escapeHtml(usageExportStatus.preview)}</pre>
+          </div>`
+        : ""
+    }
+    ${
+      usageExportDelivery
+        ? `<div class="item">
+            <strong>Finance CSV delivery: ${escapeHtml(usageExportDelivery.status)}</strong>
+            <div class="muted">${escapeHtml(usageExportDelivery.channel)} · ${escapeHtml(usageExportDelivery.target_configured ? "target configured" : "target not configured")} · ${escapeHtml(usageExportDelivery.scheduled ? "scheduled" : "manual")} · ${formatInteger(usageExportDelivery.bytes)} bytes</div>
+            <div class="muted">${formatInteger(usageExportDelivery.provider_count)} providers · ${formatInteger(usageExportDelivery.budget_pressure_count)} budget pressure · ${formatInteger(usageExportDelivery.rollup_count)} rollups</div>
           </div>`
         : ""
     }

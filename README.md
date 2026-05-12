@@ -188,6 +188,16 @@ cargo run -p mandoforge-api
 
 `GET /api/usage/alerts` lists warning/critical provider budget alerts. `GET/POST /api/usage/alert-routes` manages audited alert routes for webhook, Slack, and email channels. `POST /api/usage/alerts/deliver` sends active alerts through configured routes; email routes use `MANDOFORGE_COST_ALERT_EMAIL_RELAY_URL` when set, otherwise they can send directly through the SMTP relay configured with `MANDOFORGE_COST_ALERT_SMTP_ADDR` and `MANDOFORGE_COST_ALERT_SMTP_FROM`.
 
+Optional finance CSV delivery:
+
+```bash
+MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL=https://finance.example.internal/mandoforge \
+MANDOFORGE_USAGE_EXPORT_SCHEDULE=enabled \
+cargo run -p mandoforge-api
+```
+
+`GET /api/usage/export.csv` downloads the audited finance CSV. `POST /api/usage/export/deliver` sends the same CSV to the configured webhook and returns a reserved fail-closed status when no target is set. When `MANDOFORGE_USAGE_EXPORT_SCHEDULE` is enabled, `/api/scheduler/run-due` runs the same delivery boundary for cron/Kubernetes-driven finance exports.
+
 ## Docker
 
 ```bash

@@ -511,6 +511,7 @@ struct SchedulerDueRun {
     mcp_health_runs: Vec<McpServerScheduledHealthRun>,
     mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
     codex_app_server_stale_polls: CodexAppServerStalePollRun,
+    usage_finance_export: UsageFinanceExportDelivery,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -953,6 +954,20 @@ struct CostAlertAcknowledgement {
     acknowledged_by: String,
     comment: Option<String>,
     acknowledged_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageFinanceExportDelivery {
+    status: String,
+    delivered: bool,
+    channel: String,
+    scheduled: bool,
+    target_configured: bool,
+    bytes: usize,
+    provider_count: usize,
+    budget_pressure_count: usize,
+    rollup_count: usize,
+    delivered_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2023,6 +2038,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/usage", get(get_usage_summary))
         .route("/api/usage/trends", get(get_usage_trends))
         .route("/api/usage/export.csv", get(export_usage_csv))
+        .route("/api/usage/export/deliver", post(deliver_usage_export))
         .route("/api/usage/alerts", get(get_cost_alerts))
         .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
@@ -9045,6 +9061,147 @@ async fn export_usage_csv(
         .into_response())
 }
 
+async fn deliver_usage_export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<UsageFinanceExportDelivery>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "usage_export".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(
+        execute_usage_finance_export_delivery(
+            &state,
+            false,
+            "user",
+            Some(principal.subject_id.as_str()),
+        )
+        .await?,
+    ))
+}
+
+async fn execute_usage_finance_export_delivery(
+    state: &AppState,
+    scheduled: bool,
+    actor_type: &str,
+    subject: Option<&str>,
+) -> Result<UsageFinanceExportDelivery, AppError> {
+    let delivered_at = Utc::now();
+    if scheduled && !usage_finance_export_schedule_enabled() {
+        return Ok(UsageFinanceExportDelivery {
+            status: "disabled".to_string(),
+            delivered: false,
+            channel: "webhook".to_string(),
+            scheduled,
+            target_configured: usage_finance_export_webhook_url().is_some(),
+            bytes: 0,
+            provider_count: 0,
+            budget_pressure_count: 0,
+            rollup_count: 0,
+            delivered_at,
+        });
+    }
+
+    let summary = build_usage_summary(state).await?;
+    let trend = build_usage_trend_summary(state).await?;
+    let csv = build_usage_finance_csv(&summary, &trend);
+    let webhook_url = usage_finance_export_webhook_url();
+    let mut delivery = UsageFinanceExportDelivery {
+        status: if webhook_url.is_some() {
+            "pending".to_string()
+        } else {
+            "reserved".to_string()
+        },
+        delivered: false,
+        channel: "webhook".to_string(),
+        scheduled,
+        target_configured: webhook_url.is_some(),
+        bytes: csv.len(),
+        provider_count: summary.by_provider.len(),
+        budget_pressure_count: trend.budget_pressure.pressure_count,
+        rollup_count: trend.rollup_count,
+        delivered_at,
+    };
+
+    if let Some(webhook_url) = webhook_url {
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            reqwest::Client::new()
+                .post(&webhook_url)
+                .json(&json!({
+                    "type": "mandoforge.usage_finance_export",
+                    "filename": "mandoforge-usage-export.csv",
+                    "csv": csv,
+                    "scheduled": scheduled,
+                    "provider_count": summary.by_provider.len(),
+                    "budget_pressure_count": trend.budget_pressure.pressure_count,
+                    "rollup_count": trend.rollup_count,
+                    "delivered_at": delivered_at,
+                }))
+                .send(),
+        )
+        .await??;
+        if !response.status().is_success() {
+            return Err(AppError::bad_request(format!(
+                "usage finance export webhook returned status {}",
+                response.status()
+            )));
+        }
+        delivery.status = "delivered".to_string();
+        delivery.delivered = true;
+    }
+
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            actor_type,
+            None,
+            "usage.finance_export_delivered",
+            "usage_export",
+            None,
+            json!({
+                "subject": subject,
+                "status": delivery.status,
+                "delivered": delivery.delivered,
+                "scheduled": scheduled,
+                "target_configured": delivery.target_configured,
+                "bytes": delivery.bytes,
+                "provider_count": delivery.provider_count,
+                "budget_pressure_count": delivery.budget_pressure_count,
+                "rollup_count": delivery.rollup_count,
+                "delivered_at": delivery.delivered_at,
+            }),
+        ))
+        .await?;
+    Ok(delivery)
+}
+
+fn usage_finance_export_schedule_enabled() -> bool {
+    std::env::var("MANDOFORGE_USAGE_EXPORT_SCHEDULE")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "enabled"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn usage_finance_export_webhook_url() -> Option<String> {
+    std::env::var("MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+}
+
 async fn run_scheduler_due_tasks(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9065,6 +9222,8 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
         "system",
     )
     .await?;
+    let usage_finance_export =
+        execute_usage_finance_export_delivery(state, true, "system", Some("system")).await?;
     let mut mcp_health_runs = Vec::new();
     let mut mcp_rollout_runs = Vec::new();
     let mut team_count = 0usize;
@@ -9109,6 +9268,9 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     {
         actions.push("codex_app_server_stale_polls_processed".to_string());
     }
+    if usage_finance_export.status != "disabled" {
+        actions.push("usage_finance_export_processed".to_string());
+    }
     let status = if actions.is_empty() {
         "noop"
     } else {
@@ -9126,6 +9288,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
         mcp_health_runs,
         mcp_rollout_runs,
         codex_app_server_stale_polls,
+        usage_finance_export,
     };
     state
         .append_audit_log(new_audit_log(
@@ -17881,6 +18044,9 @@ not json
         assert_eq!(run.mcp_health_runs[0].due_count, 1);
         assert_eq!(run.mcp_rollout_runs.len(), 1);
         assert_eq!(run.codex_app_server_stale_polls.candidate_count, 0);
+        if !usage_finance_export_schedule_enabled() {
+            assert_eq!(run.usage_finance_export.status, "disabled");
+        }
         assert!(
             run.actions
                 .iter()
@@ -19458,6 +19624,29 @@ not json
         assert!(export_csv.contains("provider,governed-mock,usage"));
         assert!(export_csv.contains("budget,governed-mock,critical"));
         assert!(export_csv.contains("recommendation,critical_provider_budget_review"));
+        if usage_finance_export_webhook_url().is_none() {
+            let delivery: UsageFinanceExportDelivery = request_json(
+                app.clone(),
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/usage/export/deliver")
+                    .header("x-mandoforge-subject", "admin-1")
+                    .header("x-mandoforge-roles", "admin")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await;
+            assert_eq!(delivery.status, "reserved");
+            assert!(!delivery.delivered);
+            assert!(!delivery.target_configured);
+            assert_eq!(delivery.provider_count, usage.by_provider.len());
+            assert_eq!(
+                delivery.budget_pressure_count,
+                usage_trends.budget_pressure.pressure_count
+            );
+            assert_eq!(delivery.rollup_count, usage_trends.rollup_count);
+            assert!(delivery.bytes > 0);
+        }
 
         let active_provider: ProviderRecord = request_json(
             app.clone(),
