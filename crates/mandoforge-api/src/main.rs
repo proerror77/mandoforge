@@ -128,6 +128,7 @@ struct AppState {
 
 #[derive(Debug, Clone)]
 struct PolicyRuntime {
+    active_revision_id: Option<Uuid>,
     active: PolicyConfig,
     staged: Option<StagedPolicyRuntime>,
 }
@@ -138,6 +139,14 @@ struct StagedPolicyRuntime {
     revision_id: Uuid,
     rollout_percent: u8,
     policy: PolicyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyRuntimeStatus {
+    active_revision_id: Option<Uuid>,
+    staged_revision_id: Option<Uuid>,
+    staged_rollout_percent: Option<u8>,
+    rollout_active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1222,6 +1231,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/providers/{id}/status", patch(update_provider_status))
         .route("/api/providers/{id}/health", get(get_provider_health))
         .route("/api/policy", get(get_policy))
+        .route("/api/policy/runtime", get(get_policy_runtime))
+        .route("/api/policy/rollout/cancel", post(cancel_policy_rollout))
         .route("/api/policy/simulate", post(simulate_policy))
         .route("/api/policy/test", post(test_policy))
         .route(
@@ -1429,6 +1440,7 @@ async fn healthz() -> Json<Value> {
 
 fn runtime_policy(policy: PolicyConfig) -> Arc<RwLock<PolicyRuntime>> {
     Arc::new(RwLock::new(PolicyRuntime {
+        active_revision_id: None,
         active: policy,
         staged: None,
     }))
@@ -1461,6 +1473,7 @@ impl AppState {
     ) {
         let mut runtime = self.policy.write().await;
         if rollout_percent >= 100 {
+            runtime.active_revision_id = Some(revision_id);
             runtime.active = policy;
             runtime.staged = None;
         } else {
@@ -1470,6 +1483,29 @@ impl AppState {
                 policy,
             });
         }
+    }
+
+    async fn policy_runtime_status(&self) -> PolicyRuntimeStatus {
+        let runtime = self.policy.read().await;
+        PolicyRuntimeStatus {
+            active_revision_id: runtime.active_revision_id,
+            staged_revision_id: runtime.staged.as_ref().map(|staged| staged.revision_id),
+            staged_rollout_percent: runtime.staged.as_ref().map(|staged| staged.rollout_percent),
+            rollout_active: runtime.staged.is_some(),
+        }
+    }
+
+    async fn cancel_staged_policy_rollout(&self) -> Result<PolicyRuntimeStatus, AppError> {
+        let mut runtime = self.policy.write().await;
+        if runtime.staged.take().is_none() {
+            return Err(AppError::bad_request("no staged policy rollout is active"));
+        }
+        Ok(PolicyRuntimeStatus {
+            active_revision_id: runtime.active_revision_id,
+            staged_revision_id: None,
+            staged_rollout_percent: None,
+            rollout_active: false,
+        })
     }
 
     async fn record_codex_app_server_run(
@@ -3285,6 +3321,48 @@ async fn list_policy_revisions(
 ) -> Result<Json<Vec<PolicyRevision>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
     Ok(Json(state.list_policy_revisions().await?))
+}
+
+async fn get_policy_runtime(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRuntimeStatus>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
+    Ok(Json(state.policy_runtime_status().await))
+}
+
+async fn cancel_policy_rollout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRuntimeStatus>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "policy".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let before = state.policy_runtime_status().await;
+    let status = state.cancel_staged_policy_rollout().await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.rollout_cancelled",
+            "policy",
+            before.staged_revision_id,
+            json!({
+                "subject": principal.subject_id,
+                "staged_revision_id": before.staged_revision_id,
+                "staged_rollout_percent": before.staged_rollout_percent,
+                "active_revision_id": status.active_revision_id
+            }),
+        ))
+        .await?;
+    Ok(Json(status))
 }
 
 async fn create_policy_revision(
@@ -9738,6 +9816,68 @@ not json
         assert_eq!(custom_policy_revision_gate.rollout_percent, 25);
         assert_eq!(custom_policy_revision_gate.cases.len(), 2);
 
+        let partial_policy_revision: PolicyRevision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/activate",
+                    policy_revision.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(partial_policy_revision.status, "active");
+        let partial_runtime: PolicyRuntimeStatus = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/policy/runtime")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(partial_runtime.rollout_active);
+        assert_eq!(partial_runtime.staged_revision_id, Some(policy_revision.id));
+        assert_eq!(partial_runtime.staged_rollout_percent, Some(25));
+
+        let cancelled_runtime: PolicyRuntimeStatus = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/rollout/cancel")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(!cancelled_runtime.rollout_active);
+        assert_eq!(cancelled_runtime.staged_revision_id, None);
+
+        let (cancel_again_status, cancel_again_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/rollout/cancel")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(cancel_again_status, StatusCode::BAD_REQUEST);
+        assert!(
+            cancel_again_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no staged policy rollout")
+        );
+
         let invalid_policy_revision = request_value(
             app.clone(),
             Request::builder()
@@ -9927,6 +10067,11 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "policy.revision_activated")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "policy.rollout_cancelled")
         );
 
         let reserved_secret_health = secret_provider_health_from_lookup(|_| None).await;

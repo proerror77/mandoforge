@@ -56,6 +56,7 @@ wait_for_static_ui() {
     hasCostAlertRoutes: text.includes('Create Alert Route') && text.includes('No cost alert routes'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
     hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy') && text.includes('POLICY REVISIONS') && text.includes('Create Policy Revision') && text.includes('Gate cases JSON') && text.includes('Rollout %'),
+    hasPolicyRolloutCancel: text.includes('Cancel Staged Rollout') && text.includes('RUNTIME ROLLOUT'),
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),
     hasApprovalGovernance: text.includes('Approval Governance') && text.includes('Create Approval Group') && text.includes('Create Escalation Rule'),
     hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Load Codex Runs') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering'),
@@ -77,6 +78,7 @@ wait_for_static_ui() {
     && result.hasCostAlertRoutes
     && result.hasProviderCredentialFields
     && result.hasPolicyConsole
+    && result.hasPolicyRolloutCancel
     && result.hasVaultHealthAction
     && result.hasApprovalGovernance
     && result.hasCodexAppServer
@@ -125,6 +127,7 @@ grep -q "checkMcpHealth" /tmp/mandoforge-actionbook-app.js
 grep -q "data-health-mcp" /tmp/mandoforge-actionbook-app.js
 grep -q "renderPolicyDiffSummary" /tmp/mandoforge-actionbook-app.js
 grep -q "policy-diff-table" /tmp/mandoforge-actionbook-app.js
+grep -q "cancelPolicyRollout" /tmp/mandoforge-actionbook-app.js
 curl -fsS "$BASE_URL/api/usage" \
   -H 'x-mandoforge-subject: actionbook-smoke' \
   -H 'x-mandoforge-roles: admin' \

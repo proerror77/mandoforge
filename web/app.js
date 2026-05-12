@@ -11,6 +11,7 @@ const state = {
   secretRecords: [],
   policy: null,
   policyDecision: null,
+  policyRuntime: null,
   policyTest: null,
   policyRevisions: [],
   policyRevisionDiffs: {},
@@ -78,6 +79,7 @@ const policyRevisionForm = document.querySelector("#policy-revision-form");
 const policyRevisionRoot = document.querySelector("#policy-revisions");
 const policyGateCasesInput = document.querySelector("#policy-gate-cases");
 const policyRolloutPercentInput = document.querySelector("#policy-rollout-percent");
+const cancelPolicyRolloutButton = document.querySelector("#cancel-policy-rollout");
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
@@ -135,6 +137,7 @@ checkVaultHealthButton.addEventListener("click", checkVaultHealth);
 policyForm.addEventListener("submit", simulatePolicy);
 policyTestForm.addEventListener("submit", testPolicy);
 policyRevisionForm.addEventListener("submit", createPolicyRevision);
+cancelPolicyRolloutButton.addEventListener("click", cancelPolicyRollout);
 evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
 evalRunForm.addEventListener("submit", createEvalRun);
@@ -398,7 +401,13 @@ async function createPolicyRevision(event) {
 
 async function activatePolicyRevision(id) {
   await api(`/api/policy/revisions/${id}/activate`, { method: "POST" });
+  state.policyRuntime = await api("/api/policy/runtime");
   state.policyRevisions = await api("/api/policy/revisions");
+  renderPolicy();
+}
+
+async function cancelPolicyRollout() {
+  state.policyRuntime = await api("/api/policy/rollout/cancel", { method: "POST" });
   renderPolicy();
 }
 
@@ -788,6 +797,7 @@ async function refreshOps() {
     providers,
     secretRecords,
     policy,
+    policyRuntime,
     policyRevisions,
     evalDatasets,
     evalRuns,
@@ -803,6 +813,7 @@ async function refreshOps() {
       api("/api/providers"),
       api("/api/vault/secrets"),
       api("/api/policy"),
+      api("/api/policy/runtime"),
       api("/api/policy/revisions"),
       api("/api/eval/datasets"),
       api("/api/eval/runs"),
@@ -817,6 +828,7 @@ async function refreshOps() {
   state.providers = providers;
   state.secretRecords = secretRecords;
   state.policy = policy;
+  state.policyRuntime = policyRuntime;
   state.policyRevisions = policyRevisions;
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
@@ -1385,8 +1397,13 @@ function renderPolicy() {
   const blockedTools = state.policy.blocked_tools || [];
   const approvalRequired = state.policy.approval_required || [];
   const allowedTools = state.policy.allowed_tools || {};
+  const runtime = state.policyRuntime || {};
   policyRoot.innerHTML = `
     <dl>
+      <dt>Runtime rollout</dt>
+      <dd>${escapeHtml(runtime.rollout_active ? `staged ${runtime.staged_rollout_percent}%` : "baseline only")}</dd>
+      <dt>Staged revision</dt>
+      <dd>${escapeHtml(runtime.staged_revision_id || "none")}</dd>
       <dt>Blocked tools</dt>
       <dd>${escapeHtml(blockedTools.join(", ") || "none")}</dd>
       <dt>Approval required</dt>
@@ -1463,6 +1480,7 @@ function renderPolicy() {
   policyRevisionRoot.querySelectorAll("[data-policy-activate]").forEach((button) => {
     button.addEventListener("click", () => activatePolicyRevision(button.dataset.policyActivate));
   });
+  cancelPolicyRolloutButton.disabled = !state.policyRuntime?.rollout_active;
 }
 
 function renderPolicyDiffSummary(diff) {
