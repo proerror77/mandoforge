@@ -5,6 +5,7 @@ BASE_URL="${BASE_URL:-http://127.0.0.1:8791}"
 GATE_ADDR="${GATE_ADDR:-127.0.0.1:8791}"
 ACTIONBOOK_CDP_PORT="${ACTIONBOOK_CDP_PORT:-9224}"
 ACTIONBOOK_SCREENSHOT="${ACTIONBOOK_SCREENSHOT:-/tmp/mandoforge-actionbook-smoke.png}"
+ACTIONBOOK_EVAL_JSON="${ACTIONBOOK_EVAL_JSON:-/tmp/mandoforge-actionbook-eval.json}"
 CHROME_PATH="${CHROME_PATH:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 CHROME_USER_DATA_DIR="${CHROME_USER_DATA_DIR:-/tmp/mandoforge-actionbook-chrome}"
 API_PID=""
@@ -39,6 +40,54 @@ wait_for_url() {
     sleep 0.5
   done
   curl -fsS "$url" >/dev/null
+}
+
+wait_for_static_ui() {
+  local attempt
+  for attempt in $(seq 1 40); do
+    actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser eval "
+(() => {
+  const text = document.body?.innerText || '';
+  const result = {
+    title: document.title,
+    hasProviderBreakdown: text.includes('PROVIDER COST BREAKDOWN'),
+    hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
+    hasTenantGovernance: text.includes('Tenant Governance'),
+    hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
+    hasWorkerDashboard: text.includes('Worker Dashboard'),
+    hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
+    metricCards: document.querySelectorAll('.metric').length,
+    hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
+    hasAdminConsole: text.includes('Admin Console')
+  };
+  result.ok = result.title === 'MandoForge Agent OS Kernel'
+    && result.hasProviderBreakdown
+    && result.hasToolBreakdown
+    && result.hasTenantGovernance
+    && result.hasEvalGateAction
+    && result.hasWorkerDashboard
+    && result.hasProviderHealthAction
+    && result.metricCards >= 4
+    && result.hasUsageRoot
+    && result.hasAdminConsole;
+  return (result.ok ? 'MANDOFORGE_ACTIONBOOK_OK ' : 'MANDOFORGE_ACTIONBOOK_PENDING ') + JSON.stringify(result);
+})()
+" --json >"$ACTIONBOOK_EVAL_JSON" || true
+
+    if grep -q 'MANDOFORGE_ACTIONBOOK_OK' "$ACTIONBOOK_EVAL_JSON" \
+      && ! grep -q '"className": "Error"' "$ACTIONBOOK_EVAL_JSON"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  echo "static UI actionbook smoke failed after waiting for UI readiness" >&2
+  echo "last eval:" >&2
+  cat "$ACTIONBOOK_EVAL_JSON" >&2 || true
+  echo >&2
+  echo "visible text:" >&2
+  actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser text --json >&2 || true
+  exit 1
 }
 
 require_command actionbook
@@ -78,35 +127,7 @@ fi
 actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser connect "$ACTIONBOOK_CDP_PORT" --json >/tmp/mandoforge-actionbook-connect.json
 actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser open "$BASE_URL" --json >/tmp/mandoforge-actionbook-open.json
 
-actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser eval "
-(() => {
-  const text = document.body.innerText;
-  const result = {
-    title: document.title,
-    hasProviderBreakdown: text.includes('PROVIDER COST BREAKDOWN'),
-    hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
-    hasTenantGovernance: text.includes('Tenant Governance'),
-    hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
-    hasWorkerDashboard: text.includes('Worker Dashboard'),
-    metricCards: document.querySelectorAll('.metric').length,
-    hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
-    hasAdminConsole: text.includes('Admin Console')
-  };
-  const ok = result.title === 'MandoForge Agent OS Kernel'
-    && result.hasProviderBreakdown
-    && result.hasToolBreakdown
-    && result.hasTenantGovernance
-    && result.hasEvalGateAction
-    && result.hasWorkerDashboard
-    && result.metricCards >= 4
-    && result.hasUsageRoot
-    && result.hasAdminConsole;
-  if (!ok) {
-    throw new Error(JSON.stringify(result));
-  }
-  return result;
-})()
-" --json >/tmp/mandoforge-actionbook-eval.json
+wait_for_static_ui
 
 actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser screenshot "$ACTIONBOOK_SCREENSHOT" --json >/tmp/mandoforge-actionbook-screenshot.json
 

@@ -6,6 +6,7 @@ const state = {
   toolCalls: [],
   auditLogs: [],
   providers: [],
+  providerHealth: {},
   evalDatasets: [],
   evalCases: [],
   evalRuns: [],
@@ -756,15 +757,25 @@ function renderProviders() {
   providerRoot.innerHTML = state.providers.length
     ? state.providers
         .map(
-          (provider) => `
+          (provider) => {
+            const health = state.providerHealth[provider.id];
+            return `
             <div class="item">
               <strong>${escapeHtml(provider.name)}</strong>
               <div class="muted">${escapeHtml(provider.provider_type)} · ${escapeHtml(provider.status)}</div>
               <button class="secondary" data-provider-status="${provider.id}" data-status="active">Activate</button>
               <button class="secondary reject" data-provider-status="${provider.id}" data-status="disabled">Disable</button>
+              <button class="secondary" data-provider-health="${provider.id}">Check Health</button>
+              ${
+                health
+                  ? `<div class="muted">Health: ${escapeHtml(health.healthy ? "healthy" : "unhealthy")} · ${escapeHtml(health.checked_at)}</div>
+                     <pre>${escapeHtml(JSON.stringify({ issues: health.issues, checks: health.checks }, null, 2))}</pre>`
+                  : ""
+              }
               <pre>${escapeHtml(JSON.stringify(provider.config, null, 2))}</pre>
             </div>
-          `,
+          `;
+          },
         )
         .join("")
     : `<div class="muted">No stored providers</div>`;
@@ -772,6 +783,9 @@ function renderProviders() {
     button.addEventListener("click", () =>
       updateProviderStatus(button.dataset.providerStatus, button.dataset.status),
     );
+  });
+  providerRoot.querySelectorAll("[data-provider-health]").forEach((button) => {
+    button.addEventListener("click", () => checkProviderHealth(button.dataset.providerHealth));
   });
 }
 
@@ -781,6 +795,12 @@ async function updateProviderStatus(providerId, status) {
     body: JSON.stringify({ status }),
   });
   await refreshOps();
+}
+
+async function checkProviderHealth(providerId) {
+  const health = await api(`/api/providers/${providerId}/health`);
+  state.providerHealth[providerId] = health;
+  renderProviders();
 }
 
 function renderEvalRuns() {

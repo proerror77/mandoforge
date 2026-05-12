@@ -432,6 +432,17 @@ struct UpdateProviderStatus {
     status: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct ProviderHealth {
+    provider_id: Uuid,
+    name: String,
+    status: String,
+    healthy: bool,
+    issues: Vec<String>,
+    checks: Value,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct McpServerRecord {
     id: Uuid,
@@ -740,6 +751,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/{id}/status", patch(update_provider_status))
+        .route("/api/providers/{id}/health", get(get_provider_health))
         .route(
             "/api/eval/datasets",
             get(list_eval_datasets).post(create_eval_dataset),
@@ -2401,6 +2413,84 @@ fn normalize_provider_status(status: &str) -> Result<String, AppError> {
         other => Err(AppError::bad_request(format!(
             "unsupported provider status: {other}"
         ))),
+    }
+}
+
+async fn get_provider_health(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderHealth>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "provider", Some(id)).await?;
+    let provider = state
+        .list_providers()
+        .await?
+        .into_iter()
+        .find(|provider| provider.id == id)
+        .ok_or_else(|| AppError::not_found("provider not found"))?;
+    Ok(Json(provider_health(&provider)))
+}
+
+fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
+    let mut issues = Vec::new();
+    let provider_type = provider.provider_type.trim().to_ascii_lowercase();
+    if provider.status != "active" {
+        issues.push(format!("provider status is {}", provider.status));
+    }
+    let has_base_url = provider
+        .base_url
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_default_model = provider
+        .default_model
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let api_key_env = provider
+        .config
+        .get("api_key_env")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let api_key_ref = provider
+        .config
+        .get("api_key_ref")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let api_key_env_present = api_key_env.is_some_and(|env_key| std::env::var(env_key).is_ok());
+
+    match provider_type.as_str() {
+        "mock" | "mock_openai_compatible" => {}
+        "openai_compatible" | "openai-compatible" => {
+            if !has_base_url {
+                issues.push("openai-compatible provider requires base_url".to_string());
+            }
+            if api_key_env.is_none() && api_key_ref.is_none() {
+                issues.push(
+                    "openai-compatible provider requires config.api_key_env or config.api_key_ref"
+                        .to_string(),
+                );
+            }
+            if api_key_env.is_some() && !api_key_env_present {
+                issues.push("configured api_key_env is not present in the environment".to_string());
+            }
+        }
+        other => issues.push(format!("provider type {other} is not supported")),
+    }
+
+    ProviderHealth {
+        provider_id: provider.id,
+        name: provider.name.clone(),
+        status: provider.status.clone(),
+        healthy: issues.is_empty(),
+        issues,
+        checks: json!({
+            "provider_type": provider.provider_type,
+            "has_base_url": has_base_url,
+            "has_default_model": has_default_model,
+            "has_api_key_env": api_key_env.is_some(),
+            "api_key_env_present": api_key_env_present,
+            "has_api_key_ref": api_key_ref.is_some(),
+        }),
+        checked_at: Utc::now(),
     }
 }
 
@@ -5396,6 +5486,19 @@ not json
         .await;
         assert_eq!(status_provider.status, "active");
 
+        let status_provider_health: ProviderHealth = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/providers/{}/health", status_provider.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(status_provider_health.healthy);
+        assert!(status_provider_health.issues.is_empty());
+
         let status_provider_access: ProviderAccess = request_json(
             app.clone(),
             Request::builder()
@@ -5449,6 +5552,70 @@ not json
         )
         .await;
         assert_eq!(disabled_provider.status, "disabled");
+        let disabled_provider_health: ProviderHealth = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/providers/{}/health", status_provider.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(!disabled_provider_health.healthy);
+        assert!(
+            disabled_provider_health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("disabled"))
+        );
+
+        let misconfigured_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "openai-compatible",
+                        "name": "misconfigured-openai-compatible",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let misconfigured_health: ProviderHealth = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/providers/{}/health",
+                    misconfigured_provider.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(!misconfigured_health.healthy);
+        assert!(
+            misconfigured_health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("base_url"))
+        );
+        assert!(
+            misconfigured_health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("api_key_env"))
+        );
 
         let status_agent: Agent = request_json(
             app.clone(),
