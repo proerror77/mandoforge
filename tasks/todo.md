@@ -106,7 +106,7 @@
 - [x] Derive principal roles from persisted memberships when role headers are absent.
 - [x] Enforce team membership for scoped agent/session/tool/approval/job resource paths.
 - [x] Filter agent/session list APIs by principal membership scope.
-- [ ] Add project-level permissions instead of only team-level inheritance.
+- [x] Add project-level permissions instead of only team-level inheritance.
 - [x] Add provider access/model allowlist enforcement for team-scoped agent creation.
 - [ ] Add provider budgets and runtime provider selection from stored provider rows.
 - [x] Add eval dataset/case/run schema and a first version-bound eval runner skeleton.

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS memberships (
     user_id TEXT NOT NULL,
     organization_id UUID REFERENCES organizations(id),
     team_id UUID REFERENCES teams(id),
+    project_id UUID REFERENCES projects(id),
     role TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -80,11 +81,13 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES teams(id);
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id);
+ALTER TABLE memberships ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id);
 
 CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(tenant_id, organization_id);
 CREATE INDEX IF NOT EXISTS idx_projects_team ON projects(tenant_id, team_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_org ON memberships(tenant_id, organization_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_team ON memberships(tenant_id, team_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_project ON memberships(tenant_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_provider_access_team ON provider_access(tenant_id, team_id);
 CREATE INDEX IF NOT EXISTS idx_eval_cases_dataset ON eval_cases(tenant_id, dataset_id);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_dataset ON eval_runs(tenant_id, dataset_id);

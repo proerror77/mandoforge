@@ -168,6 +168,7 @@ pub(crate) fn membership_from_row(row: PgRow) -> Result<Membership, AppError> {
         user_id: row.try_get("user_id")?,
         organization_id: row.try_get("organization_id")?,
         team_id: row.try_get("team_id")?,
+        project_id: row.try_get("project_id").unwrap_or(None),
         role: row.try_get("role")?,
         created_at: row.try_get("created_at")?,
     })

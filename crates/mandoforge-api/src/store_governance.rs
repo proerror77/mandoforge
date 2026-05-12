@@ -228,7 +228,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, user_id, organization_id, team_id, role, created_at
+                    "SELECT id, user_id, organization_id, team_id, project_id, role, created_at
                      FROM memberships
                      WHERE tenant_id = $1 AND organization_id = $2
                      ORDER BY created_at DESC",
@@ -251,11 +251,21 @@ impl AppState {
         if let Some(team_id) = input.team_id {
             self.ensure_team_exists(team_id).await?;
         }
+        if let Some(project_id) = input.project_id {
+            let Some(team_id) = input.team_id else {
+                return Err(AppError::bad_request(
+                    "project_id requires a matching team_id on memberships",
+                ));
+            };
+            self.ensure_project_belongs_to_team(project_id, team_id)
+                .await?;
+        }
         let membership = Membership {
             id: Uuid::new_v4(),
             user_id: input.user_id,
             organization_id: Some(organization_id),
             team_id: input.team_id,
+            project_id: input.project_id,
             role: input.role,
             created_at: Utc::now(),
         };
@@ -269,14 +279,15 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO memberships (id, tenant_id, user_id, organization_id, team_id, role, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    "INSERT INTO memberships (id, tenant_id, user_id, organization_id, team_id, project_id, role, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 )
                 .bind(membership.id)
                 .bind(self.tenant_id)
                 .bind(&membership.user_id)
                 .bind(membership.organization_id)
                 .bind(membership.team_id)
+                .bind(membership.project_id)
                 .bind(&membership.role)
                 .bind(membership.created_at)
                 .execute(pool)
@@ -336,8 +347,10 @@ impl AppState {
                 };
                 Ok(store.memberships.values().any(|membership| {
                     membership.user_id == subject_id
-                        && (membership.team_id == Some(team_id)
+                        && ((membership.team_id == Some(team_id)
+                            && membership.project_id.is_none())
                             || (membership.team_id.is_none()
+                                && membership.project_id.is_none()
                                 && membership.organization_id == Some(team.organization_id)))
                 }))
             }
@@ -350,14 +363,64 @@ impl AppState {
                         WHERE m.tenant_id = $1
                           AND m.user_id = $2
                           AND (
-                            m.team_id = $3
-                            OR (m.team_id IS NULL AND m.organization_id = t.organization_id)
+                            (m.team_id = $3 AND m.project_id IS NULL)
+                            OR (m.team_id IS NULL AND m.project_id IS NULL AND m.organization_id = t.organization_id)
                           )
                     )",
                 )
                 .bind(self.tenant_id)
                 .bind(subject_id)
                 .bind(team_id)
+                .fetch_one(pool)
+                .await?;
+                Ok(can_access)
+            }
+        }
+    }
+
+    pub(crate) async fn subject_can_access_project(
+        &self,
+        subject_id: &str,
+        project_id: Uuid,
+    ) -> Result<bool, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                let Some(project) = store.projects.get(&project_id) else {
+                    return Ok(false);
+                };
+                let Some(team) = store.teams.get(&project.team_id) else {
+                    return Ok(false);
+                };
+                Ok(store.memberships.values().any(|membership| {
+                    membership.user_id == subject_id
+                        && (membership.project_id == Some(project_id)
+                            || (membership.project_id.is_none()
+                                && membership.team_id == Some(project.team_id))
+                            || (membership.project_id.is_none()
+                                && membership.team_id.is_none()
+                                && membership.organization_id == Some(team.organization_id)))
+                }))
+            }
+            StoreBackend::Postgres(pool) => {
+                let can_access: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                        SELECT 1
+                        FROM memberships m
+                        JOIN projects p ON p.id = $3 AND p.tenant_id = $1
+                        JOIN teams t ON t.id = p.team_id AND t.tenant_id = $1
+                        WHERE m.tenant_id = $1
+                          AND m.user_id = $2
+                          AND (
+                            m.project_id = $3
+                            OR (m.project_id IS NULL AND m.team_id = p.team_id)
+                            OR (m.project_id IS NULL AND m.team_id IS NULL AND m.organization_id = t.organization_id)
+                          )
+                    )",
+                )
+                .bind(self.tenant_id)
+                .bind(subject_id)
+                .bind(project_id)
                 .fetch_one(pool)
                 .await?;
                 Ok(can_access)

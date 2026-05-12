@@ -42,7 +42,14 @@ impl AppState {
         }
         let mut visible = Vec::new();
         for agent in agents {
-            if let Some(team_id) = agent.team_id {
+            if let Some(project_id) = agent.project_id {
+                if self
+                    .subject_can_access_project(&principal.subject_id, project_id)
+                    .await?
+                {
+                    visible.push(agent);
+                }
+            } else if let Some(team_id) = agent.team_id {
                 if self
                     .subject_can_access_team(&principal.subject_id, team_id)
                     .await?
@@ -368,7 +375,14 @@ impl AppState {
         let mut visible = Vec::new();
         for session in sessions {
             let agent = self.get_agent(session.agent_id).await?;
-            if let Some(team_id) = agent.team_id {
+            if let Some(project_id) = agent.project_id {
+                if self
+                    .subject_can_access_project(&principal.subject_id, project_id)
+                    .await?
+                {
+                    visible.push(session);
+                }
+            } else if let Some(team_id) = agent.team_id {
                 if self
                     .subject_can_access_team(&principal.subject_id, team_id)
                     .await?

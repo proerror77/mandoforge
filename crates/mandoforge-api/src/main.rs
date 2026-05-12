@@ -330,6 +330,7 @@ struct Membership {
     user_id: String,
     organization_id: Option<Uuid>,
     team_id: Option<Uuid>,
+    project_id: Option<Uuid>,
     role: String,
     created_at: DateTime<Utc>,
 }
@@ -339,6 +340,8 @@ struct CreateMembership {
     user_id: String,
     #[serde(default)]
     team_id: Option<Uuid>,
+    #[serde(default)]
+    project_id: Option<Uuid>,
     role: String,
 }
 
@@ -1115,14 +1118,30 @@ async fn enforce_resource_scope(
     let Some(resource_id) = request.resource_id else {
         return Ok(());
     };
-    let team_id = match request.resource_type.as_str() {
-        "agent" => state.get_agent(resource_id).await?.team_id,
+    let (team_id, project_id) = match request.resource_type.as_str() {
+        "agent" => {
+            let agent = state.get_agent(resource_id).await?;
+            (agent.team_id, agent.project_id)
+        }
         "session" => {
             let session = state.get_session(resource_id).await?;
-            state.get_agent(session.agent_id).await?.team_id
+            let agent = state.get_agent(session.agent_id).await?;
+            (agent.team_id, agent.project_id)
         }
-        _ => None,
+        _ => (None, None),
     };
+    if let Some(project_id) = project_id {
+        if state
+            .subject_can_access_project(&principal.subject_id, project_id)
+            .await?
+        {
+            return Ok(());
+        }
+        return Err(AppError::forbidden(format!(
+            "principal {} has no membership for scoped {}",
+            principal.subject_id, request.resource_type
+        )));
+    }
     let Some(team_id) = team_id else {
         return Ok(());
     };
@@ -4066,6 +4085,22 @@ not json
         .await;
         assert_eq!(project.team_id, team.id);
 
+        let sibling_project: Project = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/projects", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Sibling Pilot", "slug": "sibling-pilot"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(sibling_project.team_id, team.id);
+
         let membership: Membership = request_json(
             app.clone(),
             Request::builder()
@@ -4086,6 +4121,63 @@ not json
         .await;
         assert_eq!(membership.organization_id, Some(organization.id));
         assert_eq!(membership.team_id, Some(team.id));
+        assert_eq!(membership.project_id, None);
+
+        let project_membership: Membership = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/memberships",
+                    organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "user_id": "project-viewer-1",
+                        "team_id": team.id,
+                        "project_id": project.id,
+                        "role": "viewer"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(project_membership.team_id, Some(team.id));
+        assert_eq!(project_membership.project_id, Some(project.id));
+
+        let (status, project_membership_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/memberships",
+                    organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "user_id": "invalid-project-viewer",
+                        "project_id": project.id,
+                        "role": "viewer"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            project_membership_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("project_id requires")
+        );
 
         let derived_approver_approvals: Vec<Approval> = request_json(
             app.clone(),
@@ -4174,6 +4266,31 @@ not json
         assert_eq!(scoped_agent.team_id, Some(team.id));
         assert_eq!(scoped_agent.project_id, Some(project.id));
 
+        let sibling_agent: Agent = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "sibling scoped agent",
+                        "kind": "orchestrator",
+                        "team_id": team.id,
+                        "project_id": sibling_project.id,
+                        "provider": "openai-compatible",
+                        "model": "gpt-5.4-mini",
+                        "tools": ["file.read"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(sibling_agent.project_id, Some(sibling_project.id));
+
         let scoped_session: Session = request_json(
             app.clone(),
             Request::builder()
@@ -4184,6 +4301,21 @@ not json
                 .header("x-mandoforge-roles", "admin")
                 .body(Body::from(
                     json!({"agent_id": scoped_agent.id, "title": "scoped session"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let sibling_session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": sibling_agent.id, "title": "sibling session"}).to_string(),
                 ))
                 .expect("valid request"),
         )
@@ -4218,6 +4350,34 @@ not json
         .await;
         assert_eq!(scoped_read.id, scoped_session.id);
 
+        let project_scoped_read: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", scoped_session.id))
+                .header("x-mandoforge-subject", "project-viewer-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(project_scoped_read.id, scoped_session.id);
+
+        let (status, sibling_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", sibling_session.id))
+                .header("x-mandoforge-subject", "project-viewer-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            sibling_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no membership")
+        );
+
         let outside_sessions: Vec<Session> = request_json(
             app.clone(),
             Request::builder()
@@ -4249,6 +4409,46 @@ not json
                 .any(|agent| agent.id == scoped_agent.id)
         );
 
+        let project_viewer_agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "project-viewer-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            project_viewer_agents
+                .iter()
+                .any(|agent| agent.id == scoped_agent.id)
+        );
+        assert!(
+            !project_viewer_agents
+                .iter()
+                .any(|agent| agent.id == sibling_agent.id)
+        );
+
+        let project_viewer_sessions: Vec<Session> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/sessions")
+                .header("x-mandoforge-subject", "project-viewer-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            project_viewer_sessions
+                .iter()
+                .any(|session| session.id == scoped_session.id)
+        );
+        assert!(
+            !project_viewer_sessions
+                .iter()
+                .any(|session| session.id == sibling_session.id)
+        );
+
         let projects: Vec<Project> = request_json(
             app,
             Request::builder()
@@ -4259,8 +4459,17 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].slug, "kernel-pilot");
+        assert_eq!(projects.len(), 2);
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.slug == "kernel-pilot")
+        );
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.slug == "sibling-pilot")
+        );
     }
 
     #[tokio::test]
