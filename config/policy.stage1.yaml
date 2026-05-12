@@ -30,6 +30,7 @@ allowed_tools:
     - codex.exec
     - approval.request
     - artifact.create
+    - mcp.call
 sql_policy:
   default_mode: read_only
   max_rows: 500

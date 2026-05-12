@@ -77,6 +77,7 @@ impl Default for PolicyConfig {
                     "codex.exec".to_string(),
                     "approval.request".to_string(),
                     "artifact.create".to_string(),
+                    "mcp.call".to_string(),
                 ],
             )]),
             sql_policy: SqlPolicy {
@@ -221,7 +222,7 @@ fn tool_risk_level(name: &str) -> &'static str {
     match name {
         "file.read" | "sql.get_schema" | "approval.request" | "artifact.create" => "low",
         "file.write" | "sql.query" => "medium",
-        "shell.exec" | "codex.exec" | "http.request" => "high",
+        "shell.exec" | "codex.exec" | "http.request" | "mcp.call" => "high",
         _ => "unknown",
     }
 }

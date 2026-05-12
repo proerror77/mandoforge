@@ -223,6 +223,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - Tool Router is the only intended external execution path.
 - `sql.query` rejects non-read SQL commands.
 - `shell.exec`, `file.write`, `codex.exec`, and `http.request` require approval by Stage 1 policy.
+- `mcp.call` executes only when an MCP Gateway is configured and the target server is allowlisted.
 - `shell.exec` can run through the optional Docker sandbox runner via `MANDOFORGE_SHELL_RUNNER=docker`.
 - `codex.exec` only allows `read-only` and `workspace-write` sandbox modes without extra approval.
 - Production secrets must not be passed into prompts, event logs, or Codex workspaces.

@@ -56,6 +56,10 @@ use execution_queue::ExecutionQueue;
 use execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
 #[cfg(test)]
 use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueKind};
+use mcp_gateway::{
+    HttpMcpGatewayClient, McpCallRequest, McpGatewayClient, McpGatewayConfig,
+    ReservedMcpGatewayClient,
+};
 use observability::{
     HttpTelemetryExporter, ObservabilityConfig, ReservedTelemetryExporter, TelemetryEvent,
     TelemetryExporter,
@@ -81,6 +85,8 @@ struct AppState {
     authorizer: Arc<dyn Authorizer>,
     observability_config: ObservabilityConfig,
     telemetry_exporter: Arc<dyn TelemetryExporter>,
+    mcp_gateway_config: Option<McpGatewayConfig>,
+    mcp_gateway_client: Arc<dyn McpGatewayClient>,
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
@@ -428,6 +434,7 @@ struct SqlSchemaTool;
 struct SqlQueryTool;
 struct ArtifactCreateTool;
 struct ApprovalRequestTool;
+struct McpCallTool;
 
 #[derive(Debug, Deserialize)]
 struct ExecuteTool {
@@ -472,6 +479,8 @@ async fn main() -> Result<()> {
         observability_config: ObservabilityConfig::from_env()
             .map_err(|error| anyhow::anyhow!(error.message))?,
         telemetry_exporter: telemetry_exporter_from_env()?,
+        mcp_gateway_config: mcp_gateway_config_from_env()?,
+        mcp_gateway_client: mcp_gateway_client_from_env()?,
         workspace_root,
         tenant_id,
         policy,
@@ -637,6 +646,28 @@ fn telemetry_exporter_from_env() -> Result<Arc<dyn TelemetryExporter>> {
         ))
     } else {
         Ok(Arc::new(ReservedTelemetryExporter))
+    }
+}
+
+fn mcp_gateway_config_from_env() -> Result<Option<McpGatewayConfig>> {
+    match std::env::var("MANDOFORGE_MCP_GATEWAY_URL") {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(
+            McpGatewayConfig::from_env().map_err(|error| anyhow::anyhow!(error.message))?,
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn mcp_gateway_client_from_env() -> Result<Arc<dyn McpGatewayClient>> {
+    if std::env::var("MANDOFORGE_MCP_GATEWAY_URL")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        Ok(Arc::new(
+            HttpMcpGatewayClient::new().map_err(|error| anyhow::anyhow!(error.message))?,
+        ))
+    } else {
+        Ok(Arc::new(ReservedMcpGatewayClient))
     }
 }
 
@@ -1325,11 +1356,41 @@ impl ToolExecutor for ApprovalRequestTool {
     }
 }
 
+#[async_trait]
+impl ToolExecutor for McpCallTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "mcp.call",
+            risk: "high",
+            description: "Call an allowlisted MCP Gateway server tool through the audited Tool Router",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        _input: &ExecuteTool,
+        _tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        let config = state
+            .mcp_gateway_config
+            .as_ref()
+            .ok_or_else(|| AppError::bad_request("MCP gateway is not configured"))?;
+        let request: McpCallRequest = serde_json::from_value(_input.args.clone())?;
+        let response = state.mcp_gateway_client.call(config, request).await?;
+        Ok(json!({
+            "status": "called",
+            "result": response.result,
+        }))
+    }
+}
+
 fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
     let tools: Vec<Box<dyn ToolExecutor>> = vec![
         Box::new(ArtifactCreateTool),
         Box::new(ApprovalRequestTool),
         Box::new(FileReadTool),
+        Box::new(McpCallTool),
         Box::new(SqlSchemaTool),
         Box::new(SqlQueryTool),
     ];
@@ -2790,6 +2851,8 @@ not json
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -2819,6 +2882,40 @@ not json
         }
     }
 
+    #[derive(Default)]
+    struct RecordingMcpGatewayClient {
+        requests: tokio::sync::Mutex<Vec<McpCallRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl McpGatewayClient for RecordingMcpGatewayClient {
+        async fn health_check(&self, _config: &McpGatewayConfig) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn call(
+            &self,
+            config: &McpGatewayConfig,
+            request: McpCallRequest,
+        ) -> Result<mcp_gateway::McpCallResponse, AppError> {
+            if !config.allows_server(&request.server) {
+                return Err(AppError::forbidden(format!(
+                    "MCP server {} is not allowed",
+                    request.server
+                )));
+            }
+            self.requests.lock().await.push(request.clone());
+            Ok(mcp_gateway::McpCallResponse {
+                result: json!({
+                    "server": request.server,
+                    "tool": request.tool,
+                    "args": request.args,
+                    "status": "called"
+                }),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn appended_session_events_export_telemetry_when_enabled() {
         let exporter = Arc::new(RecordingTelemetryExporter::default());
@@ -2833,6 +2930,8 @@ not json
                 sample_ratio: 1.0,
             },
             telemetry_exporter: exporter.clone(),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -2869,6 +2968,90 @@ not json
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "session.started");
         assert_eq!(events[0].attributes["session_id"], session.id.to_string());
+    }
+
+    #[tokio::test]
+    async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
+        let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(InlineExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: Some(McpGatewayConfig {
+                endpoint: "http://mcp.test".to_string(),
+                timeout_seconds: 5,
+                allowed_servers: vec!["docs".to_string()],
+            }),
+            mcp_gateway_client: mcp_client.clone(),
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: PolicyConfig::default(),
+        };
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state);
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "mcp call"}),
+            ),
+        )
+        .await;
+
+        let result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/mcp.call/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "server": "docs",
+                        "tool": "search",
+                        "args": {"q": "policy"}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(result["status"], "called");
+        assert_eq!(result["result"]["server"], "docs");
+
+        let requests = mcp_client.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].tool, "search");
+        drop(requests);
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(tool_calls.iter().any(|call| {
+            call.tool_name == "mcp.call"
+                && call.status == "completed"
+                && call.policy_decision["decision"] == "allowed"
+        }));
     }
 
     fn test_workspace_root() -> PathBuf {

@@ -12,7 +12,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 | Vault | Reserved provider and Vault KV v2 HTTP client boundary exist. | Production secret storage, secret CRUD, rotation, and scoped secret references are not implemented. |
 | Worker queue | Postgres/in-memory execution queue, worker binary, lease claims, and reclaim boundary exist; Redis command/client boundary is reserved. | Live Redis/NATS backend and separate broker worker handoff are not enabled. |
 | Approval v2 | Approve/reject exists; modify now updates pending tool args, records `approval.modified`, and preserves the approval for later approve/reject. | Comments are stored in `decision_payload`; expiry, delegated approvers, and parameter diff UI are not implemented. |
-| MCP Gateway | Reserved config plus verified HTTP client boundary exist. | `mcp.call`, MCP server registry, discovery, allowlist policy, and audited runtime execution are not enabled. |
+| MCP Gateway | `mcp.call` is enabled through the Tool Router, uses configured MCP Gateway server allowlists, and is persisted through tool call/event/audit paths. | MCP server registry, tool discovery import, per-team MCP config, and UI management are not implemented. |
 | Codex App Server adapter | Codex CLI adapter exists. | App Server thread/turn/interrupt adapter is not implemented. |
 | Evaluation | Eval datasets, cases, and version-bound run records are implemented with a first skeleton runner that records case count and agent version evidence. | Real scenario grading, regression gates, judge integrations, and eval dashboards are not implemented. |
 | Observability | OTel exporter boundary exists and session event appends now export telemetry events when OTLP is enabled. | Rich traces/spans, metrics, dashboards, and retry/backpressure for exporter failures are not implemented. |
@@ -25,4 +25,4 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 2. Add provider budgets and runtime provider selection from stored provider rows.
 3. Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
 4. Add rich OTel spans/metrics for session run, provider call, tool execution, approval, and worker queue paths.
-5. Enable MCP registry and `mcp.call` behind policy and audit.
+5. Add MCP server registry, tool discovery import, per-team MCP config, and UI management.

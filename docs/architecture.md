@@ -33,7 +33,8 @@ Not yet aligned:
 
 - External worker mode is still API-drained; a separate broker-backed queue remains later-stage work, with Redis Stream command/payload shape now fixed before enabling a live Redis backend.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
-- Enabling `mcp.call`, adding production-grade telemetry spans/metrics, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
+- MCP Gateway execution is now available through `mcp.call` when configured; server allowlists are enforced by the gateway config before the HTTP call.
+- Adding production-grade telemetry spans/metrics, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
 
 ## Runtime Layers
 
@@ -52,7 +53,7 @@ Managed Agent Runtime
 
 Execution Layer
   file.read / file.write / sql.query / shell.exec / codex.exec
-  approval.request / artifact.create / mcp.call later
+  approval.request / artifact.create / mcp.call
 
 Sandbox / Worker Layer
   session workspace / Docker runner / Codex CLI adapter
@@ -234,7 +235,7 @@ Stage 2/3 target components:
 - `runtime-worker`
 - `codex-worker`
 - `sandbox-runner`
-- `mcp-gateway` with `McpGatewayConfig`, `McpGatewayClient`, and a local-verified `HttpMcpGatewayClient` HTTP boundary before enabling `mcp.call`.
+- `mcp-gateway` with `McpGatewayConfig`, `McpGatewayClient`, and a local-verified `HttpMcpGatewayClient` HTTP boundary behind `mcp.call`.
 - `policy-engine` with `Principal`, `Permission`, and `Authorizer` as the RBAC boundary; session run, manual tool execution, approval decisions, execution job drain, read/list APIs, and core write APIs are enforced request paths.
 - `otel-collector` with `ObservabilityConfig`, `TelemetryExporter`, and a local-verified `HttpTelemetryExporter` OTLP HTTP boundary before wiring runtime export paths.
 - `vault` or compatible secret store with `SecretProviderKind`, `SecretProviderConfig`, `SecretRef`, `SecretProvider`, and explicit `reserved` / `vault` provider selection before enabling runtime secret reads by default.

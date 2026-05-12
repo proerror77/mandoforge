@@ -26,6 +26,7 @@ impl AppState {
                 "codex.exec".to_string(),
                 "approval.request".to_string(),
                 "artifact.create".to_string(),
+                "mcp.call".to_string(),
             ],
             created_at: Utc::now(),
         };

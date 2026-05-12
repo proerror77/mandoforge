@@ -111,4 +111,5 @@
 - [ ] Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
 - [x] Wire OTel export into append-only session event paths.
 - [ ] Add rich OTel spans/metrics for session/provider/tool/approval/worker paths.
-- [ ] Enable MCP registry and `mcp.call` behind policy and audit.
+- [x] Enable `mcp.call` through Tool Router, MCP Gateway allowlist, events, tool calls, and audit.
+- [ ] Add MCP server registry, tool discovery import, per-team MCP config, and UI management.
