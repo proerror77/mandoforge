@@ -12,6 +12,7 @@ const state = {
   evalGates: {},
   mcpServers: [],
   mcpTeamId: "",
+  executionJobs: [],
   usageRollups: [],
   usage: null,
   organizations: [],
@@ -42,6 +43,7 @@ const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
 const mcpServerRoot = document.querySelector("#mcp-servers");
+const executionJobRoot = document.querySelector("#execution-jobs");
 const usageRoot = document.querySelector("#usage-summary");
 const usageRollupRoot = document.querySelector("#usage-rollups");
 const governanceRoot = document.querySelector("#governance-status");
@@ -61,6 +63,7 @@ const evalRunForm = document.querySelector("#eval-run-form");
 const mcpForm = document.querySelector("#mcp-form");
 const loadMcpButton = document.querySelector("#load-mcp");
 const loadEvalCasesButton = document.querySelector("#load-eval-cases");
+const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jobs");
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
@@ -76,6 +79,7 @@ evalRunForm.addEventListener("submit", createEvalRun);
 mcpForm.addEventListener("submit", createMcpServer);
 loadMcpButton.addEventListener("click", loadMcpServers);
 loadEvalCasesButton.addEventListener("click", loadEvalCases);
+refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 
 async function api(path, options = {}) {
@@ -329,6 +333,19 @@ async function discoverMcpTools(serverId) {
   await loadMcpServers();
 }
 
+async function refreshExecutionJobs() {
+  state.executionJobs = await api("/api/execution-jobs");
+  renderExecutionJobs();
+}
+
+async function runExecutionJob(jobId) {
+  await api(`/api/execution-jobs/${jobId}/run`, { method: "POST" });
+  await refreshExecutionJobs();
+  await refreshApprovals();
+  await refreshSession();
+  await refreshOps();
+}
+
 async function runDemo() {
   const agent = state.agents[0];
   const session = await api("/api/sessions", {
@@ -350,20 +367,23 @@ async function runDemo() {
 }
 
 async function refreshOps() {
-  const [providers, evalDatasets, evalRuns, usage, usageRollups, organizations] = await Promise.all([
-    api("/api/providers"),
-    api("/api/eval/datasets"),
-    api("/api/eval/runs"),
-    api("/api/usage"),
-    api("/api/usage/rollups"),
-    api("/api/organizations"),
-  ]);
+  const [providers, evalDatasets, evalRuns, usage, usageRollups, organizations, executionJobs] =
+    await Promise.all([
+      api("/api/providers"),
+      api("/api/eval/datasets"),
+      api("/api/eval/runs"),
+      api("/api/usage"),
+      api("/api/usage/rollups"),
+      api("/api/organizations"),
+      api("/api/execution-jobs"),
+    ]);
   state.providers = providers;
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
   state.usage = usage;
   state.usageRollups = usageRollups;
   state.organizations = organizations;
+  state.executionJobs = executionJobs;
   if (
     state.selectedOrganizationId &&
     !organizations.some((organization) => organization.id === state.selectedOrganizationId)
@@ -460,6 +480,7 @@ function renderOps() {
   renderEvalCases();
   renderEvalRuns();
   renderMcpServers();
+  renderExecutionJobs();
   governanceRoot.innerHTML = `
     <dl>
       <dt>Policy</dt>
@@ -472,6 +493,44 @@ function renderOps() {
       <dd>Gateway calls require global and team-scoped allowlists; discovery can import gateway tools into a team server allowlist</dd>
     </dl>
   `;
+}
+
+function renderExecutionJobs() {
+  executionJobRoot.innerHTML = state.executionJobs.length
+    ? state.executionJobs
+        .map(
+          (job) => `
+            <div class="item">
+              <strong>${escapeHtml(job.tool_name)}</strong>
+              <div class="muted">${escapeHtml(job.status)} · ${escapeHtml(job.id)}</div>
+              <div class="muted">Worker: ${escapeHtml(job.worker_id || "none")} · Lease: ${escapeHtml(job.lease_expires_at || "none")}</div>
+              ${
+                job.status === "queued"
+                  ? `<button class="secondary" data-run-execution-job="${job.id}">Run Job</button>`
+                  : ""
+              }
+              <pre>${escapeHtml(
+                JSON.stringify(
+                  {
+                    session_id: job.session_id,
+                    approval_id: job.approval_id,
+                    tool_call_id: job.tool_call_id,
+                    enqueued_at: job.enqueued_at,
+                    started_at: job.started_at,
+                    completed_at: job.completed_at,
+                  },
+                  null,
+                  2,
+                ),
+              )}</pre>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No execution jobs</div>`;
+  executionJobRoot.querySelectorAll("[data-run-execution-job]").forEach((button) => {
+    button.addEventListener("click", () => runExecutionJob(button.dataset.runExecutionJob));
+  });
 }
 
 function renderTenantGovernance() {

@@ -87,6 +87,7 @@ actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser eval "
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
+    hasWorkerDashboard: text.includes('Worker Dashboard'),
     metricCards: document.querySelectorAll('.metric').length,
     hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
     hasAdminConsole: text.includes('Admin Console')
@@ -96,6 +97,7 @@ actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser eval "
     && result.hasToolBreakdown
     && result.hasTenantGovernance
     && result.hasEvalGateAction
+    && result.hasWorkerDashboard
     && result.metricCards >= 4
     && result.hasUsageRoot
     && result.hasAdminConsole;
