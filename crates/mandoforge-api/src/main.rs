@@ -873,6 +873,16 @@ struct McpServerHealth {
     checked_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct McpServerHealthRun {
+    team_id: Uuid,
+    server_count: usize,
+    healthy_count: usize,
+    unhealthy_count: usize,
+    results: Vec<McpServerHealth>,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateMcpServerRecord {
     name: String,
@@ -1224,6 +1234,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{team_id}/mcp-servers/{server_id}/health",
             get(get_mcp_server_health),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/health/run",
+            post(run_mcp_server_health_checks),
         )
         .route(
             "/api/teams/{team_id}/mcp-servers/{server_id}/discover",
@@ -4572,6 +4586,46 @@ async fn get_mcp_server_health(
         ))
         .await?;
     Ok(Json(health))
+}
+
+async fn run_mcp_server_health_checks(
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerHealthRun>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    let checked_at = Utc::now();
+    let servers = state.list_mcp_servers(team_id).await?;
+    let mut results = Vec::with_capacity(servers.len());
+    for server in servers {
+        results.push(mcp_server_health(&state, &server).await);
+    }
+    let healthy_count = results.iter().filter(|health| health.healthy).count();
+    let run = McpServerHealthRun {
+        team_id,
+        server_count: results.len(),
+        healthy_count,
+        unhealthy_count: results.len().saturating_sub(healthy_count),
+        results,
+        checked_at,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "mcp.server_health_run",
+            "team",
+            Some(team_id),
+            json!({
+                "team_id": team_id,
+                "server_count": run.server_count,
+                "healthy_count": run.healthy_count,
+                "unhealthy_count": run.unhealthy_count,
+            }),
+        ))
+        .await?;
+    Ok(Json(run))
 }
 
 async fn mcp_server_health(state: &AppState, server: &McpServerRecord) -> McpServerHealth {
@@ -8291,6 +8345,22 @@ not json
                 .any(|issue| issue.contains("status is disabled"))
         );
 
+        let health_run: McpServerHealthRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/mcp-servers/health/run", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(health_run.team_id, team.id);
+        assert_eq!(health_run.server_count, 1);
+        assert_eq!(health_run.unhealthy_count, 1);
+        assert_eq!(health_run.results[0].server_id, mcp_server.id);
+
         let (status, inactive) = request_value(
             app.clone(),
             Request::builder()
@@ -8412,6 +8482,11 @@ not json
                 .filter(|log| log.action == "mcp.server_health_checked")
                 .count()
                 >= 2
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "mcp.server_health_run")
         );
     }
 

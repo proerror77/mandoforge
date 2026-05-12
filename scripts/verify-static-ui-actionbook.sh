@@ -60,7 +60,7 @@ wait_for_static_ui() {
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),
     hasApprovalGovernance: text.includes('Approval Governance') && text.includes('Create Approval Group') && text.includes('Create Escalation Rule'),
     hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Load Codex Runs') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering'),
-    hasMcpLifecycle: text.includes('MCP Servers') && text.includes('Config JSON') && text.includes('Load Team Servers'),
+    hasMcpLifecycle: text.includes('MCP Servers') && text.includes('Config JSON') && text.includes('Load Team Servers') && text.includes('Run Team Health'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
@@ -125,6 +125,7 @@ curl -fsS "$BASE_URL/" >/tmp/mandoforge-actionbook-index.html
 curl -fsS "$BASE_URL/app.js" >/tmp/mandoforge-actionbook-app.js
 grep -q "checkMcpHealth" /tmp/mandoforge-actionbook-app.js
 grep -q "data-health-mcp" /tmp/mandoforge-actionbook-app.js
+grep -q "runMcpHealth" /tmp/mandoforge-actionbook-app.js
 grep -q "renderPolicyDiffSummary" /tmp/mandoforge-actionbook-app.js
 grep -q "policy-diff-table" /tmp/mandoforge-actionbook-app.js
 grep -q "cancelPolicyRollout" /tmp/mandoforge-actionbook-app.js
