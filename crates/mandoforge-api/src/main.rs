@@ -5712,6 +5712,66 @@ fn normalize_mcp_tool_allowlist(tool_allowlist: Vec<String>) -> Result<Vec<Strin
     Ok(tools)
 }
 
+fn normalize_mcp_config(config: Value) -> Result<Value, AppError> {
+    let mut map = config
+        .as_object()
+        .cloned()
+        .ok_or_else(|| AppError::bad_request("MCP server config must be a JSON object"))?;
+    let mut secret_refs = Vec::new();
+    if let Some(secret_ref) = map.get("secret_ref").and_then(Value::as_str) {
+        secret_refs.push(normalize_mcp_secret_ref(secret_ref)?);
+    }
+    if let Some(value) = map.get("secret_refs") {
+        let refs = value.as_array().ok_or_else(|| {
+            AppError::bad_request("MCP server config secret_refs must be an array")
+        })?;
+        for (index, item) in refs.iter().enumerate() {
+            let Some(secret_ref) = item.as_str() else {
+                return Err(AppError::bad_request(format!(
+                    "MCP server config secret_refs[{index}] must be a string"
+                )));
+            };
+            secret_refs.push(normalize_mcp_secret_ref(secret_ref)?);
+        }
+    }
+    secret_refs.sort();
+    secret_refs.dedup();
+    if !secret_refs.is_empty() {
+        map.insert("secret_refs".to_string(), json!(secret_refs));
+        map.remove("secret_ref");
+    }
+    Ok(Value::Object(map))
+}
+
+fn normalize_mcp_secret_ref(value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    let Some(reference) = trimmed.strip_prefix("vault:") else {
+        return Err(AppError::bad_request(
+            "MCP server secret refs must use vault:path#key",
+        ));
+    };
+    let Some((path, key)) = reference.split_once('#') else {
+        return Err(AppError::bad_request(
+            "MCP server secret refs must use vault:path#key",
+        ));
+    };
+    let secret_ref = SecretRef::new(path, key)?;
+    Ok(format!("vault:{}#{}", secret_ref.path, secret_ref.key))
+}
+
+fn mcp_config_secret_refs(config: &Value) -> Vec<String> {
+    config
+        .get("secret_refs")
+        .and_then(Value::as_array)
+        .map(|refs| {
+            refs.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 async fn get_provider_health(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -5965,6 +6025,7 @@ async fn create_mcp_server(
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     input.name = normalize_mcp_name(&input.name)?;
     input.transport = normalize_mcp_transport(&input.transport)?;
+    input.config = normalize_mcp_config(input.config)?;
     input.tool_allowlist = normalize_mcp_tool_allowlist(input.tool_allowlist)?;
     let server = state.create_mcp_server(id, input).await?;
     state
@@ -5996,6 +6057,9 @@ async fn update_mcp_server(
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
     if let Some(transport) = input.transport.as_deref() {
         input.transport = Some(normalize_mcp_transport(transport)?);
+    }
+    if let Some(config) = input.config.take() {
+        input.config = Some(normalize_mcp_config(config)?);
     }
     if let Some(tool_allowlist) = input.tool_allowlist.take() {
         input.tool_allowlist = Some(normalize_mcp_tool_allowlist(tool_allowlist)?);
@@ -6247,6 +6311,7 @@ async fn mcp_server_health(state: &AppState, server: &McpServerRecord) -> McpSer
     let gateway_configured = state.mcp_gateway_config.is_some();
     let mut gateway_allows_server = false;
     let mut gateway_reachable = false;
+    let secret_refs = mcp_config_secret_refs(&server.config);
 
     if server.status != "active" {
         issues.push(format!("MCP server status is {}", server.status));
@@ -6289,6 +6354,9 @@ async fn mcp_server_health(state: &AppState, server: &McpServerRecord) -> McpSer
         checks: json!({
             "transport": server.transport,
             "tool_allowlist_count": server.tool_allowlist.len(),
+            "secret_refs_count": secret_refs.len(),
+            "secret_refs": secret_refs,
+            "secret_values_loaded": false,
             "gateway_configured": gateway_configured,
             "gateway_allows_server": gateway_allows_server,
             "gateway_reachable": gateway_reachable,
@@ -12151,6 +12219,111 @@ not json
         assert!(transcript.contains("RCPT TO:<ops@example.com>"));
         assert!(transcript.contains("Subject: MandoForge cost alert"));
         assert!(transcript.contains("smtp-provider [critical]"));
+    }
+
+    #[tokio::test]
+    async fn mcp_server_config_normalizes_secret_refs_without_secret_values() {
+        let app = test_app().await;
+        let organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/organizations")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "MCP Secret Org", "slug": "mcp-secret-org"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/organizations/{}/teams", organization.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "MCP Secret Team", "slug": "mcp-secret-team"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let server: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/mcp-servers", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "secret-docs",
+                        "transport": "http",
+                        "tool_allowlist": ["search"],
+                        "config": {
+                            "endpoint": "https://mcp.example.invalid",
+                            "secret_ref": " vault:mcp/docs#api_key "
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(server.config["secret_refs"][0], "vault:mcp/docs#api_key");
+        assert!(server.config.get("secret_ref").is_none());
+        assert!(server.config["api_key"].is_null());
+
+        let health: McpServerHealth = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}/health",
+                    team.id, server.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(health.checks["secret_refs_count"], 1);
+        assert_eq!(health.checks["secret_refs"][0], "vault:mcp/docs#api_key");
+        assert_eq!(health.checks["secret_values_loaded"], false);
+
+        let (status, invalid_secret_ref) = request_value(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/mcp-servers", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "bad-secret-docs",
+                        "transport": "http",
+                        "tool_allowlist": ["search"],
+                        "config": {"secret_refs": ["vault:../mcp/docs#api_key"]}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            invalid_secret_ref["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid secret path")
+        );
     }
 
     #[tokio::test]

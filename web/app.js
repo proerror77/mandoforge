@@ -2391,6 +2391,7 @@ function renderMcpServers() {
               <strong>${escapeHtml(server.name)}</strong>
               <div class="muted">${escapeHtml(server.transport)} · ${escapeHtml(server.status)}</div>
               <div class="muted">Tools: ${escapeHtml(server.tool_allowlist.join(", ") || "none")}</div>
+              <div class="muted">Secret refs: ${escapeHtml((server.config?.secret_refs || []).join(", ") || "none")}</div>
               <button class="secondary" data-edit-mcp="${server.id}">Edit Config</button>
               <button class="secondary" data-health-mcp="${server.id}">Check Health</button>
               <button class="secondary" data-discover-mcp="${server.id}">Discover Tools</button>
