@@ -40,6 +40,7 @@ const state = {
   projects: [],
   memberships: [],
   tenantInvitations: [],
+  tenantProvisioning: null,
   selectedOrganizationId: "",
   selectedTeamId: "",
   approvalDeliveries: {},
@@ -107,6 +108,7 @@ const membershipRoot = document.querySelector("#memberships");
 const tenantInvitationRoot = document.querySelector("#tenant-invitations");
 const agentForm = document.querySelector("#agent-form");
 const organizationForm = document.querySelector("#organization-form");
+const tenantProvisioningForm = document.querySelector("#tenant-provisioning-form");
 const organizationOwnerForm = document.querySelector("#organization-owner-form");
 const teamForm = document.querySelector("#team-form");
 const projectForm = document.querySelector("#project-form");
@@ -142,6 +144,7 @@ const codexAppServerRoot = document.querySelector("#codex-app-server");
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
 organizationForm.addEventListener("submit", createOrganization);
+tenantProvisioningForm.addEventListener("submit", bootstrapTenantProvisioning);
 organizationOwnerForm.addEventListener("submit", transferOrganizationOwnership);
 teamForm.addEventListener("submit", createTeam);
 projectForm.addEventListener("submit", createProject);
@@ -231,6 +234,27 @@ async function createOrganization(event) {
     }),
   });
   setOrganizationId(organization.id);
+  await refreshOps();
+}
+
+async function bootstrapTenantProvisioning(event) {
+  event.preventDefault();
+  const form = new FormData(tenantProvisioningForm);
+  state.tenantProvisioning = await api("/api/tenant-provisioning/bootstrap", {
+    method: "POST",
+    body: JSON.stringify({
+      owner_subject: String(form.get("owner_subject") || "").trim(),
+      organization_name: String(form.get("organization_name") || "").trim(),
+      organization_slug: String(form.get("organization_slug") || "").trim(),
+      team_name: String(form.get("team_name") || "").trim(),
+      team_slug: String(form.get("team_slug") || "").trim(),
+      owner_role: "admin",
+    }),
+  });
+  setOrganizationId(state.tenantProvisioning.organization.id);
+  if (state.tenantProvisioning.team) {
+    setTeamId(state.tenantProvisioning.team.id);
+  }
   await refreshOps();
 }
 
@@ -1297,8 +1321,14 @@ function renderExecutionJobs() {
 }
 
 function renderTenantGovernance() {
+  const provisioning = state.tenantProvisioning
+    ? `<div class="item">
+        <strong>Tenant provisioned</strong>
+        <div class="muted">Org ${escapeHtml(state.tenantProvisioning.organization.id)} · Team ${escapeHtml(state.tenantProvisioning.team?.id || "none")} · Owner ${escapeHtml(state.tenantProvisioning.owner_membership.user_id)}</div>
+      </div>`
+    : "";
   organizationRoot.innerHTML = state.organizations.length
-    ? state.organizations
+    ? `${provisioning}${state.organizations
         .map(
           (organization) => `
             <div class="item">
@@ -1315,8 +1345,8 @@ function renderTenantGovernance() {
             </div>
           `,
         )
-        .join("")
-    : `<div class="muted">No organizations yet</div>`;
+        .join("")}`
+    : `${provisioning}<div class="muted">No organizations yet</div>`;
   organizationRoot.querySelectorAll("[data-organization]").forEach((button) => {
     button.addEventListener("click", async () => {
       setOrganizationId(button.dataset.organization);

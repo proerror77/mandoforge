@@ -115,6 +115,29 @@
                 </label>
                 <button type="submit">Create Organization</button>
               </form>
+              <form id="tenant-provisioning-form" class="stack-form compact-form">
+                <label>
+                  Owner subject
+                  <input name="owner_subject" required value="tenant-owner-1" />
+                </label>
+                <label>
+                  Organization
+                  <input name="organization_name" required value="Provisioned Org" />
+                </label>
+                <label>
+                  Organization slug
+                  <input name="organization_slug" required value="provisioned-org" />
+                </label>
+                <label>
+                  Team
+                  <input name="team_name" value="Provisioned Team" />
+                </label>
+                <label>
+                  Team slug
+                  <input name="team_slug" value="provisioned-team" />
+                </label>
+                <button type="submit">Bootstrap Tenant</button>
+              </form>
               <form id="organization-owner-form" class="stack-form compact-form">
                 <label>
                   Organization ID

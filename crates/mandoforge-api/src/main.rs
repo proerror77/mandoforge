@@ -683,6 +683,31 @@ struct TransferOrganizationOwnership {
     owner_subject: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct BootstrapTenantProvisioning {
+    organization_name: String,
+    organization_slug: String,
+    owner_subject: String,
+    #[serde(default)]
+    team_name: Option<String>,
+    #[serde(default)]
+    team_slug: Option<String>,
+    #[serde(default)]
+    project_name: Option<String>,
+    #[serde(default)]
+    project_slug: Option<String>,
+    #[serde(default = "default_bootstrap_owner_role")]
+    owner_role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantProvisioningResult {
+    organization: Organization,
+    team: Option<Team>,
+    project: Option<Project>,
+    owner_membership: Membership,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Team {
     id: Uuid,
@@ -1342,6 +1367,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/organizations",
             get(list_organizations).post(create_organization),
+        )
+        .route(
+            "/api/tenant-provisioning/bootstrap",
+            post(bootstrap_tenant_provisioning),
         )
         .route("/api/organizations/{id}", delete(delete_organization))
         .route(
@@ -3363,6 +3392,120 @@ async fn create_organization(
         ))
         .await?;
     Ok(Json(organization))
+}
+
+async fn bootstrap_tenant_provisioning(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<BootstrapTenantProvisioning>,
+) -> Result<Json<TenantProvisioningResult>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "tenant_provisioning".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let owner_subject = required_trimmed(&input.owner_subject, "owner_subject")?;
+    let organization_name = required_trimmed(&input.organization_name, "organization_name")?;
+    let organization_slug = required_trimmed(&input.organization_slug, "organization_slug")?;
+    let team_parts = match (
+        optional_trimmed(input.team_name.as_deref()),
+        optional_trimmed(input.team_slug.as_deref()),
+    ) {
+        (Some(name), Some(slug)) => Some((name, slug)),
+        (None, None) => None,
+        _ => {
+            return Err(AppError::bad_request(
+                "team_name and team_slug must be provided together",
+            ));
+        }
+    };
+    let project_parts = match (
+        optional_trimmed(input.project_name.as_deref()),
+        optional_trimmed(input.project_slug.as_deref()),
+    ) {
+        (Some(name), Some(slug)) => {
+            if team_parts.is_none() {
+                return Err(AppError::bad_request(
+                    "project provisioning requires team_name and team_slug",
+                ));
+            }
+            Some((name, slug))
+        }
+        (None, None) => None,
+        _ => {
+            return Err(AppError::bad_request(
+                "project_name and project_slug must be provided together",
+            ));
+        }
+    };
+    let organization = state
+        .create_organization(
+            CreateOrganization {
+                name: organization_name,
+                slug: organization_slug,
+            },
+            Some(owner_subject.clone()),
+        )
+        .await?;
+    let team = match team_parts {
+        Some((name, slug)) => Some(
+            state
+                .create_team(organization.id, CreateTeam { name, slug })
+                .await?,
+        ),
+        None => None,
+    };
+    let project = match project_parts {
+        Some((name, slug)) => {
+            let team = team.as_ref().expect("project parts require team parts");
+            Some(
+                state
+                    .create_project(team.id, CreateProject { name, slug })
+                    .await?,
+            )
+        }
+        None => None,
+    };
+    let owner_membership = state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: owner_subject.clone(),
+                team_id: team.as_ref().map(|team| team.id),
+                project_id: project.as_ref().map(|project| project.id),
+                role: input.owner_role.trim().to_string(),
+            },
+        )
+        .await?;
+    let result = TenantProvisioningResult {
+        organization,
+        team,
+        project,
+        owner_membership,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.provisioned",
+            "tenant_provisioning",
+            Some(result.organization.id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": result.organization.id,
+                "team_id": result.team.as_ref().map(|team| team.id),
+                "project_id": result.project.as_ref().map(|project| project.id),
+                "owner_subject": owner_subject,
+                "owner_membership_id": result.owner_membership.id
+            }),
+        ))
+        .await?;
+    Ok(Json(result))
 }
 
 async fn archive_organization(
@@ -7104,6 +7247,21 @@ fn validate_cost_alert_route_input(
     Ok(input)
 }
 
+fn required_trimmed(value: &str, field_name: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::bad_request(format!("{field_name} is required")));
+    }
+    Ok(value.to_string())
+}
+
+fn optional_trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn merge_approval_evidence(target: &mut Value, patch: Value) {
     if !target.is_object() {
         *target = json!({"details": target.clone()});
@@ -8100,6 +8258,10 @@ fn default_artifact_type() -> String {
 
 fn default_cost_alert_severity_filter() -> String {
     "warning".to_string()
+}
+
+fn default_bootstrap_owner_role() -> String {
+    "admin".to_string()
 }
 
 fn default_provider() -> String {
@@ -9248,6 +9410,99 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "tenant.invitation_revoked")
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_provisioning_bootstrap_creates_owner_scope_and_audit() {
+        let app = test_app().await;
+
+        let provisioned: TenantProvisioningResult = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tenant-provisioning/bootstrap")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "organization_name": "Bootstrap Org",
+                        "organization_slug": "bootstrap-org",
+                        "owner_subject": "tenant-owner-1",
+                        "team_name": "Bootstrap Team",
+                        "team_slug": "bootstrap-team",
+                        "project_name": "Bootstrap Project",
+                        "project_slug": "bootstrap-project",
+                        "owner_role": "admin"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            provisioned.organization.owner_subject.as_deref(),
+            Some("tenant-owner-1")
+        );
+        assert_eq!(
+            provisioned.team.as_ref().map(|team| team.organization_id),
+            Some(provisioned.organization.id)
+        );
+        assert_eq!(
+            provisioned.project.as_ref().map(|project| project.team_id),
+            provisioned.team.as_ref().map(|team| team.id)
+        );
+        assert_eq!(provisioned.owner_membership.user_id, "tenant-owner-1");
+        assert_eq!(provisioned.owner_membership.role, "admin");
+        assert_eq!(
+            provisioned.owner_membership.project_id,
+            provisioned.project.as_ref().map(|project| project.id)
+        );
+
+        let (status, invalid_project_without_team) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tenant-provisioning/bootstrap")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "organization_name": "Invalid Project Org",
+                        "organization_slug": "invalid-project-org",
+                        "owner_subject": "tenant-owner-2",
+                        "project_name": "Missing Team Project",
+                        "project_slug": "missing-team-project"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            invalid_project_without_team["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("project provisioning requires")
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "tenant.provisioned")
         );
     }
 
