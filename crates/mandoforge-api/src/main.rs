@@ -542,6 +542,36 @@ struct SchedulerDuePlanItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchedulerOrchestrationSummary {
+    generated_at: DateTime<Utc>,
+    status: String,
+    plan: SchedulerDuePlan,
+    recent_run_count: usize,
+    last_run_at: Option<DateTime<Utc>>,
+    last_run_status: Option<String>,
+    last_run_action_count: usize,
+    recent_runs: Vec<SchedulerRunHistoryItem>,
+    attention_items: Vec<SchedulerAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchedulerRunHistoryItem {
+    audit_log_id: Uuid,
+    status: String,
+    team_count: usize,
+    action_count: usize,
+    actions: Vec<String>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchedulerAttentionItem {
+    severity: String,
+    kind: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolCall {
     id: Uuid,
     session_id: Uuid,
@@ -2212,6 +2242,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/usage/alerts", get(get_cost_alerts))
         .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
+        .route("/api/scheduler/summary", get(get_scheduler_summary))
         .route("/api/scheduler/due-plan", get(get_scheduler_due_plan))
         .route("/api/scheduler/run-due", post(run_scheduler_due_tasks))
         .route(
@@ -9845,6 +9876,115 @@ async fn get_scheduler_due_plan(
 ) -> Result<Json<SchedulerDuePlan>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
     Ok(Json(build_scheduler_due_plan(&state).await?))
+}
+
+async fn get_scheduler_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SchedulerOrchestrationSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
+    Ok(Json(build_scheduler_orchestration_summary(&state).await?))
+}
+
+async fn build_scheduler_orchestration_summary(
+    state: &AppState,
+) -> Result<SchedulerOrchestrationSummary, AppError> {
+    let generated_at = Utc::now();
+    let plan = build_scheduler_due_plan(state).await?;
+    let mut recent_runs: Vec<_> = state
+        .list_audit_logs(None)
+        .await?
+        .into_iter()
+        .filter(|log| log.action == "scheduler.run_due")
+        .filter_map(scheduler_run_history_item)
+        .collect();
+    recent_runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    recent_runs.truncate(10);
+    let last_run = recent_runs.first();
+    let mut attention_items = Vec::new();
+    if plan.status == "blocked" {
+        attention_items.push(SchedulerAttentionItem {
+            severity: "warning".to_string(),
+            kind: "blocked_plan".to_string(),
+            message: "scheduler has a blocked due-plan item that needs configuration".to_string(),
+        });
+    }
+    if plan.actionable_count > 0 {
+        attention_items.push(SchedulerAttentionItem {
+            severity: "warning".to_string(),
+            kind: "due_actions".to_string(),
+            message: format!(
+                "{} scheduler item(s) are ready for due-run execution",
+                plan.actionable_count
+            ),
+        });
+    }
+    if let Some(run) = last_run
+        && run.status != "completed"
+        && run.status != "noop"
+    {
+        attention_items.push(SchedulerAttentionItem {
+            severity: "critical".to_string(),
+            kind: "last_run_unhealthy".to_string(),
+            message: format!("last scheduler due-run ended with status {}", run.status),
+        });
+    }
+    let status = if attention_items
+        .iter()
+        .any(|item| item.severity == "critical")
+    {
+        "critical"
+    } else if !attention_items.is_empty() {
+        "attention"
+    } else {
+        "ok"
+    }
+    .to_string();
+    Ok(SchedulerOrchestrationSummary {
+        generated_at,
+        status,
+        plan,
+        recent_run_count: recent_runs.len(),
+        last_run_at: last_run.map(|run| run.created_at),
+        last_run_status: last_run.map(|run| run.status.clone()),
+        last_run_action_count: last_run.map(|run| run.action_count).unwrap_or(0),
+        recent_runs,
+        attention_items,
+    })
+}
+
+fn scheduler_run_history_item(log: AuditLog) -> Option<SchedulerRunHistoryItem> {
+    let status = log
+        .details
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let team_count = log
+        .details
+        .get("team_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let actions: Vec<String> = log
+        .details
+        .get("actions")
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(SchedulerRunHistoryItem {
+        audit_log_id: log.id,
+        status,
+        team_count,
+        action_count: actions.len(),
+        actions,
+        created_at: log.created_at,
+    })
 }
 
 async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, AppError> {
@@ -19587,6 +19727,26 @@ not json
         }
         assert!(
             run.actions
+                .iter()
+                .any(|action| action == "mcp_health_checks_processed")
+        );
+
+        let summary: SchedulerOrchestrationSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/scheduler/summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(summary.last_run_status.as_deref(), Some("completed"));
+        assert_eq!(summary.recent_run_count, 1);
+        assert_eq!(summary.recent_runs[0].team_count, 1);
+        assert!(
+            summary.recent_runs[0]
+                .actions
                 .iter()
                 .any(|action| action == "mcp_health_checks_processed")
         );

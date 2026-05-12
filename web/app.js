@@ -45,6 +45,7 @@ const state = {
   observability: null,
   observabilityRemediationPlan: null,
   observabilityRemediation: null,
+  schedulerSummary: null,
   schedulerDuePlan: null,
   schedulerDueRun: null,
   costAlertDelivery: null,
@@ -1302,6 +1303,7 @@ async function refreshOps() {
     usageFinanceSummary,
     observability,
     observabilityRemediationPlan,
+    schedulerSummary,
     schedulerDuePlan,
     usageRollups,
     costAlertRoutes,
@@ -1325,6 +1327,7 @@ async function refreshOps() {
       api("/api/usage/finance-summary"),
       api("/api/observability"),
       api("/api/observability/remediation/plan"),
+      api("/api/scheduler/summary"),
       api("/api/scheduler/due-plan"),
       api("/api/usage/rollups"),
       api("/api/usage/alert-routes"),
@@ -1347,6 +1350,7 @@ async function refreshOps() {
   state.usageFinanceSummary = usageFinanceSummary;
   state.observability = observability;
   state.observabilityRemediationPlan = observabilityRemediationPlan;
+  state.schedulerSummary = schedulerSummary;
   state.schedulerDuePlan = schedulerDuePlan;
   state.usageRollups = usageRollups;
   state.costAlertRoutes = costAlertRoutes;
@@ -1911,6 +1915,9 @@ function renderObservability() {
   const remediationPlan = state.observabilityRemediationPlan;
   const remediationPlanActions = remediationPlan?.actions || [];
   const remediation = state.observabilityRemediation;
+  const schedulerSummary = state.schedulerSummary;
+  const schedulerAttention = schedulerSummary?.attention_items || [];
+  const schedulerRuns = schedulerSummary?.recent_runs || [];
   const schedulerDuePlan = state.schedulerDuePlan;
   const schedulerDuePlanActions = schedulerDuePlan?.actions || [];
   const schedulerDueRun = state.schedulerDueRun;
@@ -1987,6 +1994,76 @@ function renderObservability() {
               : `<div class="muted">No remediation actions planned.</div>`
           }
           <div class="muted">Generated: ${escapeHtml(remediationPlan.generated_at)}</div>`
+        : ""
+    }
+    ${
+      schedulerSummary
+        ? `<h4>Scheduler Orchestration</h4>
+          <div class="metric-grid compact-metrics">
+            <div class="metric"><span>Status</span><strong>${escapeHtml(schedulerSummary.status)}</strong></div>
+            <div class="metric"><span>Recent Runs</span><strong>${formatInteger(schedulerSummary.recent_run_count)}</strong></div>
+            <div class="metric"><span>Last Actions</span><strong>${formatInteger(schedulerSummary.last_run_action_count)}</strong></div>
+            <div class="metric"><span>Attention</span><strong>${formatInteger(schedulerAttention.length)}</strong></div>
+          </div>
+          <dl>
+            <dt>Last run</dt>
+            <dd>${escapeHtml(schedulerSummary.last_run_at || "none")} · ${escapeHtml(schedulerSummary.last_run_status || "none")}</dd>
+          </dl>
+          ${
+            schedulerAttention.length
+              ? `<table class="usage-table">
+                  <thead>
+                    <tr>
+                      <th>Severity</th>
+                      <th>Kind</th>
+                      <th>Message</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${schedulerAttention
+                      .map(
+                        (item) => `
+                          <tr>
+                            <td><span class="budget-status ${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</span></td>
+                            <td>${escapeHtml(item.kind)}</td>
+                            <td>${escapeHtml(item.message)}</td>
+                          </tr>
+                        `,
+                      )
+                      .join("")}
+                  </tbody>
+                </table>`
+              : `<div class="muted">No scheduler attention items.</div>`
+          }
+          ${
+            schedulerRuns.length
+              ? `<table class="usage-table">
+                  <thead>
+                    <tr>
+                      <th>Run</th>
+                      <th>Status</th>
+                      <th>Teams</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${schedulerRuns
+                      .map(
+                        (run) => `
+                          <tr>
+                            <td>${escapeHtml(run.created_at)}</td>
+                            <td>${escapeHtml(run.status)}</td>
+                            <td>${formatInteger(run.team_count)}</td>
+                            <td>${escapeHtml((run.actions || []).join(", ") || "no action")}</td>
+                          </tr>
+                        `,
+                      )
+                      .join("")}
+                  </tbody>
+                </table>`
+              : `<div class="muted">No scheduler run history yet.</div>`
+          }
+          <div class="muted">Generated: ${escapeHtml(schedulerSummary.generated_at)}</div>`
         : ""
     }
     ${
