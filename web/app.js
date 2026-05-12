@@ -16,6 +16,8 @@ const state = {
   policyRevisions: [],
   policyRevisionDiffs: {},
   policyRevisionGates: {},
+  policyScheduledRolloutRun: null,
+  policyRollback: null,
   evalDatasets: [],
   evalCases: [],
   evalRuns: [],
@@ -84,6 +86,8 @@ const policyRolloutPercentInput = document.querySelector("#policy-rollout-percen
 const policyActivateAfterInput = document.querySelector("#policy-activate-after");
 const policyActivateBeforeInput = document.querySelector("#policy-activate-before");
 const cancelPolicyRolloutButton = document.querySelector("#cancel-policy-rollout");
+const runDuePolicyRolloutsButton = document.querySelector("#run-due-policy-rollouts");
+const rollbackPolicyRolloutButton = document.querySelector("#rollback-policy-rollout");
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
@@ -144,6 +148,8 @@ policyForm.addEventListener("submit", simulatePolicy);
 policyTestForm.addEventListener("submit", testPolicy);
 policyRevisionForm.addEventListener("submit", createPolicyRevision);
 cancelPolicyRolloutButton.addEventListener("click", cancelPolicyRollout);
+runDuePolicyRolloutsButton.addEventListener("click", runDuePolicyRollouts);
+rollbackPolicyRolloutButton.addEventListener("click", rollbackPolicyRollout);
 evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
 evalRunForm.addEventListener("submit", createEvalRun);
@@ -438,6 +444,21 @@ async function activatePolicyRevision(id) {
 
 async function cancelPolicyRollout() {
   state.policyRuntime = await api("/api/policy/rollout/cancel", { method: "POST" });
+  renderPolicy();
+}
+
+async function runDuePolicyRollouts() {
+  state.policyScheduledRolloutRun = await api("/api/policy/rollout/run-due", { method: "POST" });
+  state.policyRuntime = await api("/api/policy/runtime");
+  state.policyRevisions = await api("/api/policy/revisions");
+  renderPolicy();
+}
+
+async function rollbackPolicyRollout() {
+  state.policyRollback = await api("/api/policy/rollout/rollback", { method: "POST" });
+  state.policyRuntime = await api("/api/policy/runtime");
+  state.policyRevisions = await api("/api/policy/revisions");
+  state.policy = await api("/api/policy");
   renderPolicy();
 }
 
@@ -1554,6 +1575,8 @@ function renderPolicy() {
     <dl>
       <dt>Runtime rollout</dt>
       <dd>${escapeHtml(runtime.rollout_active ? `staged ${runtime.staged_rollout_percent}%` : "baseline only")}</dd>
+      <dt>Active revision</dt>
+      <dd>${escapeHtml(runtime.active_revision_id || "config baseline")}</dd>
       <dt>Staged revision</dt>
       <dd>${escapeHtml(runtime.staged_revision_id || "none")}</dd>
       <dt>Blocked tools</dt>
@@ -1579,6 +1602,24 @@ function renderPolicy() {
         <strong>Policy test</strong>
         <div class="muted">${escapeHtml(state.policyTest.tested_at)}</div>
         <pre>${escapeHtml(JSON.stringify(state.policyTest.decisions, null, 2))}</pre>
+      </div>
+    `;
+  }
+  if (state.policyScheduledRolloutRun) {
+    policyDecisionRoot.innerHTML += `
+      <div class="item">
+        <strong>Scheduled rollout run: ${escapeHtml(state.policyScheduledRolloutRun.status)}</strong>
+        <div class="muted">${escapeHtml(state.policyScheduledRolloutRun.reason || "")}</div>
+        <pre>${escapeHtml(JSON.stringify(state.policyScheduledRolloutRun, null, 2))}</pre>
+      </div>
+    `;
+  }
+  if (state.policyRollback) {
+    policyDecisionRoot.innerHTML += `
+      <div class="item">
+        <strong>Policy rollback complete</strong>
+        <div class="muted">${escapeHtml(state.policyRollback.rolled_back_from_revision_id)} -> ${escapeHtml(state.policyRollback.active_revision_id)}</div>
+        <pre>${escapeHtml(JSON.stringify(state.policyRollback, null, 2))}</pre>
       </div>
     `;
   }
@@ -1633,6 +1674,8 @@ function renderPolicy() {
     button.addEventListener("click", () => activatePolicyRevision(button.dataset.policyActivate));
   });
   cancelPolicyRolloutButton.disabled = !state.policyRuntime?.rollout_active;
+  rollbackPolicyRolloutButton.disabled =
+    Boolean(state.policyRuntime?.rollout_active) || !state.policyRuntime?.active_revision_id;
 }
 
 function policyActivationWindowLabel(gate) {

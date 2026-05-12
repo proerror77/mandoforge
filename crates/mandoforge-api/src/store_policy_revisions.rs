@@ -227,4 +227,148 @@ impl AppState {
             }
         }
     }
+
+    pub(crate) async fn previous_activated_policy_revision(
+        &self,
+        current_id: Uuid,
+    ) -> Result<Option<PolicyRevision>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut revisions: Vec<_> = inner
+                    .read()
+                    .await
+                    .policy_revisions
+                    .values()
+                    .filter(|revision| {
+                        revision.id != current_id
+                            && revision.status == "archived"
+                            && revision.activated_at.is_some()
+                    })
+                    .cloned()
+                    .collect();
+                revisions.sort_by_key(|revision| revision.activated_at);
+                revisions.reverse();
+                Ok(revisions.into_iter().next())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, name, body, status, created_by, created_at, activated_at, gate_status, gate_result, gated_at
+                     FROM policy_revisions
+                     WHERE tenant_id = $1
+                       AND id <> $2
+                       AND status = 'archived'
+                       AND activated_at IS NOT NULL
+                     ORDER BY activated_at DESC
+                     LIMIT 1",
+                )
+                .bind(self.tenant_id)
+                .bind(current_id)
+                .fetch_optional(pool)
+                .await?;
+                row.map(policy_revision_from_row).transpose()
+            }
+        }
+    }
+
+    pub(crate) async fn rollback_policy_revision(
+        &self,
+        current_id: Uuid,
+        target_id: Uuid,
+    ) -> Result<PolicyRevision, AppError> {
+        let rolled_back_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                {
+                    let current = store
+                        .policy_revisions
+                        .get_mut(&current_id)
+                        .ok_or_else(|| AppError::not_found("active policy revision not found"))?;
+                    if current.status != "active" {
+                        return Err(AppError::bad_request(
+                            "current policy revision is not active",
+                        ));
+                    }
+                    current.status = "archived".to_string();
+                }
+                let target = store.policy_revisions.get_mut(&target_id).ok_or_else(|| {
+                    AppError::not_found("rollback target policy revision not found")
+                })?;
+                if target.status != "archived" {
+                    return Err(AppError::bad_request(
+                        "rollback target policy revision must be archived",
+                    ));
+                }
+                target.status = "active".to_string();
+                target.activated_at = Some(rolled_back_at);
+                Ok(target.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let current_status: Option<String> = sqlx::query_scalar(
+                    "SELECT status
+                     FROM policy_revisions
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(current_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                match current_status.as_deref() {
+                    Some("active") => {}
+                    Some(_) => {
+                        return Err(AppError::bad_request(
+                            "current policy revision is not active",
+                        ));
+                    }
+                    None => return Err(AppError::not_found("active policy revision not found")),
+                }
+
+                let target_status: Option<String> = sqlx::query_scalar(
+                    "SELECT status
+                     FROM policy_revisions
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(target_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                match target_status.as_deref() {
+                    Some("archived") => {}
+                    Some(_) => {
+                        return Err(AppError::bad_request(
+                            "rollback target policy revision must be archived",
+                        ));
+                    }
+                    None => {
+                        return Err(AppError::not_found(
+                            "rollback target policy revision not found",
+                        ));
+                    }
+                }
+
+                sqlx::query(
+                    "UPDATE policy_revisions
+                     SET status = 'archived'
+                     WHERE tenant_id = $1 AND status = 'active'",
+                )
+                .bind(self.tenant_id)
+                .execute(&mut *tx)
+                .await?;
+                let row = sqlx::query(
+                    "UPDATE policy_revisions
+                     SET status = 'active', activated_at = $3
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING id, name, body, status, created_by, created_at, activated_at, gate_status, gate_result, gated_at",
+                )
+                .bind(self.tenant_id)
+                .bind(target_id)
+                .bind(rolled_back_at)
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                policy_revision_from_row(row)
+            }
+        }
+    }
 }

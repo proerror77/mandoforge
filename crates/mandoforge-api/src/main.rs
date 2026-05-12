@@ -149,6 +149,25 @@ struct PolicyRuntimeStatus {
     rollout_active: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyRollbackResult {
+    rolled_back_from_revision_id: Uuid,
+    active_revision_id: Uuid,
+    active_revision: PolicyRevision,
+    rolled_back_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyScheduledRolloutRun {
+    status: String,
+    activated_revision_id: Option<Uuid>,
+    activated_revision: Option<PolicyRevision>,
+    scanned_count: usize,
+    skipped_count: usize,
+    checked_at: DateTime<Utc>,
+    reason: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecutionQueueBackendSelection {
     Memory,
@@ -1315,6 +1334,11 @@ fn build_router(state: AppState) -> Router {
         .route("/api/policy", get(get_policy))
         .route("/api/policy/runtime", get(get_policy_runtime))
         .route("/api/policy/rollout/cancel", post(cancel_policy_rollout))
+        .route(
+            "/api/policy/rollout/rollback",
+            post(rollback_policy_rollout),
+        )
+        .route("/api/policy/rollout/run-due", post(run_due_policy_rollouts))
         .route("/api/policy/simulate", post(simulate_policy))
         .route("/api/policy/test", post(test_policy))
         .route(
@@ -1599,6 +1623,16 @@ impl AppState {
             staged_rollout_percent: None,
             rollout_active: false,
         })
+    }
+
+    async fn rollback_runtime_policy(&self, revision: &PolicyRevision) -> Result<(), AppError> {
+        let policy = serde_json::from_value::<PolicyConfig>(revision.body.clone())
+            .map_err(|error| AppError::bad_request(format!("invalid rollback policy: {error}")))?;
+        let mut runtime = self.policy.write().await;
+        runtime.active_revision_id = Some(revision.id);
+        runtime.active = policy;
+        runtime.staged = None;
+        Ok(())
     }
 
     pub(crate) async fn record_codex_app_server_run(
@@ -3549,6 +3583,135 @@ async fn cancel_policy_rollout(
     Ok(Json(status))
 }
 
+async fn rollback_policy_rollout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRollbackResult>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "policy".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let runtime = state.policy_runtime_status().await;
+    if runtime.rollout_active {
+        return Err(AppError::bad_request(
+            "cancel staged policy rollout before rollback",
+        ));
+    }
+    let current_id = runtime
+        .active_revision_id
+        .ok_or_else(|| AppError::bad_request("no active policy revision to roll back"))?;
+    let target = state
+        .previous_activated_policy_revision(current_id)
+        .await?
+        .ok_or_else(|| AppError::bad_request("no previous policy revision to roll back to"))?;
+    let active_revision = state
+        .rollback_policy_revision(current_id, target.id)
+        .await?;
+    state.rollback_runtime_policy(&active_revision).await?;
+    let result = PolicyRollbackResult {
+        rolled_back_from_revision_id: current_id,
+        active_revision_id: active_revision.id,
+        active_revision,
+        rolled_back_at: Utc::now(),
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.rollback_completed",
+            "policy_revision",
+            Some(result.active_revision_id),
+            json!({
+                "subject": principal.subject_id,
+                "rolled_back_from_revision_id": result.rolled_back_from_revision_id,
+                "active_revision_id": result.active_revision_id,
+                "rolled_back_at": result.rolled_back_at
+            }),
+        ))
+        .await?;
+    Ok(Json(result))
+}
+
+async fn run_due_policy_rollouts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyScheduledRolloutRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "policy".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let now = Utc::now();
+    let revisions = state.list_policy_revisions().await?;
+    let mut due_revisions = Vec::new();
+    let mut skipped_count = 0usize;
+    for revision in &revisions {
+        if policy_revision_is_due_for_scheduled_activation(revision, now) {
+            due_revisions.push(revision.clone());
+        } else {
+            skipped_count += 1;
+        }
+    }
+    due_revisions.sort_by_key(|revision| {
+        policy_revision_activation_window(revision)
+            .and_then(|window| window.activate_after)
+            .unwrap_or(revision.created_at)
+    });
+
+    let result = if let Some(revision) = due_revisions.into_iter().next() {
+        let activated_revision = activate_policy_revision_for_runtime(&state, revision.id).await?;
+        PolicyScheduledRolloutRun {
+            status: "activated".to_string(),
+            activated_revision_id: Some(activated_revision.id),
+            activated_revision: Some(activated_revision),
+            scanned_count: revisions.len(),
+            skipped_count,
+            checked_at: now,
+            reason: "activated the earliest due policy revision".to_string(),
+        }
+    } else {
+        PolicyScheduledRolloutRun {
+            status: "noop".to_string(),
+            activated_revision_id: None,
+            activated_revision: None,
+            scanned_count: revisions.len(),
+            skipped_count,
+            checked_at: now,
+            reason: "no passed draft policy revision is inside its activation window".to_string(),
+        }
+    };
+
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.rollout_due_run",
+            "policy",
+            result.activated_revision_id,
+            json!({
+                "subject": principal.subject_id,
+                "status": result.status,
+                "activated_revision_id": result.activated_revision_id,
+                "scanned_count": result.scanned_count,
+                "skipped_count": result.skipped_count,
+                "checked_at": result.checked_at
+            }),
+        ))
+        .await?;
+    Ok(Json(result))
+}
+
 async fn create_policy_revision(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3662,15 +3825,8 @@ async fn activate_policy_revision(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
-    let pending_revision = state.get_policy_revision(id).await?;
-    enforce_policy_activation_window(&pending_revision, Utc::now())?;
-    let revision = state.activate_policy_revision(id).await?;
-    let activated_policy = serde_json::from_value::<PolicyConfig>(revision.body.clone())
-        .map_err(|error| AppError::bad_request(format!("invalid activated policy: {error}")))?;
+    let revision = activate_policy_revision_for_runtime(&state, id).await?;
     let rollout_percent = policy_revision_rollout_percent(&revision);
-    state
-        .activate_runtime_policy(revision.id, activated_policy, rollout_percent)
-        .await;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -3691,22 +3847,30 @@ async fn activate_policy_revision(
     Ok(Json(revision))
 }
 
+async fn activate_policy_revision_for_runtime(
+    state: &AppState,
+    id: Uuid,
+) -> Result<PolicyRevision, AppError> {
+    let pending_revision = state.get_policy_revision(id).await?;
+    enforce_policy_activation_window(&pending_revision, Utc::now())?;
+    let revision = state.activate_policy_revision(id).await?;
+    let activated_policy = serde_json::from_value::<PolicyConfig>(revision.body.clone())
+        .map_err(|error| AppError::bad_request(format!("invalid activated policy: {error}")))?;
+    let rollout_percent = policy_revision_rollout_percent(&revision);
+    state
+        .activate_runtime_policy(revision.id, activated_policy, rollout_percent)
+        .await;
+    Ok(revision)
+}
+
 fn enforce_policy_activation_window(
     revision: &PolicyRevision,
     now: DateTime<Utc>,
 ) -> Result<(), AppError> {
-    let Some(window) = revision.gate_result.get("activation_window") else {
+    let Some(window) = policy_revision_activation_window(revision) else {
         return Ok(());
     };
-    if window.is_null() {
-        return Ok(());
-    }
-    let activate_after = window
-        .get("activate_after")
-        .and_then(Value::as_str)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc));
-    if let Some(activate_after) = activate_after
+    if let Some(activate_after) = window.activate_after
         && now < activate_after
     {
         return Err(AppError::bad_request(format!(
@@ -3714,12 +3878,7 @@ fn enforce_policy_activation_window(
             activate_after.to_rfc3339()
         )));
     }
-    let activate_before = window
-        .get("activate_before")
-        .and_then(Value::as_str)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc));
-    if let Some(activate_before) = activate_before
+    if let Some(activate_before) = window.activate_before
         && now > activate_before
     {
         return Err(AppError::bad_request(format!(
@@ -3728,6 +3887,49 @@ fn enforce_policy_activation_window(
         )));
     }
     Ok(())
+}
+
+fn policy_revision_is_due_for_scheduled_activation(
+    revision: &PolicyRevision,
+    now: DateTime<Utc>,
+) -> bool {
+    if revision.status != "draft" || revision.gate_status.as_deref() != Some("passed") {
+        return false;
+    }
+    let Some(window) = policy_revision_activation_window(revision) else {
+        return false;
+    };
+    let Some(activate_after) = window.activate_after else {
+        return false;
+    };
+    if now < activate_after {
+        return false;
+    }
+    if let Some(activate_before) = window.activate_before
+        && now > activate_before
+    {
+        return false;
+    }
+    true
+}
+
+fn policy_revision_activation_window(revision: &PolicyRevision) -> Option<PolicyActivationWindow> {
+    let window = revision.gate_result.get("activation_window")?;
+    if window.is_null() {
+        return None;
+    }
+    Some(PolicyActivationWindow {
+        activate_after: window
+            .get("activate_after")
+            .and_then(Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc)),
+        activate_before: window
+            .get("activate_before")
+            .and_then(Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc)),
+    })
 }
 
 fn policy_revision_rollout_percent(revision: &PolicyRevision) -> u8 {
@@ -8008,6 +8210,34 @@ not json
         }
     }
 
+    fn test_policy_body(http_allowed: bool) -> Value {
+        let approval_required = if http_allowed {
+            json!([
+                {"tool": "shell.exec", "risk": "high"},
+                {"tool": "codex.exec", "risk": "high"},
+                {"tool": "file.write", "risk": "medium"}
+            ])
+        } else {
+            json!([
+                {"tool": "shell.exec", "risk": "high"},
+                {"tool": "codex.exec", "risk": "high"},
+                {"tool": "file.write", "risk": "medium"},
+                {"tool": "http.request", "risk": "high"}
+            ])
+        };
+        json!({
+            "blocked_tools": ["secret.read"],
+            "approval_required": approval_required,
+            "allowed_tools": {
+                "generic-orchestrator-agent": ["file.read", "file.write", "sql.get_schema", "sql.query", "shell.exec", "codex.exec", "approval.request", "artifact.create", "mcp.call", "http.request"]
+            },
+            "sql_policy": {
+                "max_rows": 500,
+                "blocked_keywords": ["INSERT", "UPDATE", "DELETE", "DROP"]
+            }
+        })
+    }
+
     #[tokio::test]
     async fn staged_policy_rollout_selects_candidate_by_session_bucket() {
         let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
@@ -8048,6 +8278,246 @@ not json
                 .evaluate_tool("http.request")
                 .decision,
             "requires_approval"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_rollout_can_rollback_and_run_due_activation() {
+        let app = test_app().await;
+
+        let baseline_revision: PolicyRevision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/revisions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "rollback-baseline-policy",
+                        "body": test_policy_body(false)
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _: PolicyRevisionGate = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/gate",
+                    baseline_revision.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let _: PolicyRevision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/activate",
+                    baseline_revision.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        let permissive_revision: PolicyRevision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/revisions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "rollback-permissive-policy",
+                        "body": test_policy_body(true)
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _: PolicyRevisionGate = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/gate",
+                    permissive_revision.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let _: PolicyRevision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/activate",
+                    permissive_revision.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        let allowed_http: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/simulate")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"tool_name": "http.request"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(allowed_http["decision"], "allowed");
+
+        let rollback: PolicyRollbackResult = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/rollout/rollback")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            rollback.rolled_back_from_revision_id,
+            permissive_revision.id
+        );
+        assert_eq!(rollback.active_revision_id, baseline_revision.id);
+        assert_eq!(rollback.active_revision.status, "active");
+
+        let rollback_http: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/simulate")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"tool_name": "http.request"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rollback_http["decision"], "requires_approval");
+
+        let scheduled_revision: PolicyRevision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/revisions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "scheduled-due-policy",
+                        "body": test_policy_body(true)
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let activate_after = (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let activate_before = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let scheduled_gate: PolicyRevisionGate = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/gate",
+                    scheduled_revision.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "activate_after": activate_after,
+                        "activate_before": activate_before
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(scheduled_gate.status, "passed");
+
+        let scheduled_run: PolicyScheduledRolloutRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/rollout/run-due")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(scheduled_run.status, "activated");
+        assert_eq!(
+            scheduled_run.activated_revision_id,
+            Some(scheduled_revision.id)
+        );
+
+        let scheduled_http: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/simulate")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"tool_name": "http.request"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(scheduled_http["decision"], "allowed");
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "policy.rollback_completed")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "policy.rollout_due_run")
         );
     }
 
