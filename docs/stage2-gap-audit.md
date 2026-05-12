@@ -16,12 +16,12 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 | Codex App Server adapter | Codex CLI adapter exists. | App Server thread/turn/interrupt adapter is not implemented. |
 | Evaluation | Eval datasets, cases, and version-bound run records are implemented with deterministic Stage 2 graders for policy decisions, tool allowlist coverage, SQL safety, sandbox path checks, and final-answer required fragments. Runs persist per-case details, pass count, score, and agent version evidence. | Regression gates, judge integrations, drift detection, and eval dashboards are not implemented. |
 | Observability | OTel exporter boundary exists and session event appends now export telemetry events when OTLP is enabled. Exported telemetry attributes classify session/provider/tool/approval/worker/sandbox/codex events as span-like signals and attach counters, status, duration, provider/client/tool IDs, approval IDs, worker IDs, and tool-call counts when present. | Dashboards, retry/backpressure, and full OTLP-native trace/metric encoding are not implemented. |
-| Cost tracking | Token/tool duration data is partially present in events and tool calls. | Cost tables, provider price config, usage aggregation, and dashboards are not implemented. |
+| Cost tracking | `GET /api/usage` aggregates session/event counts, provider requests/responses, configured provider per-request pricing, tool call status counts, tool runtime, and approval counts. | Token-level provider accounting, persisted cost rollups, budgets over cost windows, and dashboards are not implemented. |
 | UI v2 | Static Stage 1 console covers agents, sessions, timeline, approvals, and artifacts. | Admin/provider/vault/policy/worker/eval/usage pages are not implemented. |
 
 ## Next Stage 2 Slices
 
 1. Add MCP tool discovery import and UI management.
-2. Add provider settings UI and price/cost budget aggregation.
+2. Add provider settings UI, token-level provider accounting, persisted cost rollups, and dashboards.
 3. Add eval regression gates, judge integrations, drift detection, and dashboards.
 4. Add dashboards, retry/backpressure, and full OTLP-native trace/metric encoding.

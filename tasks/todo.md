@@ -116,3 +116,4 @@
 - [x] Enable `mcp.call` through Tool Router, MCP Gateway allowlist, events, tool calls, and audit.
 - [x] Add MCP server registry and per-team tool allowlist enforcement before `mcp.call`.
 - [ ] Add MCP tool discovery import and UI management.
+- [x] Add usage/cost aggregation API for provider requests, tool runtime, approvals, and configured provider pricing.

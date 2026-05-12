@@ -282,6 +282,37 @@ struct Artifact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageSummary {
+    session_count: usize,
+    event_count: usize,
+    provider_request_count: usize,
+    provider_response_count: usize,
+    tool_call_count: usize,
+    tool_success_count: usize,
+    tool_failed_count: usize,
+    approval_count: usize,
+    total_tool_duration_ms: i64,
+    estimated_provider_cost_cents: f64,
+    by_provider: HashMap<String, ProviderUsageSummary>,
+    by_tool: HashMap<String, ToolUsageSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ProviderUsageSummary {
+    request_count: usize,
+    response_count: usize,
+    estimated_cost_cents: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ToolUsageSummary {
+    call_count: usize,
+    success_count: usize,
+    failed_count: usize,
+    total_duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Organization {
     id: Uuid,
     name: String,
@@ -668,6 +699,7 @@ fn build_router(state: AppState) -> Router {
             get(list_dataset_eval_runs).post(create_eval_run),
         )
         .route("/api/eval/runs", get(list_eval_runs))
+        .route("/api/usage", get(get_usage_summary))
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
@@ -2303,6 +2335,104 @@ async fn create_eval_run(
     )
     .await?;
     Ok(Json(state.create_eval_run(id, input).await?))
+}
+
+async fn get_usage_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<UsageSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "usage", None).await?;
+    Ok(Json(build_usage_summary(&state).await?))
+}
+
+async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError> {
+    let sessions = state.list_sessions().await?;
+    let tool_calls = state.list_tool_calls(None).await?;
+    let approvals = state.list_approvals().await?;
+    let providers = state.list_providers().await?;
+    let provider_prices: HashMap<_, _> = providers
+        .iter()
+        .filter_map(|provider| {
+            provider
+                .config
+                .get("pricing")
+                .and_then(|pricing| pricing.get("per_request_cents"))
+                .and_then(Value::as_f64)
+                .map(|price| (provider.name.clone(), price))
+        })
+        .collect();
+
+    let mut event_count = 0;
+    let mut provider_request_count = 0;
+    let mut provider_response_count = 0;
+    let mut by_provider = HashMap::<String, ProviderUsageSummary>::new();
+    for session in &sessions {
+        for event in state.list_events(session.id).await? {
+            event_count += 1;
+            if event.event_type == "llm.request" || event.event_type == "llm.response" {
+                let provider = event
+                    .payload
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                let usage = by_provider.entry(provider.clone()).or_default();
+                if event.event_type == "llm.request" {
+                    provider_request_count += 1;
+                    usage.request_count += 1;
+                    usage.estimated_cost_cents +=
+                        provider_prices.get(&provider).copied().unwrap_or(0.0);
+                } else {
+                    provider_response_count += 1;
+                    usage.response_count += 1;
+                }
+            }
+        }
+    }
+
+    let mut by_tool = HashMap::<String, ToolUsageSummary>::new();
+    let mut total_tool_duration_ms = 0;
+    let mut tool_success_count = 0;
+    let mut tool_failed_count = 0;
+    for call in &tool_calls {
+        let tool = by_tool.entry(call.tool_name.clone()).or_default();
+        tool.call_count += 1;
+        if call.status == "completed" {
+            tool.success_count += 1;
+            tool_success_count += 1;
+        }
+        if matches!(call.status.as_str(), "failed" | "denied") {
+            tool.failed_count += 1;
+            tool_failed_count += 1;
+        }
+        if let (Some(started_at), Some(completed_at)) = (call.started_at, call.completed_at) {
+            let duration = completed_at
+                .signed_duration_since(started_at)
+                .num_milliseconds()
+                .max(0);
+            tool.total_duration_ms += duration;
+            total_tool_duration_ms += duration;
+        }
+    }
+
+    let estimated_provider_cost_cents = by_provider
+        .values()
+        .map(|usage| usage.estimated_cost_cents)
+        .sum();
+    Ok(UsageSummary {
+        session_count: sessions.len(),
+        event_count,
+        provider_request_count,
+        provider_response_count,
+        tool_call_count: tool_calls.len(),
+        tool_success_count,
+        tool_failed_count,
+        approval_count: approvals.len(),
+        total_tool_duration_ms,
+        estimated_provider_cost_cents,
+        by_provider,
+        by_tool,
+    })
 }
 
 async fn list_approvals(
@@ -4610,7 +4740,10 @@ not json
                         "provider_type": "mock",
                         "name": "governed-mock",
                         "default_model": "gpt-5.4-mini",
-                        "config": {"budget": {"daily_request_limit": 1}}
+                        "config": {
+                            "budget": {"daily_request_limit": 1},
+                            "pricing": {"per_request_cents": 2.5}
+                        }
                     })
                     .to_string(),
                 ))
@@ -4739,6 +4872,20 @@ not json
                 .unwrap_or_default()
                 .contains("exceeded daily request budget")
         );
+
+        let usage: UsageSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/usage")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(usage.provider_request_count, 1);
+        assert_eq!(usage.by_provider["governed-mock"].request_count, 1);
+        assert_eq!(usage.estimated_provider_cost_cents, 2.5);
 
         let scoped_agent: Agent = request_json(
             app.clone(),
