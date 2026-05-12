@@ -33,6 +33,7 @@ const state = {
   usageRollups: [],
   costAlertRoutes: [],
   usage: null,
+  observability: null,
   costAlertDelivery: null,
   costAlertAcknowledgement: null,
   organizations: [],
@@ -98,6 +99,7 @@ const agentReleaseRoot = document.querySelector("#agent-releases");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
 const usageRoot = document.querySelector("#usage-summary");
+const observabilityRoot = document.querySelector("#observability-summary");
 const usageRollupRoot = document.querySelector("#usage-rollups");
 const costAlertRouteRoot = document.querySelector("#cost-alert-routes");
 const governanceRoot = document.querySelector("#governance-status");
@@ -987,6 +989,7 @@ async function refreshOps() {
     evalDatasets,
     evalRuns,
     usage,
+    observability,
     usageRollups,
     costAlertRoutes,
     organizations,
@@ -1003,6 +1006,7 @@ async function refreshOps() {
       api("/api/eval/datasets"),
       api("/api/eval/runs"),
       api("/api/usage"),
+      api("/api/observability"),
       api("/api/usage/rollups"),
       api("/api/usage/alert-routes"),
       api("/api/organizations"),
@@ -1018,6 +1022,7 @@ async function refreshOps() {
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
   state.usage = usage;
+  state.observability = observability;
   state.usageRollups = usageRollups;
   state.costAlertRoutes = costAlertRoutes;
   state.organizations = organizations;
@@ -1154,6 +1159,7 @@ async function escalateApproval(id) {
 
 function renderOps() {
   renderUsage();
+  renderObservability();
   renderTenantGovernance();
   renderProviders();
   renderVaultHealth();
@@ -1467,6 +1473,69 @@ function renderTenantGovernance() {
   });
 }
 
+function renderObservability() {
+  const observability = state.observability;
+  if (!observability) {
+    observabilityRoot.innerHTML = `<div class="muted">Observability data is not loaded.</div>`;
+    return;
+  }
+  const backpressure = observability.backpressure || {};
+  const telemetry = observability.telemetry || {};
+  const errorEvents = observability.recent_error_events || [];
+  observabilityRoot.innerHTML = `
+    <div class="metric-grid">
+      <div class="metric">
+        <span>Backpressure</span>
+        <strong>${escapeHtml(backpressure.status || "unknown")}</strong>
+      </div>
+      <div class="metric">
+        <span>Pending approvals</span>
+        <strong>${formatInteger(backpressure.pending_approvals || 0)}</strong>
+      </div>
+      <div class="metric">
+        <span>Queued jobs</span>
+        <strong>${formatInteger(backpressure.queued_jobs || 0)}</strong>
+      </div>
+      <div class="metric">
+        <span>Failed signals</span>
+        <strong>${formatInteger(errorEvents.length)}</strong>
+      </div>
+    </div>
+    <dl>
+      <dt>Telemetry</dt>
+      <dd>${escapeHtml(telemetry.service_name || "unknown")} · ${escapeHtml(telemetry.otlp_enabled ? "OTLP enabled" : "OTLP disabled")} · sample ${escapeHtml(String(telemetry.sample_ratio ?? "unknown"))}</dd>
+      <dt>Sessions</dt>
+      <dd>${escapeHtml(formatCounts(observability.sessions_by_status))}</dd>
+      <dt>Tool calls</dt>
+      <dd>${escapeHtml(formatCounts(observability.tool_calls_by_status))}</dd>
+      <dt>Approvals</dt>
+      <dd>${escapeHtml(formatCounts(observability.approvals_by_status))}</dd>
+      <dt>Execution jobs</dt>
+      <dd>${escapeHtml(formatCounts(observability.execution_jobs_by_status))}</dd>
+      <dt>Event categories</dt>
+      <dd>${escapeHtml(formatCounts(observability.event_categories))}</dd>
+      <dt>Oldest queued job</dt>
+      <dd>${escapeHtml(backpressure.oldest_queued_job_age_seconds == null ? "none" : `${backpressure.oldest_queued_job_age_seconds}s`)}</dd>
+    </dl>
+    <h4>Recent Error Events</h4>
+    ${
+      errorEvents.length
+        ? errorEvents
+            .map(
+              (event) => `
+                <div class="item">
+                  <strong>${escapeHtml(event.event_type)}</strong>
+                  <div class="muted">${escapeHtml(event.status)} · seq ${formatInteger(event.seq)} · ${escapeHtml(event.created_at)}</div>
+                  <div class="muted">${escapeHtml(event.session_id)}</div>
+                </div>
+              `,
+            )
+            .join("")
+        : `<div class="muted">No recent error events</div>`
+    }
+  `;
+}
+
 function renderUsage() {
   const usage = state.usage;
   if (!usage) {
@@ -1664,6 +1733,16 @@ function renderUsage() {
 
 function formatInteger(value) {
   return Number(value || 0).toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+function formatCounts(counts) {
+  const entries = Object.entries(counts || {}).sort((left, right) => {
+    const countDelta = Number(right[1] || 0) - Number(left[1] || 0);
+    return countDelta || left[0].localeCompare(right[0]);
+  });
+  return entries.length
+    ? entries.map(([key, value]) => `${key}: ${formatInteger(value)}`).join(" · ")
+    : "none";
 }
 
 function formatCents(value) {

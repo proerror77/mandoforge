@@ -540,6 +540,50 @@ struct UsageSummary {
     provider_budgets: Vec<ProviderBudgetStatus>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilitySummary {
+    generated_at: DateTime<Utc>,
+    telemetry: ObservabilityTelemetryStatus,
+    sessions_by_status: HashMap<String, usize>,
+    tool_calls_by_status: HashMap<String, usize>,
+    approvals_by_status: HashMap<String, usize>,
+    execution_jobs_by_status: HashMap<String, usize>,
+    event_categories: HashMap<String, usize>,
+    recent_error_events: Vec<ObservabilityErrorEvent>,
+    backpressure: ObservabilityBackpressure,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityTelemetryStatus {
+    service_name: String,
+    otlp_enabled: bool,
+    sample_ratio: f64,
+    endpoint_configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityErrorEvent {
+    session_id: Uuid,
+    event_type: String,
+    seq: i64,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityBackpressure {
+    status: String,
+    queued_jobs: usize,
+    running_jobs: usize,
+    failed_jobs: usize,
+    retryable_jobs: usize,
+    pending_approvals: usize,
+    waiting_approval_sessions: usize,
+    failed_sessions: usize,
+    failed_tool_calls: usize,
+    oldest_queued_job_age_seconds: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ProviderUsageSummary {
     request_count: usize,
@@ -1528,6 +1572,7 @@ fn build_router(state: AppState) -> Router {
             "/api/usage/rollups",
             get(list_usage_rollups).post(create_usage_rollup),
         )
+        .route("/api/observability", get(get_observability_summary))
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
@@ -6298,6 +6343,14 @@ async fn get_usage_summary(
     Ok(Json(build_usage_summary(&state).await?))
 }
 
+async fn get_observability_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ObservabilitySummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
+    Ok(Json(build_observability_summary(&state).await?))
+}
+
 async fn get_cost_alerts(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6889,6 +6942,148 @@ async fn create_usage_rollup(
             .create_usage_rollup(period_start, period_end, summary)
             .await?,
     ))
+}
+
+async fn build_observability_summary(state: &AppState) -> Result<ObservabilitySummary, AppError> {
+    let sessions = state.list_sessions().await?;
+    let tool_calls = state.list_tool_calls(None).await?;
+    let approvals = state.list_approvals().await?;
+    let execution_jobs = state.execution_queue.list().await?;
+    let now = Utc::now();
+
+    let mut sessions_by_status = HashMap::new();
+    let mut event_categories = HashMap::new();
+    let mut recent_error_events = Vec::new();
+    for session in &sessions {
+        increment_count(&mut sessions_by_status, session.status.as_str());
+        for event in state.list_events(session.id).await? {
+            let category = event.event_type.split('.').next().unwrap_or("event");
+            increment_count(&mut event_categories, category);
+            if telemetry_status_for_event(&event) == "error" {
+                recent_error_events.push(ObservabilityErrorEvent {
+                    session_id: event.session_id,
+                    event_type: event.event_type,
+                    seq: event.seq,
+                    status: "error".to_string(),
+                    created_at: event.created_at,
+                });
+            }
+        }
+    }
+    recent_error_events.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.seq.cmp(&left.seq))
+    });
+    recent_error_events.truncate(10);
+
+    let mut tool_calls_by_status = HashMap::new();
+    let mut failed_tool_calls = 0;
+    for call in &tool_calls {
+        increment_count(&mut tool_calls_by_status, &call.status);
+        if matches!(call.status.as_str(), "failed" | "denied") {
+            failed_tool_calls += 1;
+        }
+    }
+
+    let mut approvals_by_status = HashMap::new();
+    let mut pending_approvals = 0;
+    for approval in &approvals {
+        increment_count(&mut approvals_by_status, &approval.status);
+        if approval.status == "pending" {
+            pending_approvals += 1;
+        }
+    }
+
+    let mut execution_jobs_by_status = HashMap::new();
+    let mut queued_jobs = 0;
+    let mut running_jobs = 0;
+    let mut failed_jobs = 0;
+    let mut retryable_jobs = 0;
+    let mut oldest_queued_at = None;
+    for job in &execution_jobs {
+        let status = execution_job_status_label(&job.status);
+        increment_count(&mut execution_jobs_by_status, status);
+        match job.status {
+            ExecutionJobStatus::Queued => {
+                queued_jobs += 1;
+                oldest_queued_at = Some(match oldest_queued_at {
+                    Some(oldest) if oldest <= job.enqueued_at => oldest,
+                    _ => job.enqueued_at,
+                });
+            }
+            ExecutionJobStatus::Running => running_jobs += 1,
+            ExecutionJobStatus::Failed => failed_jobs += 1,
+            ExecutionJobStatus::Completed => {}
+        }
+        if job.attempt_count > 0
+            && job.attempt_count < job.max_attempts
+            && job.status != ExecutionJobStatus::Completed
+        {
+            retryable_jobs += 1;
+        }
+    }
+
+    let waiting_approval_sessions = sessions
+        .iter()
+        .filter(|session| session.status == SessionStatus::WaitingApproval)
+        .count();
+    let failed_sessions = sessions
+        .iter()
+        .filter(|session| session.status == SessionStatus::Failed)
+        .count();
+    let oldest_queued_job_age_seconds =
+        oldest_queued_at.map(|queued_at| now.signed_duration_since(queued_at).num_seconds().max(0));
+    let backpressure_status = if failed_jobs > 0 || failed_sessions > 0 || failed_tool_calls > 0 {
+        "error"
+    } else if queued_jobs > 0 || running_jobs > 0 || pending_approvals > 0 {
+        "attention"
+    } else {
+        "healthy"
+    }
+    .to_string();
+
+    Ok(ObservabilitySummary {
+        generated_at: now,
+        telemetry: ObservabilityTelemetryStatus {
+            service_name: state.observability_config.service_name.clone(),
+            otlp_enabled: state.observability_config.is_enabled(),
+            sample_ratio: state.observability_config.sample_ratio,
+            endpoint_configured: state.observability_config.otlp_endpoint.is_some(),
+        },
+        sessions_by_status,
+        tool_calls_by_status,
+        approvals_by_status,
+        execution_jobs_by_status,
+        event_categories,
+        recent_error_events,
+        backpressure: ObservabilityBackpressure {
+            status: backpressure_status,
+            queued_jobs,
+            running_jobs,
+            failed_jobs,
+            retryable_jobs,
+            pending_approvals,
+            waiting_approval_sessions,
+            failed_sessions,
+            failed_tool_calls,
+            oldest_queued_job_age_seconds,
+        },
+    })
+}
+
+fn increment_count(counts: &mut HashMap<String, usize>, key: &str) {
+    *counts.entry(key.to_string()).or_default() += 1;
+}
+
+fn execution_job_status_label(status: &ExecutionJobStatus) -> &'static str {
+    match status {
+        ExecutionJobStatus::Queued => "queued",
+        ExecutionJobStatus::Running => "running",
+        ExecutionJobStatus::Completed => "completed",
+        ExecutionJobStatus::Failed => "failed",
+    }
 }
 
 async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError> {
@@ -12305,6 +12500,80 @@ not json
                 .and_then(|result| result["stdout"].as_str())
                 .unwrap_or_default()
                 .contains(&session.id.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn observability_summary_reports_dashboard_backpressure() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.name == "Generic Orchestrator Agent")
+            .expect("seeded generic orchestrator agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "Observability dashboard run",
+                    "message": "Run the diagnostics flow until shell approval is requested."
+                }),
+            ),
+        )
+        .await;
+        let running: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(running.status, SessionStatus::WaitingApproval));
+
+        let observability: ObservabilitySummary = request_json(
+            app,
+            Request::builder()
+                .uri("/api/observability")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(observability.telemetry.service_name, "mandoforge-api-test");
+        assert!(!observability.telemetry.otlp_enabled);
+        assert_eq!(
+            observability.sessions_by_status.get("waiting_approval"),
+            Some(&1)
+        );
+        assert_eq!(
+            observability.tool_calls_by_status.get("waiting_approval"),
+            Some(&1)
+        );
+        assert_eq!(observability.approvals_by_status.get("pending"), Some(&1));
+        assert_eq!(observability.backpressure.status, "attention");
+        assert_eq!(observability.backpressure.pending_approvals, 1);
+        assert_eq!(observability.backpressure.waiting_approval_sessions, 1);
+        assert!(
+            observability
+                .event_categories
+                .get("llm")
+                .copied()
+                .unwrap_or(0)
+                >= 2
         );
     }
 
