@@ -425,10 +425,28 @@ async function refreshApprovals() {
   approvalRoot.querySelectorAll("[data-expire]").forEach((button) => {
     button.addEventListener("click", () => decide(button.dataset.expire, "expire"));
   });
+  approvalRoot.querySelectorAll("[data-approval-modify]").forEach((form) => {
+    form.addEventListener("submit", (event) => modifyApproval(event, form.dataset.approvalModify));
+  });
 }
 
 async function decide(id, decision) {
   await api(`/api/approvals/${id}/${decision}`, { method: "POST" });
+  await refreshApprovals();
+  await refreshSession();
+  await refreshOps();
+}
+
+async function modifyApproval(event, id) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  await api(`/api/approvals/${id}/modify`, {
+    method: "POST",
+    body: JSON.stringify({
+      args: parseJsonField(form.get("args"), "Approval args JSON"),
+      comment: String(form.get("comment") || "").trim() || null,
+    }),
+  });
   await refreshApprovals();
   await refreshSession();
   await refreshOps();
@@ -946,15 +964,39 @@ function renderEvent(event) {
 
 function renderApproval(approval) {
   const isPending = approval.status === "pending";
+  const originalArgs = approval.evidence?.args ?? {};
+  const modifiedArgs = approval.decision_payload?.modified_args;
   return `
     <div class="item">
       <strong>${escapeHtml(approval.action)}</strong>
       <div class="muted">${escapeHtml(approval.risk_level)} · ${escapeHtml(approval.status)}</div>
       <div class="muted">Expires: ${escapeHtml(approval.expires_at || "not set")}</div>
       <p>${escapeHtml(approval.reason)}</p>
+      <dl>
+        <dt>Original args</dt>
+        <dd><pre>${escapeHtml(JSON.stringify(originalArgs, null, 2))}</pre></dd>
+        ${
+          modifiedArgs
+            ? `<dt>Modified args</dt><dd><pre>${escapeHtml(JSON.stringify(modifiedArgs, null, 2))}</pre></dd>`
+            : ""
+        }
+        <dt>Decision payload</dt>
+        <dd><pre>${escapeHtml(JSON.stringify(approval.decision_payload ?? {}, null, 2))}</pre></dd>
+      </dl>
       ${
         isPending
-          ? `<button class="secondary" data-approve="${approval.id}">Approve</button><button class="secondary reject" data-reject="${approval.id}">Reject</button><button class="secondary" data-expire="${approval.id}">Expire</button>`
+          ? `<form class="stack-form compact-form" data-approval-modify="${approval.id}">
+              <label>
+                Args JSON
+                <textarea name="args" rows="4">${escapeHtml(JSON.stringify(modifiedArgs ?? originalArgs, null, 2))}</textarea>
+              </label>
+              <label>
+                Comment
+                <input name="comment" value="${escapeHtml(approval.decision_payload?.comment ?? "")}" />
+              </label>
+              <button type="submit" class="secondary">Modify Args</button>
+            </form>
+            <button class="secondary" data-approve="${approval.id}">Approve</button><button class="secondary reject" data-reject="${approval.id}">Reject</button><button class="secondary" data-expire="${approval.id}">Expire</button>`
           : ""
       }
     </div>
