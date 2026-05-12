@@ -44,7 +44,7 @@ impl AppState {
         event_type: &str,
         payload: Value,
     ) -> Result<SessionEvent, AppError> {
-        match &self.store {
+        let event = match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
                 if !store.sessions.contains_key(&session_id) {
@@ -70,7 +70,7 @@ impl AppState {
                     .entry(session_id)
                     .or_default()
                     .push(event.clone());
-                Ok(event)
+                event
             }
             StoreBackend::Postgres(pool) => {
                 if self.get_session(session_id).await.is_err() {
@@ -98,8 +98,10 @@ impl AppState {
                 .bind(Utc::now())
                 .fetch_one(pool)
                 .await?;
-                event_from_row(row)
+                event_from_row(row)?
             }
-        }
+        };
+        self.emit_telemetry_event(&event).await;
+        Ok(event)
     }
 }

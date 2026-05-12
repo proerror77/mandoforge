@@ -108,5 +108,6 @@
 - [ ] Add provider budgets and runtime provider selection from stored provider rows.
 - [x] Add eval dataset/case/run schema and a first version-bound eval runner skeleton.
 - [ ] Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
-- [ ] Wire OTel export into session/provider/tool/approval/worker request paths.
+- [x] Wire OTel export into append-only session event paths.
+- [ ] Add rich OTel spans/metrics for session/provider/tool/approval/worker paths.
 - [ ] Enable MCP registry and `mcp.call` behind policy and audit.

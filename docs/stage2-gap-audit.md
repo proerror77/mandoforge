@@ -15,7 +15,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 | MCP Gateway | Reserved config plus verified HTTP client boundary exist. | `mcp.call`, MCP server registry, discovery, allowlist policy, and audited runtime execution are not enabled. |
 | Codex App Server adapter | Codex CLI adapter exists. | App Server thread/turn/interrupt adapter is not implemented. |
 | Evaluation | Eval datasets, cases, and version-bound run records are implemented with a first skeleton runner that records case count and agent version evidence. | Real scenario grading, regression gates, judge integrations, and eval dashboards are not implemented. |
-| Observability | OTel exporter boundary exists. | Runtime request-path trace/metric/log export and usage dashboards are not wired. |
+| Observability | OTel exporter boundary exists and session event appends now export telemetry events when OTLP is enabled. | Rich traces/spans, metrics, dashboards, and retry/backpressure for exporter failures are not implemented. |
 | Cost tracking | Token/tool duration data is partially present in events and tool calls. | Cost tables, provider price config, usage aggregation, and dashboards are not implemented. |
 | UI v2 | Static Stage 1 console covers agents, sessions, timeline, approvals, and artifacts. | Admin/provider/vault/policy/worker/eval/usage pages are not implemented. |
 
@@ -24,5 +24,5 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 1. Scope Agent/Session/Tool routes through project or team and derive authorization from memberships.
 2. Add provider budgets and runtime provider selection from stored provider rows.
 3. Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
-4. Wire OTel exporter into session run, provider call, tool execution, approval, and worker queue paths.
+4. Add rich OTel spans/metrics for session run, provider call, tool execution, approval, and worker queue paths.
 5. Enable MCP registry and `mcp.call` behind policy and audit.

@@ -26,13 +26,14 @@ Aligned:
 - Stage 2 governance groundwork includes `organizations`, `teams`, `projects`, and `memberships` tables plus Admin-only CRUD/list routes for the hierarchy.
 - Provider governance groundwork includes `provider_access` rows per team, Admin-only provider-access routes, and model allowlist enforcement when creating a team-scoped agent.
 - Evaluation groundwork includes eval datasets, cases, and version-bound run records with a first skeleton runner that persists case count and agent version evidence.
+- OTel groundwork is now wired into the session event append path, so session, provider, tool, approval, sandbox, and worker events can be exported through the configured telemetry exporter.
 - OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed on the default reserved provider. `MANDOFORGE_SECRET_PROVIDER=vault` explicitly selects the Vault KV v2 provider boundary, while the default remains `reserved`.
 
 Not yet aligned:
 
 - External worker mode is still API-drained; a separate broker-backed queue remains later-stage work, with Redis Stream command/payload shape now fixed before enabling a live Redis backend.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
-- Enabling `mcp.call`, wiring OTel export into runtime request paths, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
+- Enabling `mcp.call`, adding production-grade telemetry spans/metrics, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
 
 ## Runtime Layers
 

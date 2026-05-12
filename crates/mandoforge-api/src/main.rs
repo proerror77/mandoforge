@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod authorization;
@@ -56,6 +56,10 @@ use execution_queue::ExecutionQueue;
 use execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
 #[cfg(test)]
 use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueKind};
+use observability::{
+    HttpTelemetryExporter, ObservabilityConfig, ReservedTelemetryExporter, TelemetryEvent,
+    TelemetryExporter,
+};
 #[cfg(test)]
 use policy::ensure_read_only_sql;
 use policy::{PolicyConfig, ensure_read_only_sql_with_policy, load_policy_config};
@@ -75,6 +79,8 @@ struct AppState {
     execution_queue: ExecutionQueue,
     execution_worker: Arc<dyn ExecutionWorker>,
     authorizer: Arc<dyn Authorizer>,
+    observability_config: ObservabilityConfig,
+    telemetry_exporter: Arc<dyn TelemetryExporter>,
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
@@ -463,6 +469,9 @@ async fn main() -> Result<()> {
         execution_queue,
         execution_worker: execution_worker_from_env(),
         authorizer: Arc::new(RoleBasedAuthorizer),
+        observability_config: ObservabilityConfig::from_env()
+            .map_err(|error| anyhow::anyhow!(error.message))?,
+        telemetry_exporter: telemetry_exporter_from_env()?,
         workspace_root,
         tenant_id,
         policy,
@@ -620,8 +629,46 @@ fn execution_worker_from_env() -> Arc<dyn ExecutionWorker> {
     }
 }
 
+fn telemetry_exporter_from_env() -> Result<Arc<dyn TelemetryExporter>> {
+    let config = ObservabilityConfig::from_env().map_err(|error| anyhow::anyhow!(error.message))?;
+    if config.is_enabled() {
+        Ok(Arc::new(
+            HttpTelemetryExporter::new().map_err(|error| anyhow::anyhow!(error.message))?,
+        ))
+    } else {
+        Ok(Arc::new(ReservedTelemetryExporter))
+    }
+}
+
 async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
+}
+
+impl AppState {
+    async fn emit_telemetry_event(&self, event: &SessionEvent) {
+        if !self.observability_config.is_enabled() || self.observability_config.sample_ratio <= 0.0
+        {
+            return;
+        }
+        let telemetry_event = TelemetryEvent {
+            name: event.event_type.clone(),
+            attributes: json!({
+                "tenant_id": self.tenant_id,
+                "session_id": event.session_id,
+                "event_id": event.id,
+                "seq": event.seq,
+                "actor_type": event.actor_type,
+                "actor_id": event.actor_id,
+            }),
+        };
+        if let Err(error) = self
+            .telemetry_exporter
+            .export_event(&self.observability_config, telemetry_event)
+            .await
+        {
+            warn!(%error.message, "telemetry export failed");
+        }
+    }
 }
 
 async fn run_migrations(pool: &PgPool) -> Result<()> {
@@ -2732,12 +2779,91 @@ not json
             execution_queue: ExecutionQueue::default(),
             execution_worker,
             authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
         build_router(state)
+    }
+
+    #[derive(Default)]
+    struct RecordingTelemetryExporter {
+        events: tokio::sync::Mutex<Vec<TelemetryEvent>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TelemetryExporter for RecordingTelemetryExporter {
+        async fn health_check(&self, _config: &ObservabilityConfig) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn export_event(
+            &self,
+            _config: &ObservabilityConfig,
+            event: TelemetryEvent,
+        ) -> Result<(), AppError> {
+            self.events.lock().await.push(event);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn appended_session_events_export_telemetry_when_enabled() {
+        let exporter = Arc::new(RecordingTelemetryExporter::default());
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(InlineExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: Some("http://otel.test".to_string()),
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: exporter.clone(),
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: PolicyConfig::default(),
+        };
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("list agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let session = state
+            .create_session(CreateSession {
+                agent_id: agent.id,
+                title: "telemetry".to_string(),
+                message: None,
+            })
+            .await
+            .expect("create session");
+
+        state
+            .append_event(
+                "system",
+                None,
+                session.id,
+                "session.started",
+                json!({"source": "test"}),
+            )
+            .await
+            .expect("append event");
+
+        let events = exporter.events.lock().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "session.started");
+        assert_eq!(events[0].attributes["session_id"], session.id.to_string());
     }
 
     fn test_workspace_root() -> PathBuf {
