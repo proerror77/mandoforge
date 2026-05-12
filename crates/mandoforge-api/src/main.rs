@@ -713,6 +713,11 @@ struct UpdateProviderStatus {
 }
 
 #[derive(Debug, Deserialize)]
+struct RotateProviderApiKeyRef {
+    api_key_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SimulatePolicy {
     tool_name: String,
 }
@@ -1245,6 +1250,10 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/{id}/status", patch(update_provider_status))
+        .route(
+            "/api/providers/{id}/api-key-ref/rotate",
+            post(rotate_provider_api_key_ref),
+        )
         .route("/api/providers/{id}/health", get(get_provider_health))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/runtime", get(get_policy_runtime))
@@ -4226,6 +4235,58 @@ async fn update_provider_status(
     Ok(Json(state.update_provider_status(id, &status).await?))
 }
 
+async fn rotate_provider_api_key_ref(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RotateProviderApiKeyRef>,
+) -> Result<Json<ProviderRecord>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "provider".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let new_ref = normalize_provider_api_key_ref(&input.api_key_ref)?;
+    let provider = state
+        .list_providers()
+        .await?
+        .into_iter()
+        .find(|provider| provider.id == id)
+        .ok_or_else(|| AppError::not_found("provider not found"))?;
+    let previous_ref = provider
+        .config
+        .get("api_key_ref")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let mut config = provider.config.as_object().cloned().unwrap_or_default();
+    config.insert("api_key_ref".to_string(), Value::String(new_ref.clone()));
+    config.remove("api_key_env");
+    let updated = state
+        .update_provider_config(id, Value::Object(config))
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "provider.api_key_ref_rotated",
+            "provider",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "provider_name": provider.name,
+                "previous_api_key_ref": previous_ref,
+                "new_api_key_ref": new_ref,
+            }),
+        ))
+        .await?;
+    Ok(Json(updated))
+}
+
 fn normalize_provider_status(status: &str) -> Result<String, AppError> {
     match status.trim() {
         "active" => Ok("active".to_string()),
@@ -4234,6 +4295,22 @@ fn normalize_provider_status(status: &str) -> Result<String, AppError> {
             "unsupported provider status: {other}"
         ))),
     }
+}
+
+fn normalize_provider_api_key_ref(value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    let Some(reference) = trimmed.strip_prefix("vault:") else {
+        return Err(AppError::bad_request(
+            "provider api key ref must use vault:path#key",
+        ));
+    };
+    let Some((path, key)) = reference.split_once('#') else {
+        return Err(AppError::bad_request(
+            "provider api key ref must use vault:path#key",
+        ));
+    };
+    let secret_ref = SecretRef::new(path, key)?;
+    Ok(format!("vault:{}#{}", secret_ref.path, secret_ref.key))
 }
 
 fn normalize_mcp_name(name: &str) -> Result<String, AppError> {
@@ -10958,6 +11035,68 @@ not json
         assert!(probed_health.healthy);
         assert_eq!(probed_health.checks["external_probe"], "healthy");
         assert_eq!(probed_health.checks["external_probe_status"]["status"], 200);
+
+        let key_ref_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "openai-compatible",
+                        "name": "rotated-key-ref-openai-compatible",
+                        "base_url": format!("http://{addr}"),
+                        "default_model": "gpt-5.4-mini",
+                        "config": {
+                            "api_key_ref": "vault:providers/openai#api_key",
+                            "api_key_env": "PATH"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let rotated_key_ref_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/providers/{}/api-key-ref/rotate",
+                    key_ref_provider.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"api_key_ref": " vault:providers/openai/rotated#api_key "}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            rotated_key_ref_provider.config["api_key_ref"],
+            "vault:providers/openai/rotated#api_key"
+        );
+        assert!(rotated_key_ref_provider.config.get("api_key_env").is_none());
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider.api_key_ref_rotated"
+                && log.details["previous_api_key_ref"] == "vault:providers/openai#api_key"
+                && log.details["new_api_key_ref"] == "vault:providers/openai/rotated#api_key"
+        }));
         server.abort();
 
         let status_agent: Agent = request_json(

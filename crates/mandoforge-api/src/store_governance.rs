@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
@@ -727,6 +728,39 @@ impl AppState {
                      RETURNING id, provider_type, name, base_url, default_model, config, status, created_at",
                 )
                 .bind(status)
+                .bind(self.tenant_id)
+                .bind(provider_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("provider not found"))?;
+                provider_record_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn update_provider_config(
+        &self,
+        provider_id: Uuid,
+        config: Value,
+    ) -> Result<ProviderRecord, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let provider = store
+                    .providers
+                    .get_mut(&provider_id)
+                    .ok_or_else(|| AppError::not_found("provider not found"))?;
+                provider.config = config;
+                Ok(provider.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE providers
+                     SET config = $1
+                     WHERE tenant_id = $2 AND id = $3
+                     RETURNING id, provider_type, name, base_url, default_model, config, status, created_at",
+                )
+                .bind(config)
                 .bind(self.tenant_id)
                 .bind(provider_id)
                 .fetch_optional(pool)
