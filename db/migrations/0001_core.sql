@@ -180,7 +180,10 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     worker_id TEXT,
-    lease_expires_at TIMESTAMPTZ
+    lease_expires_at TIMESTAMPTZ,
+    attempt_count INT NOT NULL DEFAULT 0,
+    max_attempts INT NOT NULL DEFAULT 3,
+    last_error TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_events_session_seq ON session_events(session_id, seq);
@@ -221,3 +224,6 @@ ALTER TABLE approvals ADD COLUMN IF NOT EXISTS approved_by UUID;
 
 ALTER TABLE execution_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT;
 ALTER TABLE execution_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE execution_jobs ADD COLUMN IF NOT EXISTS attempt_count INT NOT NULL DEFAULT 0;
+ALTER TABLE execution_jobs ADD COLUMN IF NOT EXISTS max_attempts INT NOT NULL DEFAULT 3;
+ALTER TABLE execution_jobs ADD COLUMN IF NOT EXISTS last_error TEXT;

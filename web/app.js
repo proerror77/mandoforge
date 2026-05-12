@@ -1112,6 +1112,7 @@ function renderExecutionJobs() {
               <strong>${escapeHtml(job.tool_name)}</strong>
               <div class="muted">${escapeHtml(job.status)} · ${escapeHtml(job.id)}</div>
               <div class="muted">Worker: ${escapeHtml(job.worker_id || "none")} · Lease: ${escapeHtml(job.lease_expires_at || "none")}</div>
+              <div class="muted">Attempts: ${formatInteger(job.attempt_count || 0)}/${formatInteger(job.max_attempts || 0)} · Last error: ${escapeHtml(job.last_error || "none")}</div>
               ${
                 job.status === "queued"
                   ? `<button class="secondary" data-run-execution-job="${job.id}">Run Job</button>`
@@ -1126,6 +1127,9 @@ function renderExecutionJobs() {
                     enqueued_at: job.enqueued_at,
                     started_at: job.started_at,
                     completed_at: job.completed_at,
+                    attempt_count: job.attempt_count,
+                    max_attempts: job.max_attempts,
+                    last_error: job.last_error,
                   },
                   null,
                   2,

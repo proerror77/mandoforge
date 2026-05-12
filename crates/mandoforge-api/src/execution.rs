@@ -111,6 +111,7 @@ async fn enqueue_approved_job(
                 approval_id: approval.id,
                 tool_call_id,
                 tool_name: tool_call.tool_name,
+                max_attempts: None,
             })
             .await?,
     ))
@@ -148,9 +149,38 @@ pub(crate) async fn run_execution_job(
     if result.is_ok() {
         state.execution_queue.complete(job.id).await
     } else {
-        state.execution_queue.fail(job.id).await?;
-        result?;
-        unreachable!()
+        let error = result.expect_err("checked error");
+        let updated = state
+            .execution_queue
+            .retry_or_fail(job.id, &error.message)
+            .await?;
+        let event_type = if updated.status == crate::execution_queue::ExecutionJobStatus::Queued {
+            "execution.retry_queued"
+        } else {
+            "execution.failed"
+        };
+        state
+            .append_event(
+                "worker",
+                Some(job.id),
+                job.session_id,
+                event_type,
+                json!({
+                    "execution_job_id": job.id,
+                    "approval_id": job.approval_id,
+                    "tool_call_id": job.tool_call_id,
+                    "tool": job.tool_name,
+                    "attempt_count": updated.attempt_count,
+                    "max_attempts": updated.max_attempts,
+                    "last_error": updated.last_error,
+                }),
+            )
+            .await?;
+        if updated.status == crate::execution_queue::ExecutionJobStatus::Queued {
+            Ok(updated)
+        } else {
+            Err(error)
+        }
     }
 }
 

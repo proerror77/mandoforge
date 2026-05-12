@@ -65,19 +65,18 @@ use codex_app_server::{
     CodexInterruptResponse, CodexThreadRequest, CodexThreadResponse, CodexTurnRequest,
     CodexTurnResponse, HttpCodexAppServerClient, ReservedCodexAppServerClient,
 };
-use eval_judge::{
-    EvalJudgeClient, EvalJudgeConfig, EvalJudgeRequest, EvalJudgeResponse, HttpEvalJudgeClient,
-    ReservedEvalJudgeClient,
-};
+use eval_judge::{EvalJudgeClient, EvalJudgeConfig, HttpEvalJudgeClient, ReservedEvalJudgeClient};
+#[cfg(test)]
+use eval_judge::{EvalJudgeRequest, EvalJudgeResponse};
 use execution::{
     ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker, QueueBackedExecutionWorker,
     run_execution_job,
 };
 #[cfg(test)]
 use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
-use execution_queue::ExecutionQueue;
 #[cfg(test)]
-use execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
+use execution_queue::{ExecutionJobRequest, ExecutionQueueBackend};
+use execution_queue::{ExecutionJobStatus, ExecutionQueue};
 use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueKind};
 use mcp_gateway::{
     HttpMcpGatewayClient, McpCallRequest, McpGatewayClient, McpGatewayConfig,
@@ -6769,7 +6768,9 @@ async fn run_execution_job_route(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("api");
     let completed = run_execution_job(&state, id, worker_id).await?;
-    resume_provider_after_approval(&state, completed.session_id).await?;
+    if completed.status == ExecutionJobStatus::Completed {
+        resume_provider_after_approval(&state, completed.session_id).await?;
+    }
     Ok(Json(completed))
 }
 
@@ -7276,6 +7277,7 @@ not json
             approval_id: Uuid::new_v4(),
             tool_call_id: Uuid::new_v4(),
             tool_name: "codex.exec".to_string(),
+            max_attempts: None,
         };
 
         let queued = queue.enqueue(request).await.expect("queue job");
@@ -7294,6 +7296,49 @@ not json
         let completed = queue.complete(queued.id).await.expect("complete job");
         assert_eq!(completed.status, ExecutionJobStatus::Completed);
         assert!(completed.completed_at.is_some());
+
+        let retryable = queue
+            .enqueue(ExecutionJobRequest {
+                session_id: Uuid::new_v4(),
+                approval_id: Uuid::new_v4(),
+                tool_call_id: Uuid::new_v4(),
+                tool_name: "codex.exec".to_string(),
+                max_attempts: Some(2),
+            })
+            .await
+            .expect("queue retryable job");
+        let first_attempt = queue
+            .start(retryable.id, "worker-a")
+            .await
+            .expect("start retryable job");
+        assert_eq!(first_attempt.attempt_count, 1);
+        let requeued = queue
+            .retry_or_fail(retryable.id, "transient app server status")
+            .await
+            .expect("retry job");
+        assert_eq!(requeued.status, ExecutionJobStatus::Queued);
+        assert_eq!(requeued.attempt_count, 1);
+        assert_eq!(requeued.max_attempts, 2);
+        assert_eq!(
+            requeued.last_error.as_deref(),
+            Some("transient app server status")
+        );
+        assert!(requeued.worker_id.is_none());
+        assert!(requeued.lease_expires_at.is_none());
+
+        let second_attempt = queue
+            .start(retryable.id, "worker-b")
+            .await
+            .expect("restart retryable job");
+        assert_eq!(second_attempt.attempt_count, 2);
+        let failed = queue
+            .retry_or_fail(retryable.id, "still failing")
+            .await
+            .expect("fail after max attempts");
+        assert_eq!(failed.status, ExecutionJobStatus::Failed);
+        assert_eq!(failed.attempt_count, 2);
+        assert_eq!(failed.last_error.as_deref(), Some("still failing"));
+        assert!(failed.completed_at.is_some());
     }
 
     #[tokio::test]
@@ -7305,12 +7350,14 @@ not json
                 approval_id: Uuid::new_v4(),
                 tool_call_id: Uuid::new_v4(),
                 tool_name: "file.write".to_string(),
+                max_attempts: None,
             };
 
             assert!(queue.enqueue(request).await.is_err());
             assert!(queue.start(Uuid::new_v4(), "worker").await.is_err());
             assert!(queue.complete(Uuid::new_v4()).await.is_err());
             assert!(queue.fail(Uuid::new_v4()).await.is_err());
+            assert!(queue.retry_or_fail(Uuid::new_v4(), "error").await.is_err());
             assert!(queue.list().await.is_err());
             assert!(queue.get(Uuid::new_v4()).await.is_err());
         }
@@ -7546,6 +7593,7 @@ not json
         assert!(names.contains(&"0010_approval_groups.sql"));
         assert!(names.contains(&"0011_cost_alert_routes.sql"));
         assert!(names.contains(&"0012_codex_app_server_runs.sql"));
+        assert!(names.contains(&"0013_execution_job_retries.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -7757,6 +7805,18 @@ not json
     #[derive(Default)]
     struct RecordingCodexAppServerClient {
         calls: tokio::sync::Mutex<Vec<String>>,
+        poll_statuses: tokio::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingCodexAppServerClient {
+        fn with_poll_statuses(statuses: Vec<&str>) -> Self {
+            Self {
+                calls: tokio::sync::Mutex::new(Vec::new()),
+                poll_statuses: tokio::sync::Mutex::new(
+                    statuses.into_iter().map(str::to_string).collect(),
+                ),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -7800,11 +7860,19 @@ not json
             turn_id: &str,
         ) -> Result<CodexTurnResponse, AppError> {
             self.calls.lock().await.push(format!("poll:{turn_id}"));
+            let status = {
+                let mut statuses = self.poll_statuses.lock().await;
+                if statuses.is_empty() {
+                    "completed".to_string()
+                } else {
+                    statuses.remove(0)
+                }
+            };
             Ok(CodexTurnResponse {
                 turn_id: turn_id.to_string(),
                 thread_id: Some("thread-1".to_string()),
-                status: Some("completed".to_string()),
-                result: json!({"message": "completed"}),
+                status: Some(status.clone()),
+                result: json!({"message": status}),
             })
         }
 
@@ -8643,6 +8711,152 @@ not json
             codex_client.calls.lock().await.as_slice(),
             ["thread", "turn:thread-1", "poll:turn-1"]
         );
+    }
+
+    #[tokio::test]
+    async fn queue_backed_worker_retries_codex_app_server_across_leases() {
+        let codex_client = Arc::new(RecordingCodexAppServerClient::with_poll_statuses(vec![
+            "running",
+            "completed",
+        ]));
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(QueueBackedExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: Some(CodexAppServerConfig {
+                endpoint: "http://codex-app-server.test".to_string(),
+                timeout_seconds: 5,
+            }),
+            codex_app_server_client: codex_client.clone(),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
+            cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
+            approval_webhook_url: None,
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: runtime_policy(PolicyConfig::default()),
+        };
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state);
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agents[0].id, "title": "retry codex app server"}),
+            ),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/codex.exec/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "task": "Keep polling through worker retries",
+                        "sandbox_mode": "workspace-write",
+                        "execution_strategy": "app-server",
+                        "poll_attempts": 1,
+                        "poll_interval_ms": 0
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job_id = jobs
+            .iter()
+            .find(|job| job.approval_id == approved.id)
+            .expect("queued codex job")
+            .id;
+
+        let requeued: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "codex-worker-a")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(requeued.status, ExecutionJobStatus::Queued);
+        assert_eq!(requeued.attempt_count, 1);
+        assert_eq!(
+            requeued.last_error.as_deref(),
+            Some("Codex App Server turn ended with status running")
+        );
+
+        let completed: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "codex-worker-b")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        assert_eq!(completed.attempt_count, 2);
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "execution.retry_queued")
+        );
+        assert!(events.iter().any(|event| {
+            event.event_type == "codex.task.completed"
+                && event.payload["runner"] == "app-server"
+                && event.payload["status"] == "completed"
+        }));
     }
 
     #[tokio::test]

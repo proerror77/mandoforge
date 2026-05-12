@@ -35,6 +35,7 @@
 - [x] Add external execution worker loop script and verification.
 - [x] Persist execution jobs in Postgres when a durable store is configured.
 - [x] Add execution job worker claims and lease-based stale running job reclaim.
+- [x] Add execution job retry-or-fail attempts with last-error tracking.
 - [x] Add Rust `mandoforge-worker` binary for API-drained execution jobs.
 - [x] Add Docker Compose and Kubernetes worker deployment entries.
 - [x] Add static Worker Dashboard for execution job status and API drain.
@@ -180,4 +181,5 @@
 - [x] Persist Codex App Server steering responses for replay/debugging.
 - [x] Add bounded Codex App Server turn polling and retry with persisted run status/audit.
 - [x] Add production Codex App Server worker-backed steering orchestration.
-- [ ] Add Codex App Server retry orchestration across worker leases and richer long-running steering dashboards.
+- [x] Add Codex App Server retry orchestration across worker leases.
+- [ ] Add richer long-running Codex App Server steering dashboards and external scheduler integration.

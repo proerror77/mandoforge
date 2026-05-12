@@ -50,6 +50,8 @@ pub(crate) struct RedisExecutionJobPayload {
     pub(crate) approval_id: Uuid,
     pub(crate) tool_call_id: Uuid,
     pub(crate) tool_name: String,
+    #[serde(default)]
+    pub(crate) max_attempts: Option<i32>,
 }
 
 #[allow(dead_code)]
@@ -132,6 +134,7 @@ impl RedisExecutionJobPayload {
             approval_id: request.approval_id,
             tool_call_id: request.tool_call_id,
             tool_name: request.tool_name.clone(),
+            max_attempts: request.max_attempts,
         }
     }
 
@@ -142,10 +145,12 @@ impl RedisExecutionJobPayload {
             approval_id: job.approval_id,
             tool_call_id: job.tool_call_id,
             tool_name: job.tool_name.clone(),
+            max_attempts: Some(job.max_attempts),
         }
     }
 
     fn into_execution_job(self) -> ExecutionJob {
+        let max_attempts = self.max_attempts.unwrap_or(3).clamp(1, 10);
         ExecutionJob {
             id: self.job_id.unwrap_or_else(Uuid::new_v4),
             session_id: self.session_id,
@@ -158,6 +163,9 @@ impl RedisExecutionJobPayload {
             completed_at: None,
             worker_id: None,
             lease_expires_at: None,
+            attempt_count: 0,
+            max_attempts,
+            last_error: None,
         }
     }
 
@@ -168,6 +176,7 @@ impl RedisExecutionJobPayload {
             "approval_id": self.approval_id,
             "tool_call_id": self.tool_call_id,
             "tool_name": self.tool_name,
+            "max_attempts": self.max_attempts,
         })
     }
 }
@@ -606,6 +615,9 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             completed_at: None,
             worker_id: None,
             lease_expires_at: None,
+            attempt_count: 0,
+            max_attempts: request.max_attempts.unwrap_or(3).clamp(1, 10),
+            last_error: None,
         };
         let payload = RedisExecutionJobPayload::from_job(&job);
         let command = RedisStreamCommand::xadd_enqueue(config, &payload)?;
@@ -623,6 +635,7 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         pending_job.job.started_at = Some(Utc::now());
         pending_job.job.worker_id = Some(worker_id.to_string());
         pending_job.job.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
+        pending_job.job.attempt_count += 1;
         Ok(pending_job.job.clone())
     }
 
@@ -650,6 +663,38 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         pending_job.job.completed_at = Some(Utc::now());
         pending_job.job.lease_expires_at = None;
         Ok(pending_job.job.clone())
+    }
+
+    async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
+        let (job, message_id) = {
+            let mut pending = self.pending.write().await;
+            let pending_job = pending
+                .get_mut(&job_id)
+                .ok_or_else(|| AppError::not_found("execution job not found"))?;
+            pending_job.job.last_error = Some(error.to_string());
+            if pending_job.job.attempt_count < pending_job.job.max_attempts {
+                pending_job.job.status = ExecutionJobStatus::Queued;
+                pending_job.job.started_at = None;
+                pending_job.job.completed_at = None;
+                pending_job.job.worker_id = None;
+                pending_job.job.lease_expires_at = None;
+                (pending_job.job.clone(), None)
+            } else {
+                pending_job.job.status = ExecutionJobStatus::Failed;
+                pending_job.job.completed_at = Some(Utc::now());
+                pending_job.job.lease_expires_at = None;
+                (
+                    pending_job.job.clone(),
+                    Some(pending_job.message_id.clone()),
+                )
+            }
+        };
+        if let Some(message_id) = message_id {
+            let config = self.redis_config().await?;
+            let command = RedisStreamCommand::xack(config, message_id)?;
+            RedisStreamClient::execute(config, &command).await?;
+        }
+        Ok(job)
     }
 
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
@@ -771,6 +816,7 @@ mod tests {
                 .parse()
                 .expect("tool call id"),
             tool_name: "codex.exec".to_string(),
+            max_attempts: None,
         };
         let payload = RedisExecutionJobPayload::from_request(&request);
         let command = RedisStreamCommand::xadd_enqueue(&config, &payload).expect("xadd command");
@@ -933,6 +979,7 @@ mod tests {
                 .parse()
                 .expect("tool call id"),
             tool_name: "codex.exec".to_string(),
+            max_attempts: None,
         };
         let payload = RedisExecutionJobPayload::from_request(&request);
         let command = RedisStreamCommand::xadd_enqueue(&config, &payload).expect("xadd command");
@@ -975,6 +1022,7 @@ mod tests {
                     .parse()
                     .expect("tool call id"),
                 tool_name: "file.write".to_string(),
+                max_attempts: None,
             })
             .await
             .expect("enqueue redis job");

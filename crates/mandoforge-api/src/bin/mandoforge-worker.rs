@@ -61,11 +61,17 @@ async fn main() -> Result<()> {
                 eprintln!("execution job not claimable: {}", job.id);
                 continue;
             }
-            response
+            let updated: ExecutionJob = response
                 .error_for_status()
-                .with_context(|| format!("run execution job {} failed", job.id))?;
+                .with_context(|| format!("run execution job {} failed", job.id))?
+                .json()
+                .await
+                .with_context(|| format!("parse execution job {} run response", job.id))?;
             processed += 1;
-            println!("execution job completed: {}", job.id);
+            println!(
+                "execution job attempt finished: {} status={}",
+                updated.id, updated.status
+            );
             if max_jobs != 0 && processed >= max_jobs {
                 println!("mandoforge worker processed {processed} job(s)");
                 return Ok(());

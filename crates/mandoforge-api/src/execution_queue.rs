@@ -52,8 +52,17 @@ impl ExecutionQueue {
         self.backend.complete(job_id).await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.backend.fail(job_id).await
+    }
+
+    pub(crate) async fn retry_or_fail(
+        &self,
+        job_id: Uuid,
+        error: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.backend.retry_or_fail(job_id, error).await
     }
 
     pub(crate) async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
@@ -75,6 +84,8 @@ pub(crate) trait ExecutionQueueBackend: Send + Sync {
     async fn complete(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
 
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
+
+    async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError>;
 
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError>;
 
@@ -110,6 +121,9 @@ pub(crate) struct ExecutionJob {
     pub(crate) completed_at: Option<DateTime<Utc>>,
     pub(crate) worker_id: Option<String>,
     pub(crate) lease_expires_at: Option<DateTime<Utc>>,
+    pub(crate) attempt_count: i32,
+    pub(crate) max_attempts: i32,
+    pub(crate) last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,9 +164,14 @@ pub(crate) struct ExecutionJobRequest {
     pub(crate) approval_id: Uuid,
     pub(crate) tool_call_id: Uuid,
     pub(crate) tool_name: String,
+    pub(crate) max_attempts: Option<i32>,
 }
 
 fn new_execution_job(request: ExecutionJobRequest) -> ExecutionJob {
+    let max_attempts = request
+        .max_attempts
+        .unwrap_or_else(default_execution_job_max_attempts)
+        .clamp(1, 10);
     ExecutionJob {
         id: Uuid::new_v4(),
         session_id: request.session_id,
@@ -165,7 +184,17 @@ fn new_execution_job(request: ExecutionJobRequest) -> ExecutionJob {
         completed_at: None,
         worker_id: None,
         lease_expires_at: None,
+        attempt_count: 0,
+        max_attempts,
+        last_error: None,
     }
+}
+
+fn default_execution_job_max_attempts() -> i32 {
+    std::env::var("MANDOFORGE_EXECUTION_JOB_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(3)
 }
 
 fn execution_job_from_row(row: PgRow) -> Result<ExecutionJob, AppError> {
@@ -182,6 +211,9 @@ fn execution_job_from_row(row: PgRow) -> Result<ExecutionJob, AppError> {
         completed_at: row.try_get("completed_at")?,
         worker_id: row.try_get("worker_id")?,
         lease_expires_at: row.try_get("lease_expires_at")?,
+        attempt_count: row.try_get("attempt_count")?,
+        max_attempts: row.try_get("max_attempts")?,
+        last_error: row.try_get("last_error")?,
     })
 }
 
@@ -205,6 +237,28 @@ impl ExecutionQueueBackend for MemoryExecutionQueue {
 
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.update(job_id, ExecutionJobStatus::Failed, None).await
+    }
+
+    async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
+        let mut state = self.inner.write().await;
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        job.last_error = Some(error.to_string());
+        if job.attempt_count < job.max_attempts {
+            job.status = ExecutionJobStatus::Queued;
+            job.started_at = None;
+            job.completed_at = None;
+            job.worker_id = None;
+            job.lease_expires_at = None;
+        } else {
+            job.status = ExecutionJobStatus::Failed;
+            job.completed_at = Some(Utc::now());
+            job.lease_expires_at = None;
+        }
+        Ok(job.clone())
     }
 
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
@@ -242,6 +296,7 @@ impl MemoryExecutionQueue {
                 job.started_at = Some(Utc::now());
                 job.worker_id = worker_id.map(str::to_string);
                 job.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
+                job.attempt_count += 1;
             }
             ExecutionJobStatus::Completed | ExecutionJobStatus::Failed => {
                 job.completed_at = Some(Utc::now());
@@ -264,8 +319,8 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
         let job = new_execution_job(request);
         sqlx::query(
             "INSERT INTO execution_jobs
-                (id, tenant_id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                (id, tenant_id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(job.id)
         .bind(self.tenant_id)
@@ -279,6 +334,9 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
         .bind(job.completed_at)
         .bind(&job.worker_id)
         .bind(job.lease_expires_at)
+        .bind(job.attempt_count)
+        .bind(job.max_attempts)
+        .bind(&job.last_error)
         .execute(&self.pool)
         .await?;
         Ok(job)
@@ -298,9 +356,30 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
         self.update(job_id, ExecutionJobStatus::Failed, None).await
     }
 
+    async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
+        let row = sqlx::query(
+            "UPDATE execution_jobs
+             SET status = CASE WHEN attempt_count < max_attempts THEN 'queued' ELSE 'failed' END,
+                 started_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE started_at END,
+                 completed_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE COALESCE(completed_at, now()) END,
+                 worker_id = CASE WHEN attempt_count < max_attempts THEN NULL ELSE worker_id END,
+                 lease_expires_at = NULL,
+                 last_error = $1
+             WHERE tenant_id = $2 AND id = $3
+             RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+        )
+        .bind(error)
+        .bind(self.tenant_id)
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        execution_job_from_row(row)
+    }
+
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
         let rows = sqlx::query(
-            "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at
+            "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error
              FROM execution_jobs
              WHERE tenant_id = $1
              ORDER BY enqueued_at ASC",
@@ -313,7 +392,7 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
 
     async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         let row = sqlx::query(
-            "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at
+            "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error
              FROM execution_jobs
              WHERE tenant_id = $1 AND id = $2",
         )
@@ -336,11 +415,11 @@ impl PostgresExecutionQueue {
         let row = match status {
             ExecutionJobStatus::Running => sqlx::query(
                 "UPDATE execution_jobs
-                 SET status = 'running', started_at = COALESCE(started_at, now()), worker_id = $1, lease_expires_at = now() + interval '5 minutes'
+                 SET status = 'running', started_at = COALESCE(started_at, now()), completed_at = NULL, worker_id = $1, lease_expires_at = now() + interval '5 minutes', attempt_count = attempt_count + 1
                  WHERE tenant_id = $2
                    AND id = $3
                    AND (status = 'queued' OR (status = 'running' AND lease_expires_at < now()))
-                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at",
+                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(worker_id.unwrap_or("api"))
             .bind(self.tenant_id)
@@ -351,7 +430,7 @@ impl PostgresExecutionQueue {
                 "UPDATE execution_jobs
                  SET status = $1, completed_at = COALESCE(completed_at, now()), lease_expires_at = NULL
                  WHERE tenant_id = $2 AND id = $3
-                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at",
+                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(status.as_str())
             .bind(self.tenant_id)
@@ -362,7 +441,7 @@ impl PostgresExecutionQueue {
                 "UPDATE execution_jobs
                  SET status = 'queued', started_at = NULL, completed_at = NULL, worker_id = NULL, lease_expires_at = NULL
                  WHERE tenant_id = $1 AND id = $2
-                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at",
+                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(self.tenant_id)
             .bind(job_id)

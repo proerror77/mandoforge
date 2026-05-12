@@ -65,7 +65,7 @@ wait_for_static_ui() {
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
     hasAgentReleases: text.includes('AGENT RELEASES') && Boolean(document.querySelector('#agent-releases')),
-    hasWorkerDashboard: text.includes('Worker Dashboard'),
+    hasWorkerDashboard: text.includes('Worker Dashboard') && text.includes('Attempts'),
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
     metricCards: document.querySelectorAll('.metric').length,
     hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
