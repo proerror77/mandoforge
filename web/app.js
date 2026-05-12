@@ -199,23 +199,30 @@ async function createProvider(event) {
   const perRequestCents = Number(form.get("per_request_cents") || 0);
   const promptTokenCents = Number(form.get("per_1k_prompt_tokens_cents") || 0);
   const completionTokenCents = Number(form.get("per_1k_completion_tokens_cents") || 0);
+  const baseUrl = String(form.get("base_url") || "").trim();
+  const apiKeyEnv = String(form.get("api_key_env") || "").trim();
+  const apiKeyRef = String(form.get("api_key_ref") || "").trim();
+  const config = {
+    budget: {
+      daily_request_limit: dailyRequestLimit,
+      daily_cost_limit_cents: dailyCostLimitCents,
+    },
+    pricing: {
+      per_request_cents: perRequestCents,
+      per_1k_prompt_tokens_cents: promptTokenCents,
+      per_1k_completion_tokens_cents: completionTokenCents,
+    },
+  };
+  if (apiKeyEnv) config.api_key_env = apiKeyEnv;
+  if (apiKeyRef) config.api_key_ref = apiKeyRef;
   await api("/api/providers", {
     method: "POST",
     body: JSON.stringify({
       name: form.get("name"),
       provider_type: form.get("provider_type"),
+      base_url: baseUrl || null,
       default_model: form.get("default_model"),
-      config: {
-        budget: {
-          daily_request_limit: dailyRequestLimit,
-          daily_cost_limit_cents: dailyCostLimitCents,
-        },
-        pricing: {
-          per_request_cents: perRequestCents,
-          per_1k_prompt_tokens_cents: promptTokenCents,
-          per_1k_completion_tokens_cents: completionTokenCents,
-        },
-      },
+      config,
     }),
   });
   await refreshOps();
@@ -807,6 +814,7 @@ function renderProviders() {
             <div class="item">
               <strong>${escapeHtml(provider.name)}</strong>
               <div class="muted">${escapeHtml(provider.provider_type)} · ${escapeHtml(provider.status)}</div>
+              <div class="muted">${escapeHtml(provider.default_model || "no default model")} · ${escapeHtml(provider.base_url || "no base URL")}</div>
               <button class="secondary" data-provider-status="${provider.id}" data-status="active">Activate</button>
               <button class="secondary reject" data-provider-status="${provider.id}" data-status="disabled">Disable</button>
               <button class="secondary" data-provider-health="${provider.id}">Check Health</button>

@@ -167,6 +167,18 @@
                   <input name="default_model" value="gpt-5.4-mini" />
                 </label>
                 <label>
+                  Base URL
+                  <input name="base_url" placeholder="https://api.openai.com/v1" />
+                </label>
+                <label>
+                  API key env var
+                  <input name="api_key_env" placeholder="OPENAI_API_KEY" />
+                </label>
+                <label>
+                  API key ref
+                  <input name="api_key_ref" placeholder="vault:path#key" />
+                </label>
+                <label>
                   Daily request limit
                   <input name="daily_request_limit" type="number" min="0" value="100" />
                 </label>

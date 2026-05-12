@@ -53,6 +53,7 @@ wait_for_static_ui() {
     hasProviderBreakdown: text.includes('PROVIDER COST BREAKDOWN'),
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
     hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
+    hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasWorkerDashboard: text.includes('Worker Dashboard'),
@@ -65,6 +66,7 @@ wait_for_static_ui() {
     && result.hasProviderBreakdown
     && result.hasToolBreakdown
     && result.hasProviderBudgetForecast
+    && result.hasProviderCredentialFields
     && result.hasTenantGovernance
     && result.hasEvalGateAction
     && result.hasWorkerDashboard

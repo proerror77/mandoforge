@@ -135,3 +135,4 @@
 - [x] Add Actionbook CLI static UI smoke verification as the browser fallback.
 - [x] Add static Admin Console panels for usage, providers, eval runs, and governance status.
 - [x] Add static Provider Settings form for creating/updating stored providers with budget and pricing config.
+- [x] Add static Provider Settings fields for base URL and API key env/ref config.
