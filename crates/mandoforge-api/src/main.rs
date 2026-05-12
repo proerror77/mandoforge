@@ -294,6 +294,52 @@ struct AgentReleaseAutomationRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReleaseRolloutSummary {
+    generated_at: DateTime<Utc>,
+    release_count: usize,
+    by_status: BTreeMap<String, usize>,
+    by_environment: BTreeMap<String, usize>,
+    pending_count: usize,
+    promoted_count: usize,
+    rejected_count: usize,
+    rolled_back_count: usize,
+    auto_pending_count: usize,
+    manual_pending_count: usize,
+    expired_pending_count: usize,
+    expiring_soon_count: usize,
+    stale_pending_count: usize,
+    latest_promoted_by_environment: Vec<AgentReleaseLatestPromotion>,
+    attention_items: Vec<AgentReleaseAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReleaseLatestPromotion {
+    environment: String,
+    release_id: Uuid,
+    agent_id: Uuid,
+    agent_version_id: Uuid,
+    promoted_at: DateTime<Utc>,
+    eval_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReleaseAttentionItem {
+    release_id: Uuid,
+    agent_id: Uuid,
+    agent_version_id: Uuid,
+    environment: String,
+    status: String,
+    reason: String,
+    requested_by: Option<String>,
+    approver_subject: Option<String>,
+    requested_at: Option<DateTime<Utc>>,
+    activate_after: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
+    eval_score: Option<f64>,
+    min_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Session {
     id: Uuid,
     agent_id: Uuid,
@@ -1607,6 +1653,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/agents/{id}/versions", get(list_agent_versions))
         .route(
+            "/api/agents/releases/summary",
+            get(get_agent_release_rollout_summary),
+        )
+        .route(
             "/api/agents/{id}/releases",
             get(list_agent_releases).post(create_agent_release),
         )
@@ -2325,6 +2375,17 @@ async fn list_agent_releases(
     Ok(Json(state.list_agent_releases(id).await?))
 }
 
+async fn get_agent_release_rollout_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AgentReleaseRolloutSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "agent_release", None).await?;
+    Ok(Json(build_agent_release_rollout_summary(
+        state.list_all_agent_releases().await?,
+        Utc::now(),
+    )))
+}
+
 async fn create_agent_release(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -2591,6 +2652,153 @@ fn release_automation_time(release: &AgentRelease, field: &str) -> Option<DateTi
         .and_then(Value::as_str)
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.with_timezone(&Utc))
+}
+
+fn build_agent_release_rollout_summary(
+    releases: Vec<AgentRelease>,
+    now: DateTime<Utc>,
+) -> AgentReleaseRolloutSummary {
+    let mut by_status = BTreeMap::new();
+    let mut by_environment = BTreeMap::new();
+    let mut latest_promoted = BTreeMap::<String, AgentReleaseLatestPromotion>::new();
+    let mut attention_items = Vec::new();
+    let mut pending_count = 0usize;
+    let mut promoted_count = 0usize;
+    let mut rejected_count = 0usize;
+    let mut rolled_back_count = 0usize;
+    let mut auto_pending_count = 0usize;
+    let mut manual_pending_count = 0usize;
+    let mut expired_pending_count = 0usize;
+    let mut expiring_soon_count = 0usize;
+    let mut stale_pending_count = 0usize;
+    let expiring_soon_cutoff = now + chrono::Duration::hours(24);
+    let stale_cutoff = now - chrono::Duration::hours(24);
+
+    for release in &releases {
+        *by_status.entry(release.status.clone()).or_insert(0) += 1;
+        *by_environment
+            .entry(release.environment.clone())
+            .or_insert(0) += 1;
+
+        match release.status.as_str() {
+            "pending_approval" => {
+                pending_count += 1;
+                let auto_approve = release
+                    .automation_policy
+                    .get("auto_approve")
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                if auto_approve {
+                    auto_pending_count += 1;
+                } else {
+                    manual_pending_count += 1;
+                }
+                let activate_after = release_automation_time(release, "activate_after");
+                let expires_at = release_automation_time(release, "expires_at");
+                let mut reasons = Vec::new();
+                if expires_at.is_some_and(|expires_at| now > expires_at) {
+                    expired_pending_count += 1;
+                    reasons.push("expired_pending".to_string());
+                } else if expires_at.is_some_and(|expires_at| expires_at <= expiring_soon_cutoff) {
+                    expiring_soon_count += 1;
+                    reasons.push("expiring_soon".to_string());
+                }
+                if release
+                    .requested_at
+                    .is_some_and(|requested_at| requested_at < stale_cutoff)
+                {
+                    stale_pending_count += 1;
+                    reasons.push("stale_pending".to_string());
+                }
+                match release_automation_due_decision(release, now) {
+                    ReleaseAutomationDecision::Promote => {
+                        reasons.push("automation_ready".to_string());
+                    }
+                    ReleaseAutomationDecision::Skip(reason) => {
+                        reasons.push(reason);
+                    }
+                }
+                attention_items.push(AgentReleaseAttentionItem {
+                    release_id: release.id,
+                    agent_id: release.agent_id,
+                    agent_version_id: release.agent_version_id,
+                    environment: release.environment.clone(),
+                    status: release.status.clone(),
+                    reason: reasons.join(","),
+                    requested_by: release.requested_by.clone(),
+                    approver_subject: release.approver_subject.clone(),
+                    requested_at: release.requested_at,
+                    activate_after,
+                    expires_at,
+                    eval_score: release.eval_score,
+                    min_score: release.min_score,
+                });
+            }
+            "promoted" => {
+                promoted_count += 1;
+                if let Some(promoted_at) = release.promoted_at {
+                    let candidate = AgentReleaseLatestPromotion {
+                        environment: release.environment.clone(),
+                        release_id: release.id,
+                        agent_id: release.agent_id,
+                        agent_version_id: release.agent_version_id,
+                        promoted_at,
+                        eval_score: release.eval_score,
+                    };
+                    let should_replace = latest_promoted
+                        .get(&release.environment)
+                        .is_none_or(|existing| existing.promoted_at < candidate.promoted_at);
+                    if should_replace {
+                        latest_promoted.insert(release.environment.clone(), candidate);
+                    }
+                }
+            }
+            "rejected" => rejected_count += 1,
+            "rolled_back" => rolled_back_count += 1,
+            _ => {}
+        }
+    }
+
+    attention_items.sort_by(|left, right| {
+        attention_priority(&left.reason)
+            .cmp(&attention_priority(&right.reason))
+            .then_with(|| left.environment.cmp(&right.environment))
+            .then_with(|| left.release_id.cmp(&right.release_id))
+    });
+
+    AgentReleaseRolloutSummary {
+        generated_at: now,
+        release_count: releases.len(),
+        by_status,
+        by_environment,
+        pending_count,
+        promoted_count,
+        rejected_count,
+        rolled_back_count,
+        auto_pending_count,
+        manual_pending_count,
+        expired_pending_count,
+        expiring_soon_count,
+        stale_pending_count,
+        latest_promoted_by_environment: latest_promoted.into_values().collect(),
+        attention_items,
+    }
+}
+
+fn attention_priority(reason: &str) -> usize {
+    if reason.contains("expired_pending") {
+        0
+    } else if reason.contains("eval_score_below_minimum") {
+        1
+    } else if reason.contains("stale_pending") {
+        2
+    } else if reason.contains("expiring_soon") {
+        3
+    } else if reason.contains("automation_ready") {
+        4
+    } else {
+        5
+    }
 }
 
 async fn approve_agent_release_promotion(
@@ -19297,6 +19505,37 @@ not json
         .await;
         assert_eq!(expired_request.status, "pending_approval");
 
+        let pending_summary: AgentReleaseRolloutSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents/releases/summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(pending_summary.release_count, 5);
+        assert_eq!(pending_summary.pending_count, 2);
+        assert_eq!(pending_summary.promoted_count, 2);
+        assert_eq!(pending_summary.rejected_count, 1);
+        assert_eq!(pending_summary.auto_pending_count, 1);
+        assert_eq!(pending_summary.manual_pending_count, 1);
+        assert_eq!(pending_summary.expired_pending_count, 1);
+        assert_eq!(pending_summary.by_environment.get("prod").copied(), Some(4));
+        assert!(pending_summary.attention_items.iter().any(|item| {
+            item.release_id == auto_request.id && item.reason.contains("automation_ready")
+        }));
+        assert!(pending_summary.attention_items.iter().any(|item| {
+            item.release_id == expired_request.id && item.reason.contains("expired_pending")
+        }));
+        assert!(
+            pending_summary
+                .latest_promoted_by_environment
+                .iter()
+                .any(|item| item.environment == "staging" && item.release_id == release.id)
+        );
+
         let automation_run: AgentReleaseAutomationRun = request_json(
             app.clone(),
             Request::builder()
@@ -19373,6 +19612,22 @@ not json
         .await;
         assert_eq!(rolled_back.id, release.id);
         assert_eq!(rolled_back.status, "rolled_back");
+
+        let post_rollback_summary: AgentReleaseRolloutSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents/releases/summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(post_rollback_summary.release_count, 5);
+        assert_eq!(post_rollback_summary.pending_count, 0);
+        assert_eq!(post_rollback_summary.rolled_back_count, 1);
+        assert_eq!(post_rollback_summary.promoted_count, 2);
+        assert_eq!(post_rollback_summary.rejected_count, 2);
 
         let (status, rollback_error) = request_value(
             app.clone(),

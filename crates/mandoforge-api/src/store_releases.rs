@@ -46,6 +46,36 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn list_all_agent_releases(&self) -> Result<Vec<AgentRelease>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut releases: Vec<_> = inner
+                    .read()
+                    .await
+                    .agent_releases
+                    .values()
+                    .cloned()
+                    .collect();
+                releases.sort_by_key(|release| release.created_at);
+                releases.reverse();
+                Ok(releases)
+            }
+            StoreBackend::Postgres(pool) => {
+                let sql = format!(
+                    "SELECT {AGENT_RELEASE_COLUMNS}
+                     FROM agent_releases
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC"
+                );
+                let rows = sqlx::query(&sql)
+                    .bind(self.tenant_id)
+                    .fetch_all(pool)
+                    .await?;
+                rows.into_iter().map(agent_release_from_row).collect()
+            }
+        }
+    }
+
     pub(crate) async fn list_pending_agent_releases(&self) -> Result<Vec<AgentRelease>, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {

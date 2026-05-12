@@ -26,6 +26,7 @@ const state = {
   evalGates: {},
   evalDrifts: {},
   agentReleases: {},
+  agentReleaseSummary: null,
   agentReleaseAutomationRun: null,
   mcpServers: [],
   mcpTeamId: "",
@@ -1312,9 +1313,13 @@ async function refreshOps() {
 }
 
 async function refreshAgentReleases(render = true) {
-  const releaseEntries = await Promise.all(
-    state.agents.map(async (agent) => [agent.id, await api(`/api/agents/${agent.id}/releases`)]),
-  );
+  const [summary, releaseEntries] = await Promise.all([
+    api("/api/agents/releases/summary"),
+    Promise.all(
+      state.agents.map(async (agent) => [agent.id, await api(`/api/agents/${agent.id}/releases`)]),
+    ),
+  ]);
+  state.agentReleaseSummary = summary;
   state.agentReleases = Object.fromEntries(releaseEntries);
   if (render) {
     renderAgentReleases();
@@ -2714,6 +2719,26 @@ function renderEvalSuiteBootstrap() {
 }
 
 function renderAgentReleases() {
+  const summary = state.agentReleaseSummary;
+  const summaryPanel = summary
+    ? `<div class="policy-gate-summary">
+        <div class="metric-grid compact-metrics">
+          <div class="metric"><span>Total</span><strong>${formatInteger(summary.release_count)}</strong></div>
+          <div class="metric"><span>Pending</span><strong>${formatInteger(summary.pending_count)}</strong></div>
+          <div class="metric"><span>Promoted</span><strong>${formatInteger(summary.promoted_count)}</strong></div>
+          <div class="metric"><span>Rejected</span><strong>${formatInteger(summary.rejected_count)}</strong></div>
+          <div class="metric"><span>Rolled Back</span><strong>${formatInteger(summary.rolled_back_count)}</strong></div>
+          <div class="metric"><span>Auto Pending</span><strong>${formatInteger(summary.auto_pending_count)}</strong></div>
+          <div class="metric"><span>Expired</span><strong>${formatInteger(summary.expired_pending_count)}</strong></div>
+          <div class="metric"><span>Stale</span><strong>${formatInteger(summary.stale_pending_count)}</strong></div>
+        </div>
+        <div class="muted">Status: ${escapeHtml(formatCounts(summary.by_status))}</div>
+        <div class="muted">Environment: ${escapeHtml(formatCounts(summary.by_environment))}</div>
+        <div class="muted">Generated: ${escapeHtml(summary.generated_at)}</div>
+        ${renderReleaseAttention(summary.attention_items || [])}
+        ${renderLatestPromotions(summary.latest_promoted_by_environment || [])}
+      </div>`
+    : "";
   const automationRun = state.agentReleaseAutomationRun;
   const automationSummary = automationRun
     ? `<div class="item">
@@ -2728,7 +2753,7 @@ function renderAgentReleases() {
     }))
     .filter((group) => group.releases.length);
   agentReleaseRoot.innerHTML = releaseGroups.length
-    ? `${automationSummary}${releaseGroups
+    ? `${summaryPanel}${automationSummary}${releaseGroups
         .map(
           ({ agent, releases }) => `
             <div class="item">
@@ -2764,7 +2789,7 @@ function renderAgentReleases() {
           `,
         )
         .join("")}`
-    : `${automationSummary}<div class="muted">No promoted or rolled back releases</div>`;
+    : `${summaryPanel}${automationSummary}<div class="muted">No promoted or rolled back releases</div>`;
   agentReleaseRoot.querySelectorAll("[data-release-rollback]").forEach((button) => {
     button.addEventListener("click", () =>
       rollbackAgentRelease(button.dataset.releaseAgent, button.dataset.releaseRollback),
@@ -2780,6 +2805,49 @@ function renderAgentReleases() {
       rejectAgentRelease(button.dataset.releaseAgent, button.dataset.releaseReject),
     );
   });
+}
+
+function renderReleaseAttention(items) {
+  return items.length
+    ? `<div class="nested-item">
+        <strong>Release attention</strong>
+        <table class="usage-table">
+          <thead>
+            <tr><th>Environment</th><th>Status</th><th>Reason</th><th>Approver</th><th>Expires</th></tr>
+          </thead>
+          <tbody>
+            ${items
+              .map(
+                (item) => `
+                  <tr>
+                    <td>${escapeHtml(item.environment)}</td>
+                    <td>${escapeHtml(item.status)}</td>
+                    <td>${escapeHtml(item.reason || "review")}</td>
+                    <td>${escapeHtml(item.approver_subject || "any separate admin")}</td>
+                    <td>${escapeHtml(item.expires_at || "none")}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>`
+    : `<div class="muted">No pending release attention items.</div>`;
+}
+
+function renderLatestPromotions(items) {
+  return items.length
+    ? `<div class="nested-item">
+        <strong>Latest promoted by environment</strong>
+        ${items
+          .map(
+            (item) => `
+              <div class="muted">${escapeHtml(item.environment)} · ${escapeHtml(item.release_id)} · score ${escapeHtml(item.eval_score ?? "n/a")} · ${escapeHtml(item.promoted_at)}</div>
+            `,
+          )
+          .join("")}
+      </div>`
+    : `<div class="muted">No promoted release per environment yet.</div>`;
 }
 
 function renderEvalDatasets() {
