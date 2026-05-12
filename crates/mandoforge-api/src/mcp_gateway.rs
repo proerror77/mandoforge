@@ -29,6 +29,14 @@ pub(crate) struct McpCallResponse {
     pub(crate) result: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct McpToolDescriptor {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+}
+
 #[allow(dead_code)]
 impl McpGatewayConfig {
     pub(crate) fn from_env() -> Result<Self, AppError> {
@@ -82,6 +90,12 @@ pub(crate) trait McpGatewayClient: Send + Sync {
         config: &McpGatewayConfig,
         request: McpCallRequest,
     ) -> Result<McpCallResponse, AppError>;
+
+    async fn discover_tools(
+        &self,
+        config: &McpGatewayConfig,
+        server: &str,
+    ) -> Result<Vec<McpToolDescriptor>, AppError>;
 }
 
 #[allow(dead_code)]
@@ -111,6 +125,22 @@ impl McpGatewayClient for ReservedMcpGatewayClient {
             "MCP gateway call is reserved but not implemented",
         ))
     }
+
+    async fn discover_tools(
+        &self,
+        config: &McpGatewayConfig,
+        server: &str,
+    ) -> Result<Vec<McpToolDescriptor>, AppError> {
+        if !config.allows_server(server) {
+            return Err(AppError::forbidden(format!(
+                "MCP server {server} is not allowed"
+            )));
+        }
+
+        Err(AppError::bad_request(
+            "MCP gateway tool discovery is reserved but not implemented",
+        ))
+    }
 }
 
 #[allow(dead_code)]
@@ -132,6 +162,10 @@ impl HttpMcpGatewayClient {
 
     fn call_url(config: &McpGatewayConfig) -> String {
         format!("{}/v1/call", config.normalized_endpoint())
+    }
+
+    fn tools_url(config: &McpGatewayConfig, server: &str) -> String {
+        format!("{}/v1/servers/{server}/tools", config.normalized_endpoint())
     }
 }
 
@@ -180,6 +214,30 @@ impl McpGatewayClient for HttpMcpGatewayClient {
         let value = response.json::<McpCallResponse>().await?;
         Ok(value)
     }
+
+    async fn discover_tools(
+        &self,
+        config: &McpGatewayConfig,
+        server: &str,
+    ) -> Result<Vec<McpToolDescriptor>, AppError> {
+        if !config.allows_server(server) {
+            return Err(AppError::forbidden(format!(
+                "MCP server {server} is not allowed"
+            )));
+        }
+        let response = tokio::time::timeout(
+            Duration::from_secs(config.timeout_seconds),
+            self.client.get(Self::tools_url(config, server)).send(),
+        )
+        .await??;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AppError::bad_request(format!(
+                "MCP gateway tool discovery failed with status {status}"
+            )));
+        }
+        Ok(response.json::<Vec<McpToolDescriptor>>().await?)
+    }
 }
 
 fn parse_csv(value: &str) -> Vec<String> {
@@ -198,7 +256,7 @@ mod tests {
 
     use super::{
         HttpMcpGatewayClient, McpCallRequest, McpCallResponse, McpGatewayClient, McpGatewayConfig,
-        ReservedMcpGatewayClient, parse_csv,
+        McpToolDescriptor, ReservedMcpGatewayClient, parse_csv,
     };
 
     async fn mock_mcp_health() -> Json<serde_json::Value> {
@@ -214,6 +272,19 @@ mod tests {
                 "status": "called"
             }),
         })
+    }
+
+    async fn mock_mcp_tools() -> Json<Vec<McpToolDescriptor>> {
+        Json(vec![
+            McpToolDescriptor {
+                name: "query".to_string(),
+                description: Some("Query warehouse".to_string()),
+            },
+            McpToolDescriptor {
+                name: "describe".to_string(),
+                description: Some("Describe warehouse".to_string()),
+            },
+        ])
     }
 
     #[test]
@@ -297,7 +368,8 @@ mod tests {
         let addr = listener.local_addr().expect("local addr");
         let app = Router::new()
             .route("/healthz", get(mock_mcp_health))
-            .route("/v1/call", post(mock_mcp_call));
+            .route("/v1/call", post(mock_mcp_call))
+            .route("/v1/servers/warehouse/tools", get(mock_mcp_tools));
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("mock mcp");
         });
@@ -323,10 +395,21 @@ mod tests {
             .await
             .expect("mcp call");
 
-        server.abort();
         assert_eq!(response.result["status"], "called");
         assert_eq!(response.result["server"], "warehouse");
         assert_eq!(response.result["args"]["sql"], "select 1");
+        let tools = client
+            .discover_tools(&config, "warehouse")
+            .await
+            .expect("discover tools");
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["query", "describe"]
+        );
+        server.abort();
     }
 
     #[tokio::test]

@@ -866,6 +866,73 @@ impl AppState {
         Ok(server)
     }
 
+    pub(crate) async fn get_mcp_server(
+        &self,
+        team_id: Uuid,
+        server_id: Uuid,
+    ) -> Result<McpServerRecord, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .mcp_servers
+                .get(&server_id)
+                .filter(|server| server.team_id == team_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("mcp server not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, team_id, name, transport, config, tool_allowlist, status, created_at
+                     FROM mcp_servers
+                     WHERE tenant_id = $1 AND team_id = $2 AND id = $3",
+                )
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .bind(server_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("mcp server not found"))?;
+                mcp_server_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn update_mcp_server_tool_allowlist(
+        &self,
+        team_id: Uuid,
+        server_id: Uuid,
+        tool_allowlist: Vec<String>,
+    ) -> Result<McpServerRecord, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let server = store
+                    .mcp_servers
+                    .get_mut(&server_id)
+                    .filter(|server| server.team_id == team_id)
+                    .ok_or_else(|| AppError::not_found("mcp server not found"))?;
+                server.tool_allowlist = tool_allowlist;
+                Ok(server.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE mcp_servers
+                     SET tool_allowlist = $1
+                     WHERE tenant_id = $2 AND team_id = $3 AND id = $4
+                     RETURNING id, team_id, name, transport, config, tool_allowlist, status, created_at",
+                )
+                .bind(serde_json::json!(tool_allowlist))
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .bind(server_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("mcp server not found"))?;
+                mcp_server_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn ensure_mcp_tool_allowed_for_session(
         &self,
         session_id: Uuid,

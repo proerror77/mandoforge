@@ -685,6 +685,10 @@ fn build_router(state: AppState) -> Router {
             "/api/teams/{id}/mcp-servers",
             get(list_mcp_servers).post(create_mcp_server),
         )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/{server_id}/discover",
+            post(discover_mcp_server_tools),
+        )
         .route("/api/providers", get(list_providers).post(create_provider))
         .route(
             "/api/eval/datasets",
@@ -2246,6 +2250,35 @@ async fn create_mcp_server(
     Ok(Json(state.create_mcp_server(id, input).await?))
 }
 
+async fn discover_mcp_server_tools(
+    State(state): State<AppState>,
+    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerRecord>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    let config = state
+        .mcp_gateway_config
+        .as_ref()
+        .ok_or_else(|| AppError::bad_request("MCP gateway is not configured"))?;
+    let server = state.get_mcp_server(team_id, server_id).await?;
+    let tools = state
+        .mcp_gateway_client
+        .discover_tools(config, &server.name)
+        .await?;
+    let mut tool_allowlist: Vec<_> = tools
+        .into_iter()
+        .map(|tool| tool.name)
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+    tool_allowlist.sort();
+    tool_allowlist.dedup();
+    Ok(Json(
+        state
+            .update_mcp_server_tool_allowlist(team_id, server_id, tool_allowlist)
+            .await?,
+    ))
+}
+
 async fn list_eval_datasets(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3395,6 +3428,22 @@ not json
                 }),
             })
         }
+
+        async fn discover_tools(
+            &self,
+            config: &McpGatewayConfig,
+            server: &str,
+        ) -> Result<Vec<mcp_gateway::McpToolDescriptor>, AppError> {
+            if !config.allows_server(server) {
+                return Err(AppError::forbidden(format!(
+                    "MCP server {server} is not allowed"
+                )));
+            }
+            Ok(vec![mcp_gateway::McpToolDescriptor {
+                name: "search".to_string(),
+                description: Some("Search governed docs".to_string()),
+            }])
+        }
     }
 
     #[tokio::test]
@@ -3525,14 +3574,14 @@ not json
             )
             .await
             .expect("create provider access");
-        state
+        let mcp_server = state
             .create_mcp_server(
                 team.id,
                 CreateMcpServerRecord {
                     name: "docs".to_string(),
                     transport: "http".to_string(),
                     config: json!({"source": "test"}),
-                    tool_allowlist: vec!["search".to_string()],
+                    tool_allowlist: vec![],
                 },
             )
             .await
@@ -3559,6 +3608,22 @@ not json
             .await
             .expect("create scoped session");
         let app = build_router(state);
+
+        let discovered: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}/discover",
+                    team.id, mcp_server.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(discovered.tool_allowlist, vec!["search".to_string()]);
 
         let result: Value = request_json(
             app.clone(),
