@@ -1365,6 +1365,56 @@ struct McpServerRolloutDueRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerRolloutSummary {
+    team_id: Uuid,
+    generated_at: DateTime<Utc>,
+    server_count: usize,
+    by_server_status: BTreeMap<String, usize>,
+    by_transport: BTreeMap<String, usize>,
+    pending_rollout_count: usize,
+    manual_pending_count: usize,
+    scheduled_pending_count: usize,
+    due_pending_count: usize,
+    not_due_pending_count: usize,
+    expired_pending_count: usize,
+    applied_rollout_count: usize,
+    rolled_back_rollout_count: usize,
+    expired_rollout_count: usize,
+    failed_preflight_count: usize,
+    attention_items: Vec<McpServerRolloutAttentionItem>,
+    latest_rollouts: Vec<McpServerLatestRollout>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerRolloutAttentionItem {
+    server_id: Uuid,
+    name: String,
+    server_status: String,
+    rollout_id: Option<String>,
+    rollout_status: String,
+    reason: String,
+    requested_by: Option<String>,
+    requested_at: Option<DateTime<Utc>>,
+    activate_after: Option<DateTime<Utc>>,
+    activate_before: Option<DateTime<Utc>>,
+    target_keys: Vec<String>,
+    preflight_healthy: Option<bool>,
+    preflight_issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerLatestRollout {
+    server_id: Uuid,
+    name: String,
+    rollout_id: Option<String>,
+    status: String,
+    updated_at: Option<DateTime<Utc>>,
+    requested_by: Option<String>,
+    applied_by: Option<String>,
+    rolled_back_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct EvalDataset {
     id: Uuid,
     name: String,
@@ -1773,6 +1823,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{team_id}/mcp-servers/rollouts/run-due",
             post(run_due_mcp_server_rollouts),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/rollouts/summary",
+            get(get_mcp_server_rollout_summary),
         )
         .route(
             "/api/teams/{team_id}/mcp-servers/{server_id}/rollouts",
@@ -7414,6 +7468,19 @@ async fn run_due_mcp_server_rollouts(
     ))
 }
 
+async fn get_mcp_server_rollout_summary(
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerRolloutSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    Ok(Json(build_mcp_server_rollout_summary(
+        team_id,
+        state.list_mcp_servers(team_id).await?,
+        Utc::now(),
+    )))
+}
+
 async fn execute_due_mcp_server_rollouts(
     state: &AppState,
     team_id: Uuid,
@@ -7513,6 +7580,208 @@ async fn execute_due_mcp_server_rollouts(
         ))
         .await?;
     Ok(run)
+}
+
+fn build_mcp_server_rollout_summary(
+    team_id: Uuid,
+    servers: Vec<McpServerRecord>,
+    now: DateTime<Utc>,
+) -> McpServerRolloutSummary {
+    let mut by_server_status = BTreeMap::new();
+    let mut by_transport = BTreeMap::new();
+    let mut pending_rollout_count = 0usize;
+    let mut manual_pending_count = 0usize;
+    let mut scheduled_pending_count = 0usize;
+    let mut due_pending_count = 0usize;
+    let mut not_due_pending_count = 0usize;
+    let mut expired_pending_count = 0usize;
+    let mut applied_rollout_count = 0usize;
+    let mut rolled_back_rollout_count = 0usize;
+    let mut expired_rollout_count = 0usize;
+    let mut failed_preflight_count = 0usize;
+    let mut attention_items = Vec::new();
+    let mut latest_rollouts = Vec::new();
+
+    for server in &servers {
+        *by_server_status.entry(server.status.clone()).or_insert(0) += 1;
+        *by_transport.entry(server.transport.clone()).or_insert(0) += 1;
+
+        if let Some(rollout) = mcp_pending_rollout(server) {
+            pending_rollout_count += 1;
+            let activation_window = mcp_rollout_activation_window(rollout);
+            if activation_window
+                .as_ref()
+                .and_then(|window| window.activate_after)
+                .is_some()
+            {
+                scheduled_pending_count += 1;
+            } else {
+                manual_pending_count += 1;
+            }
+            let mut reasons = Vec::new();
+            if mcp_rollout_is_expired(rollout, now) {
+                expired_pending_count += 1;
+                reasons.push("expired_pending".to_string());
+            } else if mcp_rollout_is_due(rollout, now) {
+                due_pending_count += 1;
+                reasons.push("due_for_activation".to_string());
+            } else {
+                not_due_pending_count += 1;
+                if activation_window.is_some() {
+                    reasons.push("activation_window_not_open".to_string());
+                } else {
+                    reasons.push("manual_apply_required".to_string());
+                }
+            }
+            let preflight_healthy = rollout
+                .get("preflight")
+                .and_then(|preflight| preflight.get("healthy"))
+                .and_then(Value::as_bool);
+            let preflight_issues = rollout
+                .get("preflight")
+                .and_then(|preflight| preflight.get("issues"))
+                .and_then(Value::as_array)
+                .map(|issues| {
+                    issues
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if preflight_healthy == Some(false) {
+                failed_preflight_count += 1;
+                reasons.push("preflight_failed".to_string());
+            }
+            attention_items.push(McpServerRolloutAttentionItem {
+                server_id: server.id,
+                name: server.name.clone(),
+                server_status: server.status.clone(),
+                rollout_id: rollout
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                rollout_status: rollout
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("pending")
+                    .to_string(),
+                reason: reasons.join(","),
+                requested_by: rollout
+                    .get("requested_by")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                requested_at: mcp_rollout_time(rollout, "requested_at"),
+                activate_after: activation_window
+                    .as_ref()
+                    .and_then(|window| window.activate_after),
+                activate_before: activation_window
+                    .as_ref()
+                    .and_then(|window| window.activate_before),
+                target_keys: mcp_rollout_target_keys(rollout),
+                preflight_healthy,
+                preflight_issues,
+            });
+        }
+
+        if let Some(last_rollout) = server.config.get("last_rollout") {
+            let status = last_rollout
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            match status.as_str() {
+                "applied" => applied_rollout_count += 1,
+                "rolled_back" => rolled_back_rollout_count += 1,
+                "expired" => expired_rollout_count += 1,
+                _ => {}
+            }
+            latest_rollouts.push(McpServerLatestRollout {
+                server_id: server.id,
+                name: server.name.clone(),
+                rollout_id: last_rollout
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                status,
+                updated_at: mcp_rollout_time(last_rollout, "rolled_back_at")
+                    .or_else(|| mcp_rollout_time(last_rollout, "applied_at"))
+                    .or_else(|| mcp_rollout_time(last_rollout, "expired_at"))
+                    .or_else(|| mcp_rollout_time(last_rollout, "requested_at")),
+                requested_by: last_rollout
+                    .get("requested_by")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                applied_by: last_rollout
+                    .get("applied_by")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                rolled_back_by: last_rollout
+                    .get("rolled_back_by")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            });
+        }
+    }
+
+    attention_items.sort_by(|left, right| {
+        mcp_rollout_attention_priority(&left.reason)
+            .cmp(&mcp_rollout_attention_priority(&right.reason))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    latest_rollouts.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+
+    McpServerRolloutSummary {
+        team_id,
+        generated_at: now,
+        server_count: servers.len(),
+        by_server_status,
+        by_transport,
+        pending_rollout_count,
+        manual_pending_count,
+        scheduled_pending_count,
+        due_pending_count,
+        not_due_pending_count,
+        expired_pending_count,
+        applied_rollout_count,
+        rolled_back_rollout_count,
+        expired_rollout_count,
+        failed_preflight_count,
+        attention_items,
+        latest_rollouts,
+    }
+}
+
+fn mcp_rollout_target_keys(rollout: &Value) -> Vec<String> {
+    let mut keys = rollout
+        .get("target")
+        .and_then(Value::as_object)
+        .map(|target| target.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+fn mcp_rollout_time(rollout: &Value, field: &str) -> Option<DateTime<Utc>> {
+    rollout
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn mcp_rollout_attention_priority(reason: &str) -> usize {
+    if reason.contains("expired_pending") {
+        0
+    } else if reason.contains("preflight_failed") {
+        1
+    } else if reason.contains("due_for_activation") {
+        2
+    } else if reason.contains("activation_window_not_open") {
+        3
+    } else {
+        4
+    }
 }
 
 struct BuiltMcpServerRollout {
@@ -15143,6 +15412,33 @@ not json
                 .is_some()
         );
 
+        let pending_rollout_summary: McpServerRolloutSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/rollouts/summary",
+                    team.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(pending_rollout_summary.server_count, 1);
+        assert_eq!(pending_rollout_summary.pending_rollout_count, 1);
+        assert_eq!(pending_rollout_summary.scheduled_pending_count, 1);
+        assert_eq!(pending_rollout_summary.due_pending_count, 1);
+        assert_eq!(pending_rollout_summary.expired_pending_count, 0);
+        assert!(
+            pending_rollout_summary
+                .attention_items
+                .iter()
+                .any(|item| item.server_id == mcp_server.id
+                    && item.reason.contains("due_for_activation")
+                    && item.target_keys.contains(&"config".to_string()))
+        );
+
         let rollout_run: McpServerRolloutDueRun = request_json(
             app.clone(),
             Request::builder()
@@ -15198,6 +15494,29 @@ not json
         .await;
         assert_eq!(rolled_back.rollout["status"], "rolled_back");
         assert_eq!(rolled_back.server.config["source"], "scheduled");
+
+        let rolled_back_summary: McpServerRolloutSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/rollouts/summary",
+                    team.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rolled_back_summary.pending_rollout_count, 0);
+        assert_eq!(rolled_back_summary.rolled_back_rollout_count, 1);
+        assert_eq!(rolled_back_summary.applied_rollout_count, 0);
+        assert!(
+            rolled_back_summary
+                .latest_rollouts
+                .iter()
+                .any(|item| item.server_id == mcp_server.id && item.status == "rolled_back")
+        );
 
         let result: Value = request_json(
             app.clone(),

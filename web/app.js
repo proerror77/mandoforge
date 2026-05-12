@@ -34,6 +34,7 @@ const state = {
   mcpHealthRun: null,
   mcpScheduledHealthRun: null,
   mcpRolloutRun: null,
+  mcpRolloutSummary: null,
   executionJobs: [],
   usageRollups: [],
   usageTrend: null,
@@ -1044,7 +1045,12 @@ async function loadMcpServers() {
     return;
   }
   state.mcpTeamId = teamId;
-  state.mcpServers = await api(`/api/teams/${teamId}/mcp-servers`);
+  const [servers, rolloutSummary] = await Promise.all([
+    api(`/api/teams/${teamId}/mcp-servers`),
+    api(`/api/teams/${teamId}/mcp-servers/rollouts/summary`),
+  ]);
+  state.mcpServers = servers;
+  state.mcpRolloutSummary = rolloutSummary;
   renderMcpServers();
 }
 
@@ -2957,8 +2963,9 @@ function renderMcpServers() {
         <div class="muted">${formatInteger(rolloutRun.applied_count)} applied · ${formatInteger(rolloutRun.skipped_count)} skipped · ${formatInteger(rolloutRun.expired_count)} expired · ${formatInteger(rolloutRun.failed_count)} failed · ${escapeHtml(rolloutRun.checked_at)}</div>
       </div>`
     : "";
+  const rolloutSummary = renderMcpRolloutSummary(state.mcpRolloutSummary);
   mcpServerRoot.innerHTML = state.mcpServers.length
-    ? `${runSummary}${scheduledRunSummary}${rolloutRunSummary}${state.mcpServers
+    ? `${rolloutSummary}${runSummary}${scheduledRunSummary}${rolloutRunSummary}${state.mcpServers
         .map((server) => {
           const health = state.mcpHealth[server.id];
           const pendingRollout = server.config?.pending_rollout;
@@ -2990,7 +2997,7 @@ function renderMcpServers() {
         })
         .join("")}`
     : state.mcpTeamId
-      ? `${runSummary}${scheduledRunSummary}${rolloutRunSummary}<div class="muted">No MCP servers for this team</div>`
+      ? `${rolloutSummary}${runSummary}${scheduledRunSummary}${rolloutRunSummary}<div class="muted">No MCP servers for this team</div>`
       : `<div class="muted">Enter a team ID to manage MCP servers</div>`;
   mcpServerRoot.querySelectorAll("[data-discover-mcp]").forEach((button) => {
     button.addEventListener("click", () => discoverMcpTools(button.dataset.discoverMcp));
@@ -3019,6 +3026,71 @@ function renderMcpServers() {
       updateMcpStatus(button.dataset.mcpStatus, button.dataset.status),
     );
   });
+}
+
+function renderMcpRolloutSummary(summary) {
+  return summary
+    ? `<div class="policy-gate-summary">
+        <div class="metric-grid compact-metrics">
+          <div class="metric"><span>Servers</span><strong>${formatInteger(summary.server_count)}</strong></div>
+          <div class="metric"><span>Pending</span><strong>${formatInteger(summary.pending_rollout_count)}</strong></div>
+          <div class="metric"><span>Due</span><strong>${formatInteger(summary.due_pending_count)}</strong></div>
+          <div class="metric"><span>Not Due</span><strong>${formatInteger(summary.not_due_pending_count)}</strong></div>
+          <div class="metric"><span>Expired</span><strong>${formatInteger(summary.expired_pending_count)}</strong></div>
+          <div class="metric"><span>Applied</span><strong>${formatInteger(summary.applied_rollout_count)}</strong></div>
+          <div class="metric"><span>Rolled Back</span><strong>${formatInteger(summary.rolled_back_rollout_count)}</strong></div>
+          <div class="metric"><span>Preflight Failed</span><strong>${formatInteger(summary.failed_preflight_count)}</strong></div>
+        </div>
+        <div class="muted">Server status: ${escapeHtml(formatCounts(summary.by_server_status))}</div>
+        <div class="muted">Transport: ${escapeHtml(formatCounts(summary.by_transport))}</div>
+        <div class="muted">Generated: ${escapeHtml(summary.generated_at)}</div>
+        ${renderMcpRolloutAttention(summary.attention_items || [])}
+        ${renderMcpLatestRollouts(summary.latest_rollouts || [])}
+      </div>`
+    : "";
+}
+
+function renderMcpRolloutAttention(items) {
+  return items.length
+    ? `<div class="nested-item">
+        <strong>Connector rollout attention</strong>
+        <table class="usage-table">
+          <thead>
+            <tr><th>Server</th><th>Status</th><th>Reason</th><th>Targets</th><th>Window</th></tr>
+          </thead>
+          <tbody>
+            ${items
+              .map(
+                (item) => `
+                  <tr>
+                    <td>${escapeHtml(item.name)}</td>
+                    <td>${escapeHtml(item.rollout_status)}</td>
+                    <td>${escapeHtml(item.reason || "review")}</td>
+                    <td>${escapeHtml((item.target_keys || []).join(", ") || "none")}</td>
+                    <td>${escapeHtml(item.activate_after || "manual")} -> ${escapeHtml(item.activate_before || "open")}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>`
+    : `<div class="muted">No pending connector rollout attention items.</div>`;
+}
+
+function renderMcpLatestRollouts(items) {
+  return items.length
+    ? `<div class="nested-item">
+        <strong>Latest connector rollouts</strong>
+        ${items
+          .map(
+            (item) => `
+              <div class="muted">${escapeHtml(item.name)} · ${escapeHtml(item.status)} · ${escapeHtml(item.rollout_id || "no id")} · ${escapeHtml(item.updated_at || "no timestamp")}</div>
+            `,
+          )
+          .join("")}
+      </div>`
+    : `<div class="muted">No applied connector rollouts yet.</div>`;
 }
 
 function renderAgents() {
