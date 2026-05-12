@@ -581,6 +581,54 @@ struct UsageSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageTrendSummary {
+    generated_at: DateTime<Utc>,
+    rollup_count: usize,
+    comparison_basis: String,
+    current_cost_cents: f64,
+    current_total_tokens: i64,
+    current_tool_calls: i64,
+    latest_period: Option<UsageTrendPeriod>,
+    previous_period: Option<UsageTrendPeriod>,
+    cost_delta_cents: Option<f64>,
+    cost_delta_percent: Option<f64>,
+    token_delta: Option<i64>,
+    token_delta_percent: Option<f64>,
+    tool_call_delta: Option<i64>,
+    tool_call_delta_percent: Option<f64>,
+    top_provider_by_cost: Option<UsageTrendProvider>,
+    budget_pressure: UsageBudgetPressure,
+    recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageTrendPeriod {
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    cost_cents: f64,
+    total_tokens: i64,
+    tool_calls: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageTrendProvider {
+    provider_name: String,
+    estimated_cost_cents: f64,
+    total_tokens: i64,
+    request_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageBudgetPressure {
+    total_budgeted_providers: usize,
+    pressure_count: usize,
+    warning_count: usize,
+    critical_count: usize,
+    highest_status: String,
+    highest_used_percent: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ObservabilitySummary {
     generated_at: DateTime<Utc>,
     telemetry: ObservabilityTelemetryStatus,
@@ -1747,6 +1795,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/eval/runs/{id}/gate", post(gate_eval_run))
         .route("/api/eval/runs/{id}/drift", get(get_eval_run_drift))
         .route("/api/usage", get(get_usage_summary))
+        .route("/api/usage/trends", get(get_usage_trends))
         .route("/api/usage/alerts", get(get_cost_alerts))
         .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
@@ -7957,6 +8006,14 @@ async fn get_usage_summary(
     Ok(Json(build_usage_summary(&state).await?))
 }
 
+async fn get_usage_trends(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<UsageTrendSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "usage_trends", None).await?;
+    Ok(Json(build_usage_trend_summary(&state).await?))
+}
+
 async fn get_observability_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -8903,6 +8960,192 @@ async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError>
         by_tool,
         provider_budgets,
     })
+}
+
+async fn build_usage_trend_summary(state: &AppState) -> Result<UsageTrendSummary, AppError> {
+    let generated_at = Utc::now();
+    let current = build_usage_summary(state).await?;
+    let rollups = state.list_usage_rollups().await?;
+    Ok(build_usage_trend_from_parts(
+        current,
+        &rollups,
+        generated_at,
+    ))
+}
+
+fn build_usage_trend_from_parts(
+    current: UsageSummary,
+    rollups: &[UsageRollup],
+    generated_at: DateTime<Utc>,
+) -> UsageTrendSummary {
+    let current_period = UsageTrendPeriod {
+        period_start: generated_at - chrono::Duration::hours(24),
+        period_end: generated_at,
+        cost_cents: current.estimated_provider_cost_cents,
+        total_tokens: current.total_tokens,
+        tool_calls: current.tool_call_count as i64,
+    };
+    let (comparison_basis, latest_period, previous_period) = match rollups {
+        [latest, previous, ..] => (
+            "latest_rollups".to_string(),
+            Some(usage_rollup_trend_period(latest)),
+            Some(usage_rollup_trend_period(previous)),
+        ),
+        [previous] => (
+            "current_vs_latest_rollup".to_string(),
+            Some(current_period.clone()),
+            Some(usage_rollup_trend_period(previous)),
+        ),
+        [] => (
+            "current_only".to_string(),
+            Some(current_period.clone()),
+            None,
+        ),
+    };
+    let cost_delta_cents = latest_period
+        .as_ref()
+        .zip(previous_period.as_ref())
+        .map(|(latest, previous)| latest.cost_cents - previous.cost_cents);
+    let cost_delta_percent = latest_period
+        .as_ref()
+        .zip(previous_period.as_ref())
+        .and_then(|(latest, previous)| percent_delta(latest.cost_cents, previous.cost_cents));
+    let token_delta = latest_period
+        .as_ref()
+        .zip(previous_period.as_ref())
+        .map(|(latest, previous)| latest.total_tokens - previous.total_tokens);
+    let token_delta_percent = latest_period
+        .as_ref()
+        .zip(previous_period.as_ref())
+        .and_then(|(latest, previous)| {
+            percent_delta(latest.total_tokens as f64, previous.total_tokens as f64)
+        });
+    let tool_call_delta = latest_period
+        .as_ref()
+        .zip(previous_period.as_ref())
+        .map(|(latest, previous)| latest.tool_calls - previous.tool_calls);
+    let tool_call_delta_percent = latest_period
+        .as_ref()
+        .zip(previous_period.as_ref())
+        .and_then(|(latest, previous)| {
+            percent_delta(latest.tool_calls as f64, previous.tool_calls as f64)
+        });
+    let top_provider_by_cost = current
+        .by_provider
+        .iter()
+        .max_by(|left, right| {
+            left.1
+                .estimated_cost_cents
+                .total_cmp(&right.1.estimated_cost_cents)
+        })
+        .map(|(provider_name, usage)| UsageTrendProvider {
+            provider_name: provider_name.clone(),
+            estimated_cost_cents: usage.estimated_cost_cents,
+            total_tokens: usage.total_tokens,
+            request_count: usage.request_count,
+        });
+    let budget_pressure = build_usage_budget_pressure(&current.provider_budgets);
+    let mut recommendations = Vec::new();
+    if budget_pressure.critical_count > 0 {
+        recommendations.push("critical_provider_budget_review".to_string());
+    } else if budget_pressure.warning_count > 0 {
+        recommendations.push("provider_budget_watch".to_string());
+    }
+    if cost_delta_percent.is_some_and(|percent| percent >= 25.0) {
+        recommendations.push("cost_growth_investigation".to_string());
+    }
+    if rollups.is_empty() {
+        recommendations.push("create_daily_usage_rollup".to_string());
+    }
+
+    UsageTrendSummary {
+        generated_at,
+        rollup_count: rollups.len(),
+        comparison_basis,
+        current_cost_cents: current_period.cost_cents,
+        current_total_tokens: current_period.total_tokens,
+        current_tool_calls: current_period.tool_calls,
+        latest_period,
+        previous_period,
+        cost_delta_cents,
+        cost_delta_percent,
+        token_delta,
+        token_delta_percent,
+        tool_call_delta,
+        tool_call_delta_percent,
+        top_provider_by_cost,
+        budget_pressure,
+        recommendations,
+    }
+}
+
+fn usage_rollup_trend_period(rollup: &UsageRollup) -> UsageTrendPeriod {
+    UsageTrendPeriod {
+        period_start: rollup.period_start,
+        period_end: rollup.period_end,
+        cost_cents: json_f64(&rollup.summary, "estimated_provider_cost_cents"),
+        total_tokens: json_i64(&rollup.summary, "total_tokens"),
+        tool_calls: json_i64(&rollup.summary, "tool_call_count"),
+    }
+}
+
+fn build_usage_budget_pressure(budgets: &[ProviderBudgetStatus]) -> UsageBudgetPressure {
+    let critical_count = budgets
+        .iter()
+        .filter(|budget| budget.status == "critical")
+        .count();
+    let warning_count = budgets
+        .iter()
+        .filter(|budget| budget.status == "warning")
+        .count();
+    let highest_status = if critical_count > 0 {
+        "critical"
+    } else if warning_count > 0 {
+        "warning"
+    } else {
+        "ok"
+    }
+    .to_string();
+    let highest_used_percent = budgets
+        .iter()
+        .flat_map(|budget| {
+            [
+                budget.request_budget_used_percent,
+                budget.cost_budget_used_percent,
+            ]
+        })
+        .flatten()
+        .max_by(f64::total_cmp);
+    UsageBudgetPressure {
+        total_budgeted_providers: budgets.len(),
+        pressure_count: critical_count + warning_count,
+        warning_count,
+        critical_count,
+        highest_status,
+        highest_used_percent,
+    }
+}
+
+fn json_f64(value: &Value, key: &str) -> f64 {
+    value.get(key).and_then(Value::as_f64).unwrap_or_default()
+}
+
+fn json_i64(value: &Value, key: &str) -> i64 {
+    value
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().map(|value| value as i64))
+        })
+        .unwrap_or_default()
+}
+
+fn percent_delta(current: f64, previous: f64) -> Option<f64> {
+    if previous.abs() < f64::EPSILON {
+        return None;
+    }
+    Some(((current - previous) / previous) * 100.0)
 }
 
 async fn build_provider_budget_statuses(
@@ -10320,6 +10563,100 @@ not json
         assert_eq!(events.len(), 2);
         assert_eq!(codex_jsonl_event_type(&events[0]), "session.started");
         assert_eq!(codex_jsonl_event_type(&events[1]), "agent.message");
+    }
+
+    #[test]
+    fn builds_usage_trend_from_rollups_and_budget_pressure() {
+        let generated_at = "2026-05-13T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid time");
+        let current = UsageSummary {
+            session_count: 1,
+            event_count: 2,
+            provider_request_count: 1,
+            provider_response_count: 1,
+            tool_call_count: 3,
+            tool_success_count: 2,
+            tool_failed_count: 1,
+            approval_count: 1,
+            prompt_tokens: 120,
+            completion_tokens: 80,
+            total_tokens: 200,
+            total_tool_duration_ms: 1000,
+            estimated_provider_cost_cents: 15.0,
+            by_provider: HashMap::from([(
+                "mock".to_string(),
+                ProviderUsageSummary {
+                    request_count: 1,
+                    response_count: 1,
+                    prompt_tokens: 120,
+                    completion_tokens: 80,
+                    total_tokens: 200,
+                    token_cost_cents: 5.0,
+                    estimated_cost_cents: 15.0,
+                },
+            )]),
+            by_tool: HashMap::new(),
+            provider_budgets: vec![ProviderBudgetStatus {
+                provider_name: "mock".to_string(),
+                status: "warning".to_string(),
+                window_hours: 24,
+                request_count: 8,
+                daily_request_limit: Some(10),
+                request_budget_used_percent: Some(80.0),
+                estimated_cost_cents: 15.0,
+                projected_daily_cost_cents: 15.0,
+                daily_cost_limit_cents: Some(20.0),
+                cost_budget_used_percent: Some(75.0),
+                messages: vec!["8 of 10 daily requests used (80.0%)".to_string()],
+            }],
+        };
+        let rollups = vec![
+            UsageRollup {
+                id: Uuid::new_v4(),
+                period_start: "2026-05-12T00:00:00Z".parse().expect("valid time"),
+                period_end: "2026-05-13T00:00:00Z".parse().expect("valid time"),
+                summary: json!({
+                    "estimated_provider_cost_cents": 15.0,
+                    "total_tokens": 200,
+                    "tool_call_count": 3
+                }),
+                created_at: generated_at,
+            },
+            UsageRollup {
+                id: Uuid::new_v4(),
+                period_start: "2026-05-11T00:00:00Z".parse().expect("valid time"),
+                period_end: "2026-05-12T00:00:00Z".parse().expect("valid time"),
+                summary: json!({
+                    "estimated_provider_cost_cents": 10.0,
+                    "total_tokens": 100,
+                    "tool_call_count": 2
+                }),
+                created_at: generated_at - chrono::Duration::hours(24),
+            },
+        ];
+        let trend = build_usage_trend_from_parts(current, &rollups, generated_at);
+        assert_eq!(trend.comparison_basis, "latest_rollups");
+        assert_eq!(trend.rollup_count, 2);
+        assert_eq!(trend.cost_delta_cents, Some(5.0));
+        assert_eq!(trend.cost_delta_percent, Some(50.0));
+        assert_eq!(trend.token_delta, Some(100));
+        assert_eq!(trend.tool_call_delta, Some(1));
+        assert_eq!(trend.top_provider_by_cost.unwrap().provider_name, "mock");
+        assert_eq!(trend.budget_pressure.warning_count, 1);
+        assert_eq!(trend.budget_pressure.highest_status, "warning");
+        assert!(
+            trend
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation == "provider_budget_watch")
+        );
+        assert!(
+            trend
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation == "cost_growth_investigation")
+        );
     }
 
     #[test]
@@ -17425,6 +17762,40 @@ not json
         .await;
         assert_eq!(rollups.len(), 1);
         assert_eq!(rollups[0].id, rollup.id);
+        let usage_trends: UsageTrendSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/usage/trends")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(usage_trends.rollup_count, 1);
+        assert_eq!(usage_trends.comparison_basis, "current_vs_latest_rollup");
+        assert!((usage_trends.current_cost_cents - 2.8).abs() < 0.000001);
+        assert_eq!(usage_trends.current_total_tokens, 240);
+        assert_eq!(
+            usage_trends.current_tool_calls,
+            usage.tool_call_count as i64
+        );
+        assert_eq!(
+            usage_trends
+                .top_provider_by_cost
+                .as_ref()
+                .unwrap()
+                .provider_name,
+            "governed-mock"
+        );
+        assert_eq!(usage_trends.budget_pressure.highest_status, "critical");
+        assert_eq!(usage_trends.budget_pressure.critical_count, 1);
+        assert!(
+            usage_trends
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation == "critical_provider_budget_review")
+        );
 
         let active_provider: ProviderRecord = request_json(
             app.clone(),

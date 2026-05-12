@@ -35,6 +35,7 @@ const state = {
   mcpRolloutRun: null,
   executionJobs: [],
   usageRollups: [],
+  usageTrend: null,
   costAlertRoutes: [],
   usage: null,
   observability: null,
@@ -1185,6 +1186,7 @@ async function refreshOps() {
     evalDatasets,
     evalRuns,
     usage,
+    usageTrend,
     observability,
     usageRollups,
     costAlertRoutes,
@@ -1203,6 +1205,7 @@ async function refreshOps() {
       api("/api/eval/datasets"),
       api("/api/eval/runs"),
       api("/api/usage"),
+      api("/api/usage/trends"),
       api("/api/observability"),
       api("/api/usage/rollups"),
       api("/api/usage/alert-routes"),
@@ -1220,6 +1223,7 @@ async function refreshOps() {
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
   state.usage = usage;
+  state.usageTrend = usageTrend;
   state.observability = observability;
   state.usageRollups = usageRollups;
   state.costAlertRoutes = costAlertRoutes;
@@ -1770,6 +1774,8 @@ function renderUsage() {
   const budgetEntries = usage.provider_budgets || [];
   const costAlertDelivery = state.costAlertDelivery;
   const costAlertAcknowledgement = state.costAlertAcknowledgement;
+  const trend = state.usageTrend;
+  const budgetPressure = trend?.budget_pressure || {};
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
     ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
   );
@@ -1806,6 +1812,57 @@ function renderUsage() {
       <dt>Approval records</dt>
       <dd>${formatInteger(usage.approval_count)}</dd>
     </dl>
+    <h4>Cost Trend</h4>
+    ${
+      trend
+        ? `<div class="metric-grid">
+            <div class="metric">
+              <span>Comparison</span>
+              <strong>${escapeHtml(trend.comparison_basis)}</strong>
+            </div>
+            <div class="metric">
+              <span>Cost delta</span>
+              <strong>${escapeHtml(formatSignedCents(trend.cost_delta_cents))}</strong>
+            </div>
+            <div class="metric">
+              <span>Token delta</span>
+              <strong>${escapeHtml(formatSignedInteger(trend.token_delta))}</strong>
+            </div>
+            <div class="metric">
+              <span>Budget pressure</span>
+              <strong>${escapeHtml(budgetPressure.highest_status || "ok")}</strong>
+            </div>
+          </div>
+          <table class="usage-table">
+            <thead>
+              <tr>
+                <th>Window</th>
+                <th>Cost</th>
+                <th>Tokens</th>
+                <th>Tool calls</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${renderTrendPeriodRow("Latest", trend.latest_period)}
+              ${renderTrendPeriodRow("Previous", trend.previous_period)}
+            </tbody>
+          </table>
+          <dl>
+            <dt>Delta rates</dt>
+            <dd>${escapeHtml(formatSignedPercent(trend.cost_delta_percent))} cost · ${escapeHtml(formatSignedPercent(trend.token_delta_percent))} tokens · ${escapeHtml(formatSignedPercent(trend.tool_call_delta_percent))} tool calls</dd>
+            <dt>Top provider</dt>
+            <dd>${
+              trend.top_provider_by_cost
+                ? `${escapeHtml(trend.top_provider_by_cost.provider_name)} · ${escapeHtml(formatCents(trend.top_provider_by_cost.estimated_cost_cents))} · ${escapeHtml(formatInteger(trend.top_provider_by_cost.total_tokens))} tokens`
+                : "none"
+            }</dd>
+            <dt>Budget pressure</dt>
+            <dd>${formatInteger(budgetPressure.pressure_count)} pressured of ${formatInteger(budgetPressure.total_budgeted_providers)} budgeted providers · ${formatInteger(budgetPressure.warning_count)} warning · ${formatInteger(budgetPressure.critical_count)} critical · peak ${escapeHtml(formatOptionalPercent(budgetPressure.highest_used_percent))}</dd>
+            <dt>Recommendations</dt>
+            <dd>${escapeHtml((trend.recommendations || []).join(" · ") || "No active recommendation")}</dd>
+          </dl>`
+        : `<div class="muted">Usage trend data is not loaded.</div>`
+    }
     <h4>Provider Cost Breakdown</h4>
     ${
       providerEntries.length
@@ -1980,6 +2037,49 @@ function formatOptionalInteger(value) {
 
 function formatOptionalPercent(value) {
   return value === null || value === undefined ? "n/a" : `${Number(value || 0).toFixed(1)}%`;
+}
+
+function formatSignedCents(value) {
+  if (value === null || value === undefined) {
+    return "n/a";
+  }
+  const number = Number(value || 0);
+  return `${number >= 0 ? "+" : ""}${number.toFixed(2)} cents`;
+}
+
+function formatSignedInteger(value) {
+  if (value === null || value === undefined) {
+    return "n/a";
+  }
+  const number = Number(value || 0);
+  return `${number >= 0 ? "+" : ""}${formatInteger(number)}`;
+}
+
+function formatSignedPercent(value) {
+  if (value === null || value === undefined) {
+    return "n/a";
+  }
+  const number = Number(value || 0);
+  return `${number >= 0 ? "+" : ""}${number.toFixed(1)}%`;
+}
+
+function renderTrendPeriodRow(label, period) {
+  if (!period) {
+    return `
+      <tr>
+        <td>${escapeHtml(label)}</td>
+        <td colspan="3"><span class="muted">No comparison window</span></td>
+      </tr>
+    `;
+  }
+  return `
+    <tr>
+      <td>${escapeHtml(label)}<br /><span class="muted">${escapeHtml(period.period_start)} to ${escapeHtml(period.period_end)}</span></td>
+      <td>${formatCents(period.cost_cents)}</td>
+      <td>${formatInteger(period.total_tokens)}</td>
+      <td>${formatInteger(period.tool_calls)}</td>
+    </tr>
+  `;
 }
 
 function formatDurationMs(value) {
