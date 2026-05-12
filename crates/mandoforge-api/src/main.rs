@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
     routing::{delete, get, patch, post},
 };
@@ -1796,6 +1796,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/eval/runs/{id}/drift", get(get_eval_run_drift))
         .route("/api/usage", get(get_usage_summary))
         .route("/api/usage/trends", get(get_usage_trends))
+        .route("/api/usage/export.csv", get(export_usage_csv))
         .route("/api/usage/alerts", get(get_cost_alerts))
         .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
@@ -8014,6 +8015,51 @@ async fn get_usage_trends(
     Ok(Json(build_usage_trend_summary(&state).await?))
 }
 
+async fn export_usage_csv(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "usage_export".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let summary = build_usage_summary(&state).await?;
+    let trend = build_usage_trend_summary(&state).await?;
+    let csv = build_usage_finance_csv(&summary, &trend);
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "usage.finance_exported",
+            "usage_export",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "provider_count": summary.by_provider.len(),
+                "budget_pressure_count": trend.budget_pressure.pressure_count,
+                "rollup_count": trend.rollup_count
+            }),
+        ))
+        .await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"mandoforge-usage-export.csv\"",
+            ),
+        ],
+        csv,
+    )
+        .into_response())
+}
+
 async fn get_observability_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9146,6 +9192,195 @@ fn percent_delta(current: f64, previous: f64) -> Option<f64> {
         return None;
     }
     Some(((current - previous) / previous) * 100.0)
+}
+
+fn build_usage_finance_csv(summary: &UsageSummary, trend: &UsageTrendSummary) -> String {
+    let mut csv = String::new();
+    push_csv_row(
+        &mut csv,
+        vec![
+            "section".to_string(),
+            "name".to_string(),
+            "status".to_string(),
+            "requests".to_string(),
+            "responses".to_string(),
+            "tokens".to_string(),
+            "tool_calls".to_string(),
+            "cost_cents".to_string(),
+            "percent".to_string(),
+            "notes".to_string(),
+        ],
+    );
+    push_csv_row(
+        &mut csv,
+        vec![
+            "summary".to_string(),
+            "current_24h".to_string(),
+            "current".to_string(),
+            summary.provider_request_count.to_string(),
+            summary.provider_response_count.to_string(),
+            summary.total_tokens.to_string(),
+            summary.tool_call_count.to_string(),
+            format_csv_float(summary.estimated_provider_cost_cents),
+            optional_csv_float(trend.budget_pressure.highest_used_percent),
+            format!(
+                "sessions={};events={};approvals={}",
+                summary.session_count, summary.event_count, summary.approval_count
+            ),
+        ],
+    );
+    if let Some(latest) = &trend.latest_period {
+        push_usage_trend_period_csv_row(&mut csv, "trend", "latest", latest);
+    }
+    if let Some(previous) = &trend.previous_period {
+        push_usage_trend_period_csv_row(&mut csv, "trend", "previous", previous);
+    }
+    push_csv_row(
+        &mut csv,
+        vec![
+            "trend".to_string(),
+            "delta".to_string(),
+            trend.comparison_basis.clone(),
+            String::new(),
+            String::new(),
+            trend
+                .token_delta
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            trend
+                .tool_call_delta
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            optional_csv_float(trend.cost_delta_cents),
+            optional_csv_float(trend.cost_delta_percent),
+            "percent_column_contains_cost_delta_percent_for_delta_row".to_string(),
+        ],
+    );
+
+    let mut provider_entries: Vec<_> = summary.by_provider.iter().collect();
+    provider_entries.sort_by(|left, right| {
+        right
+            .1
+            .estimated_cost_cents
+            .total_cmp(&left.1.estimated_cost_cents)
+            .then_with(|| left.0.cmp(right.0))
+    });
+    for (provider_name, usage) in provider_entries {
+        push_csv_row(
+            &mut csv,
+            vec![
+                "provider".to_string(),
+                provider_name.clone(),
+                "usage".to_string(),
+                usage.request_count.to_string(),
+                usage.response_count.to_string(),
+                usage.total_tokens.to_string(),
+                String::new(),
+                format_csv_float(usage.estimated_cost_cents),
+                String::new(),
+                format!(
+                    "prompt_tokens={};completion_tokens={};token_cost_cents={}",
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    format_csv_float(usage.token_cost_cents)
+                ),
+            ],
+        );
+    }
+    for budget in &summary.provider_budgets {
+        push_csv_row(
+            &mut csv,
+            vec![
+                "budget".to_string(),
+                budget.provider_name.clone(),
+                budget.status.clone(),
+                budget.request_count.to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                format_csv_float(budget.estimated_cost_cents),
+                optional_csv_float(budget_peak_percent(budget)),
+                budget.messages.join(" | "),
+            ],
+        );
+    }
+    for recommendation in &trend.recommendations {
+        push_csv_row(
+            &mut csv,
+            vec![
+                "recommendation".to_string(),
+                recommendation.clone(),
+                "open".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                "operator_action".to_string(),
+            ],
+        );
+    }
+    csv
+}
+
+fn push_usage_trend_period_csv_row(
+    csv: &mut String,
+    section: &str,
+    name: &str,
+    period: &UsageTrendPeriod,
+) {
+    push_csv_row(
+        csv,
+        vec![
+            section.to_string(),
+            name.to_string(),
+            "window".to_string(),
+            String::new(),
+            String::new(),
+            period.total_tokens.to_string(),
+            period.tool_calls.to_string(),
+            format_csv_float(period.cost_cents),
+            String::new(),
+            format!("{} to {}", period.period_start, period.period_end),
+        ],
+    );
+}
+
+fn budget_peak_percent(budget: &ProviderBudgetStatus) -> Option<f64> {
+    [
+        budget.request_budget_used_percent,
+        budget.cost_budget_used_percent,
+    ]
+    .into_iter()
+    .flatten()
+    .max_by(f64::total_cmp)
+}
+
+fn format_csv_float(value: f64) -> String {
+    format!("{value:.6}")
+}
+
+fn optional_csv_float(value: Option<f64>) -> String {
+    value.map(format_csv_float).unwrap_or_default()
+}
+
+fn push_csv_row(csv: &mut String, cells: Vec<String>) {
+    let row = cells
+        .into_iter()
+        .map(csv_escape_cell)
+        .collect::<Vec<_>>()
+        .join(",");
+    csv.push_str(&row);
+    csv.push('\n');
+}
+
+fn csv_escape_cell(cell: String) -> String {
+    if cell.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", cell.replace('"', "\"\""))
+    } else {
+        cell
+    }
 }
 
 async fn build_provider_budget_statuses(
@@ -17796,6 +18031,34 @@ not json
                 .iter()
                 .any(|recommendation| recommendation == "critical_provider_budget_review")
         );
+        let export_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/usage/export.csv")
+                    .header("x-mandoforge-subject", "admin-1")
+                    .header("x-mandoforge-roles", "admin")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("export response");
+        assert_eq!(export_response.status(), StatusCode::OK);
+        assert_eq!(
+            export_response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/csv; charset=utf-8")
+        );
+        let export_body = to_bytes(export_response.into_body(), usize::MAX)
+            .await
+            .expect("export body");
+        let export_csv = String::from_utf8(export_body.to_vec()).expect("csv utf8");
+        assert!(export_csv.starts_with("section,name,status"));
+        assert!(export_csv.contains("provider,governed-mock,usage"));
+        assert!(export_csv.contains("budget,governed-mock,critical"));
+        assert!(export_csv.contains("recommendation,critical_provider_budget_review"));
 
         let active_provider: ProviderRecord = request_json(
             app.clone(),

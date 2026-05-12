@@ -42,6 +42,7 @@ const state = {
   observabilityRemediation: null,
   costAlertDelivery: null,
   costAlertAcknowledgement: null,
+  usageExportStatus: null,
   organizations: [],
   teams: [],
   projects: [],
@@ -147,6 +148,7 @@ const loadEvalCasesButton = document.querySelector("#load-eval-cases");
 const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jobs");
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 const deliverCostAlertsButton = document.querySelector("#deliver-cost-alerts");
+const exportUsageCsvButton = document.querySelector("#export-usage-csv");
 const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
 const checkCodexHealthButton = document.querySelector("#check-codex-health");
 const loadCodexRunsButton = document.querySelector("#load-codex-runs");
@@ -194,6 +196,7 @@ loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
+exportUsageCsvButton.addEventListener("click", exportUsageCsv);
 runObservabilityRemediationButton.addEventListener("click", runObservabilityRemediation);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
 checkCodexHealthButton.addEventListener("click", checkCodexAppServerHealth);
@@ -206,17 +209,22 @@ interruptCodexTurnButton.addEventListener("click", interruptCodexTurn);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
-    headers: {
-      "content-type": "application/json",
-      "x-mandoforge-subject": "web-admin",
-      "x-mandoforge-roles": "admin",
-    },
+    headers: adminHeaders(),
     ...options,
   });
   if (!response.ok) {
     throw new Error(await response.text());
   }
   return response.json();
+}
+
+function adminHeaders(extra = {}) {
+  return {
+    "content-type": "application/json",
+    "x-mandoforge-subject": "web-admin",
+    "x-mandoforge-roles": "admin",
+    ...extra,
+  };
 }
 
 async function boot() {
@@ -818,6 +826,22 @@ async function deliverCostAlerts() {
     method: "POST",
   });
   await refreshOps();
+}
+
+async function exportUsageCsv() {
+  const response = await fetch("/api/usage/export.csv", {
+    headers: adminHeaders({ accept: "text/csv" }),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const csv = await response.text();
+  state.usageExportStatus = {
+    status: "ready",
+    bytes: csv.length,
+    preview: csv.split("\n").slice(0, 6).join("\n"),
+  };
+  renderUsage();
 }
 
 async function runObservabilityRemediation() {
@@ -1776,6 +1800,7 @@ function renderUsage() {
   const costAlertAcknowledgement = state.costAlertAcknowledgement;
   const trend = state.usageTrend;
   const budgetPressure = trend?.budget_pressure || {};
+  const usageExportStatus = state.usageExportStatus;
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
     ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
   );
@@ -1862,6 +1887,15 @@ function renderUsage() {
             <dd>${escapeHtml((trend.recommendations || []).join(" · ") || "No active recommendation")}</dd>
           </dl>`
         : `<div class="muted">Usage trend data is not loaded.</div>`
+    }
+    ${
+      usageExportStatus
+        ? `<div class="item">
+            <strong>Finance CSV export: ${escapeHtml(usageExportStatus.status)}</strong>
+            <div class="muted">${formatInteger(usageExportStatus.bytes)} bytes generated from /api/usage/export.csv</div>
+            <pre>${escapeHtml(usageExportStatus.preview)}</pre>
+          </div>`
+        : ""
     }
     <h4>Provider Cost Breakdown</h4>
     ${
