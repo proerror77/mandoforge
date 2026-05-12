@@ -5115,7 +5115,7 @@ async fn deliver_cost_alert_route(
             target: route.target.clone(),
         });
     }
-    if route.channel != "webhook" {
+    if route.channel == "email" {
         return Ok(CostAlertRouteDelivery {
             route_id: Some(route.id),
             route_name: route.name.clone(),
@@ -5126,22 +5126,43 @@ async fn deliver_cost_alert_route(
             target: route.target.clone(),
         });
     }
-    let webhook_url = route
-        .target
-        .as_ref()
-        .or(state.cost_alert_webhook_url.as_ref())
-        .ok_or_else(|| AppError::bad_request("webhook cost alert route requires a target"))?;
+    let webhook_url = match route.channel.as_str() {
+        "webhook" => route
+            .target
+            .as_ref()
+            .or(state.cost_alert_webhook_url.as_ref())
+            .ok_or_else(|| AppError::bad_request("webhook cost alert route requires a target"))?,
+        "slack" => route
+            .target
+            .as_ref()
+            .ok_or_else(|| AppError::bad_request("slack cost alert route requires a target"))?,
+        other => {
+            return Ok(CostAlertRouteDelivery {
+                route_id: Some(route.id),
+                route_name: route.name.clone(),
+                channel: other.to_string(),
+                status: "reserved".to_string(),
+                delivered: false,
+                matched_alert_count: matched_alerts.len(),
+                target: route.target.clone(),
+            });
+        }
+    };
+    let payload = match route.channel.as_str() {
+        "slack" => slack_cost_alert_payload(route, &matched_alerts, delivered_at),
+        _ => json!({
+            "type": "mandoforge.cost_alerts",
+            "route_id": route.id,
+            "route_name": route.name,
+            "alerts": matched_alerts,
+            "delivered_at": delivered_at,
+        }),
+    };
     let response = tokio::time::timeout(
         Duration::from_secs(10),
         reqwest::Client::new()
             .post(webhook_url)
-            .json(&json!({
-                "type": "mandoforge.cost_alerts",
-                "route_id": route.id,
-                "route_name": route.name,
-                "alerts": matched_alerts,
-                "delivered_at": delivered_at,
-            }))
+            .json(&payload)
             .send(),
     )
     .await??;
@@ -5160,6 +5181,48 @@ async fn deliver_cost_alert_route(
         delivered: true,
         matched_alert_count: matched_alerts.len(),
         target: Some(webhook_url.clone()),
+    })
+}
+
+fn slack_cost_alert_payload(
+    route: &CostAlertRoute,
+    alerts: &[&CostAlert],
+    delivered_at: DateTime<Utc>,
+) -> Value {
+    let title = format!(
+        "MandoForge cost alert: {} matching {} route",
+        alerts.len(),
+        route.severity_filter
+    );
+    let lines: Vec<_> = alerts
+        .iter()
+        .map(|alert| {
+            format!(
+                "*{}* `{}`: {}",
+                alert.severity, alert.provider_name, alert.message
+            )
+        })
+        .collect();
+    json!({
+        "text": format!("{title}\n{}", lines.join("\n")),
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format!("*{}*\n{}", title, lines.join("\n"))
+                }
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": format!("route `{}` · delivered {}", route.name, delivered_at)
+                    }
+                ]
+            }
+        ]
     })
 }
 
@@ -7165,6 +7228,16 @@ not json
         Json(json!({"accepted": true}))
     }
 
+    async fn mock_slack_cost_alert_webhook(Json(payload): Json<Value>) -> Json<Value> {
+        assert!(
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("MandoForge cost alert"))
+        );
+        assert!(payload["blocks"].as_array().is_some());
+        Json(json!({"ok": true}))
+    }
+
     async fn mock_approval_webhook(Json(payload): Json<Value>) -> Json<Value> {
         assert_eq!(payload["type"], "mandoforge.approval_requested");
         assert!(payload["approval"]["id"].as_str().is_some());
@@ -7654,7 +7727,9 @@ not json
             .await
             .expect("listener");
         let addr = listener.local_addr().expect("local addr");
-        let webhook = Router::new().route("/alerts", post(mock_cost_alert_webhook));
+        let webhook = Router::new()
+            .route("/alerts", post(mock_cost_alert_webhook))
+            .route("/slack", post(mock_slack_cost_alert_webhook));
         let server = tokio::spawn(async move {
             axum::serve(listener, webhook)
                 .await
@@ -7802,7 +7877,7 @@ not json
                     json!({
                         "name": "critical-slack",
                         "channel": "slack",
-                        "target": "#alerts",
+                        "target": format!("http://{addr}/slack"),
                         "severity_filter": "critical"
                     })
                     .to_string(),
@@ -7844,7 +7919,9 @@ not json
             })
         );
         assert!(delivered.route_deliveries.iter().any(|delivery| {
-            delivery.route_id == Some(slack_route.id) && delivery.status == "reserved"
+            delivery.route_id == Some(slack_route.id)
+                && delivery.delivered
+                && delivery.status == "delivered"
         }));
 
         let acknowledgement: CostAlertAcknowledgement = request_json(
