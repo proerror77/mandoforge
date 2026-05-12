@@ -115,7 +115,21 @@ struct AppState {
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
-    policy: Arc<RwLock<PolicyConfig>>,
+    policy: Arc<RwLock<PolicyRuntime>>,
+}
+
+#[derive(Debug, Clone)]
+struct PolicyRuntime {
+    active: PolicyConfig,
+    staged: Option<StagedPolicyRuntime>,
+}
+
+#[derive(Debug, Clone)]
+struct StagedPolicyRuntime {
+    #[allow(dead_code)]
+    revision_id: Uuid,
+    rollout_percent: u8,
+    policy: PolicyConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1363,17 +1377,49 @@ async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
 }
 
-fn runtime_policy(policy: PolicyConfig) -> Arc<RwLock<PolicyConfig>> {
-    Arc::new(RwLock::new(policy))
+fn runtime_policy(policy: PolicyConfig) -> Arc<RwLock<PolicyRuntime>> {
+    Arc::new(RwLock::new(PolicyRuntime {
+        active: policy,
+        staged: None,
+    }))
+}
+
+fn session_rollout_bucket(session_id: Uuid) -> u8 {
+    (session_id.as_u128() % 100) as u8
 }
 
 impl AppState {
     async fn active_policy(&self) -> PolicyConfig {
-        self.policy.read().await.clone()
+        self.policy.read().await.active.clone()
     }
 
-    async fn replace_active_policy(&self, policy: PolicyConfig) {
-        *self.policy.write().await = policy;
+    async fn policy_for_session(&self, session_id: Uuid) -> PolicyConfig {
+        let runtime = self.policy.read().await;
+        if let Some(staged) = runtime.staged.as_ref() {
+            if session_rollout_bucket(session_id) < staged.rollout_percent {
+                return staged.policy.clone();
+            }
+        }
+        runtime.active.clone()
+    }
+
+    async fn activate_runtime_policy(
+        &self,
+        revision_id: Uuid,
+        policy: PolicyConfig,
+        rollout_percent: u8,
+    ) {
+        let mut runtime = self.policy.write().await;
+        if rollout_percent >= 100 {
+            runtime.active = policy;
+            runtime.staged = None;
+        } else {
+            runtime.staged = Some(StagedPolicyRuntime {
+                revision_id,
+                rollout_percent,
+                policy,
+            });
+        }
     }
 
     async fn emit_telemetry_event(&self, event: &SessionEvent) {
@@ -2284,7 +2330,7 @@ impl ToolExecutor for SqlQueryTool {
             .get("sql")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let policy = state.active_policy().await;
+        let policy = state.policy_for_session(input.session_id).await;
         ensure_read_only_sql_with_policy(sql, &policy.sql_policy)?;
         match &state.store {
             StoreBackend::Postgres(pool) => {
@@ -2659,7 +2705,7 @@ async fn execute_tool_invocation(
     input: ExecuteTool,
 ) -> Result<Value, AppError> {
     let agent_version = state.agent_version_for_session(input.session_id).await?;
-    let policy = state.active_policy().await;
+    let policy = state.policy_for_session(input.session_id).await;
     let policy_decision = policy.evaluate_tool_for_agent_version(name, &agent_version);
     let call_event = state
         .append_event(
@@ -3283,7 +3329,10 @@ async fn activate_policy_revision(
     let revision = state.activate_policy_revision(id).await?;
     let activated_policy = serde_json::from_value::<PolicyConfig>(revision.body.clone())
         .map_err(|error| AppError::bad_request(format!("invalid activated policy: {error}")))?;
-    state.replace_active_policy(activated_policy).await;
+    let rollout_percent = policy_revision_rollout_percent(&revision);
+    state
+        .activate_runtime_policy(revision.id, activated_policy, rollout_percent)
+        .await;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -3296,11 +3345,22 @@ async fn activate_policy_revision(
                 "subject": principal.subject_id,
                 "name": revision.name,
                 "status": revision.status,
+                "rollout_percent": rollout_percent,
                 "activated_at": revision.activated_at
             }),
         ))
         .await?;
     Ok(Json(revision))
+}
+
+fn policy_revision_rollout_percent(revision: &PolicyRevision) -> u8 {
+    revision
+        .gate_result
+        .get("rollout_percent")
+        .and_then(Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value <= 100)
+        .unwrap_or(100)
 }
 
 fn validate_policy_revision_input(
@@ -6528,7 +6588,13 @@ not json
     }
 
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {
-        let state = AppState {
+        let state = test_state_with_worker(execution_worker);
+        state.seed_demo_agent().await.expect("seed demo agent");
+        build_router(state)
+    }
+
+    fn test_state_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> AppState {
+        AppState {
             store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
             execution_queue: ExecutionQueue::default(),
             execution_worker,
@@ -6548,9 +6614,50 @@ not json
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: runtime_policy(PolicyConfig::default()),
-        };
-        state.seed_demo_agent().await.expect("seed demo agent");
-        build_router(state)
+        }
+    }
+
+    #[tokio::test]
+    async fn staged_policy_rollout_selects_candidate_by_session_bucket() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let staged_policy = serde_json::from_value::<PolicyConfig>(json!({
+            "blocked_tools": ["secret.read"],
+            "approval_required": [
+                {"tool": "shell.exec", "risk": "high"},
+                {"tool": "codex.exec", "risk": "high"},
+                {"tool": "file.write", "risk": "medium"}
+            ],
+            "allowed_tools": {
+                "generic-orchestrator-agent": ["file.read", "file.write", "sql.get_schema", "sql.query", "shell.exec", "codex.exec", "approval.request", "artifact.create", "mcp.call", "http.request"]
+            },
+            "sql_policy": {
+                "max_rows": 500,
+                "blocked_keywords": ["INSERT", "UPDATE", "DELETE", "DROP"]
+            }
+        }))
+        .expect("policy");
+        state
+            .activate_runtime_policy(Uuid::new_v4(), staged_policy, 1)
+            .await;
+
+        let candidate_session = Uuid::from_u128(0);
+        let baseline_session = Uuid::from_u128(99);
+        assert_eq!(
+            state
+                .policy_for_session(candidate_session)
+                .await
+                .evaluate_tool("http.request")
+                .decision,
+            "allowed"
+        );
+        assert_eq!(
+            state
+                .policy_for_session(baseline_session)
+                .await
+                .evaluate_tool("http.request")
+                .decision,
+            "requires_approval"
+        );
     }
 
     async fn test_app_with_approval_webhook(approval_webhook_url: String) -> Router {
@@ -9518,6 +9625,19 @@ not json
         .await;
         assert_eq!(unsafe_gate.status, "failed");
         assert!(unsafe_gate.cases.iter().any(|case| !case.passed));
+
+        let final_policy_revision_gate: PolicyRevisionGate = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/policy/revisions/{}/gate", policy_revision.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(final_policy_revision_gate.rollout_percent, 100);
 
         let active_policy_revision: PolicyRevision = request_json(
             app.clone(),
