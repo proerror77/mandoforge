@@ -55,7 +55,7 @@ wait_for_static_ui() {
     hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
     hasCostAlertRoutes: text.includes('Create Alert Route') && text.includes('No cost alert routes'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
-    hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy') && text.includes('POLICY REVISIONS') && text.includes('Create Policy Revision'),
+    hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy') && text.includes('POLICY REVISIONS') && text.includes('Create Policy Revision') && text.includes('Gate cases JSON') && text.includes('Rollout %'),
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),
     hasApprovalGovernance: text.includes('Approval Governance') && text.includes('Create Approval Group') && text.includes('Create Escalation Rule'),
     hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering'),

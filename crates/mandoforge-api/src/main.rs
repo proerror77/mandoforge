@@ -701,9 +701,25 @@ struct PolicyRevisionDiff {
 struct PolicyRevisionGate {
     revision_id: Uuid,
     status: String,
+    suite_source: String,
+    rollout_percent: u8,
     cases: Vec<PolicyGateCaseResult>,
     diff: PolicyRevisionDiff,
     checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PolicyRevisionGateRequest {
+    #[serde(default)]
+    cases: Vec<PolicyGateCaseInput>,
+    #[serde(default)]
+    rollout_percent: Option<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PolicyGateCaseInput {
+    tool_name: String,
+    expected_decision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3155,6 +3171,7 @@ async fn gate_policy_revision(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
+    input: Option<Json<PolicyRevisionGateRequest>>,
 ) -> Result<Json<PolicyRevisionGate>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -3166,7 +3183,11 @@ async fn gate_policy_revision(
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
     let revision = state.get_policy_revision(id).await?;
-    let gate = build_policy_revision_gate(&state.policy, &revision)?;
+    let gate = build_policy_revision_gate(
+        &state.policy,
+        &revision,
+        input.map(|Json(input)| input).unwrap_or_default(),
+    )?;
     state.update_policy_revision_gate(&gate).await?;
     state
         .append_audit_log(new_audit_log(
@@ -3180,6 +3201,8 @@ async fn gate_policy_revision(
                 "subject": principal.subject_id,
                 "name": revision.name,
                 "status": gate.status,
+                "suite_source": gate.suite_source,
+                "rollout_percent": gate.rollout_percent,
                 "case_count": gate.cases.len(),
                 "change_count": gate.diff.changes.len()
             }),
@@ -3301,29 +3324,33 @@ fn collect_policy_diff(
 fn build_policy_revision_gate(
     current_policy: &PolicyConfig,
     revision: &PolicyRevision,
+    input: PolicyRevisionGateRequest,
 ) -> Result<PolicyRevisionGate, AppError> {
     let proposed_policy = serde_json::from_value::<PolicyConfig>(revision.body.clone())
         .map_err(|error| AppError::bad_request(format!("invalid policy body: {error}")))?;
-    let cases = [
-        ("secret.read", "denied"),
-        ("shell.exec", "requires_approval"),
-        ("file.write", "requires_approval"),
-        ("sql.query", "allowed"),
-        ("file.read", "allowed"),
-    ]
-    .into_iter()
-    .map(|(tool_name, expected_decision)| {
-        let decision = proposed_policy.evaluate_tool(tool_name);
-        let passed = decision.decision == expected_decision;
-        PolicyGateCaseResult {
-            tool_name: tool_name.to_string(),
-            expected_decision: expected_decision.to_string(),
-            actual_decision: decision.decision.to_string(),
-            passed,
-            reason: decision.reason,
-        }
-    })
-    .collect::<Vec<_>>();
+    let rollout_percent = input.rollout_percent.unwrap_or(100);
+    if rollout_percent > 100 {
+        return Err(AppError::bad_request(
+            "policy rollout percent must be between 0 and 100",
+        ));
+    }
+    let (suite_source, suite_cases) = normalize_policy_gate_cases(input.cases)?;
+    let cases = suite_cases
+        .into_iter()
+        .map(|case| {
+            let tool_name = case.tool_name;
+            let expected_decision = case.expected_decision;
+            let decision = proposed_policy.evaluate_tool(&tool_name);
+            let passed = decision.decision == expected_decision;
+            PolicyGateCaseResult {
+                tool_name: tool_name.to_string(),
+                expected_decision: expected_decision.to_string(),
+                actual_decision: decision.decision.to_string(),
+                passed,
+                reason: decision.reason,
+            }
+        })
+        .collect::<Vec<_>>();
     let status = if cases.iter().all(|case| case.passed) {
         "passed"
     } else {
@@ -3333,10 +3360,78 @@ fn build_policy_revision_gate(
     Ok(PolicyRevisionGate {
         revision_id: revision.id,
         status,
+        suite_source,
+        rollout_percent,
         cases,
         diff: build_policy_revision_diff(current_policy, revision)?,
         checked_at: Utc::now(),
     })
+}
+
+fn normalize_policy_gate_cases(
+    cases: Vec<PolicyGateCaseInput>,
+) -> Result<(String, Vec<PolicyGateCaseInput>), AppError> {
+    let cases = if cases.is_empty() {
+        vec![
+            PolicyGateCaseInput {
+                tool_name: "secret.read".to_string(),
+                expected_decision: "denied".to_string(),
+            },
+            PolicyGateCaseInput {
+                tool_name: "shell.exec".to_string(),
+                expected_decision: "requires_approval".to_string(),
+            },
+            PolicyGateCaseInput {
+                tool_name: "file.write".to_string(),
+                expected_decision: "requires_approval".to_string(),
+            },
+            PolicyGateCaseInput {
+                tool_name: "sql.query".to_string(),
+                expected_decision: "allowed".to_string(),
+            },
+            PolicyGateCaseInput {
+                tool_name: "file.read".to_string(),
+                expected_decision: "allowed".to_string(),
+            },
+        ]
+    } else {
+        cases
+    };
+    if cases.len() > 50 {
+        return Err(AppError::bad_request(
+            "policy revision gate supports at most 50 cases",
+        ));
+    }
+    let mut normalized = Vec::with_capacity(cases.len());
+    for mut case in cases {
+        case.tool_name = case.tool_name.trim().to_string();
+        case.expected_decision = case.expected_decision.trim().to_string();
+        if case.tool_name.is_empty() || case.expected_decision.is_empty() {
+            return Err(AppError::bad_request(
+                "policy gate cases require tool_name and expected_decision",
+            ));
+        }
+        match case.expected_decision.as_str() {
+            "allowed" | "denied" | "requires_approval" => {}
+            _ => {
+                return Err(AppError::bad_request(
+                    "expected_decision must be allowed, denied, or requires_approval",
+                ));
+            }
+        }
+        normalized.push(case);
+    }
+    let source = if normalized.len() == 5
+        && normalized
+            .iter()
+            .any(|case| case.tool_name == "secret.read")
+        && normalized.iter().any(|case| case.tool_name == "shell.exec")
+    {
+        "default"
+    } else {
+        "custom"
+    };
+    Ok((source.to_string(), normalized))
 }
 
 async fn get_vault_health(
@@ -8885,7 +8980,35 @@ not json
         )
         .await;
         assert_eq!(policy_revision_gate.status, "passed");
+        assert_eq!(policy_revision_gate.suite_source, "default");
+        assert_eq!(policy_revision_gate.rollout_percent, 100);
         assert!(policy_revision_gate.cases.iter().all(|case| case.passed));
+
+        let custom_policy_revision_gate: PolicyRevisionGate = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/policy/revisions/{}/gate", policy_revision.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "rollout_percent": 25,
+                        "cases": [
+                            {"tool_name": "secret.read", "expected_decision": "denied"},
+                            {"tool_name": "sql.query", "expected_decision": "allowed"}
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(custom_policy_revision_gate.status, "passed");
+        assert_eq!(custom_policy_revision_gate.suite_source, "custom");
+        assert_eq!(custom_policy_revision_gate.rollout_percent, 25);
+        assert_eq!(custom_policy_revision_gate.cases.len(), 2);
 
         let invalid_policy_revision = request_value(
             app.clone(),

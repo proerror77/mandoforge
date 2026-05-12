@@ -74,6 +74,8 @@ const policyTestForm = document.querySelector("#policy-test-form");
 const policyDecisionRoot = document.querySelector("#policy-decision");
 const policyRevisionForm = document.querySelector("#policy-revision-form");
 const policyRevisionRoot = document.querySelector("#policy-revisions");
+const policyGateCasesInput = document.querySelector("#policy-gate-cases");
+const policyRolloutPercentInput = document.querySelector("#policy-rollout-percent");
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
@@ -404,6 +406,10 @@ async function diffPolicyRevision(id) {
 async function gatePolicyRevision(id) {
   state.policyRevisionGates[id] = await api(`/api/policy/revisions/${id}/gate`, {
     method: "POST",
+    body: JSON.stringify({
+      cases: parseJsonField(policyGateCasesInput.value, "Gate cases JSON"),
+      rollout_percent: Number(policyRolloutPercentInput.value || 100),
+    }),
   });
   state.policyRevisions = await api("/api/policy/revisions");
   renderPolicy();
@@ -1354,7 +1360,7 @@ function renderPolicy() {
                 return `
                   <div class="item">
                     <strong>${escapeHtml(revision.name)}</strong>
-                    <div class="muted">${escapeHtml(revision.status)} · gate ${escapeHtml(revision.gate_status || "not_run")} · ${escapeHtml(revision.created_at)}</div>
+                    <div class="muted">${escapeHtml(revision.status)} · gate ${escapeHtml(revision.gate_status || "not_run")} · rollout ${escapeHtml(gate?.rollout_percent ?? "n/a")}% · ${escapeHtml(revision.created_at)}</div>
                     <pre>${escapeHtml(JSON.stringify(revision.body, null, 2))}</pre>
                     <button type="button" data-policy-diff="${escapeHtml(revision.id)}">Diff</button>
                     <button type="button" data-policy-gate="${escapeHtml(revision.id)}">Gate</button>

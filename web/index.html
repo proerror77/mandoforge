@@ -258,6 +258,14 @@
                 </label>
                 <button type="submit">Create Policy Revision</button>
               </form>
+              <label>
+                Gate cases JSON
+                <textarea id="policy-gate-cases" rows="5">[{"tool_name":"secret.read","expected_decision":"denied"},{"tool_name":"shell.exec","expected_decision":"requires_approval"},{"tool_name":"file.write","expected_decision":"requires_approval"},{"tool_name":"sql.query","expected_decision":"allowed"},{"tool_name":"file.read","expected_decision":"allowed"}]</textarea>
+              </label>
+              <label>
+                Rollout %
+                <input id="policy-rollout-percent" type="number" min="0" max="100" value="100" />
+              </label>
               <div id="policy-summary" class="detail-panel"></div>
               <div id="policy-decision" class="list"></div>
               <div id="policy-revisions" class="list"></div>
