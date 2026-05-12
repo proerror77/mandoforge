@@ -200,10 +200,10 @@ impl AppState {
         self.ensure_eval_dataset_exists(dataset_id).await?;
         let agent_version = self.current_agent_version(input.agent_id).await?;
         let cases = self.list_eval_cases(dataset_id).await?;
-        let case_results: Vec<_> = cases
-            .iter()
-            .map(|case| self.grade_eval_case(case, &agent_version))
-            .collect();
+        let mut case_results = Vec::with_capacity(cases.len());
+        for case in &cases {
+            case_results.push(self.grade_eval_case(case, &agent_version).await);
+        }
         let passed_count = case_results.iter().filter(|result| result.passed).count();
         let case_count = case_results.len();
         let score = if case_count == 0 {
@@ -257,7 +257,7 @@ impl AppState {
         Ok(run)
     }
 
-    fn grade_eval_case(
+    async fn grade_eval_case(
         &self,
         case: &EvalCase,
         agent_version: &crate::AgentVersion,
@@ -268,9 +268,9 @@ impl AppState {
             .and_then(Value::as_str)
             .unwrap_or("policy");
         match kind {
-            "policy" => self.grade_policy_case(case, agent_version),
+            "policy" => self.grade_policy_case(case, agent_version).await,
             "tool_selection" => self.grade_tool_selection_case(case, agent_version),
-            "sql_safety" => self.grade_sql_safety_case(case),
+            "sql_safety" => self.grade_sql_safety_case(case).await,
             "sandbox" => grade_sandbox_case(case),
             "final_answer" => grade_final_answer_case(case),
             other => EvalCaseResult::fail(
@@ -282,7 +282,7 @@ impl AppState {
         }
     }
 
-    fn grade_policy_case(
+    async fn grade_policy_case(
         &self,
         case: &EvalCase,
         agent_version: &crate::AgentVersion,
@@ -314,9 +314,8 @@ impl AppState {
                 json!({}),
             );
         };
-        let decision = self
-            .policy
-            .evaluate_tool_for_agent_version(tool, agent_version);
+        let policy = self.active_policy().await;
+        let decision = policy.evaluate_tool_for_agent_version(tool, agent_version);
         EvalCaseResult::from_match(
             case.id,
             "policy",
@@ -395,7 +394,7 @@ impl AppState {
         )
     }
 
-    fn grade_sql_safety_case(&self, case: &EvalCase) -> EvalCaseResult {
+    async fn grade_sql_safety_case(&self, case: &EvalCase) -> EvalCaseResult {
         let sql = case
             .input
             .get("sql")
@@ -419,7 +418,8 @@ impl AppState {
             .and_then(|expected| expected.get("allowed"))
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let actual_allowed = ensure_read_only_sql_with_policy(sql, &self.policy.sql_policy).is_ok();
+        let policy = self.active_policy().await;
+        let actual_allowed = ensure_read_only_sql_with_policy(sql, &policy.sql_policy).is_ok();
         EvalCaseResult::from_match(
             case.id,
             "sql_safety",

@@ -115,7 +115,7 @@ struct AppState {
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
-    policy: PolicyConfig,
+    policy: Arc<RwLock<PolicyConfig>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1028,7 +1028,7 @@ async fn main() -> Result<()> {
         approval_webhook_url: approval_webhook_url_from_env(),
         workspace_root,
         tenant_id,
-        policy,
+        policy: runtime_policy(policy),
     };
     state
         .seed_demo_agent()
@@ -1363,7 +1363,19 @@ async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
 }
 
+fn runtime_policy(policy: PolicyConfig) -> Arc<RwLock<PolicyConfig>> {
+    Arc::new(RwLock::new(policy))
+}
+
 impl AppState {
+    async fn active_policy(&self) -> PolicyConfig {
+        self.policy.read().await.clone()
+    }
+
+    async fn replace_active_policy(&self, policy: PolicyConfig) {
+        *self.policy.write().await = policy;
+    }
+
     async fn emit_telemetry_event(&self, event: &SessionEvent) {
         if !self.observability_config.is_enabled() || self.observability_config.sample_ratio <= 0.0
         {
@@ -2272,10 +2284,11 @@ impl ToolExecutor for SqlQueryTool {
             .get("sql")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        ensure_read_only_sql_with_policy(sql, &state.policy.sql_policy)?;
+        let policy = state.active_policy().await;
+        ensure_read_only_sql_with_policy(sql, &policy.sql_policy)?;
         match &state.store {
             StoreBackend::Postgres(pool) => {
-                execute_postgres_sql_query(pool, sql, state.policy.sql_policy.max_rows).await
+                execute_postgres_sql_query(pool, sql, policy.sql_policy.max_rows).await
             }
             StoreBackend::Memory(_) => Ok(json!({"rows": generic_diagnostics(), "row_count": 4})),
         }
@@ -2646,9 +2659,8 @@ async fn execute_tool_invocation(
     input: ExecuteTool,
 ) -> Result<Value, AppError> {
     let agent_version = state.agent_version_for_session(input.session_id).await?;
-    let policy_decision = state
-        .policy
-        .evaluate_tool_for_agent_version(name, &agent_version);
+    let policy = state.active_policy().await;
+    let policy_decision = policy.evaluate_tool_for_agent_version(name, &agent_version);
     let call_event = state
         .append_event(
             "tool",
@@ -3047,7 +3059,7 @@ async fn get_policy(
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
-    Ok(Json(serde_json::to_value(&state.policy)?))
+    Ok(Json(serde_json::to_value(state.active_policy().await)?))
 }
 
 async fn simulate_policy(
@@ -3068,7 +3080,8 @@ async fn simulate_policy(
     if tool_name.is_empty() {
         return Err(AppError::bad_request("tool_name is required"));
     }
-    let decision = state.policy.evaluate_tool(tool_name);
+    let policy = state.active_policy().await;
+    let decision = policy.evaluate_tool(tool_name);
     state
         .append_audit_log(new_audit_log(
             None,
@@ -3119,9 +3132,10 @@ async fn test_policy(
             "policy test supports at most 50 tool names",
         ));
     }
+    let policy = state.active_policy().await;
     let decisions: Vec<_> = tool_names
         .iter()
-        .map(|tool_name| state.policy.evaluate_tool(tool_name))
+        .map(|tool_name| policy.evaluate_tool(tool_name))
         .collect();
     let result = PolicyTestResult {
         decisions,
@@ -3203,7 +3217,8 @@ async fn diff_policy_revision(
     )
     .await?;
     let revision = state.get_policy_revision(id).await?;
-    Ok(Json(build_policy_revision_diff(&state.policy, &revision)?))
+    let policy = state.active_policy().await;
+    Ok(Json(build_policy_revision_diff(&policy, &revision)?))
 }
 
 async fn gate_policy_revision(
@@ -3222,8 +3237,9 @@ async fn gate_policy_revision(
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
     let revision = state.get_policy_revision(id).await?;
+    let policy = state.active_policy().await;
     let gate = build_policy_revision_gate(
-        &state.policy,
+        &policy,
         &revision,
         input.map(|Json(input)| input).unwrap_or_default(),
     )?;
@@ -3265,6 +3281,9 @@ async fn activate_policy_revision(
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
     let revision = state.activate_policy_revision(id).await?;
+    let activated_policy = serde_json::from_value::<PolicyConfig>(revision.body.clone())
+        .map_err(|error| AppError::bad_request(format!("invalid activated policy: {error}")))?;
+    state.replace_active_policy(activated_policy).await;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -6528,7 +6547,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
-            policy: PolicyConfig::default(),
+            policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
         build_router(state)
@@ -6554,7 +6573,7 @@ not json
             approval_webhook_url: Some(approval_webhook_url),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
-            policy: PolicyConfig::default(),
+            policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
         build_router(state)
@@ -6736,7 +6755,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
-            policy: PolicyConfig::default(),
+            policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
         let agent = state
@@ -6819,7 +6838,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
-            policy: PolicyConfig::default(),
+            policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
         let agent = state
@@ -7044,7 +7063,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
-            policy: PolicyConfig::default(),
+            policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
         let app = build_router(state);
@@ -7189,7 +7208,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
-            policy: PolicyConfig::default(),
+            policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
         let app = build_router(state);
@@ -7426,7 +7445,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
-            policy: PolicyConfig::default(),
+            policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
         let organization = state
@@ -9278,6 +9297,23 @@ not json
         .await;
         assert_eq!(policy_decision["decision"], "requires_approval");
 
+        let http_policy_before_activation: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/simulate")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"tool_name": "http.request"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            http_policy_before_activation["decision"],
+            "requires_approval"
+        );
+
         let policy_test: Value = request_json(
             app.clone(),
             Request::builder()
@@ -9315,10 +9351,11 @@ not json
                             "blocked_tools": ["secret.read"],
                             "approval_required": [
                                 {"tool": "shell.exec", "risk": "high"},
+                                {"tool": "codex.exec", "risk": "high"},
                                 {"tool": "file.write", "risk": "medium"}
                             ],
                             "allowed_tools": {
-                                "generic-orchestrator-agent": ["file.read", "file.write", "sql.query", "shell.exec"]
+                                "generic-orchestrator-agent": ["file.read", "file.write", "sql.get_schema", "sql.query", "shell.exec", "codex.exec", "approval.request", "artifact.create", "mcp.call", "http.request"]
                             },
                             "sql_policy": {
                                 "max_rows": 500,
@@ -9498,6 +9535,52 @@ not json
         .await;
         assert_eq!(active_policy_revision.status, "active");
         assert!(active_policy_revision.activated_at.is_some());
+
+        let codex_policy_after_activation: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/simulate")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"tool_name": "codex.exec"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            codex_policy_after_activation["decision"],
+            "requires_approval"
+        );
+
+        let http_policy_after_activation: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/simulate")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"tool_name": "http.request"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(http_policy_after_activation["decision"], "allowed");
+
+        let active_policy: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/policy")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            active_policy["approval_required"].as_array().unwrap().len(),
+            3
+        );
 
         let policy_revisions: Vec<PolicyRevision> = request_json(
             app.clone(),
