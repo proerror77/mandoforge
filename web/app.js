@@ -26,6 +26,7 @@ const state = {
   mcpTeamId: "",
   mcpHealth: {},
   mcpHealthRun: null,
+  mcpScheduledHealthRun: null,
   executionJobs: [],
   usageRollups: [],
   costAlertRoutes: [],
@@ -111,6 +112,7 @@ const evalRunForm = document.querySelector("#eval-run-form");
 const mcpForm = document.querySelector("#mcp-form");
 const loadMcpButton = document.querySelector("#load-mcp");
 const runMcpHealthButton = document.querySelector("#run-mcp-health");
+const runDueMcpHealthButton = document.querySelector("#run-due-mcp-health");
 const loadEvalCasesButton = document.querySelector("#load-eval-cases");
 const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jobs");
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
@@ -146,6 +148,7 @@ evalRunForm.addEventListener("submit", createEvalRun);
 mcpForm.addEventListener("submit", createMcpServer);
 loadMcpButton.addEventListener("click", loadMcpServers);
 runMcpHealthButton.addEventListener("click", runMcpHealth);
+runDueMcpHealthButton.addEventListener("click", runDueMcpHealth);
 loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
@@ -753,6 +756,20 @@ async function runMcpHealth() {
   state.mcpHealthRun = run;
   state.mcpHealth = Object.fromEntries((run.results || []).map((health) => [health.server_id, health]));
   renderMcpServers();
+}
+
+async function runDueMcpHealth() {
+  if (!state.mcpTeamId) {
+    const form = new FormData(mcpForm);
+    state.mcpTeamId = String(form.get("team_id") || "").trim();
+  }
+  if (!state.mcpTeamId) return;
+  const run = await api(`/api/teams/${state.mcpTeamId}/mcp-servers/health/run-due`, {
+    method: "POST",
+  });
+  state.mcpScheduledHealthRun = run;
+  state.mcpHealth = Object.fromEntries((run.results || []).map((health) => [health.server_id, health]));
+  await loadMcpServers();
 }
 
 async function updateMcpStatus(serverId, status) {
@@ -1940,8 +1957,15 @@ function renderMcpServers() {
         <div class="muted">${formatInteger(run.healthy_count)} healthy · ${formatInteger(run.unhealthy_count)} unhealthy · ${formatInteger(run.server_count)} servers · ${escapeHtml(run.checked_at)}</div>
       </div>`
     : "";
+  const scheduledRun = state.mcpScheduledHealthRun;
+  const scheduledRunSummary = scheduledRun
+    ? `<div class="item">
+        <strong>Due health run</strong>
+        <div class="muted">${formatInteger(scheduledRun.due_count)} due · ${formatInteger(scheduledRun.skipped_count)} skipped · ${formatInteger(scheduledRun.healthy_count)} healthy · ${formatInteger(scheduledRun.unhealthy_count)} unhealthy · ${escapeHtml(scheduledRun.checked_at)}</div>
+      </div>`
+    : "";
   mcpServerRoot.innerHTML = state.mcpServers.length
-    ? `${runSummary}${state.mcpServers
+    ? `${runSummary}${scheduledRunSummary}${state.mcpServers
         .map((server) => {
           const health = state.mcpHealth[server.id];
           return `
@@ -1966,7 +1990,7 @@ function renderMcpServers() {
         })
         .join("")}`
     : state.mcpTeamId
-      ? `${runSummary}<div class="muted">No MCP servers for this team</div>`
+      ? `${runSummary}${scheduledRunSummary}<div class="muted">No MCP servers for this team</div>`
       : `<div class="muted">Enter a team ID to manage MCP servers</div>`;
   mcpServerRoot.querySelectorAll("[data-discover-mcp]").forEach((button) => {
     button.addEventListener("click", () => discoverMcpTools(button.dataset.discoverMcp));

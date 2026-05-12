@@ -146,6 +146,7 @@
 - [x] Add MCP connector lifecycle APIs/UI for config patching and activate/disable/archive status.
 - [x] Add audited MCP connector health check API and static UI action.
 - [x] Add audited team-level MCP connector health run API and static UI action.
+- [x] Add due-only scheduled MCP connector health runs with persisted last health metadata.
 - [x] Add usage/cost aggregation API for provider requests, tool runtime, approvals, and configured provider pricing.
 - [x] Add token-level provider usage and cost accounting for OpenAI-compatible responses.
 - [x] Add persisted usage/cost rollup snapshots and static rollup UI.

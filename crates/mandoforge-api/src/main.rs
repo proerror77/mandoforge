@@ -908,6 +908,17 @@ struct McpServerHealthRun {
     checked_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct McpServerScheduledHealthRun {
+    team_id: Uuid,
+    due_count: usize,
+    skipped_count: usize,
+    healthy_count: usize,
+    unhealthy_count: usize,
+    results: Vec<McpServerHealth>,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateMcpServerRecord {
     name: String,
@@ -1263,6 +1274,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{team_id}/mcp-servers/health/run",
             post(run_mcp_server_health_checks),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/health/run-due",
+            post(run_due_mcp_server_health_checks),
         )
         .route(
             "/api/teams/{team_id}/mcp-servers/{server_id}/discover",
@@ -4885,6 +4900,131 @@ async fn run_mcp_server_health_checks(
         ))
         .await?;
     Ok(Json(run))
+}
+
+async fn run_due_mcp_server_health_checks(
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerScheduledHealthRun>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    let checked_at = Utc::now();
+    let servers = state.list_mcp_servers(team_id).await?;
+    let mut skipped_count = 0usize;
+    let mut results = Vec::new();
+    for server in servers {
+        if !mcp_server_health_check_is_due(&server, checked_at) {
+            skipped_count += 1;
+            continue;
+        }
+        let health = mcp_server_health(&state, &server).await;
+        let config = mcp_server_config_with_health_result(&server.config, &health, checked_at);
+        state
+            .update_mcp_server(
+                team_id,
+                server.id,
+                UpdateMcpServerRecord {
+                    transport: None,
+                    config: Some(config),
+                    tool_allowlist: None,
+                },
+            )
+            .await?;
+        results.push(health);
+    }
+    let healthy_count = results.iter().filter(|health| health.healthy).count();
+    let run = McpServerScheduledHealthRun {
+        team_id,
+        due_count: results.len(),
+        skipped_count,
+        healthy_count,
+        unhealthy_count: results.len().saturating_sub(healthy_count),
+        results,
+        checked_at,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "mcp.server_scheduled_health_run",
+            "team",
+            Some(team_id),
+            json!({
+                "team_id": team_id,
+                "due_count": run.due_count,
+                "skipped_count": run.skipped_count,
+                "healthy_count": run.healthy_count,
+                "unhealthy_count": run.unhealthy_count,
+            }),
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
+fn mcp_server_health_check_is_due(server: &McpServerRecord, now: DateTime<Utc>) -> bool {
+    let Some(interval_seconds) = mcp_server_health_interval_seconds(server) else {
+        return false;
+    };
+    let Some(last_checked_at) = server
+        .config
+        .pointer("/health_check/last_checked_at")
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+    else {
+        return true;
+    };
+    now.signed_duration_since(last_checked_at) >= chrono::Duration::seconds(interval_seconds)
+}
+
+fn mcp_server_health_interval_seconds(server: &McpServerRecord) -> Option<i64> {
+    if server
+        .config
+        .pointer("/health_check/enabled")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        return None;
+    }
+    server
+        .config
+        .pointer("/health_check/interval_seconds")
+        .or_else(|| server.config.get("health_check_interval_seconds"))
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+}
+
+fn mcp_server_config_with_health_result(
+    config: &Value,
+    health: &McpServerHealth,
+    checked_at: DateTime<Utc>,
+) -> Value {
+    let mut object = config.as_object().cloned().unwrap_or_default();
+    let mut health_config = object
+        .get("health_check")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    health_config.insert(
+        "last_checked_at".to_string(),
+        Value::String(checked_at.to_rfc3339()),
+    );
+    health_config.insert("last_healthy".to_string(), Value::Bool(health.healthy));
+    health_config.insert(
+        "last_status".to_string(),
+        Value::String(
+            if health.healthy {
+                "healthy"
+            } else {
+                "unhealthy"
+            }
+            .to_string(),
+        ),
+    );
+    health_config.insert("last_issues".to_string(), json!(health.issues));
+    object.insert("health_check".to_string(), Value::Object(health_config));
+    Value::Object(object)
 }
 
 async fn mcp_server_health(state: &AppState, server: &McpServerRecord) -> McpServerHealth {
@@ -8658,6 +8798,90 @@ not json
         assert!(healthy.healthy);
         assert_eq!(healthy.checks["gateway_reachable"], true);
 
+        let scheduled: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}",
+                    team.id, mcp_server.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "config": {
+                            "source": "scheduled",
+                            "health_check": {"interval_seconds": 60}
+                        },
+                        "tool_allowlist": ["search"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(scheduled.config["source"], "scheduled");
+        assert_eq!(
+            scheduled.config["health_check"]["interval_seconds"],
+            json!(60)
+        );
+
+        let scheduled_run: McpServerScheduledHealthRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/mcp-servers/health/run-due", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(scheduled_run.due_count, 1);
+        assert_eq!(scheduled_run.skipped_count, 0);
+        assert_eq!(scheduled_run.healthy_count, 1);
+        assert_eq!(scheduled_run.results[0].server_id, mcp_server.id);
+
+        let scheduled_servers: Vec<McpServerRecord> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/teams/{}/mcp-servers", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let scheduled_server = scheduled_servers
+            .iter()
+            .find(|server| server.id == mcp_server.id)
+            .expect("scheduled server");
+        assert!(
+            scheduled_server.config["health_check"]["last_checked_at"]
+                .as_str()
+                .is_some()
+        );
+        assert_eq!(
+            scheduled_server.config["health_check"]["last_healthy"],
+            true
+        );
+
+        let skipped_scheduled_run: McpServerScheduledHealthRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/mcp-servers/health/run-due", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(skipped_scheduled_run.due_count, 0);
+        assert_eq!(skipped_scheduled_run.skipped_count, 1);
+
         let result: Value = request_json(
             app.clone(),
             Request::builder()
@@ -8868,6 +9092,11 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "mcp.server_health_run")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "mcp.server_scheduled_health_run")
         );
     }
 
