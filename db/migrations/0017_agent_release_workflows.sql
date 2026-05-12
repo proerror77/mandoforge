@@ -1,0 +1,8 @@
+ALTER TABLE agent_releases
+    ADD COLUMN IF NOT EXISTS requested_by TEXT,
+    ADD COLUMN IF NOT EXISTS requested_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS request_reason TEXT,
+    ADD COLUMN IF NOT EXISTS approver_subject TEXT,
+    ADD COLUMN IF NOT EXISTS decision_by TEXT,
+    ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS decision_reason TEXT;

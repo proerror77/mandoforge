@@ -705,6 +705,38 @@ async function promoteEvalRun(runId, environment) {
   await refreshAgentReleases();
 }
 
+async function requestEvalRunPromotion(runId) {
+  const run = state.evalRuns.find((candidate) => candidate.id === runId);
+  if (!run) return;
+  await api(`/api/agents/${run.agent_id}/release-requests`, {
+    method: "POST",
+    body: JSON.stringify({
+      eval_run_id: run.id,
+      agent_version_id: run.agent_version_id,
+      environment: "prod",
+      min_score: 1.0,
+      approver_subject: "release-approver-1",
+      reason: "Production release requires separation of duties",
+    }),
+  });
+  await refreshAgentReleases();
+}
+
+async function approveAgentRelease(agentId, releaseId) {
+  await api(`/api/agents/${agentId}/releases/${releaseId}/approve`, {
+    method: "POST",
+  });
+  await refreshAgentReleases();
+}
+
+async function rejectAgentRelease(agentId, releaseId) {
+  await api(`/api/agents/${agentId}/releases/${releaseId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ reason: "Rejected from static console" }),
+  });
+  await refreshAgentReleases();
+}
+
 async function rollbackAgentRelease(agentId, releaseId) {
   await api(`/api/agents/${agentId}/releases/${releaseId}/rollback`, {
     method: "POST",
@@ -2242,6 +2274,7 @@ function renderEvalRuns() {
               <div class="muted">Agent: ${escapeHtml(run.agent_id)} · Version: ${escapeHtml(run.agent_version_id)}</div>
               <button class="secondary" data-eval-gate="${run.id}">Gate 100%</button>
               <button class="secondary" data-eval-drift="${run.id}">Check Drift</button>
+              <button class="secondary" data-eval-request-prod="${run.id}">Request Prod Approval</button>
               <button class="secondary" data-eval-promote-staging="${run.id}">Promote Staging</button>
               <button class="secondary" data-eval-promote-prod="${run.id}">Promote Prod</button>
               ${
@@ -2273,6 +2306,9 @@ function renderEvalRuns() {
     button.addEventListener("click", () =>
       promoteEvalRun(button.dataset.evalPromoteStaging, "staging"),
     );
+  });
+  evalRunRoot.querySelectorAll("[data-eval-request-prod]").forEach((button) => {
+    button.addEventListener("click", () => requestEvalRunPromotion(button.dataset.evalRequestProd));
   });
   evalRunRoot.querySelectorAll("[data-eval-promote-prod]").forEach((button) => {
     button.addEventListener("click", () =>
@@ -2344,6 +2380,14 @@ function renderAgentReleases() {
                       <div class="muted">Score: ${escapeHtml(release.eval_score ?? "n/a")} · Min: ${escapeHtml(release.min_score)}</div>
                       <div class="muted">Version: ${escapeHtml(release.agent_version_id)}</div>
                       <div class="muted">Eval run: ${escapeHtml(release.eval_run_id || "none")}</div>
+                      <div class="muted">Requested by: ${escapeHtml(release.requested_by || "none")} · Approver: ${escapeHtml(release.approver_subject || "any separate admin")}</div>
+                      <div class="muted">Decision by: ${escapeHtml(release.decision_by || "pending")} · Reason: ${escapeHtml(release.decision_reason || release.request_reason || "none")}</div>
+                      ${
+                        release.status === "pending_approval"
+                          ? `<button class="secondary" data-release-approve="${release.id}" data-release-agent="${agent.id}">Approve</button>
+                             <button class="secondary" data-release-reject="${release.id}" data-release-agent="${agent.id}">Reject</button>`
+                          : ""
+                      }
                       ${
                         release.status === "promoted"
                           ? `<button class="secondary" data-release-rollback="${release.id}" data-release-agent="${agent.id}">Rollback</button>`
@@ -2361,6 +2405,16 @@ function renderAgentReleases() {
   agentReleaseRoot.querySelectorAll("[data-release-rollback]").forEach((button) => {
     button.addEventListener("click", () =>
       rollbackAgentRelease(button.dataset.releaseAgent, button.dataset.releaseRollback),
+    );
+  });
+  agentReleaseRoot.querySelectorAll("[data-release-approve]").forEach((button) => {
+    button.addEventListener("click", () =>
+      approveAgentRelease(button.dataset.releaseAgent, button.dataset.releaseApprove),
+    );
+  });
+  agentReleaseRoot.querySelectorAll("[data-release-reject]").forEach((button) => {
+    button.addEventListener("click", () =>
+      rejectAgentRelease(button.dataset.releaseAgent, button.dataset.releaseReject),
     );
   });
 }

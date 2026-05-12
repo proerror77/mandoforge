@@ -237,6 +237,13 @@ struct AgentRelease {
     eval_run_id: Option<Uuid>,
     eval_score: Option<f64>,
     min_score: f64,
+    requested_by: Option<String>,
+    requested_at: Option<DateTime<Utc>>,
+    request_reason: Option<String>,
+    approver_subject: Option<String>,
+    decision_by: Option<String>,
+    decided_at: Option<DateTime<Utc>>,
+    decision_reason: Option<String>,
     promoted_by: Option<String>,
     promoted_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -251,6 +258,22 @@ struct CreateAgentRelease {
     environment: String,
     #[serde(default)]
     min_score: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestAgentReleasePromotion {
+    #[serde(flatten)]
+    release: CreateAgentRelease,
+    #[serde(default)]
+    approver_subject: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RejectAgentReleasePromotion {
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1431,6 +1454,18 @@ fn build_router(state: AppState) -> Router {
             get(list_agent_releases).post(create_agent_release),
         )
         .route(
+            "/api/agents/{id}/release-requests",
+            post(request_agent_release_promotion),
+        )
+        .route(
+            "/api/agents/{id}/releases/{release_id}/approve",
+            post(approve_agent_release_promotion),
+        )
+        .route(
+            "/api/agents/{id}/releases/{release_id}/reject",
+            post(reject_agent_release_promotion),
+        )
+        .route(
             "/api/agents/{id}/releases/{release_id}/rollback",
             post(rollback_agent_release),
         )
@@ -2122,6 +2157,137 @@ async fn create_agent_release(
             .create_agent_release(id, input, principal.subject_id)
             .await?,
     ))
+}
+
+async fn request_agent_release_promotion(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RequestAgentReleasePromotion>,
+) -> Result<Json<AgentRelease>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "agent".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let release = state
+        .request_agent_release_promotion(
+            id,
+            input.release,
+            principal.subject_id.clone(),
+            optional_trimmed(input.approver_subject.as_deref()),
+            optional_trimmed(input.reason.as_deref()),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "agent.release_promotion_requested",
+            "agent_release",
+            Some(release.id),
+            json!({
+                "subject": principal.subject_id,
+                "agent_id": id,
+                "environment": release.environment,
+                "eval_run_id": release.eval_run_id,
+                "min_score": release.min_score,
+                "approver_subject": release.approver_subject,
+            }),
+        ))
+        .await?;
+    Ok(Json(release))
+}
+
+async fn approve_agent_release_promotion(
+    State(state): State<AppState>,
+    Path((id, release_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<AgentRelease>, AppError> {
+    decide_agent_release_promotion(state, id, release_id, headers, "approve", None).await
+}
+
+async fn reject_agent_release_promotion(
+    State(state): State<AppState>,
+    Path((id, release_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(input): Json<RejectAgentReleasePromotion>,
+) -> Result<Json<AgentRelease>, AppError> {
+    decide_agent_release_promotion(
+        state,
+        id,
+        release_id,
+        headers,
+        "reject",
+        optional_trimmed(input.reason.as_deref()),
+    )
+    .await
+}
+
+async fn decide_agent_release_promotion(
+    state: AppState,
+    agent_id: Uuid,
+    release_id: Uuid,
+    headers: HeaderMap,
+    decision: &str,
+    reason: Option<String>,
+) -> Result<Json<AgentRelease>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "agent".to_string(),
+        resource_id: Some(agent_id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let release = match decision {
+        "approve" => {
+            state
+                .approve_agent_release_promotion(agent_id, release_id, principal.subject_id.clone())
+                .await?
+        }
+        "reject" => {
+            state
+                .reject_agent_release_promotion(
+                    agent_id,
+                    release_id,
+                    principal.subject_id.clone(),
+                    reason,
+                )
+                .await?
+        }
+        _ => return Err(AppError::bad_request("unsupported release decision")),
+    };
+    let action = if decision == "approve" {
+        "agent.release_promotion_approved"
+    } else {
+        "agent.release_promotion_rejected"
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            action,
+            "agent_release",
+            Some(release.id),
+            json!({
+                "subject": principal.subject_id,
+                "agent_id": agent_id,
+                "environment": release.environment,
+                "status": release.status,
+                "requested_by": release.requested_by,
+                "decision_by": release.decision_by,
+            }),
+        ))
+        .await?;
+    Ok(Json(release))
 }
 
 async fn rollback_agent_release(
@@ -9517,6 +9683,7 @@ not json
         assert!(names.contains(&"0014_tenant_lifecycle_archive.sql"));
         assert!(names.contains(&"0015_tenant_invitations.sql"));
         assert!(names.contains(&"0016_organization_owner.sql"));
+        assert!(names.contains(&"0017_agent_release_workflows.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -16584,6 +16751,130 @@ not json
         assert_eq!(release.eval_score, Some(1.0));
         assert_eq!(release.status, "promoted");
         assert_eq!(release.promoted_by.as_deref(), Some("admin-1"));
+        assert_eq!(release.requested_by.as_deref(), Some("admin-1"));
+        assert_eq!(release.decision_by.as_deref(), Some("admin-1"));
+
+        let requested_release: AgentRelease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{}/release-requests", agent.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "release-requester-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "eval_run_id": run.id,
+                        "environment": "prod",
+                        "min_score": 1.0,
+                        "approver_subject": "release-approver-1",
+                        "reason": "prod release requires approval"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(requested_release.status, "pending_approval");
+        assert_eq!(
+            requested_release.requested_by.as_deref(),
+            Some("release-requester-1")
+        );
+        assert_eq!(
+            requested_release.approver_subject.as_deref(),
+            Some("release-approver-1")
+        );
+        assert!(requested_release.promoted_at.is_none());
+
+        let (status, self_approval_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/agents/{}/releases/{}/approve",
+                    agent.id, requested_release.id
+                ))
+                .header("x-mandoforge-subject", "release-requester-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            self_approval_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("requester cannot")
+        );
+
+        let approved_release: AgentRelease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/agents/{}/releases/{}/approve",
+                    agent.id, requested_release.id
+                ))
+                .header("x-mandoforge-subject", "release-approver-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved_release.status, "promoted");
+        assert_eq!(
+            approved_release.promoted_by.as_deref(),
+            Some("release-approver-1")
+        );
+        assert_eq!(
+            approved_release.decision_by.as_deref(),
+            Some("release-approver-1")
+        );
+        assert!(approved_release.promoted_at.is_some());
+
+        let rejected_request: AgentRelease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{}/release-requests", agent.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "release-requester-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "eval_run_id": run.id,
+                        "environment": "prod",
+                        "min_score": 1.0,
+                        "approver_subject": "release-approver-1"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let rejected_release: AgentRelease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/agents/{}/releases/{}/reject",
+                    agent.id, rejected_request.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "release-approver-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"reason": "needs more evidence"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rejected_release.status, "rejected");
+        assert_eq!(
+            rejected_release.decision_reason.as_deref(),
+            Some("needs more evidence")
+        );
 
         let releases: Vec<AgentRelease> = request_json(
             app.clone(),
@@ -16713,7 +17004,7 @@ not json
         );
 
         let runs: Vec<EvalRun> = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/eval/runs")
                 .header("x-mandoforge-subject", "admin-1")
@@ -16726,6 +17017,29 @@ not json
         assert!(runs.iter().any(|listed| listed.id == run.id));
         assert!(runs.iter().any(|listed| listed.id == second_run.id));
         assert!(runs.iter().any(|listed| listed.id == failing_run.id));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent.release_promotion_requested"
+                && log.resource_id == Some(requested_release.id)
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent.release_promotion_approved"
+                && log.resource_id == Some(requested_release.id)
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent.release_promotion_rejected"
+                && log.resource_id == Some(rejected_request.id)
+        }));
     }
 
     #[tokio::test]
