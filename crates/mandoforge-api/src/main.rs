@@ -3225,12 +3225,18 @@ impl ToolExecutor for McpCallTool {
             .as_ref()
             .ok_or_else(|| AppError::bad_request("MCP gateway is not configured"))?;
         let request: McpCallRequest = serde_json::from_value(_input.args.clone())?;
-        state
-            .ensure_mcp_tool_allowed_for_session(_input.session_id, &request.server, &request.tool)
+        let scoped_server = state
+            .mcp_server_for_session_tool(_input.session_id, &request.server, &request.tool)
             .await?;
+        let secret_refs_resolved = if let Some(server) = scoped_server.as_ref() {
+            resolve_mcp_runtime_secret_refs(server).await?
+        } else {
+            0
+        };
         let response = state.mcp_gateway_client.call(config, request).await?;
         Ok(json!({
             "status": "called",
+            "secret_refs_resolved_count": secret_refs_resolved,
             "result": response.result,
         }))
     }
@@ -5978,6 +5984,52 @@ fn mcp_config_secret_refs(config: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn mcp_secret_ref_from_stored_value(value: &str) -> Result<SecretRef, AppError> {
+    let Some(reference) = value.trim().strip_prefix("vault:") else {
+        return Err(AppError::bad_request(
+            "MCP server secret refs must use vault:path#key",
+        ));
+    };
+    let Some((path, key)) = reference.split_once('#') else {
+        return Err(AppError::bad_request(
+            "MCP server secret refs must use vault:path#key",
+        ));
+    };
+    SecretRef::new(path, key)
+}
+
+async fn resolve_mcp_runtime_secret_refs(server: &McpServerRecord) -> Result<usize, AppError> {
+    let refs = mcp_config_secret_refs(&server.config);
+    if refs.is_empty() {
+        return Ok(0);
+    }
+    let secret_provider = secret_provider_from_env().map_err(|error| {
+        AppError::forbidden(format!(
+            "MCP server {} secret ref could not be resolved: {}",
+            server.name, error.message
+        ))
+    })?;
+    let secret_config = SecretProviderConfig::from_env().map_err(|error| {
+        AppError::forbidden(format!(
+            "MCP server {} secret ref could not be resolved: {}",
+            server.name, error.message
+        ))
+    })?;
+    for value in &refs {
+        let secret_ref = mcp_secret_ref_from_stored_value(value)?;
+        secret_provider
+            .read_secret(&secret_config, &secret_ref)
+            .await
+            .map_err(|error| {
+                AppError::forbidden(format!(
+                    "MCP server {} secret ref could not be resolved: {}",
+                    server.name, error.message
+                ))
+            })?;
+    }
+    Ok(refs.len())
 }
 
 async fn get_provider_health(
@@ -13055,11 +13107,101 @@ not json
         .await;
         assert_eq!(result["status"], "called");
         assert_eq!(result["result"]["server"], "docs");
+        assert_eq!(result["secret_refs_resolved_count"], 0);
 
         let requests = mcp_client.requests.lock().await;
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].tool, "search");
         drop(requests);
+
+        let secret_backed: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}",
+                    team.id, mcp_server.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "config": {
+                            "source": "secret-backed",
+                            "secret_refs": ["vault:mcp/docs#api_key"]
+                        },
+                        "tool_allowlist": ["search"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            secret_backed.config["secret_refs"][0],
+            "vault:mcp/docs#api_key"
+        );
+
+        let (status, unresolved_secret) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/mcp.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": scoped_session.id,
+                        "args": {
+                            "server": "docs",
+                            "tool": "search",
+                            "args": {"q": "policy"}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            unresolved_secret["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("secret ref could not be resolved")
+        );
+        let requests = mcp_client.requests.lock().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "gateway should not be called when connector secrets fail closed"
+        );
+        drop(requests);
+
+        let unsecreted: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}",
+                    team.id, mcp_server.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "config": {"source": "unsecreted"},
+                        "tool_allowlist": ["search"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert!(unsecreted.config.get("secret_refs").is_none());
 
         let disabled: McpServerRecord = request_json(
             app.clone(),

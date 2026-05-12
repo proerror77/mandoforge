@@ -1592,20 +1592,20 @@ impl AppState {
         }
     }
 
-    pub(crate) async fn ensure_mcp_tool_allowed_for_session(
+    pub(crate) async fn mcp_server_for_session_tool(
         &self,
         session_id: Uuid,
         server_name: &str,
         tool_name: &str,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<McpServerRecord>, AppError> {
         let session = self.get_session(session_id).await?;
         let agent = self.get_agent(session.agent_id).await?;
         let Some(team_id) = agent.team_id else {
-            return Ok(());
+            return Ok(None);
         };
         let servers = self.list_mcp_servers(team_id).await?;
         let Some(server) = servers
-            .iter()
+            .into_iter()
             .find(|server| server.name == server_name && server.status == "active")
         else {
             return Err(AppError::forbidden(format!(
@@ -1613,7 +1613,7 @@ impl AppState {
             )));
         };
         if server.tool_allowlist.iter().any(|tool| tool == tool_name) {
-            Ok(())
+            Ok(Some(server))
         } else {
             Err(AppError::forbidden(format!(
                 "MCP tool {tool_name} is not allowed for server {server_name}"
