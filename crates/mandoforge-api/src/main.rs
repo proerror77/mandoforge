@@ -178,6 +178,7 @@ enum ExecutionQueueBackendSelection {
     Memory,
     Postgres,
     Redis,
+    Nats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1955,14 +1956,15 @@ fn select_execution_queue_backend(
             }
         }
         "redis" => Ok(ExecutionQueueBackendSelection::Redis),
-        "broker" | "nats" => {
+        "nats" => Ok(ExecutionQueueBackendSelection::Nats),
+        "broker" => {
             anyhow::bail!(
-                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is reserved for a future broker-backed queue; use auto, memory, postgres, or redis"
+                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is reserved for a future broker-backed queue; use auto, memory, postgres, redis, or nats"
             );
         }
         other => {
             anyhow::bail!(
-                "unsupported MANDOFORGE_EXECUTION_QUEUE_BACKEND={other}; use auto, memory, postgres, or redis"
+                "unsupported MANDOFORGE_EXECUTION_QUEUE_BACKEND={other}; use auto, memory, postgres, redis, or nats"
             );
         }
     }
@@ -1988,6 +1990,13 @@ fn execution_queue_from_env(store: &StoreBackend, tenant_id: Uuid) -> Result<Exe
                 .map_err(|error| anyhow::anyhow!(error.message))?;
             Ok(ExecutionQueue::broker(Arc::new(
                 BrokerExecutionQueue::redis(config),
+            )))
+        }
+        (ExecutionQueueBackendSelection::Nats, _) => {
+            let config = BrokerQueueConfig::from_env(BrokerQueueKind::Nats)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            Ok(ExecutionQueue::broker(Arc::new(
+                BrokerExecutionQueue::nats(config),
             )))
         }
     }
@@ -14132,6 +14141,14 @@ not json
         assert_eq!(
             select_execution_queue_backend(Some("redis"), true).expect("redis queue"),
             ExecutionQueueBackendSelection::Redis
+        );
+        assert_eq!(
+            select_execution_queue_backend(Some("nats"), true).expect("nats queue"),
+            ExecutionQueueBackendSelection::Nats
+        );
+        assert!(
+            select_execution_queue_backend(Some("broker"), true).is_err(),
+            "generic broker queue should remain reserved"
         );
     }
 

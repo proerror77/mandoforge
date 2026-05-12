@@ -8,6 +8,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::RwLock,
+    time::{Duration, timeout},
 };
 use uuid::Uuid;
 
@@ -57,8 +58,11 @@ pub(crate) struct RedisExecutionJobPayload {
 #[allow(dead_code)]
 pub(crate) struct RedisStreamClient;
 
+#[allow(dead_code)]
+pub(crate) struct NatsCoreClient;
+
 #[derive(Debug, Clone)]
-struct RedisPendingExecutionJob {
+struct BrokerPendingExecutionJob {
     message_id: String,
     job: ExecutionJob,
 }
@@ -304,6 +308,62 @@ impl RedisStreamClient {
     }
 }
 
+#[allow(dead_code)]
+impl NatsCoreClient {
+    pub(crate) async fn publish(
+        config: &BrokerQueueConfig,
+        payload: &RedisExecutionJobPayload,
+    ) -> Result<(), AppError> {
+        if config.kind != BrokerQueueKind::Nats {
+            return Err(AppError::bad_request(
+                "NATS publish requires NATS broker config",
+            ));
+        }
+        let addr = nats_tcp_addr(&config.endpoint)?;
+        let mut stream = TcpStream::connect(addr).await?;
+        let mut buffer = vec![0; 4096];
+        let _ = timeout(Duration::from_millis(250), stream.read(&mut buffer)).await;
+        stream.write_all(b"CONNECT {\"verbose\":false}\r\n").await?;
+        let payload = payload.to_json().to_string();
+        let command = format!("PUB {} {}\r\n{}\r\n", config.stream, payload.len(), payload);
+        stream.write_all(command.as_bytes()).await?;
+        stream.write_all(b"PING\r\n").await?;
+        stream.flush().await?;
+        let _ = timeout(Duration::from_millis(250), stream.read(&mut buffer)).await;
+        Ok(())
+    }
+
+    pub(crate) async fn drain_once(
+        config: &BrokerQueueConfig,
+    ) -> Result<Vec<(String, RedisExecutionJobPayload)>, AppError> {
+        if config.kind != BrokerQueueKind::Nats {
+            return Err(AppError::bad_request(
+                "NATS drain requires NATS broker config",
+            ));
+        }
+        let addr = nats_tcp_addr(&config.endpoint)?;
+        let mut stream = TcpStream::connect(addr).await?;
+        let mut buffer = vec![0; 64 * 1024];
+        let _ = timeout(Duration::from_millis(250), stream.read(&mut buffer)).await;
+        stream.write_all(b"CONNECT {\"verbose\":false}\r\n").await?;
+        let sub = format!(
+            "SUB {} {} 1\r\nPING\r\n",
+            config.stream, config.consumer_group
+        );
+        stream.write_all(sub.as_bytes()).await?;
+        stream.flush().await?;
+        let bytes = timeout(Duration::from_millis(500), stream.read(&mut buffer))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(0);
+        if bytes == 0 {
+            return Ok(Vec::new());
+        }
+        parse_nats_messages(&String::from_utf8_lossy(&buffer[..bytes]))
+    }
+}
+
 fn redis_tcp_addr(endpoint: &str) -> Result<String, AppError> {
     let trimmed = endpoint.trim();
     let without_scheme = trimmed
@@ -325,6 +385,59 @@ fn redis_tcp_addr(endpoint: &str) -> Result<String, AppError> {
         ));
     }
     Ok(authority.to_string())
+}
+
+fn nats_tcp_addr(endpoint: &str) -> Result<String, AppError> {
+    let trimmed = endpoint.trim();
+    let without_scheme = trimmed
+        .strip_prefix("nats://")
+        .ok_or_else(|| AppError::bad_request("MANDOFORGE_NATS_URL must use nats://"))?;
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("MANDOFORGE_NATS_URL must include host:port"))?;
+    if authority.contains('@') {
+        return Err(AppError::bad_request(
+            "authenticated NATS URLs are not supported by the current broker boundary",
+        ));
+    }
+    if !authority.contains(':') {
+        return Err(AppError::bad_request(
+            "MANDOFORGE_NATS_URL must include host:port",
+        ));
+    }
+    Ok(authority.to_string())
+}
+
+fn parse_nats_messages(
+    response: &str,
+) -> Result<Vec<(String, RedisExecutionJobPayload)>, AppError> {
+    let mut jobs = Vec::new();
+    let mut rest = response;
+    while let Some(index) = rest.find("MSG ") {
+        rest = &rest[index..];
+        let Some((header, after_header)) = rest.split_once("\r\n") else {
+            break;
+        };
+        let parts: Vec<_> = header.split_whitespace().collect();
+        let Some(size_part) = parts.last() else {
+            break;
+        };
+        let size = size_part
+            .parse::<usize>()
+            .map_err(|_| AppError::bad_request("invalid NATS message size"))?;
+        if after_header.len() < size + 2 {
+            break;
+        }
+        let payload = &after_header[..size];
+        let job = serde_json::from_str::<RedisExecutionJobPayload>(payload)
+            .map_err(|error| AppError::bad_request(format!("invalid NATS job payload: {error}")))?;
+        let message_id = format!("nats:{}", job.job_id.unwrap_or_else(Uuid::new_v4));
+        jobs.push((message_id, job));
+        rest = &after_header[size + 2..];
+    }
+    Ok(jobs)
 }
 
 fn encode_resp_array(args: &[String]) -> String {
@@ -535,7 +648,7 @@ impl BrokerQueueHealthCheck for ReservedBrokerQueueHealthCheck {
 pub(crate) struct BrokerExecutionQueue {
     kind: BrokerQueueKind,
     config: Option<BrokerQueueConfig>,
-    pending: Arc<RwLock<HashMap<Uuid, RedisPendingExecutionJob>>>,
+    pending: Arc<RwLock<HashMap<Uuid, BrokerPendingExecutionJob>>>,
 }
 
 #[allow(dead_code)]
@@ -556,6 +669,14 @@ impl BrokerExecutionQueue {
         }
     }
 
+    pub(crate) fn nats(config: BrokerQueueConfig) -> Self {
+        Self {
+            kind: BrokerQueueKind::Nats,
+            config: Some(config),
+            pending: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     fn reserved_error(&self) -> AppError {
         AppError::bad_request(format!(
             "{:?} execution queue backend is reserved but not implemented",
@@ -570,6 +691,12 @@ impl BrokerExecutionQueue {
         self.config
             .as_ref()
             .ok_or_else(|| AppError::bad_request("Redis execution queue config is missing"))
+    }
+
+    async fn broker_config(&self) -> Result<&BrokerQueueConfig, AppError> {
+        self.config
+            .as_ref()
+            .ok_or_else(|| AppError::bad_request("broker execution queue config is missing"))
     }
 
     async fn ensure_redis_group(&self, config: &BrokerQueueConfig) -> Result<(), AppError> {
@@ -602,7 +729,6 @@ impl BrokerExecutionQueue {
 #[async_trait]
 impl ExecutionQueueBackend for BrokerExecutionQueue {
     async fn enqueue(&self, request: ExecutionJobRequest) -> Result<ExecutionJob, AppError> {
-        let config = self.redis_config().await?;
         let job = ExecutionJob {
             id: Uuid::new_v4(),
             session_id: request.session_id,
@@ -620,13 +746,22 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             last_error: None,
         };
         let payload = RedisExecutionJobPayload::from_job(&job);
-        let command = RedisStreamCommand::xadd_enqueue(config, &payload)?;
-        RedisStreamClient::execute(config, &command).await?;
+        match self.kind {
+            BrokerQueueKind::Redis => {
+                let config = self.redis_config().await?;
+                let command = RedisStreamCommand::xadd_enqueue(config, &payload)?;
+                RedisStreamClient::execute(config, &command).await?;
+            }
+            BrokerQueueKind::Nats => {
+                let config = self.broker_config().await?;
+                NatsCoreClient::publish(config, &payload).await?;
+            }
+        }
         Ok(job)
     }
 
     async fn start(&self, job_id: Uuid, worker_id: &str) -> Result<ExecutionJob, AppError> {
-        self.redis_config().await?;
+        self.broker_config().await?;
         let mut pending = self.pending.write().await;
         let pending_job = pending
             .get_mut(&job_id)
@@ -640,8 +775,12 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
     }
 
     async fn complete(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        let config = self.redis_config().await?;
-        self.ack_redis_job(config, job_id).await?;
+        if self.kind == BrokerQueueKind::Redis {
+            let config = self.redis_config().await?;
+            self.ack_redis_job(config, job_id).await?;
+        } else {
+            self.broker_config().await?;
+        }
         let mut pending = self.pending.write().await;
         let pending_job = pending
             .get_mut(&job_id)
@@ -653,8 +792,12 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
     }
 
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        let config = self.redis_config().await?;
-        self.ack_redis_job(config, job_id).await?;
+        if self.kind == BrokerQueueKind::Redis {
+            let config = self.redis_config().await?;
+            self.ack_redis_job(config, job_id).await?;
+        } else {
+            self.broker_config().await?;
+        }
         let mut pending = self.pending.write().await;
         let pending_job = pending
             .get_mut(&job_id)
@@ -690,26 +833,36 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             }
         };
         if let Some(message_id) = message_id {
-            let config = self.redis_config().await?;
-            let command = RedisStreamCommand::xack(config, message_id)?;
-            RedisStreamClient::execute(config, &command).await?;
+            if self.kind == BrokerQueueKind::Redis {
+                let config = self.redis_config().await?;
+                let command = RedisStreamCommand::xack(config, message_id)?;
+                RedisStreamClient::execute(config, &command).await?;
+            }
         }
         Ok(job)
     }
 
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
-        let config = self.redis_config().await?;
-        self.ensure_redis_group(config).await?;
-        let command = RedisStreamCommand::xreadgroup_next(config, "api-worker", 10, 1)?;
-        let response = RedisStreamClient::execute_raw(config, &command).await?;
-        let messages = parse_xreadgroup_execution_jobs(&response)?;
+        let messages = match self.kind {
+            BrokerQueueKind::Redis => {
+                let config = self.redis_config().await?;
+                self.ensure_redis_group(config).await?;
+                let command = RedisStreamCommand::xreadgroup_next(config, "api-worker", 10, 1)?;
+                let response = RedisStreamClient::execute_raw(config, &command).await?;
+                parse_xreadgroup_execution_jobs(&response)?
+            }
+            BrokerQueueKind::Nats => {
+                let config = self.broker_config().await?;
+                NatsCoreClient::drain_once(config).await?
+            }
+        };
         {
             let mut pending = self.pending.write().await;
             for (message_id, payload) in messages {
                 let job = payload.into_execution_job();
                 pending
                     .entry(job.id)
-                    .or_insert(RedisPendingExecutionJob { message_id, job });
+                    .or_insert(BrokerPendingExecutionJob { message_id, job });
             }
         }
         Ok(self
@@ -722,7 +875,7 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
     }
 
     async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        self.redis_config().await?;
+        self.broker_config().await?;
         self.pending
             .read()
             .await
@@ -737,14 +890,15 @@ mod tests {
     use super::{
         BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind,
         RedisExecutionJobPayload, RedisStreamClient, RedisStreamCommand,
-        ReservedBrokerQueueHealthCheck, encode_resp_array, parse_redis_response,
-        parse_xreadgroup_execution_jobs, redis_tcp_addr,
+        ReservedBrokerQueueHealthCheck, encode_resp_array, nats_tcp_addr, parse_nats_messages,
+        parse_redis_response, parse_xreadgroup_execution_jobs, redis_tcp_addr,
     };
     use crate::execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+    use uuid::Uuid;
 
     #[test]
     fn broker_queue_config_requires_kind_endpoint() {
@@ -914,6 +1068,28 @@ mod tests {
     }
 
     #[test]
+    fn nats_core_client_parses_endpoint_and_messages() {
+        assert_eq!(
+            nats_tcp_addr("nats://127.0.0.1:4222").expect("addr"),
+            "127.0.0.1:4222"
+        );
+        assert!(nats_tcp_addr("http://127.0.0.1:4222").is_err());
+        assert!(nats_tcp_addr("nats://127.0.0.1").is_err());
+        let payload = "{\"job_id\":\"00000000-0000-4000-8000-000000000004\",\"session_id\":\"00000000-0000-4000-8000-000000000001\",\"approval_id\":\"00000000-0000-4000-8000-000000000002\",\"tool_call_id\":\"00000000-0000-4000-8000-000000000003\",\"tool_name\":\"file.write\"}";
+        let response = format!(
+            "INFO {{}}\r\nMSG mandoforge.execution.jobs 1 {}\r\n{}\r\n",
+            payload.len(),
+            payload
+        );
+
+        let jobs = parse_nats_messages(&response).expect("nats message payload");
+
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].0.starts_with("nats:"));
+        assert_eq!(jobs[0].1.tool_name, "file.write");
+    }
+
+    #[test]
     fn redis_stream_client_parses_xreadgroup_payloads() {
         let payload = "{\"job_id\":\"00000000-0000-4000-8000-000000000004\",\"session_id\":\"00000000-0000-4000-8000-000000000001\",\"approval_id\":\"00000000-0000-4000-8000-000000000002\",\"tool_call_id\":\"00000000-0000-4000-8000-000000000003\",\"tool_name\":\"file.write\"}";
         let response = format!(
@@ -1030,6 +1206,43 @@ mod tests {
         server.await.expect("server");
         assert_eq!(job.status, ExecutionJobStatus::Queued);
         assert_eq!(job.tool_name, "file.write");
+    }
+
+    #[tokio::test]
+    async fn broker_execution_queue_enqueues_to_nats_core() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind nats");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept nats");
+            socket
+                .write_all(b"INFO {\"server_id\":\"test\"}\r\n")
+                .await
+                .expect("write info");
+            let mut buffer = vec![0; 4096];
+            let bytes = socket.read(&mut buffer).await.expect("read command");
+            String::from_utf8_lossy(&buffer[..bytes]).to_string()
+        });
+        let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Nats, |key| match key {
+            "MANDOFORGE_NATS_URL" => Some(format!("nats://{addr}")),
+            _ => None,
+        })
+        .expect("nats config");
+        let queue = BrokerExecutionQueue::nats(config);
+        let request = ExecutionJobRequest {
+            session_id: Uuid::new_v4(),
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "codex.exec".to_string(),
+            max_attempts: Some(2),
+        };
+
+        let job = queue.enqueue(request).await.expect("enqueue to nats");
+        let command = server.await.expect("server command");
+
+        assert_eq!(job.status, ExecutionJobStatus::Queued);
+        assert!(command.contains("CONNECT"));
+        assert!(command.contains("PUB mandoforge.execution.jobs"));
+        assert!(command.contains("\"tool_name\":\"codex.exec\""));
     }
 
     #[tokio::test]
