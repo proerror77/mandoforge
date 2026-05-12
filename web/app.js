@@ -23,6 +23,7 @@ const state = {
   usageRollups: [],
   usage: null,
   costAlertDelivery: null,
+  costAlertAcknowledgement: null,
   organizations: [],
   teams: [],
   projects: [],
@@ -389,6 +390,18 @@ async function deliverCostAlerts() {
   await refreshOps();
 }
 
+async function acknowledgeCostAlert(providerName, severity) {
+  state.costAlertAcknowledgement = await api("/api/usage/alerts/ack", {
+    method: "POST",
+    body: JSON.stringify({
+      provider_name: providerName,
+      severity,
+      comment: "Acknowledged from static Usage panel",
+    }),
+  });
+  renderUsage();
+}
+
 async function loadEvalCases() {
   const form = new FormData(evalCaseForm);
   const datasetId = String(form.get("dataset_id") || "").trim();
@@ -732,6 +745,7 @@ function renderUsage() {
   );
   const budgetEntries = usage.provider_budgets || [];
   const costAlertDelivery = state.costAlertDelivery;
+  const costAlertAcknowledgement = state.costAlertAcknowledgement;
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
     ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
   );
@@ -807,6 +821,14 @@ function renderUsage() {
         : ""
     }
     ${
+      costAlertAcknowledgement
+        ? `<div class="item">
+            <strong>Cost alert acknowledged: ${escapeHtml(costAlertAcknowledgement.provider_name)}</strong>
+            <div class="muted">${escapeHtml(costAlertAcknowledgement.severity)} · ${escapeHtml(costAlertAcknowledgement.acknowledged_by)} · ${escapeHtml(costAlertAcknowledgement.acknowledged_at)}</div>
+          </div>`
+        : ""
+    }
+    ${
       budgetEntries.length
         ? `<table class="usage-table">
             <thead>
@@ -816,6 +838,7 @@ function renderUsage() {
                 <th>Requests</th>
                 <th>Cost</th>
                 <th>Messages</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -828,6 +851,11 @@ function renderUsage() {
                       <td>${formatInteger(budget.request_count)} / ${formatOptionalInteger(budget.daily_request_limit)} · ${formatOptionalPercent(budget.request_budget_used_percent)}</td>
                       <td>${formatCents(budget.estimated_cost_cents)} / ${formatOptionalCents(budget.daily_cost_limit_cents)} · ${formatOptionalPercent(budget.cost_budget_used_percent)}</td>
                       <td>${escapeHtml((budget.messages || []).join(" | ") || "No budget pressure")}</td>
+                      <td>${
+                        budget.status === "warning" || budget.status === "critical"
+                          ? `<button class="secondary" data-cost-alert-ack="${escapeHtml(budget.provider_name)}" data-cost-alert-severity="${escapeHtml(budget.status)}">Ack</button>`
+                          : `<span class="muted">No alert</span>`
+                      }</td>
                     </tr>
                   `,
                 )
@@ -866,6 +894,11 @@ function renderUsage() {
         : `<div class="muted">No tool runtime data yet.</div>`
     }
   `;
+  usageRoot.querySelectorAll("[data-cost-alert-ack]").forEach((button) => {
+    button.addEventListener("click", () =>
+      acknowledgeCostAlert(button.dataset.costAlertAck, button.dataset.costAlertSeverity),
+    );
+  });
   usageRollupRoot.innerHTML = state.usageRollups.length
     ? state.usageRollups
         .map(

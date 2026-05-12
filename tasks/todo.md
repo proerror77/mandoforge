@@ -143,6 +143,7 @@
 - [x] Add static cost dashboard breakdowns for provider cost and tool runtime.
 - [x] Add provider budget forecast and alert rows to usage summary.
 - [x] Add provider cost alert listing and webhook delivery route.
+- [x] Add audited cost alert acknowledgement route and static UI action.
 - [x] Add Actionbook CLI static UI smoke verification as the browser fallback.
 - [x] Add static Admin Console panels for usage, providers, eval runs, and governance status.
 - [x] Add static Policy Console for policy inspection and tool-decision simulation.

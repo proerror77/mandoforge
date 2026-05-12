@@ -406,6 +406,23 @@ struct CostAlertDelivery {
     delivered_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AcknowledgeCostAlertRequest {
+    provider_name: String,
+    severity: String,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CostAlertAcknowledgement {
+    provider_name: String,
+    severity: String,
+    acknowledged_by: String,
+    comment: Option<String>,
+    acknowledged_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Organization {
     id: Uuid,
@@ -924,6 +941,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/eval/runs/{id}/drift", get(get_eval_run_drift))
         .route("/api/usage", get(get_usage_summary))
         .route("/api/usage/alerts", get(get_cost_alerts))
+        .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
         .route(
             "/api/usage/rollups",
@@ -3416,6 +3434,55 @@ async fn get_cost_alerts(
     }))
 }
 
+async fn acknowledge_cost_alert(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AcknowledgeCostAlertRequest>,
+) -> Result<Json<CostAlertAcknowledgement>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "usage_alerts".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let provider_name = input.provider_name.trim();
+    let severity = input.severity.trim();
+    if provider_name.is_empty() {
+        return Err(AppError::bad_request("provider_name is required"));
+    }
+    if !matches!(severity, "warning" | "critical") {
+        return Err(AppError::bad_request(
+            "severity must be warning or critical",
+        ));
+    }
+    let acknowledged_at = Utc::now();
+    let acknowledgement = CostAlertAcknowledgement {
+        provider_name: provider_name.to_string(),
+        severity: severity.to_string(),
+        acknowledged_by: principal.subject_id.clone(),
+        comment: input.comment.and_then(|comment| {
+            let trimmed = comment.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }),
+        acknowledged_at,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "usage.alert_acknowledged",
+            "usage_alert",
+            None,
+            serde_json::to_value(&acknowledgement)?,
+        ))
+        .await?;
+    Ok(Json(acknowledgement))
+}
+
 async fn deliver_cost_alerts(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5306,7 +5373,7 @@ not json
         assert_eq!(alerts.alerts[0].severity, "critical");
 
         let delivered: CostAlertDelivery = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .method("POST")
                 .uri("/api/usage/alerts/deliver")
@@ -5319,6 +5386,44 @@ not json
         assert_eq!(delivered.status, "delivered");
         assert!(delivered.delivered);
         assert_eq!(delivered.alerts[0].provider_name, "alert-mock");
+
+        let acknowledgement: CostAlertAcknowledgement = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/usage/alerts/ack")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_name": "alert-mock",
+                        "severity": "critical",
+                        "comment": "triaged"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(acknowledgement.provider_name, "alert-mock");
+        assert_eq!(acknowledgement.acknowledged_by, "admin-1");
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "usage.alert_acknowledged")
+        );
         server.abort();
     }
 

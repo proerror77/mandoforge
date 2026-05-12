@@ -253,6 +253,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `POST /api/eval/datasets/:id/runs`
 - `GET /api/eval/runs`
 - `GET /api/usage/alerts`
+- `POST /api/usage/alerts/ack`
 - `POST /api/usage/alerts/deliver`
 - `GET /api/codex-app-server/health`
 - `POST /api/codex-app-server/threads`
