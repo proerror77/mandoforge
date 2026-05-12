@@ -104,6 +104,7 @@ async function createProvider(event) {
   event.preventDefault();
   const form = new FormData(providerForm);
   const dailyRequestLimit = Number(form.get("daily_request_limit") || 0);
+  const dailyCostLimitCents = Number(form.get("daily_cost_limit_cents") || 0);
   const perRequestCents = Number(form.get("per_request_cents") || 0);
   const promptTokenCents = Number(form.get("per_1k_prompt_tokens_cents") || 0);
   const completionTokenCents = Number(form.get("per_1k_completion_tokens_cents") || 0);
@@ -114,7 +115,10 @@ async function createProvider(event) {
       provider_type: form.get("provider_type"),
       default_model: form.get("default_model"),
       config: {
-        budget: { daily_request_limit: dailyRequestLimit },
+        budget: {
+          daily_request_limit: dailyRequestLimit,
+          daily_cost_limit_cents: dailyCostLimitCents,
+        },
         pricing: {
           per_request_cents: perRequestCents,
           per_1k_prompt_tokens_cents: promptTokenCents,

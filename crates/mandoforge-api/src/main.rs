@@ -1187,18 +1187,27 @@ async fn enforce_provider_budget(
     state: &AppState,
     provider: &ProviderRecord,
 ) -> Result<(), AppError> {
-    let Some(limit) = provider_daily_request_limit(provider) else {
-        return Ok(());
-    };
     let since = Utc::now() - chrono::Duration::hours(24);
-    let used = state
-        .provider_request_count_since(&provider.name, since)
-        .await?;
-    if used >= limit {
-        return Err(AppError::forbidden(format!(
-            "provider {} exceeded daily request budget {limit}",
-            provider.name
-        )));
+    if let Some(limit) = provider_daily_request_limit(provider) {
+        let used = state
+            .provider_request_count_since(&provider.name, since)
+            .await?;
+        if used >= limit {
+            return Err(AppError::forbidden(format!(
+                "provider {} exceeded daily request budget {limit}",
+                provider.name
+            )));
+        }
+    }
+    if let Some(limit) = provider_daily_cost_limit_cents(provider) {
+        let used = provider_estimated_cost_cents_since(state, provider, since).await?;
+        let next_request_cost = provider_per_request_cost_cents(provider);
+        if used + next_request_cost > limit {
+            return Err(AppError::forbidden(format!(
+                "provider {} exceeded daily cost budget {limit:.2} cents",
+                provider.name
+            )));
+        }
     }
     Ok(())
 }
@@ -1210,6 +1219,83 @@ fn provider_daily_request_limit(provider: &ProviderRecord) -> Option<i64> {
         .and_then(|budget| budget.get("daily_request_limit"))
         .and_then(Value::as_i64)
         .filter(|limit| *limit >= 0)
+}
+
+fn provider_daily_cost_limit_cents(provider: &ProviderRecord) -> Option<f64> {
+    provider
+        .config
+        .get("budget")
+        .and_then(|budget| budget.get("daily_cost_limit_cents"))
+        .and_then(Value::as_f64)
+        .filter(|limit| *limit >= 0.0)
+}
+
+fn provider_per_request_cost_cents(provider: &ProviderRecord) -> f64 {
+    provider
+        .config
+        .get("pricing")
+        .and_then(|pricing| pricing.get("per_request_cents"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
+fn provider_prompt_token_price_cents(provider: &ProviderRecord) -> Option<f64> {
+    provider
+        .config
+        .get("pricing")
+        .and_then(|pricing| pricing.get("per_1k_prompt_tokens_cents"))
+        .and_then(Value::as_f64)
+}
+
+fn provider_completion_token_price_cents(provider: &ProviderRecord) -> Option<f64> {
+    provider
+        .config
+        .get("pricing")
+        .and_then(|pricing| pricing.get("per_1k_completion_tokens_cents"))
+        .and_then(Value::as_f64)
+}
+
+async fn provider_estimated_cost_cents_since(
+    state: &AppState,
+    provider: &ProviderRecord,
+    since: DateTime<Utc>,
+) -> Result<f64, AppError> {
+    let mut cost = 0.0;
+    for session in state.list_sessions().await? {
+        for event in state.list_events(session.id).await? {
+            if event.created_at < since {
+                continue;
+            }
+            if event.payload.get("provider").and_then(Value::as_str) != Some(provider.name.as_str())
+            {
+                continue;
+            }
+            if event.event_type == "llm.request" {
+                cost += provider_per_request_cost_cents(provider);
+            }
+            if event.event_type == "llm.response" {
+                let prompt_tokens = event
+                    .payload
+                    .get("usage")
+                    .and_then(|usage| usage.get("prompt_tokens"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let completion_tokens = event
+                    .payload
+                    .get("usage")
+                    .and_then(|usage| usage.get("completion_tokens"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                cost +=
+                    token_cost_cents(prompt_tokens, provider_prompt_token_price_cents(provider));
+                cost += token_cost_cents(
+                    completion_tokens,
+                    provider_completion_token_price_cents(provider),
+                );
+            }
+        }
+    }
+    Ok(cost)
 }
 
 async fn provider_client_from_env() -> Result<Box<dyn ProviderClient>, AppError> {
@@ -4983,6 +5069,50 @@ not json
         .await;
         assert_eq!(governed_provider_access.provider_name, "governed-mock");
 
+        let cost_limited_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "cost-limited-mock",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {
+                            "budget": {"daily_cost_limit_cents": 1.0},
+                            "pricing": {"per_request_cents": 2.5}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(cost_limited_provider.name, "cost-limited-mock");
+        let cost_limited_access: ProviderAccess = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/provider-access", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_name": "cost-limited-mock",
+                        "model_allowlist": ["gpt-5.4-mini"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(cost_limited_access.provider_name, "cost-limited-mock");
+
         let providers: Vec<ProviderRecord> = request_json(
             app.clone(),
             Request::builder()
@@ -4997,6 +5127,62 @@ not json
             providers
                 .iter()
                 .any(|provider| provider.name == "governed-mock")
+        );
+
+        let cost_limited_agent: Agent = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "cost limited scoped agent",
+                        "kind": "orchestrator",
+                        "team_id": team.id,
+                        "provider": "cost-limited-mock",
+                        "model": "gpt-5.4-mini",
+                        "tools": ["file.read"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let cost_limited_session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": cost_limited_agent.id, "title": "cost limited session"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let (status, cost_budget_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", cost_limited_session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            cost_budget_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("exceeded daily cost budget")
         );
 
         let budget_agent: Agent = request_json(
