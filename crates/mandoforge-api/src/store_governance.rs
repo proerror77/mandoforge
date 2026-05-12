@@ -4,11 +4,12 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{
-    membership_from_row, organization_from_row, project_from_row, team_from_row,
+    membership_from_row, organization_from_row, project_from_row, provider_access_from_row,
+    team_from_row,
 };
 use crate::{
-    AppError, AppState, CreateMembership, CreateOrganization, CreateProject, CreateTeam,
-    Membership, Organization, Project, Team,
+    AppError, AppState, CreateMembership, CreateOrganization, CreateProject, CreateProviderAccess,
+    CreateTeam, Membership, Organization, Project, ProviderAccess, Team,
 };
 
 impl AppState {
@@ -334,6 +335,148 @@ impl AppState {
                     .map(|_| ())
                     .ok_or_else(|| AppError::not_found("team not found"))
             }
+        }
+    }
+
+    pub(crate) async fn ensure_project_belongs_to_team(
+        &self,
+        project_id: Uuid,
+        team_id: Uuid,
+    ) -> Result<(), AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let belongs = inner
+                    .read()
+                    .await
+                    .projects
+                    .get(&project_id)
+                    .is_some_and(|project| project.team_id == team_id);
+                if belongs {
+                    Ok(())
+                } else {
+                    Err(AppError::not_found("project not found for team"))
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let exists: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1 FROM projects WHERE tenant_id = $1 AND id = $2 AND team_id = $3",
+                )
+                .bind(self.tenant_id)
+                .bind(project_id)
+                .bind(team_id)
+                .fetch_optional(pool)
+                .await?;
+                exists
+                    .map(|_| ())
+                    .ok_or_else(|| AppError::not_found("project not found for team"))
+            }
+        }
+    }
+
+    pub(crate) async fn list_provider_access(
+        &self,
+        team_id: Uuid,
+    ) -> Result<Vec<ProviderAccess>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut access: Vec<_> = inner
+                    .read()
+                    .await
+                    .provider_access
+                    .values()
+                    .filter(|access| access.team_id == team_id)
+                    .cloned()
+                    .collect();
+                access.sort_by_key(|access| access.created_at);
+                access.reverse();
+                Ok(access)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, team_id, provider_name, model_allowlist, status, created_at
+                     FROM provider_access
+                     WHERE tenant_id = $1 AND team_id = $2
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(provider_access_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_provider_access(
+        &self,
+        team_id: Uuid,
+        input: CreateProviderAccess,
+    ) -> Result<ProviderAccess, AppError> {
+        self.ensure_team_exists(team_id).await?;
+        let provider_access = ProviderAccess {
+            id: Uuid::new_v4(),
+            team_id,
+            provider_name: input.provider_name,
+            model_allowlist: input.model_allowlist,
+            status: "active".to_string(),
+            created_at: Utc::now(),
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .provider_access
+                    .insert(provider_access.id, provider_access.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "INSERT INTO provider_access (id, tenant_id, team_id, provider_name, model_allowlist, status, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     ON CONFLICT (team_id, provider_name)
+                     DO UPDATE SET model_allowlist = EXCLUDED.model_allowlist, status = EXCLUDED.status
+                     RETURNING id, team_id, provider_name, model_allowlist, status, created_at",
+                )
+                .bind(provider_access.id)
+                .bind(self.tenant_id)
+                .bind(provider_access.team_id)
+                .bind(&provider_access.provider_name)
+                .bind(serde_json::json!(provider_access.model_allowlist))
+                .bind(&provider_access.status)
+                .bind(provider_access.created_at)
+                .fetch_one(pool)
+                .await?;
+                return provider_access_from_row(row);
+            }
+        }
+        Ok(provider_access)
+    }
+
+    pub(crate) async fn ensure_provider_model_allowed(
+        &self,
+        team_id: Uuid,
+        provider_name: &str,
+        model: &str,
+    ) -> Result<(), AppError> {
+        let entries = self.list_provider_access(team_id).await?;
+        let Some(access) = entries
+            .iter()
+            .find(|entry| entry.provider_name == provider_name && entry.status == "active")
+        else {
+            return Err(AppError::forbidden(format!(
+                "team is not allowed to use provider {provider_name}"
+            )));
+        };
+        if access
+            .model_allowlist
+            .iter()
+            .any(|allowed| allowed == model)
+        {
+            Ok(())
+        } else {
+            Err(AppError::forbidden(format!(
+                "team is not allowed to use model {model} for provider {provider_name}"
+            )))
         }
     }
 }

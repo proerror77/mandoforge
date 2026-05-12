@@ -104,7 +104,8 @@
 - [x] Add Stage 2 approver role and pending approval modify endpoint that updates waiting tool args before approval.
 - [x] Add persistent org/team/project/membership schema and Admin-only hierarchy APIs.
 - [ ] Scope Agent/Session/Tool routes through project or team and derive authorization from memberships.
-- [ ] Add provider access/model allowlist enforcement.
+- [x] Add provider access/model allowlist enforcement for team-scoped agent creation.
+- [ ] Add provider budgets and runtime provider selection from stored provider rows.
 - [ ] Add eval dataset/case/run schema and a first eval runner.
 - [ ] Wire OTel export into session/provider/tool/approval/worker request paths.
 - [ ] Enable MCP registry and `mcp.call` behind policy and audit.

@@ -12,6 +12,8 @@ impl AppState {
             id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid"),
             name: "Generic Orchestrator Agent".to_string(),
             kind: "orchestrator".to_string(),
+            team_id: None,
+            project_id: None,
             provider: "openai-compatible".to_string(),
             model: "gpt-5.4-mini".to_string(),
             system_prompt: "You are a general-purpose orchestrator. Use tools through the runtime only, request approval before risky actions, and preserve an auditable timeline.".to_string(),

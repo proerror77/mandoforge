@@ -37,7 +37,22 @@ CREATE TABLE IF NOT EXISTS memberships (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS provider_access (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    team_id UUID NOT NULL REFERENCES teams(id),
+    provider_name TEXT NOT NULL,
+    model_allowlist JSONB NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(team_id, provider_name)
+);
+
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES teams(id);
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id);
+
 CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(tenant_id, organization_id);
 CREATE INDEX IF NOT EXISTS idx_projects_team ON projects(tenant_id, team_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_org ON memberships(tenant_id, organization_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_team ON memberships(tenant_id, team_id);
+CREATE INDEX IF NOT EXISTS idx_provider_access_team ON provider_access(tenant_id, team_id);

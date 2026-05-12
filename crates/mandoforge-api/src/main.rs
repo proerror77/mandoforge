@@ -91,6 +91,8 @@ struct Agent {
     id: Uuid,
     name: String,
     kind: String,
+    team_id: Option<Uuid>,
+    project_id: Option<Uuid>,
     provider: String,
     model: String,
     system_prompt: String,
@@ -121,6 +123,10 @@ struct CreateAgent {
     provider: String,
     #[serde(default = "default_model")]
     model: String,
+    #[serde(default)]
+    team_id: Option<Uuid>,
+    #[serde(default)]
+    project_id: Option<Uuid>,
     #[serde(default)]
     system_prompt: String,
     #[serde(default)]
@@ -323,6 +329,23 @@ struct CreateMembership {
     role: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderAccess {
+    id: Uuid,
+    team_id: Uuid,
+    provider_name: String,
+    model_allowlist: Vec<String>,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateProviderAccess {
+    provider_name: String,
+    #[serde(default)]
+    model_allowlist: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ToolDescriptor {
     name: &'static str,
@@ -501,6 +524,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{id}/projects",
             get(list_projects).post(create_project),
+        )
+        .route(
+            "/api/teams/{id}/provider-access",
+            get(list_provider_access).post(create_provider_access),
         )
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
@@ -1661,6 +1688,25 @@ async fn create_membership(
     )
     .await?;
     Ok(Json(state.create_membership(id, input).await?))
+}
+
+async fn list_provider_access(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ProviderAccess>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
+    Ok(Json(state.list_provider_access(id).await?))
+}
+
+async fn create_provider_access(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateProviderAccess>,
+) -> Result<Json<ProviderAccess>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
+    Ok(Json(state.create_provider_access(id, input).await?))
 }
 
 async fn list_approvals(
@@ -3492,6 +3538,82 @@ not json
         .await;
         assert_eq!(membership.organization_id, Some(organization.id));
         assert_eq!(membership.team_id, Some(team.id));
+
+        let (status, provider_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "blocked scoped agent",
+                        "kind": "orchestrator",
+                        "team_id": team.id,
+                        "provider": "openai-compatible",
+                        "model": "gpt-5.4-mini",
+                        "tools": ["file.read"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            provider_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let provider_access: ProviderAccess = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/provider-access", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_name": "openai-compatible",
+                        "model_allowlist": ["gpt-5.4-mini"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(provider_access.team_id, team.id);
+
+        let scoped_agent: Agent = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "allowed scoped agent",
+                        "kind": "orchestrator",
+                        "team_id": team.id,
+                        "project_id": project.id,
+                        "provider": "openai-compatible",
+                        "model": "gpt-5.4-mini",
+                        "tools": ["file.read"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(scoped_agent.team_id, Some(team.id));
+        assert_eq!(scoped_agent.project_id, Some(project.id));
 
         let projects: Vec<Project> = request_json(
             app,

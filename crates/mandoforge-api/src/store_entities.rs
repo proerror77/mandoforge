@@ -18,6 +18,7 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
                     "SELECT id, name, kind, provider, model, system_prompt, tools, created_at
+                            , team_id, project_id
                      FROM agents
                      WHERE tenant_id = $1 AND archived_at IS NULL
                      ORDER BY created_at DESC",
@@ -35,25 +36,41 @@ impl AppState {
             id: Uuid::new_v4(),
             name: input.name,
             kind: input.kind,
+            team_id: input.team_id,
+            project_id: input.project_id,
             provider: input.provider,
             model: input.model,
             system_prompt: input.system_prompt,
             tools: input.tools,
             created_at: Utc::now(),
         };
+        if let Some(team_id) = agent.team_id {
+            self.ensure_provider_model_allowed(team_id, &agent.provider, &agent.model)
+                .await?;
+            if let Some(project_id) = agent.project_id {
+                self.ensure_project_belongs_to_team(project_id, team_id)
+                    .await?;
+            }
+        } else if agent.project_id.is_some() {
+            return Err(AppError::bad_request(
+                "project_id requires a matching team_id on scoped agents",
+            ));
+        }
         match &self.store {
             StoreBackend::Memory(inner) => {
                 inner.write().await.agents.insert(agent.id, agent.clone());
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO agents (id, tenant_id, name, kind, provider, model, system_prompt, tools, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    "INSERT INTO agents (id, tenant_id, name, kind, team_id, project_id, provider, model, system_prompt, tools, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(agent.id)
                 .bind(self.tenant_id)
                 .bind(&agent.name)
                 .bind(&agent.kind)
+                .bind(agent.team_id)
+                .bind(agent.project_id)
                 .bind(&agent.provider)
                 .bind(&agent.model)
                 .bind(&agent.system_prompt)

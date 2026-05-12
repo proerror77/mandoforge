@@ -24,6 +24,7 @@ Aligned:
 - Approval resume executes the approved tool, rebuilds harness context, resumes the provider for provider-run sessions, and then emits the final provider response before completing the session.
 - Approval v2 groundwork includes an `approver` role and `POST /api/approvals/:id/modify`, which updates pending tool-call arguments, appends `approval.modified`, and leaves the approval pending for approve/reject.
 - Stage 2 governance groundwork includes `organizations`, `teams`, `projects`, and `memberships` tables plus Admin-only CRUD/list routes for the hierarchy.
+- Provider governance groundwork includes `provider_access` rows per team, Admin-only provider-access routes, and model allowlist enforcement when creating a team-scoped agent.
 - OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed on the default reserved provider. `MANDOFORGE_SECRET_PROVIDER=vault` explicitly selects the Vault KV v2 provider boundary, while the default remains `reserved`.
 
 Not yet aligned:

@@ -4,7 +4,7 @@ use sqlx::{Row, postgres::PgRow};
 
 use crate::{
     Agent, AgentVersion, AppError, Approval, Artifact, AuditLog, Membership, Organization, Project,
-    Session, SessionEvent, Team, ToolCall,
+    ProviderAccess, Session, SessionEvent, Team, ToolCall,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -13,6 +13,8 @@ pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         kind: row.try_get("kind")?,
+        team_id: row.try_get("team_id").unwrap_or(None),
+        project_id: row.try_get("project_id").unwrap_or(None),
         provider: row.try_get("provider")?,
         model: row.try_get("model")?,
         system_prompt: row.try_get("system_prompt")?,
@@ -167,6 +169,18 @@ pub(crate) fn membership_from_row(row: PgRow) -> Result<Membership, AppError> {
         organization_id: row.try_get("organization_id")?,
         team_id: row.try_get("team_id")?,
         role: row.try_get("role")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn provider_access_from_row(row: PgRow) -> Result<ProviderAccess, AppError> {
+    let model_allowlist: Value = row.try_get("model_allowlist")?;
+    Ok(ProviderAccess {
+        id: row.try_get("id")?,
+        team_id: row.try_get("team_id")?,
+        provider_name: row.try_get("provider_name")?,
+        model_allowlist: serde_json::from_value(model_allowlist).unwrap_or_default(),
+        status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })
 }
