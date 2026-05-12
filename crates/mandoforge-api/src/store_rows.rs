@@ -3,9 +3,9 @@ use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
 use crate::{
-    Agent, AgentVersion, AppError, Approval, Artifact, AuditLog, EvalCase, EvalDataset, EvalRun,
-    McpServerRecord, Membership, Organization, Project, ProviderAccess, ProviderRecord, Session,
-    SessionEvent, Team, ToolCall, UsageRollup,
+    Agent, AgentRelease, AgentVersion, AppError, Approval, Artifact, AuditLog, EvalCase,
+    EvalDataset, EvalRun, McpServerRecord, Membership, Organization, Project, ProviderAccess,
+    ProviderRecord, Session, SessionEvent, Team, ToolCall, UsageRollup,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -50,6 +50,22 @@ pub(crate) fn agent_version_from_row(row: PgRow) -> Result<AgentVersion, AppErro
         tool_names: serde_json::from_value(tool_names).unwrap_or_default(),
         runtime_config: row.try_get("runtime_config")?,
         approval_policy: row.try_get("approval_policy")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn agent_release_from_row(row: PgRow) -> Result<AgentRelease, AppError> {
+    Ok(AgentRelease {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        agent_version_id: row.try_get("agent_version_id")?,
+        environment: row.try_get("environment")?,
+        status: row.try_get("status")?,
+        eval_run_id: row.try_get("eval_run_id")?,
+        eval_score: row.try_get("eval_score")?,
+        min_score: row.try_get("min_score")?,
+        promoted_by: row.try_get("promoted_by")?,
+        promoted_at: row.try_get("promoted_at")?,
         created_at: row.try_get("created_at")?,
     })
 }

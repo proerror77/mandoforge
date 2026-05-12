@@ -39,6 +39,7 @@ mod store_entities;
 mod store_eval;
 mod store_events;
 mod store_governance;
+mod store_releases;
 mod store_rows;
 mod store_seed;
 mod store_tool_calls;
@@ -158,6 +159,32 @@ struct CreateAgent {
     system_prompt: String,
     #[serde(default)]
     tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentRelease {
+    id: Uuid,
+    agent_id: Uuid,
+    agent_version_id: Uuid,
+    environment: String,
+    status: String,
+    eval_run_id: Option<Uuid>,
+    eval_score: Option<f64>,
+    min_score: f64,
+    promoted_by: Option<String>,
+    promoted_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAgentRelease {
+    #[serde(default)]
+    agent_version_id: Option<Uuid>,
+    eval_run_id: Uuid,
+    #[serde(default = "default_release_environment")]
+    environment: String,
+    #[serde(default)]
+    min_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -788,6 +815,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/agents/{id}/versions", get(list_agent_versions))
         .route(
+            "/api/agents/{id}/releases",
+            get(list_agent_releases).post(create_agent_release),
+        )
+        .route(
             "/api/agents/{id}/versions/{version}",
             get(get_agent_version),
         )
@@ -1161,6 +1192,37 @@ async fn list_agent_versions(
 ) -> Result<Json<Vec<AgentVersion>>, AppError> {
     authorize_request(&state, &headers, Permission::AgentsRead, "agent", Some(id)).await?;
     Ok(Json(state.list_agent_versions(id).await?))
+}
+
+async fn list_agent_releases(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AgentRelease>>, AppError> {
+    authorize_request(&state, &headers, Permission::AgentsRead, "agent", Some(id)).await?;
+    Ok(Json(state.list_agent_releases(id).await?))
+}
+
+async fn create_agent_release(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateAgentRelease>,
+) -> Result<Json<AgentRelease>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "agent".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(
+        state
+            .create_agent_release(id, input, principal.subject_id)
+            .await?,
+    ))
 }
 
 async fn get_agent_version(
@@ -4129,6 +4191,10 @@ fn default_agent_kind() -> String {
     "orchestrator".to_string()
 }
 
+fn default_release_environment() -> String {
+    "staging".to_string()
+}
+
 fn default_provider() -> String {
     "openai-compatible".to_string()
 }
@@ -4609,6 +4675,7 @@ not json
         assert!(names.contains(&"0003_stage2_governance.sql"));
         assert!(names.contains(&"0004_usage_rollups.sql"));
         assert!(names.contains(&"0005_approval_expiry.sql"));
+        assert!(names.contains(&"0006_agent_releases.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -7679,6 +7746,97 @@ not json
                 .failure_reasons
                 .iter()
                 .any(|reason| reason.contains("score"))
+        );
+
+        let release: AgentRelease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{}/releases", agent.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "eval_run_id": run.id,
+                        "environment": "staging",
+                        "min_score": 1.0
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(release.agent_id, agent.id);
+        assert_eq!(release.eval_run_id, Some(run.id));
+        assert_eq!(release.eval_score, Some(1.0));
+        assert_eq!(release.status, "promoted");
+        assert_eq!(release.promoted_by.as_deref(), Some("admin-1"));
+
+        let releases: Vec<AgentRelease> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/agents/{}/releases", agent.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(releases.iter().any(|listed| listed.id == release.id));
+
+        let (status, release_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{}/releases", agent.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "eval_run_id": failing_run.id,
+                        "environment": "prod",
+                        "min_score": 1.0
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            release_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("eval gate failed")
+        );
+
+        let (status, viewer_release_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{}/releases", agent.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::from(
+                    json!({
+                        "eval_run_id": run.id,
+                        "environment": "prod",
+                        "min_score": 1.0
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            viewer_release_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
         );
 
         let runs: Vec<EvalRun> = request_json(
