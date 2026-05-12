@@ -4261,17 +4261,43 @@ async fn get_provider_health(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<ProviderHealth>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "provider", Some(id)).await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "provider".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
     let provider = state
         .list_providers()
         .await?
         .into_iter()
         .find(|provider| provider.id == id)
         .ok_or_else(|| AppError::not_found("provider not found"))?;
-    Ok(Json(provider_health(&provider)))
+    let health = provider_health(&provider).await;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "provider.health_checked",
+            "provider",
+            Some(provider.id),
+            json!({
+                "subject": principal.subject_id,
+                "provider_name": provider.name,
+                "healthy": health.healthy,
+                "issues": health.issues,
+                "checks": health.checks
+            }),
+        ))
+        .await?;
+    Ok(Json(health))
 }
 
-fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
+async fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
     let mut issues = Vec::new();
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
     if provider.status != "active" {
@@ -4296,6 +4322,8 @@ fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
     let api_key_env_present = api_key_env.is_some_and(|env_key| std::env::var(env_key).is_ok());
+    let mut external_probe = "not_applicable".to_string();
+    let mut external_probe_status = Value::Null;
 
     match provider_type.as_str() {
         "mock" | "mock_openai_compatible" => {}
@@ -4311,6 +4339,32 @@ fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
             }
             if api_key_env.is_some() && !api_key_env_present {
                 issues.push("configured api_key_env is not present in the environment".to_string());
+            }
+            if provider.status == "active" && has_base_url && api_key_env_present {
+                let env_key = api_key_env.expect("checked present");
+                match std::env::var(env_key) {
+                    Ok(api_key) => {
+                        let probe = probe_openai_compatible_provider(
+                            provider.base_url.as_deref().unwrap_or_default(),
+                            &api_key,
+                        )
+                        .await;
+                        external_probe = probe.0;
+                        external_probe_status = probe.1;
+                        if let Some(issue) = probe.2 {
+                            issues.push(issue);
+                        }
+                    }
+                    Err(_) => {
+                        external_probe = "skipped".to_string();
+                    }
+                }
+            } else if api_key_ref.is_some() && has_base_url {
+                external_probe = "skipped_api_key_ref".to_string();
+            } else if provider.status != "active" {
+                external_probe = "skipped_inactive".to_string();
+            } else if !has_base_url || !api_key_env_present {
+                external_probe = "skipped_configuration".to_string();
             }
         }
         other => issues.push(format!("provider type {other} is not supported")),
@@ -4329,8 +4383,55 @@ fn provider_health(provider: &ProviderRecord) -> ProviderHealth {
             "has_api_key_env": api_key_env.is_some(),
             "api_key_env_present": api_key_env_present,
             "has_api_key_ref": api_key_ref.is_some(),
+            "external_probe": external_probe,
+            "external_probe_status": external_probe_status,
         }),
         checked_at: Utc::now(),
+    }
+}
+
+async fn probe_openai_compatible_provider(
+    base_url: &str,
+    api_key: &str,
+) -> (String, Value, Option<String>) {
+    let endpoint = format!("{}/v1/models", base_url.trim().trim_end_matches('/'));
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return (
+                "failed".to_string(),
+                json!({"error": error.to_string()}),
+                Some("provider health probe client could not be created".to_string()),
+            );
+        }
+    };
+    match client.get(&endpoint).bearer_auth(api_key).send().await {
+        Ok(response) => {
+            let status = response.status();
+            if status.is_success() {
+                (
+                    "healthy".to_string(),
+                    json!({"url": endpoint, "status": status.as_u16()}),
+                    None,
+                )
+            } else {
+                (
+                    "failed".to_string(),
+                    json!({"url": endpoint, "status": status.as_u16()}),
+                    Some(format!(
+                        "provider external health probe failed with status {status}"
+                    )),
+                )
+            }
+        }
+        Err(error) => (
+            "failed".to_string(),
+            json!({"url": endpoint, "error": error.to_string()}),
+            Some("provider external health probe failed".to_string()),
+        ),
     }
 }
 
@@ -7068,6 +7169,16 @@ not json
         assert_eq!(payload["type"], "mandoforge.approval_requested");
         assert!(payload["approval"]["id"].as_str().is_some());
         Json(json!({"accepted": true}))
+    }
+
+    async fn mock_provider_models(headers: HeaderMap) -> Json<Value> {
+        assert!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("Bearer "))
+        );
+        Json(json!({"data": [{"id": "gpt-5.4-mini"}]}))
     }
 
     #[tokio::test]
@@ -10419,6 +10530,52 @@ not json
                 .iter()
                 .any(|issue| issue.contains("api_key_env"))
         );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let provider_probe = Router::new().route("/v1/models", get(mock_provider_models));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, provider_probe)
+                .await
+                .expect("mock provider models");
+        });
+        let probed_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "openai-compatible",
+                        "name": "probed-openai-compatible",
+                        "base_url": format!("http://{addr}"),
+                        "default_model": "gpt-5.4-mini",
+                        "config": {"api_key_env": "PATH"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let probed_health: ProviderHealth = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/providers/{}/health", probed_provider.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(probed_health.healthy);
+        assert_eq!(probed_health.checks["external_probe"], "healthy");
+        assert_eq!(probed_health.checks["external_probe_status"]["status"], 200);
+        server.abort();
 
         let status_agent: Agent = request_json(
             app.clone(),
