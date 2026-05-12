@@ -184,6 +184,13 @@ struct AddMessage {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ModifyApproval {
+    args: Value,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionEvent {
     id: Uuid,
@@ -206,6 +213,7 @@ struct Approval {
     risk_level: String,
     reason: String,
     evidence: Value,
+    decision_payload: Value,
     status: String,
     created_at: DateTime<Utc>,
     decided_at: Option<DateTime<Utc>>,
@@ -418,6 +426,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
+        .route("/api/approvals/{id}/modify", post(modify_approval))
         .route("/api/execution-jobs", get(list_execution_jobs))
         .route(
             "/api/execution-jobs/{id}/run",
@@ -1064,6 +1073,7 @@ impl ToolExecutor for ApprovalRequestTool {
             risk_level,
             reason,
             evidence,
+            decision_payload: json!({}),
             status: "pending".to_string(),
             created_at: Utc::now(),
             decided_at: None,
@@ -1200,6 +1210,7 @@ fn parse_roles_header(value: &str) -> Result<Vec<Role>, AppError> {
         .map(|role| match role {
             "admin" => Ok(Role::Admin),
             "operator" => Ok(Role::Operator),
+            "approver" => Ok(Role::Approver),
             "viewer" => Ok(Role::Viewer),
             other => Err(AppError::bad_request(format!(
                 "unsupported x-mandoforge-roles value: {other}"
@@ -1298,6 +1309,7 @@ async fn execute_tool_invocation(
             risk_level: policy_decision.risk_level.clone(),
             reason: policy_decision.reason.clone(),
             evidence: json!({"tool": name, "args": input.args}),
+            decision_payload: json!({}),
             status: "pending".to_string(),
             created_at: Utc::now(),
             decided_at: None,
@@ -1500,6 +1512,59 @@ async fn reject(
 ) -> Result<Json<Approval>, AppError> {
     authorize_approval_decision(&state, &headers, id).await?;
     decide_approval(state, id, "rejected").await
+}
+
+async fn modify_approval(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ModifyApproval>,
+) -> Result<Json<Approval>, AppError> {
+    authorize_approval_decision(&state, &headers, id).await?;
+    let approval = state.get_approval(id).await?;
+    if approval.status != "pending" {
+        return Err(AppError::bad_request(
+            "only pending approvals can be modified",
+        ));
+    }
+    if let Some(tool_call_id) = approval.tool_call_id {
+        state
+            .update_tool_call_args(tool_call_id, input.args.clone())
+            .await?;
+    }
+    let updated = state
+        .modify_approval(id, input.args.clone(), input.comment.clone())
+        .await?;
+    state
+        .append_event(
+            "user",
+            Some(id),
+            updated.session_id,
+            "approval.modified",
+            json!({
+                "approval_id": id,
+                "tool_call_id": updated.tool_call_id,
+                "modified_args": input.args,
+                "comment": input.comment,
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(updated.session_id),
+            "user",
+            Some(id),
+            "approval.modified",
+            "approval",
+            Some(id),
+            json!({
+                "tool_call_id": updated.tool_call_id,
+                "action": updated.action,
+                "comment": updated.decision_payload.get("comment").cloned().unwrap_or(Value::Null),
+            }),
+        ))
+        .await?;
+    Ok(Json(updated))
 }
 
 async fn authorize_approval_decision(
@@ -3266,6 +3331,135 @@ not json
             events
                 .iter()
                 .any(|event| event.event_type == "session.completed")
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_modify_updates_waiting_tool_args_before_approve() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "approval modify"}),
+            ),
+        )
+        .await;
+
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "path": "before.md",
+                        "content": "before"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+
+        let modified: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/modify"))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "approver-1")
+                .header("x-mandoforge-roles", "approver")
+                .body(Body::from(
+                    json!({
+                        "args": {
+                            "path": "after.md",
+                            "content": "after"
+                        },
+                        "comment": "tighten file name before approval"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(modified.status, "pending");
+        assert_eq!(
+            modified.decision_payload["modified_args"]["path"],
+            "after.md"
+        );
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let file_write = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "file.write")
+            .expect("file.write tool call");
+        assert_eq!(file_write.args["path"], "after.md");
+
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "approver-1")
+                .header("x-mandoforge-roles", "approver")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+
+        let written = tokio::fs::read_to_string(
+            test_workspace_root()
+                .join(session.id.to_string())
+                .join("after.md"),
+        )
+        .await
+        .expect("approved modified file.write created workspace file");
+        assert_eq!(written, "after");
+        assert!(
+            tokio::fs::metadata(
+                test_workspace_root()
+                    .join(session.id.to_string())
+                    .join("before.md"),
+            )
+            .await
+            .is_err(),
+            "original unmodified file should not be written"
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "approval.modified")
         );
     }
 

@@ -22,6 +22,7 @@ Aligned:
 - Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh` or the `mandoforge-worker` Rust binary; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
 - Worker deployment entries exist for Docker Compose and Kubernetes.
 - Approval resume executes the approved tool, rebuilds harness context, resumes the provider for provider-run sessions, and then emits the final provider response before completing the session.
+- Approval v2 groundwork includes an `approver` role and `POST /api/approvals/:id/modify`, which updates pending tool-call arguments, appends `approval.modified`, and leaves the approval pending for approve/reject.
 - OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed on the default reserved provider. `MANDOFORGE_SECRET_PROVIDER=vault` explicitly selects the Vault KV v2 provider boundary, while the default remains `reserved`.
 
 Not yet aligned:

@@ -194,6 +194,8 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/sessions/:id/audit-logs`
 - `GET /api/approvals`
 - `POST /api/approvals/:id/approve`
+- `POST /api/approvals/:id/reject`
+- `POST /api/approvals/:id/modify`
 - `GET /api/tool-calls`
 - `GET /api/audit-logs`
 - `GET /api/tools`

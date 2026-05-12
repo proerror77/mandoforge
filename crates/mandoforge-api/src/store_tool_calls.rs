@@ -84,6 +84,44 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn update_tool_call_args(
+        &self,
+        id: Uuid,
+        args: Value,
+    ) -> Result<ToolCall, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let tool_call = store
+                    .tool_calls
+                    .get_mut(&id)
+                    .ok_or_else(|| AppError::not_found("tool call not found"))?;
+                if tool_call.status != "waiting_approval" {
+                    return Err(AppError::bad_request(
+                        "only waiting approval tool calls can be modified",
+                    ));
+                }
+                tool_call.args = args;
+                Ok(tool_call.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE tool_calls
+                     SET args = $1
+                     WHERE tenant_id = $2 AND id = $3 AND status = 'waiting_approval'
+                     RETURNING id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at",
+                )
+                .bind(args)
+                .bind(self.tenant_id)
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("waiting approval tool call not found"))?;
+                tool_call_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn get_tool_call(&self, id: Uuid) -> Result<ToolCall, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => inner

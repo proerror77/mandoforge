@@ -100,3 +100,10 @@
 - [x] Add local-verified Redis Stream command boundary before enabling a live broker queue backend.
 - [x] Add local-verified Redis RESP client boundary before enabling Redis queue backend selection.
 - [x] Add local-verified Redis worker read command boundary before enabling broker worker handoff.
+- [x] Add Stage 2 gap audit mapping PRD requirements to current code evidence and remaining gaps.
+- [x] Add Stage 2 approver role and pending approval modify endpoint that updates waiting tool args before approval.
+- [ ] Add persistent org/team/project/membership schema and scoped route enforcement.
+- [ ] Add provider access/model allowlist enforcement.
+- [ ] Add eval dataset/case/run schema and a first eval runner.
+- [ ] Wire OTel export into session/provider/tool/approval/worker request paths.
+- [ ] Enable MCP registry and `mcp.call` behind policy and audit.
