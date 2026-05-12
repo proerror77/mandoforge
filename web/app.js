@@ -7,6 +7,7 @@ const state = {
   auditLogs: [],
   providers: [],
   providerSummary: null,
+  providerPolicyGate: null,
   providerHealth: {},
   vaultHealth: null,
   secretRecords: [],
@@ -1291,6 +1292,7 @@ async function refreshOps() {
   const [
     providers,
     providerSummary,
+    providerPolicyGate,
     secretRecords,
     policy,
     policyRuntime,
@@ -1315,6 +1317,7 @@ async function refreshOps() {
     await Promise.all([
       api("/api/providers"),
       api("/api/providers/summary"),
+      api("/api/providers/policy-gate"),
       api("/api/vault/secrets"),
       api("/api/policy"),
       api("/api/policy/runtime"),
@@ -1338,6 +1341,7 @@ async function refreshOps() {
     ]);
   state.providers = providers;
   state.providerSummary = providerSummary;
+  state.providerPolicyGate = providerPolicyGate;
   state.secretRecords = secretRecords;
   state.policy = policy;
   state.policyRuntime = policyRuntime;
@@ -2876,6 +2880,53 @@ function countPolicyDiffChanges(changes = []) {
 function renderProviders() {
   const summary = state.providerSummary;
   const attentionItems = summary?.attention_items || [];
+  const policyGate = state.providerPolicyGate;
+  const policyGateChecks = policyGate?.checks || [];
+  const policyGateHtml = policyGate
+    ? `
+      <div class="detail-panel">
+        <h4>Provider Policy Gate</h4>
+        <div class="metric-grid compact-metrics">
+          <div class="metric"><span>Status</span><strong>${escapeHtml(policyGate.status)}</strong></div>
+          <div class="metric"><span>Providers</span><strong>${formatInteger(policyGate.provider_count)}</strong></div>
+          <div class="metric"><span>Passed</span><strong>${formatInteger(policyGate.passed_count)}</strong></div>
+          <div class="metric"><span>Failed</span><strong>${formatInteger(policyGate.failed_count)}</strong></div>
+          <div class="metric"><span>Warnings</span><strong>${formatInteger(policyGate.warning_count)}</strong></div>
+        </div>
+        ${
+          policyGateChecks.length
+            ? `<table class="compact-table">
+                <thead>
+                  <tr>
+                    <th>Provider</th>
+                    <th>Gate</th>
+                    <th>Blockers</th>
+                    <th>Warnings</th>
+                    <th>Recommendations</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${policyGateChecks
+                    .map(
+                      (check) => `
+                        <tr>
+                          <td>${escapeHtml(check.provider_name)}</td>
+                          <td><span class="budget-status ${escapeHtml(check.gate_status)}">${escapeHtml(check.gate_status)}</span></td>
+                          <td>${escapeHtml((check.blockers || []).join("; ") || "none")}</td>
+                          <td>${escapeHtml((check.warnings || []).join("; ") || "none")}</td>
+                          <td>${escapeHtml((check.recommendations || []).join("; ") || "none")}</td>
+                        </tr>
+                      `,
+                    )
+                    .join("")}
+                </tbody>
+              </table>`
+            : `<div class="muted">No provider policy gate checks.</div>`
+        }
+        <div class="muted">Generated: ${escapeHtml(policyGate.generated_at)}</div>
+      </div>
+    `
+    : "";
   const summaryHtml = summary
     ? `
       <div class="detail-panel">
@@ -2968,7 +3019,7 @@ function renderProviders() {
         )
         .join("")
     : `<div class="muted">No stored providers</div>`;
-  providerRoot.innerHTML = summaryHtml + providerListHtml;
+  providerRoot.innerHTML = policyGateHtml + summaryHtml + providerListHtml;
   providerRoot.querySelectorAll("[data-provider-status]").forEach((button) => {
     button.addEventListener("click", () =>
       updateProviderStatus(button.dataset.providerStatus, button.dataset.status),

@@ -1,7 +1,7 @@
 #[cfg(test)]
 use std::path::Path as FsPath;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
@@ -1377,6 +1377,29 @@ struct ProviderGovernanceAttentionItem {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderPolicyGateReport {
+    generated_at: DateTime<Utc>,
+    status: String,
+    provider_count: usize,
+    passed_count: usize,
+    failed_count: usize,
+    warning_count: usize,
+    checks: Vec<ProviderPolicyGateCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderPolicyGateCheck {
+    provider_id: Uuid,
+    provider_name: String,
+    provider_type: String,
+    status: String,
+    gate_status: String,
+    blockers: Vec<String>,
+    warnings: Vec<String>,
+    recommendations: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RotateProviderApiKeyRef {
     api_key_ref: String,
@@ -2119,6 +2142,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/summary", get(get_provider_summary))
+        .route("/api/providers/policy-gate", get(get_provider_policy_gate))
         .route("/api/providers/{id}/status", patch(update_provider_status))
         .route(
             "/api/providers/{id}/status-approval",
@@ -5190,6 +5214,19 @@ async fn get_provider_summary(
     )))
 }
 
+async fn get_provider_policy_gate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderPolicyGateReport>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
+    let providers = state.list_providers().await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    Ok(Json(build_provider_policy_gate_report(
+        &providers,
+        &audit_logs,
+    )))
+}
+
 fn build_provider_governance_summary(
     providers: &[ProviderRecord],
     audit_logs: &[AuditLog],
@@ -5326,6 +5363,132 @@ fn build_provider_governance_summary(
         inactive_provider_count,
         attention_items,
         generated_at: Utc::now(),
+    }
+}
+
+fn build_provider_policy_gate_report(
+    providers: &[ProviderRecord],
+    audit_logs: &[AuditLog],
+) -> ProviderPolicyGateReport {
+    let emergency_provider_ids: HashSet<Uuid> = audit_logs
+        .iter()
+        .filter(|log| {
+            log.action == "provider.status_updated"
+                && log.details["policy_decision"]["gate"] == "provider_lifecycle_emergency"
+        })
+        .filter_map(|log| log.resource_id)
+        .collect();
+    let mut checks = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let mut blockers = Vec::new();
+        let mut warnings = Vec::new();
+        let mut recommendations = Vec::new();
+        let has_api_key_ref = provider
+            .config
+            .get("api_key_ref")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        let has_api_key_env = provider
+            .config
+            .get("api_key_env")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        if provider.status != "active" {
+            blockers.push(format!("provider status is {}", provider.status));
+            recommendations.push("activate the provider through lifecycle approval".to_string());
+        }
+        if provider
+            .config
+            .get("pending_status_approval")
+            .and_then(|approval| approval.get("status"))
+            .and_then(Value::as_str)
+            == Some("pending")
+        {
+            blockers.push("provider lifecycle approval is still pending".to_string());
+            recommendations.push("approve or reject the pending lifecycle request".to_string());
+        }
+        if provider_requires_api_key(&provider.provider_type)
+            && !has_api_key_ref
+            && !has_api_key_env
+        {
+            blockers.push("provider requires api_key_ref or api_key_env".to_string());
+            recommendations
+                .push("bind provider credentials through Vault ref or env key".to_string());
+        }
+        if provider_requires_base_url(&provider.provider_type)
+            && provider
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .map_or(true, str::is_empty)
+        {
+            blockers.push("provider requires base_url".to_string());
+            recommendations.push("configure provider base_url before production use".to_string());
+        }
+        if provider_daily_request_limit(provider).is_none()
+            && provider_daily_cost_limit_cents(provider).is_none()
+        {
+            warnings.push("provider has no request or cost budget".to_string());
+            recommendations.push("configure daily request or cost budget".to_string());
+        }
+        if has_api_key_env && !has_api_key_ref {
+            warnings.push("provider uses env credential instead of Vault ref".to_string());
+            recommendations.push("rotate provider credential to api_key_ref".to_string());
+        }
+        if emergency_provider_ids.contains(&provider.id) {
+            warnings.push("provider has emergency lifecycle changes in audit history".to_string());
+            recommendations
+                .push("review emergency lifecycle change before production rollout".to_string());
+        }
+        let gate_status = if !blockers.is_empty() {
+            "failed"
+        } else if !warnings.is_empty() {
+            "warning"
+        } else {
+            "passed"
+        }
+        .to_string();
+        checks.push(ProviderPolicyGateCheck {
+            provider_id: provider.id,
+            provider_name: provider.name.clone(),
+            provider_type: provider.provider_type.clone(),
+            status: provider.status.clone(),
+            gate_status,
+            blockers,
+            warnings,
+            recommendations,
+        });
+    }
+    let passed_count = checks
+        .iter()
+        .filter(|check| check.gate_status == "passed")
+        .count();
+    let failed_count = checks
+        .iter()
+        .filter(|check| check.gate_status == "failed")
+        .count();
+    let warning_count = checks
+        .iter()
+        .filter(|check| check.gate_status == "warning")
+        .count();
+    let status = if failed_count > 0 {
+        "failed"
+    } else if warning_count > 0 {
+        "warning"
+    } else {
+        "passed"
+    }
+    .to_string();
+    ProviderPolicyGateReport {
+        generated_at: Utc::now(),
+        status,
+        provider_count: providers.len(),
+        passed_count,
+        failed_count,
+        warning_count,
+        checks,
     }
 }
 
@@ -15108,7 +15271,7 @@ not json
         .await;
 
         let summary: ProviderGovernanceSummary = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/providers/summary")
                 .header("x-mandoforge-subject", "admin-1")
@@ -15139,6 +15302,49 @@ not json
         assert!(summary.attention_items.iter().any(|item| {
             item.provider_name == "summary-misconfigured-openai" && item.kind == "inactive_provider"
         }));
+
+        let gate: ProviderPolicyGateReport = request_json(
+            app,
+            Request::builder()
+                .uri("/api/providers/policy-gate")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(gate.status, "failed");
+        assert_eq!(gate.provider_count, 2);
+        assert_eq!(gate.failed_count, 2);
+        let pending_gate = gate
+            .checks
+            .iter()
+            .find(|check| check.provider_name == "summary-budgeted-mock")
+            .expect("pending lifecycle provider gate check");
+        assert_eq!(pending_gate.gate_status, "failed");
+        assert!(
+            pending_gate
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("approval is still pending"))
+        );
+        let misconfigured_gate = gate
+            .checks
+            .iter()
+            .find(|check| check.provider_name == "summary-misconfigured-openai")
+            .expect("misconfigured provider gate check");
+        assert!(
+            misconfigured_gate
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("requires api_key"))
+        );
+        assert!(
+            misconfigured_gate
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("requires base_url"))
+        );
     }
 
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {
