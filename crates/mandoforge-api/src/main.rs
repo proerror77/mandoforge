@@ -42,6 +42,7 @@ mod store_approvals;
 mod store_artifacts;
 mod store_audit;
 mod store_backend;
+mod store_cost_alert_routes;
 mod store_entities;
 mod store_eval;
 mod store_events;
@@ -469,7 +470,40 @@ struct CostAlertDelivery {
     channel: String,
     webhook_configured: bool,
     alerts: Vec<CostAlert>,
+    route_deliveries: Vec<CostAlertRouteDelivery>,
     delivered_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CostAlertRouteDelivery {
+    route_id: Option<Uuid>,
+    route_name: String,
+    channel: String,
+    status: String,
+    delivered: bool,
+    matched_alert_count: usize,
+    target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CostAlertRoute {
+    id: Uuid,
+    name: String,
+    channel: String,
+    target: Option<String>,
+    severity_filter: String,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCostAlertRoute {
+    name: String,
+    channel: String,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default = "default_cost_alert_severity_filter")]
+    severity_filter: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1112,6 +1146,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/usage/alerts", get(get_cost_alerts))
         .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
+        .route(
+            "/api/usage/alert-routes",
+            get(list_cost_alert_routes).post(create_cost_alert_route),
+        )
         .route(
             "/api/usage/rollups",
             get(list_usage_rollups).post(create_usage_rollup),
@@ -4041,6 +4079,57 @@ async fn acknowledge_cost_alert(
     Ok(Json(acknowledgement))
 }
 
+async fn list_cost_alert_routes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<CostAlertRoute>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "usage_alert_routes",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_cost_alert_routes().await?))
+}
+
+async fn create_cost_alert_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateCostAlertRoute>,
+) -> Result<Json<CostAlertRoute>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "usage_alert_routes".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let route = state
+        .create_cost_alert_route(validate_cost_alert_route_input(input)?)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "usage.alert_route_created",
+            "usage_alert_route",
+            Some(route.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": route.name,
+                "channel": route.channel,
+                "severity_filter": route.severity_filter
+            }),
+        ))
+        .await?;
+    Ok(Json(route))
+}
+
 async fn deliver_cost_alerts(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4056,6 +4145,30 @@ async fn deliver_cost_alerts(
             channel: "webhook".to_string(),
             webhook_configured: state.cost_alert_webhook_url.is_some(),
             alerts,
+            route_deliveries: vec![],
+            delivered_at,
+        }));
+    }
+    let routes: Vec<_> = state
+        .list_cost_alert_routes()
+        .await?
+        .into_iter()
+        .filter(|route| route.status == "active")
+        .collect();
+    if !routes.is_empty() {
+        let mut route_deliveries = Vec::new();
+        for route in routes {
+            route_deliveries
+                .push(deliver_cost_alert_route(&state, &route, &alerts, delivered_at).await?);
+        }
+        let delivered = route_deliveries.iter().any(|delivery| delivery.delivered);
+        return Ok(Json(CostAlertDelivery {
+            status: if delivered { "delivered" } else { "reserved" }.to_string(),
+            delivered,
+            channel: "routes".to_string(),
+            webhook_configured: state.cost_alert_webhook_url.is_some(),
+            alerts,
+            route_deliveries,
             delivered_at,
         }));
     }
@@ -4066,6 +4179,7 @@ async fn deliver_cost_alerts(
             channel: "webhook".to_string(),
             webhook_configured: false,
             alerts,
+            route_deliveries: vec![],
             delivered_at,
         }));
     };
@@ -4087,14 +4201,101 @@ async fn deliver_cost_alerts(
             response.status()
         )));
     }
+    let alert_count = alerts.len();
     Ok(Json(CostAlertDelivery {
         status: "delivered".to_string(),
         delivered: true,
         channel: "webhook".to_string(),
         webhook_configured: true,
         alerts,
+        route_deliveries: vec![CostAlertRouteDelivery {
+            route_id: None,
+            route_name: "default-webhook".to_string(),
+            channel: "webhook".to_string(),
+            status: "delivered".to_string(),
+            delivered: true,
+            matched_alert_count: alert_count,
+            target: Some(webhook_url.clone()),
+        }],
         delivered_at,
     }))
+}
+
+async fn deliver_cost_alert_route(
+    state: &AppState,
+    route: &CostAlertRoute,
+    alerts: &[CostAlert],
+    delivered_at: DateTime<Utc>,
+) -> Result<CostAlertRouteDelivery, AppError> {
+    let matched_alerts: Vec<_> = alerts
+        .iter()
+        .filter(|alert| severity_rank(&alert.severity) >= severity_rank(&route.severity_filter))
+        .collect();
+    if matched_alerts.is_empty() {
+        return Ok(CostAlertRouteDelivery {
+            route_id: Some(route.id),
+            route_name: route.name.clone(),
+            channel: route.channel.clone(),
+            status: "no_matching_alerts".to_string(),
+            delivered: false,
+            matched_alert_count: 0,
+            target: route.target.clone(),
+        });
+    }
+    if route.channel != "webhook" {
+        return Ok(CostAlertRouteDelivery {
+            route_id: Some(route.id),
+            route_name: route.name.clone(),
+            channel: route.channel.clone(),
+            status: "reserved".to_string(),
+            delivered: false,
+            matched_alert_count: matched_alerts.len(),
+            target: route.target.clone(),
+        });
+    }
+    let webhook_url = route
+        .target
+        .as_ref()
+        .or(state.cost_alert_webhook_url.as_ref())
+        .ok_or_else(|| AppError::bad_request("webhook cost alert route requires a target"))?;
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        reqwest::Client::new()
+            .post(webhook_url)
+            .json(&json!({
+                "type": "mandoforge.cost_alerts",
+                "route_id": route.id,
+                "route_name": route.name,
+                "alerts": matched_alerts,
+                "delivered_at": delivered_at,
+            }))
+            .send(),
+    )
+    .await??;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "cost alert route {} returned status {}",
+            route.name,
+            response.status()
+        )));
+    }
+    Ok(CostAlertRouteDelivery {
+        route_id: Some(route.id),
+        route_name: route.name.clone(),
+        channel: route.channel.clone(),
+        status: "delivered".to_string(),
+        delivered: true,
+        matched_alert_count: matched_alerts.len(),
+        target: Some(webhook_url.clone()),
+    })
+}
+
+fn severity_rank(severity: &str) -> i32 {
+    match severity {
+        "critical" => 2,
+        "warning" => 1,
+        _ => 0,
+    }
 }
 
 async fn list_usage_rollups(
@@ -4455,6 +4656,32 @@ fn validate_approval_escalation_rule_input(
     }
     input.order_index = input.order_index.max(0);
     input.after_seconds = input.after_seconds.max(0);
+    Ok(input)
+}
+
+fn validate_cost_alert_route_input(
+    mut input: CreateCostAlertRoute,
+) -> Result<CreateCostAlertRoute, AppError> {
+    input.name = input.name.trim().to_string();
+    input.channel = input.channel.trim().to_string();
+    input.target = input.target.and_then(|target| {
+        let trimmed = target.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    input.severity_filter = input.severity_filter.trim().to_string();
+    if input.name.is_empty() {
+        return Err(AppError::bad_request("cost alert route name is required"));
+    }
+    if !matches!(input.channel.as_str(), "webhook" | "slack" | "email") {
+        return Err(AppError::bad_request(
+            "cost alert route channel must be webhook, slack, or email",
+        ));
+    }
+    if !matches!(input.severity_filter.as_str(), "warning" | "critical") {
+        return Err(AppError::bad_request(
+            "cost alert route severity_filter must be warning or critical",
+        ));
+    }
     Ok(input)
 }
 
@@ -5287,6 +5514,10 @@ fn default_secret_scope_type() -> String {
     "tenant".to_string()
 }
 
+fn default_cost_alert_severity_filter() -> String {
+    "warning".to_string()
+}
+
 fn default_provider() -> String {
     "openai-compatible".to_string()
 }
@@ -5772,6 +6003,7 @@ not json
         assert!(names.contains(&"0008_policy_revisions.sql"));
         assert!(names.contains(&"0009_policy_revision_gates.sql"));
         assert!(names.contains(&"0010_approval_groups.sql"));
+        assert!(names.contains(&"0011_cost_alert_routes.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -6322,6 +6554,59 @@ not json
         assert_eq!(alerts.alerts[0].provider_name, "alert-mock");
         assert_eq!(alerts.alerts[0].severity, "critical");
 
+        let webhook_route: CostAlertRoute = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/usage/alert-routes")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "critical-webhook",
+                        "channel": "webhook",
+                        "target": format!("http://{addr}/alerts"),
+                        "severity_filter": "critical"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let slack_route: CostAlertRoute = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/usage/alert-routes")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "critical-slack",
+                        "channel": "slack",
+                        "target": "#alerts",
+                        "severity_filter": "critical"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let routes: Vec<CostAlertRoute> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/usage/alert-routes")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(routes.iter().any(|route| route.id == webhook_route.id));
+        assert!(routes.iter().any(|route| route.id == slack_route.id));
+
         let delivered: CostAlertDelivery = request_json(
             app.clone(),
             Request::builder()
@@ -6336,6 +6621,15 @@ not json
         assert_eq!(delivered.status, "delivered");
         assert!(delivered.delivered);
         assert_eq!(delivered.alerts[0].provider_name, "alert-mock");
+        assert_eq!(delivered.channel, "routes");
+        assert!(
+            delivered.route_deliveries.iter().any(|delivery| {
+                delivery.route_id == Some(webhook_route.id) && delivery.delivered
+            })
+        );
+        assert!(delivered.route_deliveries.iter().any(|delivery| {
+            delivery.route_id == Some(slack_route.id) && delivery.status == "reserved"
+        }));
 
         let acknowledgement: CostAlertAcknowledgement = request_json(
             app.clone(),
@@ -6373,6 +6667,11 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "usage.alert_acknowledged")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "usage.alert_route_created")
         );
         server.abort();
     }

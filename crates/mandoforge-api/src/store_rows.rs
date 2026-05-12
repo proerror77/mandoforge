@@ -4,9 +4,9 @@ use sqlx::{Row, postgres::PgRow};
 
 use crate::{
     Agent, AgentRelease, AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
-    Artifact, AuditLog, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
-    PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent,
-    Team, ToolCall, UsageRollup,
+    Artifact, AuditLog, CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord,
+    Membership, Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord,
+    SecretRecord, Session, SessionEvent, Team, ToolCall, UsageRollup,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -327,6 +327,18 @@ pub(crate) fn usage_rollup_from_row(row: PgRow) -> Result<UsageRollup, AppError>
         period_start: row.try_get("period_start")?,
         period_end: row.try_get("period_end")?,
         summary: row.try_get("summary")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn cost_alert_route_from_row(row: PgRow) -> Result<CostAlertRoute, AppError> {
+    Ok(CostAlertRoute {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        channel: row.try_get("channel")?,
+        target: row.try_get("target")?,
+        severity_filter: row.try_get("severity_filter")?,
+        status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })
 }

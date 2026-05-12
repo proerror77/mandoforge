@@ -78,8 +78,28 @@
               <h3>Usage</h3>
               <button type="button" class="secondary form-inline-action" id="create-usage-rollup">Snapshot Rollup</button>
               <button type="button" class="secondary form-inline-action" id="deliver-cost-alerts">Deliver Cost Alerts</button>
+              <form id="cost-alert-route-form" class="stack-form compact-form">
+                <label>
+                  Route name
+                  <input name="name" required value="critical-webhook" />
+                </label>
+                <label>
+                  Channel
+                  <input name="channel" value="webhook" />
+                </label>
+                <label>
+                  Target
+                  <input name="target" placeholder="Webhook URL, Slack channel, or email" />
+                </label>
+                <label>
+                  Severity
+                  <input name="severity_filter" value="critical" />
+                </label>
+                <button type="submit">Create Alert Route</button>
+              </form>
               <div id="usage-summary" class="detail-panel"></div>
               <div id="usage-rollups" class="list"></div>
+              <div id="cost-alert-routes" class="list"></div>
             </div>
             <div>
               <h3>Tenant Governance</h3>

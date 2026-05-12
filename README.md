@@ -177,7 +177,7 @@ MANDOFORGE_COST_ALERT_WEBHOOK_URL=https://alerts.example.internal/mandoforge \
 cargo run -p mandoforge-api
 ```
 
-`GET /api/usage/alerts` lists warning/critical provider budget alerts. `POST /api/usage/alerts/deliver` sends the active alerts to the configured webhook; when no webhook is set, delivery stays reserved and no external request is made.
+`GET /api/usage/alerts` lists warning/critical provider budget alerts. `GET/POST /api/usage/alert-routes` manages audited alert routes for webhook, Slack, and email channels. `POST /api/usage/alerts/deliver` sends active alerts through configured routes; non-webhook channels stay reserved until their production adapters are configured.
 
 ## Docker
 
@@ -269,6 +269,8 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/usage/alerts`
 - `POST /api/usage/alerts/ack`
 - `POST /api/usage/alerts/deliver`
+- `GET /api/usage/alert-routes`
+- `POST /api/usage/alert-routes`
 - `GET /api/codex-app-server/health`
 - `POST /api/codex-app-server/threads`
 - `POST /api/codex-app-server/threads/:thread_id/turns`

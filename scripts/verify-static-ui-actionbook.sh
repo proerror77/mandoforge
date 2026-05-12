@@ -53,6 +53,7 @@ wait_for_static_ui() {
     hasProviderBreakdown: text.includes('PROVIDER COST BREAKDOWN'),
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
     hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
+    hasCostAlertRoutes: text.includes('Create Alert Route') && text.includes('No cost alert routes'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
     hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy') && text.includes('POLICY REVISIONS') && text.includes('Create Policy Revision'),
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),
@@ -71,6 +72,7 @@ wait_for_static_ui() {
     && result.hasProviderBreakdown
     && result.hasToolBreakdown
     && result.hasProviderBudgetForecast
+    && result.hasCostAlertRoutes
     && result.hasProviderCredentialFields
     && result.hasPolicyConsole
     && result.hasVaultHealthAction

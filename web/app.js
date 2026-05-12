@@ -25,6 +25,7 @@ const state = {
   mcpTeamId: "",
   executionJobs: [],
   usageRollups: [],
+  costAlertRoutes: [],
   usage: null,
   costAlertDelivery: null,
   costAlertAcknowledgement: null,
@@ -72,6 +73,7 @@ const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
 const usageRoot = document.querySelector("#usage-summary");
 const usageRollupRoot = document.querySelector("#usage-rollups");
+const costAlertRouteRoot = document.querySelector("#cost-alert-routes");
 const governanceRoot = document.querySelector("#governance-status");
 const organizationRoot = document.querySelector("#organizations");
 const teamRoot = document.querySelector("#teams");
@@ -96,6 +98,7 @@ const loadEvalCasesButton = document.querySelector("#load-eval-cases");
 const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jobs");
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 const deliverCostAlertsButton = document.querySelector("#deliver-cost-alerts");
+const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
@@ -120,6 +123,7 @@ loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
+costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -499,6 +503,21 @@ async function deliverCostAlerts() {
   await refreshOps();
 }
 
+async function createCostAlertRoute(event) {
+  event.preventDefault();
+  const form = new FormData(costAlertRouteForm);
+  await api("/api/usage/alert-routes", {
+    method: "POST",
+    body: JSON.stringify({
+      name: String(form.get("name") || "").trim(),
+      channel: String(form.get("channel") || "").trim(),
+      target: String(form.get("target") || "").trim() || null,
+      severity_filter: String(form.get("severity_filter") || "").trim(),
+    }),
+  });
+  await refreshOps();
+}
+
 async function acknowledgeCostAlert(providerName, severity) {
   state.costAlertAcknowledgement = await api("/api/usage/alerts/ack", {
     method: "POST",
@@ -586,6 +605,7 @@ async function refreshOps() {
     evalRuns,
     usage,
     usageRollups,
+    costAlertRoutes,
     organizations,
     executionJobs,
     approvalGroups,
@@ -600,6 +620,7 @@ async function refreshOps() {
       api("/api/eval/runs"),
       api("/api/usage"),
       api("/api/usage/rollups"),
+      api("/api/usage/alert-routes"),
       api("/api/organizations"),
       api("/api/execution-jobs"),
       api("/api/approval-groups"),
@@ -613,6 +634,7 @@ async function refreshOps() {
   state.evalRuns = evalRuns;
   state.usage = usage;
   state.usageRollups = usageRollups;
+  state.costAlertRoutes = costAlertRoutes;
   state.organizations = organizations;
   state.executionJobs = executionJobs;
   state.approvalGroups = approvalGroups;
@@ -974,6 +996,7 @@ function renderUsage() {
         ? `<div class="item">
             <strong>Cost alert delivery: ${escapeHtml(costAlertDelivery.status)}</strong>
             <div class="muted">${escapeHtml(costAlertDelivery.channel)} · ${escapeHtml(costAlertDelivery.webhook_configured ? "webhook configured" : "webhook not configured")} · ${formatInteger((costAlertDelivery.alerts || []).length)} alerts</div>
+            <pre>${escapeHtml(JSON.stringify(costAlertDelivery.route_deliveries || [], null, 2))}</pre>
           </div>`
         : ""
     }
@@ -1069,6 +1092,19 @@ function renderUsage() {
         )
         .join("")
     : `<div class="muted">No persisted usage rollups</div>`;
+  costAlertRouteRoot.innerHTML = state.costAlertRoutes.length
+    ? state.costAlertRoutes
+        .map(
+          (route) => `
+            <div class="item">
+              <strong>${escapeHtml(route.name)}</strong>
+              <div class="muted">${escapeHtml(route.channel)} · ${escapeHtml(route.severity_filter)} · ${escapeHtml(route.status)}</div>
+              <div class="muted">${escapeHtml(route.target || "reserved target")}</div>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No cost alert routes</div>`;
 }
 
 function formatInteger(value) {
