@@ -6,7 +6,8 @@ use uuid::Uuid;
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{agent_from_row, agent_version_from_row, session_from_row};
 use crate::{
-    Agent, AgentVersion, AppError, AppState, CreateAgent, CreateSession, Session, SessionStatus,
+    Agent, AgentVersion, AppError, AppState, CreateAgent, CreateSession, Principal, Role, Session,
+    SessionStatus,
 };
 
 impl AppState {
@@ -29,6 +30,30 @@ impl AppState {
                 rows.into_iter().map(agent_from_row).collect()
             }
         }
+    }
+
+    pub(crate) async fn list_agents_visible_to(
+        &self,
+        principal: &Principal,
+    ) -> Result<Vec<Agent>, AppError> {
+        let agents = self.list_agents().await?;
+        if principal.roles.contains(&Role::Admin) {
+            return Ok(agents);
+        }
+        let mut visible = Vec::new();
+        for agent in agents {
+            if let Some(team_id) = agent.team_id {
+                if self
+                    .subject_can_access_team(&principal.subject_id, team_id)
+                    .await?
+                {
+                    visible.push(agent);
+                }
+            } else {
+                visible.push(agent);
+            }
+        }
+        Ok(visible)
     }
 
     pub(crate) async fn get_agent(&self, agent_id: Uuid) -> Result<Agent, AppError> {
@@ -330,6 +355,31 @@ impl AppState {
                 rows.into_iter().map(session_from_row).collect()
             }
         }
+    }
+
+    pub(crate) async fn list_sessions_visible_to(
+        &self,
+        principal: &Principal,
+    ) -> Result<Vec<Session>, AppError> {
+        let sessions = self.list_sessions().await?;
+        if principal.roles.contains(&Role::Admin) {
+            return Ok(sessions);
+        }
+        let mut visible = Vec::new();
+        for session in sessions {
+            let agent = self.get_agent(session.agent_id).await?;
+            if let Some(team_id) = agent.team_id {
+                if self
+                    .subject_can_access_team(&principal.subject_id, team_id)
+                    .await?
+                {
+                    visible.push(session);
+                }
+            } else {
+                visible.push(session);
+            }
+        }
+        Ok(visible)
     }
 
     pub(crate) async fn create_session(&self, input: CreateSession) -> Result<Session, AppError> {

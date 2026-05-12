@@ -739,8 +739,15 @@ async fn list_agents(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Agent>>, AppError> {
-    authorize_request(&state, &headers, Permission::AgentsRead, "agents", None).await?;
-    Ok(Json(state.list_agents().await?))
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::AgentsRead,
+        resource_type: "agents".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    Ok(Json(state.list_agents_visible_to(&principal).await?))
 }
 
 async fn create_agent(
@@ -774,8 +781,15 @@ async fn list_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Session>>, AppError> {
-    authorize_request(&state, &headers, Permission::SessionsRead, "sessions", None).await?;
-    Ok(Json(state.list_sessions().await?))
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::SessionsRead,
+        resource_type: "sessions".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    Ok(Json(state.list_sessions_visible_to(&principal).await?))
 }
 
 async fn create_session(
@@ -4203,6 +4217,37 @@ not json
         )
         .await;
         assert_eq!(scoped_read.id, scoped_session.id);
+
+        let outside_sessions: Vec<Session> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/sessions")
+                .header("x-mandoforge-subject", "outside-operator")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            !outside_sessions
+                .iter()
+                .any(|session| session.id == scoped_session.id)
+        );
+
+        let approver_agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "approver-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            approver_agents
+                .iter()
+                .any(|agent| agent.id == scoped_agent.id)
+        );
 
         let projects: Vec<Project> = request_json(
             app,
