@@ -1803,6 +1803,7 @@ function renderProviders() {
               <div class="muted">${escapeHtml(provider.default_model || "no default model")} · ${escapeHtml(provider.base_url || "no base URL")}</div>
               <button class="secondary" data-provider-status="${provider.id}" data-status="active">Activate</button>
               <button class="secondary reject" data-provider-status="${provider.id}" data-status="disabled">Disable</button>
+              <button class="secondary reject" data-provider-status="${provider.id}" data-status="archived">Archive Provider</button>
               <button class="secondary" data-provider-health="${provider.id}">Check Health</button>
               ${
                 health

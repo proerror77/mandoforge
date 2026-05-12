@@ -130,6 +130,7 @@ grep -q "runDueMcpHealth" /tmp/mandoforge-actionbook-app.js
 grep -q "renderPolicyDiffSummary" /tmp/mandoforge-actionbook-app.js
 grep -q "policy-diff-table" /tmp/mandoforge-actionbook-app.js
 grep -q "cancelPolicyRollout" /tmp/mandoforge-actionbook-app.js
+grep -q "Archive Provider" /tmp/mandoforge-actionbook-index.html
 grep -q "pollCodexRun" /tmp/mandoforge-actionbook-app.js
 grep -q "data-poll-codex-run" /tmp/mandoforge-actionbook-app.js
 curl -fsS "$BASE_URL/api/usage" \

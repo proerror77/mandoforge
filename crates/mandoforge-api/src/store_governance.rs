@@ -750,6 +750,13 @@ impl AppState {
         provider_name: &str,
         model: &str,
     ) -> Result<(), AppError> {
+        if let Some(provider) = self.provider_by_name(provider_name).await?
+            && provider.status != "active"
+        {
+            return Err(AppError::forbidden(format!(
+                "provider {provider_name} is not active"
+            )));
+        }
         let entries = self.list_provider_access(team_id).await?;
         let Some(access) = entries
             .iter()
