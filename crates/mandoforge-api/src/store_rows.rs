@@ -5,7 +5,7 @@ use sqlx::{Row, postgres::PgRow};
 use crate::{
     Agent, AgentVersion, AppError, Approval, Artifact, AuditLog, EvalCase, EvalDataset, EvalRun,
     McpServerRecord, Membership, Organization, Project, ProviderAccess, ProviderRecord, Session,
-    SessionEvent, Team, ToolCall,
+    SessionEvent, Team, ToolCall, UsageRollup,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -243,6 +243,16 @@ pub(crate) fn eval_run_from_row(row: PgRow) -> Result<EvalRun, AppError> {
         status: row.try_get("status")?,
         score: row.try_get("score")?,
         details: row.try_get("details")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn usage_rollup_from_row(row: PgRow) -> Result<UsageRollup, AppError> {
+    Ok(UsageRollup {
+        id: row.try_get("id")?,
+        period_start: row.try_get("period_start")?,
+        period_end: row.try_get("period_end")?,
+        summary: row.try_get("summary")?,
         created_at: row.try_get("created_at")?,
     })
 }

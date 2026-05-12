@@ -9,6 +9,7 @@ const state = {
   evalRuns: [],
   mcpServers: [],
   mcpTeamId: "",
+  usageRollups: [],
   usage: null,
   selectedArtifactId: null,
   selectedToolCallId: null,
@@ -31,17 +32,20 @@ const providerRoot = document.querySelector("#providers");
 const evalRunRoot = document.querySelector("#eval-runs");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const usageRoot = document.querySelector("#usage-summary");
+const usageRollupRoot = document.querySelector("#usage-rollups");
 const governanceRoot = document.querySelector("#governance-status");
 const agentForm = document.querySelector("#agent-form");
 const providerForm = document.querySelector("#provider-form");
 const mcpForm = document.querySelector("#mcp-form");
 const loadMcpButton = document.querySelector("#load-mcp");
+const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
 providerForm.addEventListener("submit", createProvider);
 mcpForm.addEventListener("submit", createMcpServer);
 loadMcpButton.addEventListener("click", loadMcpServers);
+createUsageRollupButton.addEventListener("click", createUsageRollup);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -130,6 +134,14 @@ async function createMcpServer(event) {
   await loadMcpServers();
 }
 
+async function createUsageRollup() {
+  await api("/api/usage/rollups", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  await refreshOps();
+}
+
 async function loadMcpServers() {
   const form = new FormData(mcpForm);
   const teamId = String(form.get("team_id") || state.mcpTeamId || "").trim();
@@ -171,14 +183,16 @@ async function runDemo() {
 }
 
 async function refreshOps() {
-  const [providers, evalRuns, usage] = await Promise.all([
+  const [providers, evalRuns, usage, usageRollups] = await Promise.all([
     api("/api/providers"),
     api("/api/eval/runs"),
     api("/api/usage"),
+    api("/api/usage/rollups"),
   ]);
   state.providers = providers;
   state.evalRuns = evalRuns;
   state.usage = usage;
+  state.usageRollups = usageRollups;
   renderOps();
 }
 
@@ -256,6 +270,19 @@ function renderUsage() {
       <dd>${Number(usage.estimated_provider_cost_cents || 0).toFixed(2)} cents</dd>
     </dl>
   `;
+  usageRollupRoot.innerHTML = state.usageRollups.length
+    ? state.usageRollups
+        .map(
+          (rollup) => `
+            <div class="item">
+              <strong>${escapeHtml(Number(rollup.summary.estimated_provider_cost_cents || 0).toFixed(2))} cents</strong>
+              <div class="muted">${escapeHtml(rollup.period_start)} to ${escapeHtml(rollup.period_end)}</div>
+              <div class="muted">${escapeHtml(rollup.summary.total_tokens || 0)} provider tokens · ${escapeHtml(rollup.summary.tool_call_count || 0)} tool calls</div>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No persisted usage rollups</div>`;
 }
 
 function renderProviders() {

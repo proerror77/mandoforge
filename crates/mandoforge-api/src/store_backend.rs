@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     Agent, AgentVersion, Approval, Artifact, AuditLog, EvalCase, EvalDataset, EvalRun,
     McpServerRecord, Membership, Organization, Project, ProviderAccess, ProviderRecord, Session,
-    SessionEvent, Team, ToolCall,
+    SessionEvent, Team, ToolCall, UsageRollup,
 };
 
 #[derive(Default)]
@@ -30,6 +30,7 @@ pub(crate) struct MemoryStore {
     pub(crate) eval_datasets: HashMap<Uuid, EvalDataset>,
     pub(crate) eval_cases: HashMap<Uuid, EvalCase>,
     pub(crate) eval_runs: HashMap<Uuid, EvalRun>,
+    pub(crate) usage_rollups: HashMap<Uuid, UsageRollup>,
 }
 
 #[derive(Clone)]

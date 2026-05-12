@@ -41,6 +41,7 @@ mod store_governance;
 mod store_rows;
 mod store_seed;
 mod store_tool_calls;
+mod store_usage_rollups;
 
 use authorization::{
     AuthorizationRequest, Authorizer, Permission, Principal, Role, RoleBasedAuthorizer,
@@ -499,6 +500,23 @@ struct CreateEvalRun {
     agent_id: Uuid,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageRollup {
+    id: Uuid,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    summary: Value,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateUsageRollup {
+    #[serde(default)]
+    period_start: Option<DateTime<Utc>>,
+    #[serde(default)]
+    period_end: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Serialize)]
 struct ToolDescriptor {
     name: &'static str,
@@ -711,6 +729,10 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/eval/runs", get(list_eval_runs))
         .route("/api/usage", get(get_usage_summary))
+        .route(
+            "/api/usage/rollups",
+            get(list_usage_rollups).post(create_usage_rollup),
+        )
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
@@ -2383,6 +2405,37 @@ async fn get_usage_summary(
 ) -> Result<Json<UsageSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "usage", None).await?;
     Ok(Json(build_usage_summary(&state).await?))
+}
+
+async fn list_usage_rollups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<UsageRollup>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "usage_rollups", None).await?;
+    Ok(Json(state.list_usage_rollups().await?))
+}
+
+async fn create_usage_rollup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateUsageRollup>,
+) -> Result<Json<UsageRollup>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "usage_rollups", None).await?;
+    let period_end = input.period_end.unwrap_or_else(Utc::now);
+    let period_start = input
+        .period_start
+        .unwrap_or_else(|| period_end - chrono::Duration::hours(24));
+    if period_start >= period_end {
+        return Err(AppError::bad_request(
+            "usage rollup period_start must be before period_end",
+        ));
+    }
+    let summary = serde_json::to_value(build_usage_summary(&state).await?)?;
+    Ok(Json(
+        state
+            .create_usage_rollup(period_start, period_end, summary)
+            .await?,
+    ))
 }
 
 async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError> {
@@ -5051,6 +5104,41 @@ not json
         assert_eq!(usage.by_provider["governed-mock"].total_tokens, 240);
         assert!((usage.by_provider["governed-mock"].token_cost_cents - 0.3).abs() < 0.000001);
         assert!((usage.estimated_provider_cost_cents - 2.8).abs() < 0.000001);
+
+        let rollup: UsageRollup = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/usage/rollups")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rollup.summary["provider_request_count"], 1);
+        assert_eq!(rollup.summary["total_tokens"], 240);
+        assert!(
+            (rollup.summary["estimated_provider_cost_cents"]
+                .as_f64()
+                .unwrap()
+                - 2.8)
+                .abs()
+                < 0.000001
+        );
+        let rollups: Vec<UsageRollup> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/usage/rollups")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rollups.len(), 1);
+        assert_eq!(rollups[0].id, rollup.id);
 
         let scoped_agent: Agent = request_json(
             app.clone(),

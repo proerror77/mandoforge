@@ -16,12 +16,12 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 | Codex App Server adapter | Codex CLI adapter exists. | App Server thread/turn/interrupt adapter is not implemented. |
 | Evaluation | Eval datasets, cases, and version-bound run records are implemented with deterministic Stage 2 graders for policy decisions, tool allowlist coverage, SQL safety, sandbox path checks, and final-answer required fragments. Runs persist per-case details, pass count, score, and agent version evidence. | Regression gates, judge integrations, drift detection, and eval dashboards are not implemented. |
 | Observability | OTel exporter boundary exists and session event appends now export telemetry events when OTLP is enabled. Exported telemetry attributes classify session/provider/tool/approval/worker/sandbox/codex events as span-like signals and attach counters, status, duration, provider/client/tool IDs, approval IDs, worker IDs, and tool-call counts when present. | Dashboards, retry/backpressure, and full OTLP-native trace/metric encoding are not implemented. |
-| Cost tracking | `GET /api/usage` aggregates session/event counts, provider requests/responses, prompt/completion/total tokens, configured provider per-request and per-1K-token pricing, tool call status counts, tool runtime, and approval counts. Static usage UI displays token totals and estimated provider cost. | Persisted cost rollups, budgets over cost windows, and richer cost dashboards are not implemented. |
+| Cost tracking | `GET /api/usage` aggregates session/event counts, provider requests/responses, prompt/completion/total tokens, configured provider per-request and per-1K-token pricing, tool call status counts, tool runtime, and approval counts. Static usage UI displays token totals and estimated provider cost. Admins can persist usage/cost rollup snapshots and review them in the static console. | Budgets over cost windows and richer cost dashboards are not implemented. |
 | UI v2 | Static console covers agents, sessions, timeline, approvals, artifacts, tool calls, audit logs, and Admin Console panels for usage, stored providers, eval runs, and governance status. | Full CRUD UI for provider/vault/policy/worker/MCP/eval management and production dashboard polish are not implemented. |
 
 ## Next Stage 2 Slices
 
-1. Add persisted cost rollups, budgets over cost windows, and richer cost dashboards.
+1. Add budgets over cost windows and richer cost dashboards.
 2. Add eval regression gates, judge integrations, drift detection, and dashboards.
 3. Add dashboards, retry/backpressure, and full OTLP-native trace/metric encoding.
 4. Add production connector lifecycle management and richer MCP configuration UI.
