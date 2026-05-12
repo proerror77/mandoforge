@@ -23,6 +23,7 @@ const state = {
   agentReleases: {},
   mcpServers: [],
   mcpTeamId: "",
+  mcpHealth: {},
   executionJobs: [],
   usageRollups: [],
   costAlertRoutes: [],
@@ -696,6 +697,14 @@ async function discoverMcpTools(serverId) {
     method: "POST",
   });
   await loadMcpServers();
+}
+
+async function checkMcpHealth(serverId) {
+  if (!state.mcpTeamId) return;
+  state.mcpHealth[serverId] = await api(
+    `/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/health`,
+  );
+  renderMcpServers();
 }
 
 async function updateMcpStatus(serverId, status) {
@@ -1745,19 +1754,28 @@ function renderMcpServers() {
   mcpServerRoot.innerHTML = state.mcpServers.length
     ? state.mcpServers
         .map(
-          (server) => `
+          (server) => {
+            const health = state.mcpHealth[server.id];
+            return `
             <div class="item">
               <strong>${escapeHtml(server.name)}</strong>
               <div class="muted">${escapeHtml(server.transport)} · ${escapeHtml(server.status)}</div>
               <div class="muted">Tools: ${escapeHtml(server.tool_allowlist.join(", ") || "none")}</div>
               <button class="secondary" data-edit-mcp="${server.id}">Edit Config</button>
+              <button class="secondary" data-health-mcp="${server.id}">Check Health</button>
               <button class="secondary" data-discover-mcp="${server.id}">Discover Tools</button>
               <button class="secondary" data-mcp-status="${server.id}" data-status="active">Activate</button>
               <button class="secondary" data-mcp-status="${server.id}" data-status="disabled">Disable</button>
               <button class="secondary" data-mcp-status="${server.id}" data-status="archived">Archive</button>
+              ${
+                health
+                  ? `<div class="muted">Health: ${health.healthy ? "healthy" : "unhealthy"} · ${escapeHtml(health.issues.join("; ") || "no issues")}</div>`
+                  : ""
+              }
               <pre>${escapeHtml(JSON.stringify(server.config, null, 2))}</pre>
             </div>
-          `,
+          `;
+          },
         )
         .join("")
     : state.mcpTeamId
@@ -1768,6 +1786,9 @@ function renderMcpServers() {
   });
   mcpServerRoot.querySelectorAll("[data-edit-mcp]").forEach((button) => {
     button.addEventListener("click", () => editMcpServer(button.dataset.editMcp));
+  });
+  mcpServerRoot.querySelectorAll("[data-health-mcp]").forEach((button) => {
+    button.addEventListener("click", () => checkMcpHealth(button.dataset.healthMcp));
   });
   mcpServerRoot.querySelectorAll("[data-mcp-status]").forEach((button) => {
     button.addEventListener("click", () =>

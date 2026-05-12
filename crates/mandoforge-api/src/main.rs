@@ -815,6 +815,18 @@ struct McpServerRecord {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct McpServerHealth {
+    server_id: Uuid,
+    team_id: Uuid,
+    name: String,
+    status: String,
+    healthy: bool,
+    issues: Vec<String>,
+    checks: Value,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateMcpServerRecord {
     name: String,
@@ -1159,6 +1171,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{team_id}/mcp-servers/{server_id}/status",
             patch(update_mcp_server_status),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/{server_id}/health",
+            get(get_mcp_server_health),
         )
         .route(
             "/api/teams/{team_id}/mcp-servers/{server_id}/discover",
@@ -4137,6 +4153,88 @@ async fn update_mcp_server_status(
         ))
         .await?;
     Ok(Json(server))
+}
+
+async fn get_mcp_server_health(
+    State(state): State<AppState>,
+    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerHealth>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    let server = state.get_mcp_server(team_id, server_id).await?;
+    let health = mcp_server_health(&state, &server).await;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "mcp.server_health_checked",
+            "mcp_server",
+            Some(server.id),
+            json!({
+                "team_id": team_id,
+                "name": server.name,
+                "healthy": health.healthy,
+                "issues": health.issues,
+            }),
+        ))
+        .await?;
+    Ok(Json(health))
+}
+
+async fn mcp_server_health(state: &AppState, server: &McpServerRecord) -> McpServerHealth {
+    let mut issues = Vec::new();
+    let gateway_configured = state.mcp_gateway_config.is_some();
+    let mut gateway_allows_server = false;
+    let mut gateway_reachable = false;
+
+    if server.status != "active" {
+        issues.push(format!("MCP server status is {}", server.status));
+    }
+    if server.transport.trim().is_empty() {
+        issues.push("MCP server transport is empty".to_string());
+    }
+    if server.tool_allowlist.is_empty() {
+        issues.push("MCP server tool allowlist is empty".to_string());
+    }
+
+    if let Some(config) = state.mcp_gateway_config.as_ref() {
+        gateway_allows_server = config.allows_server(&server.name);
+        if !gateway_allows_server {
+            issues.push(format!(
+                "MCP gateway config does not allow server {}",
+                server.name
+            ));
+        }
+        match state.mcp_gateway_client.health_check(config).await {
+            Ok(()) => {
+                gateway_reachable = true;
+            }
+            Err(error) => issues.push(format!(
+                "MCP gateway health check failed: {}",
+                error.message
+            )),
+        }
+    } else {
+        issues.push("MCP gateway is not configured".to_string());
+    }
+
+    McpServerHealth {
+        server_id: server.id,
+        team_id: server.team_id,
+        name: server.name.clone(),
+        status: server.status.clone(),
+        healthy: issues.is_empty(),
+        issues,
+        checks: json!({
+            "transport": server.transport,
+            "tool_allowlist_count": server.tool_allowlist.len(),
+            "gateway_configured": gateway_configured,
+            "gateway_allows_server": gateway_allows_server,
+            "gateway_reachable": gateway_reachable,
+        }),
+        checked_at: Utc::now(),
+    }
 }
 
 async fn discover_mcp_server_tools(
@@ -7435,6 +7533,22 @@ not json
         assert_eq!(patched.config["source"], "patched");
         assert_eq!(patched.tool_allowlist, vec!["search".to_string()]);
 
+        let healthy: McpServerHealth = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}/health",
+                    team.id, mcp_server.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(healthy.healthy);
+        assert_eq!(healthy.checks["gateway_reachable"], true);
+
         let result: Value = request_json(
             app.clone(),
             Request::builder()
@@ -7481,6 +7595,27 @@ not json
         )
         .await;
         assert_eq!(disabled.status, "disabled");
+
+        let unhealthy: McpServerHealth = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}/health",
+                    team.id, mcp_server.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(!unhealthy.healthy);
+        assert!(
+            unhealthy
+                .issues
+                .iter()
+                .any(|issue| issue.contains("status is disabled"))
+        );
 
         let (status, inactive) = request_value(
             app.clone(),
@@ -7596,6 +7731,13 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "mcp.server_updated")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .filter(|log| log.action == "mcp.server_health_checked")
+                .count()
+                >= 2
         );
     }
 

@@ -121,6 +121,8 @@ fi
 
 curl -fsS "$BASE_URL/" >/tmp/mandoforge-actionbook-index.html
 curl -fsS "$BASE_URL/app.js" >/tmp/mandoforge-actionbook-app.js
+grep -q "checkMcpHealth" /tmp/mandoforge-actionbook-app.js
+grep -q "data-health-mcp" /tmp/mandoforge-actionbook-app.js
 curl -fsS "$BASE_URL/api/usage" \
   -H 'x-mandoforge-subject: actionbook-smoke' \
   -H 'x-mandoforge-roles: admin' \
