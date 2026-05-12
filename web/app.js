@@ -575,6 +575,19 @@ async function loadCodexAppServerRuns() {
   });
 }
 
+async function pollCodexRun(runId) {
+  await captureCodexAppServer("poll", async () => {
+    state.codexAppServer.poll = await api(`/api/codex-app-server/runs/${encodeURIComponent(runId)}/poll`, {
+      method: "POST",
+      body: JSON.stringify({
+        max_attempts: 3,
+        retry_interval_ms: 0,
+      }),
+    });
+    state.codexAppServer.runs = await api("/api/codex-app-server/runs");
+  });
+}
+
 async function createCodexThread(event) {
   event.preventDefault();
   const form = new FormData(codexThreadForm);
@@ -1018,6 +1031,7 @@ function renderCodexAppServer() {
     ["Turn", codex.turn],
     ["Command", codex.command],
     ["Interrupt", codex.interrupt],
+    ["Poll", codex.poll],
     ["Sync", codex.sync],
   ]
     .filter(([, value]) => value)
@@ -1037,6 +1051,11 @@ function renderCodexAppServer() {
         <div class="item">
           <strong>${escapeHtml(run.operation)}</strong>
           <div class="muted">${escapeHtml(run.status)} · ${escapeHtml(run.thread_id || "no thread")} · ${escapeHtml(run.turn_id || "no turn")} · ${escapeHtml(run.created_at)}</div>
+          ${
+            run.turn_id
+              ? `<button type="button" class="secondary" data-poll-codex-run="${escapeHtml(run.id)}">Poll Run</button>`
+              : ""
+          }
           <pre>${escapeHtml(JSON.stringify(run.response, null, 2))}</pre>
         </div>
       `,
@@ -1058,6 +1077,9 @@ function renderCodexAppServer() {
     ${responseCards || `<div class="muted">No Codex App Server responses yet.</div>`}
     ${runs ? `<h4>Persisted Codex Runs</h4>${runs}` : ""}
   `;
+  codexAppServerRoot.querySelectorAll("[data-poll-codex-run]").forEach((button) => {
+    button.addEventListener("click", () => pollCodexRun(button.dataset.pollCodexRun));
+  });
 }
 
 function renderExecutionJobs() {

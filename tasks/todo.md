@@ -176,4 +176,5 @@
 - [x] Add Codex App Server artifact synchronization into artifacts, timeline, and audit logs.
 - [x] Add CLI/App Server fallback orchestration for approved Codex worker execution.
 - [x] Persist Codex App Server steering responses for replay/debugging.
-- [ ] Add production Codex App Server polling, retry, and worker-backed steering orchestration.
+- [x] Add bounded Codex App Server turn polling and retry with persisted run status/audit.
+- [ ] Add production Codex App Server worker-backed steering orchestration.

@@ -467,6 +467,26 @@ struct CodexAppServerRun {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct CodexAppServerPollRequest {
+    #[serde(default = "default_codex_poll_attempts")]
+    max_attempts: u32,
+    #[serde(default)]
+    retry_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerPollResponse {
+    run: CodexAppServerRun,
+    attempts: u32,
+    terminal: bool,
+    last_status: String,
+}
+
+fn default_codex_poll_attempts() -> u32 {
+    3
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageSummary {
     session_count: usize,
@@ -1286,6 +1306,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/codex-app-server/runs",
             get(list_codex_app_server_runs),
+        )
+        .route(
+            "/api/codex-app-server/runs/{run_id}/poll",
+            post(poll_codex_app_server_run),
         )
         .route("/api/codex-app-server/threads", post(create_codex_thread))
         .route(
@@ -4031,6 +4055,108 @@ async fn list_codex_app_server_runs(
     )
     .await?;
     Ok(Json(state.list_codex_app_server_runs().await?))
+}
+
+async fn poll_codex_app_server_run(
+    State(state): State<AppState>,
+    Path(run_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CodexAppServerPollRequest>,
+) -> Result<Json<CodexAppServerPollResponse>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "codex_app_server".to_string(),
+        resource_id: Some(run_id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let config = codex_app_server_config(&state)?;
+    let run = state.get_codex_app_server_run(run_id).await?;
+    let turn_id = run
+        .turn_id
+        .clone()
+        .ok_or_else(|| AppError::bad_request("Codex App Server run has no turn_id to poll"))?;
+    let max_attempts = input.max_attempts.clamp(1, 10);
+    let retry_interval_ms = input.retry_interval_ms.min(5_000);
+    let mut attempts = 0;
+    let mut last_status = run.status.clone();
+    let mut terminal = false;
+    let mut updated = run;
+
+    while attempts < max_attempts && !terminal {
+        attempts += 1;
+        match state
+            .codex_app_server_client
+            .get_turn_status(config, &turn_id)
+            .await
+        {
+            Ok(response) => {
+                last_status = response
+                    .status
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                terminal = codex_turn_status_is_terminal(&last_status);
+                updated = state
+                    .update_codex_app_server_run_status(
+                        run_id,
+                        last_status.clone(),
+                        serde_json::to_value(&response)?,
+                        None,
+                    )
+                    .await?;
+            }
+            Err(error) => {
+                last_status = "poll_failed".to_string();
+                updated = state
+                    .update_codex_app_server_run_status(
+                        run_id,
+                        last_status.clone(),
+                        updated.response.clone(),
+                        Some(json!({"message": error.message, "attempt": attempts})),
+                    )
+                    .await?;
+                terminal = attempts >= max_attempts;
+            }
+        }
+        if attempts < max_attempts && !terminal && retry_interval_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(retry_interval_ms)).await;
+        }
+    }
+
+    let response = CodexAppServerPollResponse {
+        run: updated,
+        attempts,
+        terminal,
+        last_status,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "codex_app_server.run_polled",
+            "codex_app_server_run",
+            Some(run_id),
+            json!({
+                "subject": principal.subject_id,
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "attempts": response.attempts,
+                "terminal": response.terminal,
+                "last_status": response.last_status,
+            }),
+        ))
+        .await?;
+    Ok(Json(response))
+}
+
+fn codex_turn_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "completed" | "failed" | "cancelled" | "canceled" | "interrupted"
+    )
 }
 
 async fn sync_codex_artifacts(
@@ -7433,6 +7559,20 @@ not json
             })
         }
 
+        async fn get_turn_status(
+            &self,
+            _config: &CodexAppServerConfig,
+            turn_id: &str,
+        ) -> Result<CodexTurnResponse, AppError> {
+            self.calls.lock().await.push(format!("poll:{turn_id}"));
+            Ok(CodexTurnResponse {
+                turn_id: turn_id.to_string(),
+                thread_id: Some("thread-1".to_string()),
+                status: Some("completed".to_string()),
+                result: json!({"message": "completed"}),
+            })
+        }
+
         async fn interrupt_turn(
             &self,
             _config: &CodexAppServerConfig,
@@ -7823,6 +7963,28 @@ not json
                 && run.turn_id.as_deref() == Some("turn-1")
                 && run.command_id.as_deref() == Some("command-1")
         }));
+        let turn_run = codex_runs
+            .iter()
+            .find(|run| run.operation == "turn.create")
+            .expect("turn run");
+        let polled: CodexAppServerPollResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/codex-app-server/runs/{}/poll", turn_run.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"max_attempts": 3, "retry_interval_ms": 0}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert!(polled.terminal);
+        assert_eq!(polled.attempts, 1);
+        assert_eq!(polled.last_status, "completed");
+        assert_eq!(polled.run.status, "completed");
 
         let synced: CodexArtifactSyncResponse = request_json(
             app.clone(),
@@ -7899,6 +8061,19 @@ not json
             log.action == "codex_app_server.artifact_synced"
                 && log.details["command_id"] == "command-1"
         }));
+        let global_audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(global_audit_logs.iter().any(|log| {
+            log.action == "codex_app_server.run_polled" && log.details["last_status"] == "completed"
+        }));
 
         assert_eq!(
             codex_client.calls.lock().await.as_slice(),
@@ -7907,7 +8082,8 @@ not json
                 "thread",
                 "turn:thread-1",
                 "command:turn-1",
-                "interrupt:turn-1"
+                "interrupt:turn-1",
+                "poll:turn-1"
             ]
         );
     }

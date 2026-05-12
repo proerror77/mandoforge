@@ -129,6 +129,8 @@ grep -q "runMcpHealth" /tmp/mandoforge-actionbook-app.js
 grep -q "renderPolicyDiffSummary" /tmp/mandoforge-actionbook-app.js
 grep -q "policy-diff-table" /tmp/mandoforge-actionbook-app.js
 grep -q "cancelPolicyRollout" /tmp/mandoforge-actionbook-app.js
+grep -q "pollCodexRun" /tmp/mandoforge-actionbook-app.js
+grep -q "data-poll-codex-run" /tmp/mandoforge-actionbook-app.js
 curl -fsS "$BASE_URL/api/usage" \
   -H 'x-mandoforge-subject: actionbook-smoke' \
   -H 'x-mandoforge-roles: admin' \

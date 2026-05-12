@@ -124,6 +124,12 @@ pub(crate) trait CodexAppServerClient: Send + Sync {
         request: CodexTurnRequest,
     ) -> Result<CodexTurnResponse, AppError>;
 
+    async fn get_turn_status(
+        &self,
+        config: &CodexAppServerConfig,
+        turn_id: &str,
+    ) -> Result<CodexTurnResponse, AppError>;
+
     async fn interrupt_turn(
         &self,
         config: &CodexAppServerConfig,
@@ -167,6 +173,16 @@ impl CodexAppServerClient for ReservedCodexAppServerClient {
     ) -> Result<CodexTurnResponse, AppError> {
         Err(AppError::bad_request(
             "Codex App Server turn creation is reserved but not configured",
+        ))
+    }
+
+    async fn get_turn_status(
+        &self,
+        _config: &CodexAppServerConfig,
+        _turn_id: &str,
+    ) -> Result<CodexTurnResponse, AppError> {
+        Err(AppError::bad_request(
+            "Codex App Server turn polling is reserved but not configured",
         ))
     }
 
@@ -215,6 +231,10 @@ impl HttpCodexAppServerClient {
 
     fn turns_url(config: &CodexAppServerConfig, thread_id: &str) -> String {
         format!("{}/threads/{thread_id}/turns", config.normalized_endpoint())
+    }
+
+    fn turn_url(config: &CodexAppServerConfig, turn_id: &str) -> String {
+        format!("{}/turns/{turn_id}", config.normalized_endpoint())
     }
 
     fn interrupt_url(config: &CodexAppServerConfig, turn_id: &str) -> String {
@@ -270,6 +290,20 @@ impl CodexAppServerClient for HttpCodexAppServerClient {
             Self::turns_url(config, thread_id),
             &request,
             "Codex App Server turn creation",
+        )
+        .await
+    }
+
+    async fn get_turn_status(
+        &self,
+        config: &CodexAppServerConfig,
+        turn_id: &str,
+    ) -> Result<CodexTurnResponse, AppError> {
+        get_json(
+            &self.client,
+            config,
+            Self::turn_url(config, turn_id),
+            "Codex App Server turn polling",
         )
         .await
     }
@@ -331,6 +365,29 @@ where
     Ok(response.json::<R>().await?)
 }
 
+async fn get_json<R>(
+    client: &reqwest::Client,
+    config: &CodexAppServerConfig,
+    url: String,
+    label: &str,
+) -> Result<R, AppError>
+where
+    R: for<'de> Deserialize<'de>,
+{
+    let response = tokio::time::timeout(
+        Duration::from_secs(config.timeout_seconds),
+        client.get(url).send(),
+    )
+    .await??;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "{label} failed with status {status}"
+        )));
+    }
+    Ok(response.json::<R>().await?)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{Json, Router, routing::get, routing::post};
@@ -362,6 +419,15 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             status: Some("running".to_string()),
             result: json!({"message": request.message}),
+        })
+    }
+
+    async fn mock_get_turn() -> Json<CodexTurnResponse> {
+        Json(CodexTurnResponse {
+            turn_id: "turn-1".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            status: Some("completed".to_string()),
+            result: json!({"final": "done"}),
         })
     }
 
@@ -431,6 +497,7 @@ mod tests {
             .route("/healthz", get(mock_health))
             .route("/threads", post(mock_create_thread))
             .route("/threads/thread-1/turns", post(mock_create_turn))
+            .route("/turns/turn-1", get(mock_get_turn))
             .route("/turns/turn-1/interrupt", post(mock_interrupt))
             .route("/turns/turn-1/commands", post(mock_command));
         let server = tokio::spawn(async move {
@@ -471,6 +538,13 @@ mod tests {
             .expect("turn");
         assert_eq!(turn.turn_id, "turn-1");
         assert_eq!(turn.result["message"], "Inspect workspace");
+
+        let turn_status = client
+            .get_turn_status(&config, &turn.turn_id)
+            .await
+            .expect("turn status");
+        assert_eq!(turn_status.status.as_deref(), Some("completed"));
+        assert_eq!(turn_status.result["final"], "done");
 
         let command = client
             .execute_command(
