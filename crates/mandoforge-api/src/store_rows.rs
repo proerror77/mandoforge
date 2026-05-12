@@ -213,6 +213,7 @@ pub(crate) fn organization_from_row(row: PgRow) -> Result<Organization, AppError
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         slug: row.try_get("slug")?,
+        owner_subject: row.try_get("owner_subject")?,
         created_at: row.try_get("created_at")?,
         archived_at: row.try_get("archived_at")?,
     })

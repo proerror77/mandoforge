@@ -666,6 +666,7 @@ struct Organization {
     id: Uuid,
     name: String,
     slug: String,
+    owner_subject: Option<String>,
     created_at: DateTime<Utc>,
     #[serde(default)]
     archived_at: Option<DateTime<Utc>>,
@@ -675,6 +676,11 @@ struct Organization {
 struct CreateOrganization {
     name: String,
     slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferOrganizationOwnership {
+    owner_subject: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1340,6 +1346,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{id}/archive",
             post(archive_organization),
+        )
+        .route(
+            "/api/organizations/{id}/transfer-ownership",
+            post(transfer_organization_ownership),
         )
         .route(
             "/api/organizations/{id}/teams",
@@ -3328,8 +3338,30 @@ async fn create_organization(
     headers: HeaderMap,
     Json(input): Json<CreateOrganization>,
 ) -> Result<Json<Organization>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "organizations", None).await?;
-    Ok(Json(state.create_organization(input).await?))
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "organizations".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let organization = state
+        .create_organization(input, Some(principal.subject_id.clone()))
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.created",
+            "organization",
+            Some(organization.id),
+            json!({"subject": principal.subject_id, "owner_subject": organization.owner_subject}),
+        ))
+        .await?;
+    Ok(Json(organization))
 }
 
 async fn archive_organization(
@@ -3356,6 +3388,54 @@ async fn archive_organization(
             "organization",
             Some(id),
             json!({"subject": principal.subject_id, "archived_at": organization.archived_at}),
+        ))
+        .await?;
+    Ok(Json(organization))
+}
+
+async fn transfer_organization_ownership(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<TransferOrganizationOwnership>,
+) -> Result<Json<Organization>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let previous = state
+        .list_organizations()
+        .await?
+        .into_iter()
+        .find(|organization| organization.id == id)
+        .ok_or_else(|| AppError::not_found("organization not found"))?;
+    let new_owner = input.owner_subject.trim();
+    if new_owner.is_empty() {
+        return Err(AppError::bad_request(
+            "organization owner_subject is required",
+        ));
+    }
+    let organization = state
+        .transfer_organization_ownership(id, new_owner.to_string())
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.ownership_transferred",
+            "organization",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "previous_owner_subject": previous.owner_subject,
+                "owner_subject": organization.owner_subject
+            }),
         ))
         .await?;
     Ok(Json(organization))
@@ -8524,6 +8604,7 @@ not json
         assert!(names.contains(&"0013_execution_job_retries.sql"));
         assert!(names.contains(&"0014_tenant_lifecycle_archive.sql"));
         assert!(names.contains(&"0015_tenant_invitations.sql"));
+        assert!(names.contains(&"0016_organization_owner.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -8552,6 +8633,28 @@ not json
                 .expect("valid request"),
         )
         .await;
+        assert_eq!(organization.owner_subject.as_deref(), Some("admin-1"));
+        let transferred_organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/transfer-ownership",
+                    organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"owner_subject": "platform-owner-2"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            transferred_organization.owner_subject.as_deref(),
+            Some("platform-owner-2")
+        );
         let team: Team = request_json(
             app.clone(),
             Request::builder()
@@ -8708,6 +8811,31 @@ not json
         .await;
         assert!(archived_organization.archived_at.is_some());
 
+        let (status, archived_org_transfer_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/transfer-ownership",
+                    second_organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"owner_subject": "blocked-owner"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            archived_org_transfer_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("active organization not found")
+        );
+
         let (status, archived_org_team_error) = request_value(
             app.clone(),
             Request::builder()
@@ -8796,6 +8924,11 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "organization.archived")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "organization.ownership_transferred")
         );
         assert!(audit_logs.iter().any(|log| log.action == "team.archived"));
         assert!(
@@ -11126,10 +11259,13 @@ not json
         };
         state.seed_demo_agent().await.expect("seed demo agent");
         let organization = state
-            .create_organization(CreateOrganization {
-                name: "MCP Org".to_string(),
-                slug: "mcp-org".to_string(),
-            })
+            .create_organization(
+                CreateOrganization {
+                    name: "MCP Org".to_string(),
+                    slug: "mcp-org".to_string(),
+                },
+                Some("admin-1".to_string()),
+            )
             .await
             .expect("create org");
         let team = state

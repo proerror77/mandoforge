@@ -107,6 +107,7 @@ const membershipRoot = document.querySelector("#memberships");
 const tenantInvitationRoot = document.querySelector("#tenant-invitations");
 const agentForm = document.querySelector("#agent-form");
 const organizationForm = document.querySelector("#organization-form");
+const organizationOwnerForm = document.querySelector("#organization-owner-form");
 const teamForm = document.querySelector("#team-form");
 const projectForm = document.querySelector("#project-form");
 const membershipForm = document.querySelector("#membership-form");
@@ -141,6 +142,7 @@ const codexAppServerRoot = document.querySelector("#codex-app-server");
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
 organizationForm.addEventListener("submit", createOrganization);
+organizationOwnerForm.addEventListener("submit", transferOrganizationOwnership);
 teamForm.addEventListener("submit", createTeam);
 projectForm.addEventListener("submit", createProject);
 membershipForm.addEventListener("submit", createMembership);
@@ -319,6 +321,19 @@ async function archiveOrganization(organizationId) {
     state.selectedOrganizationId = "";
     state.selectedTeamId = "";
   }
+  await refreshOps();
+}
+
+async function transferOrganizationOwnership(event) {
+  event.preventDefault();
+  const form = new FormData(organizationOwnerForm);
+  const organizationId = String(form.get("organization_id") || "").trim();
+  await api(`/api/organizations/${organizationId}/transfer-ownership`, {
+    method: "POST",
+    body: JSON.stringify({
+      owner_subject: String(form.get("owner_subject") || "").trim(),
+    }),
+  });
   await refreshOps();
 }
 
@@ -1281,6 +1296,7 @@ function renderTenantGovernance() {
               <button class="item-button${organization.id === state.selectedOrganizationId ? " selected" : ""}" data-organization="${organization.id}">
                 <strong>${escapeHtml(organization.name)}</strong>
                 <span>${escapeHtml(organization.slug)} · ${escapeHtml(organization.id)} · ${escapeHtml(organization.archived_at ? "archived" : "active")}</span>
+                <span>Owner: ${escapeHtml(organization.owner_subject || "unassigned")}</span>
               </button>
               ${
                 organization.archived_at
@@ -2138,8 +2154,10 @@ function setEvalDatasetId(datasetId) {
 
 function setOrganizationId(organizationId) {
   state.selectedOrganizationId = organizationId;
+  organizationOwnerForm.elements.organization_id.value = organizationId;
   teamForm.elements.organization_id.value = organizationId;
   membershipForm.elements.organization_id.value = organizationId;
+  tenantInvitationForm.elements.organization_id.value = organizationId;
 }
 
 function setTeamId(teamId) {

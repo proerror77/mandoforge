@@ -27,7 +27,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, name, slug, created_at, archived_at
+                    "SELECT id, name, slug, owner_subject, created_at, archived_at
                      FROM organizations
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
@@ -43,11 +43,13 @@ impl AppState {
     pub(crate) async fn create_organization(
         &self,
         input: CreateOrganization,
+        owner_subject: Option<String>,
     ) -> Result<Organization, AppError> {
         let organization = Organization {
             id: Uuid::new_v4(),
             name: input.name,
             slug: input.slug,
+            owner_subject,
             created_at: Utc::now(),
             archived_at: None,
         };
@@ -61,13 +63,14 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO organizations (id, tenant_id, name, slug, created_at)
-                     VALUES ($1, $2, $3, $4, $5)",
+                    "INSERT INTO organizations (id, tenant_id, name, slug, owner_subject, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(organization.id)
                 .bind(self.tenant_id)
                 .bind(&organization.name)
                 .bind(&organization.slug)
+                .bind(&organization.owner_subject)
                 .bind(organization.created_at)
                 .execute(pool)
                 .await?;
@@ -234,7 +237,7 @@ impl AppState {
                     "UPDATE organizations
                      SET archived_at = COALESCE(archived_at, $1)
                      WHERE tenant_id = $2 AND id = $3
-                     RETURNING id, name, slug, created_at, archived_at",
+                     RETURNING id, name, slug, owner_subject, created_at, archived_at",
                 )
                 .bind(archived_at)
                 .bind(self.tenant_id)
@@ -242,6 +245,40 @@ impl AppState {
                 .fetch_optional(pool)
                 .await?
                 .ok_or_else(|| AppError::not_found("organization not found"))?;
+                organization_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn transfer_organization_ownership(
+        &self,
+        organization_id: Uuid,
+        owner_subject: String,
+    ) -> Result<Organization, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let organization = store
+                    .organizations
+                    .get_mut(&organization_id)
+                    .filter(|organization| organization.archived_at.is_none())
+                    .ok_or_else(|| AppError::not_found("active organization not found"))?;
+                organization.owner_subject = Some(owner_subject);
+                Ok(organization.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE organizations
+                     SET owner_subject = $1
+                     WHERE tenant_id = $2 AND id = $3 AND archived_at IS NULL
+                     RETURNING id, name, slug, owner_subject, created_at, archived_at",
+                )
+                .bind(owner_subject)
+                .bind(self.tenant_id)
+                .bind(organization_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("active organization not found"))?;
                 organization_from_row(row)
             }
         }

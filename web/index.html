@@ -115,6 +115,17 @@
                 </label>
                 <button type="submit">Create Organization</button>
               </form>
+              <form id="organization-owner-form" class="stack-form compact-form">
+                <label>
+                  Organization ID
+                  <input name="organization_id" required placeholder="Organization UUID" />
+                </label>
+                <label>
+                  New owner subject
+                  <input name="owner_subject" required placeholder="owner-user-id" />
+                </label>
+                <button type="submit">Transfer Ownership</button>
+              </form>
               <form id="team-form" class="stack-form compact-form">
                 <label>
                   Organization ID
