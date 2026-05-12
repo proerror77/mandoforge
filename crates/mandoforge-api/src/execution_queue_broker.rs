@@ -1,9 +1,13 @@
+use std::{collections::HashMap, sync::Arc};
+
 use async_trait::async_trait;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::RwLock,
 };
 use uuid::Uuid;
 
@@ -37,9 +41,11 @@ pub(crate) struct RedisStreamCommand {
     pub(crate) args: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct RedisExecutionJobPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) job_id: Option<Uuid>,
     pub(crate) session_id: Uuid,
     pub(crate) approval_id: Uuid,
     pub(crate) tool_call_id: Uuid,
@@ -48,6 +54,12 @@ pub(crate) struct RedisExecutionJobPayload {
 
 #[allow(dead_code)]
 pub(crate) struct RedisStreamClient;
+
+#[derive(Debug, Clone)]
+struct RedisPendingExecutionJob {
+    message_id: String,
+    job: ExecutionJob,
+}
 
 #[allow(dead_code)]
 impl BrokerQueueKind {
@@ -115,6 +127,7 @@ impl BrokerQueueConfig {
 impl RedisExecutionJobPayload {
     pub(crate) fn from_request(request: &ExecutionJobRequest) -> Self {
         Self {
+            job_id: None,
             session_id: request.session_id,
             approval_id: request.approval_id,
             tool_call_id: request.tool_call_id,
@@ -122,8 +135,35 @@ impl RedisExecutionJobPayload {
         }
     }
 
+    fn from_job(job: &ExecutionJob) -> Self {
+        Self {
+            job_id: Some(job.id),
+            session_id: job.session_id,
+            approval_id: job.approval_id,
+            tool_call_id: job.tool_call_id,
+            tool_name: job.tool_name.clone(),
+        }
+    }
+
+    fn into_execution_job(self) -> ExecutionJob {
+        ExecutionJob {
+            id: self.job_id.unwrap_or_else(Uuid::new_v4),
+            session_id: self.session_id,
+            approval_id: self.approval_id,
+            tool_call_id: self.tool_call_id,
+            tool_name: self.tool_name,
+            status: ExecutionJobStatus::Queued,
+            enqueued_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            worker_id: None,
+            lease_expires_at: None,
+        }
+    }
+
     fn to_json(&self) -> Value {
         json!({
+            "job_id": self.job_id,
             "session_id": self.session_id,
             "approval_id": self.approval_id,
             "tool_call_id": self.tool_call_id,
@@ -229,7 +269,7 @@ impl RedisStreamCommand {
 
 #[allow(dead_code)]
 impl RedisStreamClient {
-    pub(crate) async fn execute(
+    pub(crate) async fn execute_raw(
         config: &BrokerQueueConfig,
         command: &RedisStreamCommand,
     ) -> Result<String, AppError> {
@@ -238,12 +278,20 @@ impl RedisStreamClient {
         let payload = encode_resp_array(&command.resp_args());
         stream.write_all(payload.as_bytes()).await?;
         stream.flush().await?;
-        let mut buffer = vec![0; 4096];
+        let mut buffer = vec![0; 16 * 1024];
         let bytes = stream.read(&mut buffer).await?;
         if bytes == 0 {
             return Err(AppError::bad_request("Redis returned an empty response"));
         }
-        parse_redis_response(&String::from_utf8_lossy(&buffer[..bytes]))
+        Ok(String::from_utf8_lossy(&buffer[..bytes]).to_string())
+    }
+
+    pub(crate) async fn execute(
+        config: &BrokerQueueConfig,
+        command: &RedisStreamCommand,
+    ) -> Result<String, AppError> {
+        let response = Self::execute_raw(config, command).await?;
+        parse_redis_response(&response)
     }
 }
 
@@ -279,6 +327,9 @@ fn encode_resp_array(args: &[String]) -> String {
 }
 
 fn parse_redis_response(response: &str) -> Result<String, AppError> {
+    if response.starts_with("*-1") || response.starts_with("$-1") {
+        return Ok(String::new());
+    }
     if let Some(error) = response.strip_prefix('-') {
         let message = error.trim_end_matches("\r\n");
         return Err(AppError::bad_request(format!("Redis error: {message}")));
@@ -299,6 +350,157 @@ fn parse_redis_response(response: &str) -> Result<String, AppError> {
         return Ok(value.trim_end_matches("\r\n").to_string());
     }
     Err(AppError::bad_request("unsupported Redis response"))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RespValue {
+    Simple(String),
+    Error(String),
+    Integer(i64),
+    Bulk(Option<String>),
+    Array(Option<Vec<RespValue>>),
+}
+
+fn parse_resp(input: &str) -> Result<RespValue, AppError> {
+    let (value, offset) = parse_resp_at(input.as_bytes(), 0)?;
+    if offset > input.len() {
+        return Err(AppError::bad_request("invalid Redis response offset"));
+    }
+    Ok(value)
+}
+
+fn parse_resp_at(input: &[u8], offset: usize) -> Result<(RespValue, usize), AppError> {
+    let kind = *input
+        .get(offset)
+        .ok_or_else(|| AppError::bad_request("empty Redis response"))?;
+    match kind {
+        b'+' => {
+            let (line, next) = read_resp_line(input, offset + 1)?;
+            Ok((RespValue::Simple(line), next))
+        }
+        b'-' => {
+            let (line, next) = read_resp_line(input, offset + 1)?;
+            Ok((RespValue::Error(line), next))
+        }
+        b':' => {
+            let (line, next) = read_resp_line(input, offset + 1)?;
+            let value = line
+                .parse::<i64>()
+                .map_err(|_| AppError::bad_request("invalid Redis integer response"))?;
+            Ok((RespValue::Integer(value), next))
+        }
+        b'$' => {
+            let (line, mut next) = read_resp_line(input, offset + 1)?;
+            let len = line
+                .parse::<isize>()
+                .map_err(|_| AppError::bad_request("invalid Redis bulk length"))?;
+            if len < 0 {
+                return Ok((RespValue::Bulk(None), next));
+            }
+            let len = len as usize;
+            let end = next + len;
+            if input.len() < end + 2 {
+                return Err(AppError::bad_request("truncated Redis bulk response"));
+            }
+            let value = String::from_utf8_lossy(&input[next..end]).to_string();
+            next = end + 2;
+            Ok((RespValue::Bulk(Some(value)), next))
+        }
+        b'*' => {
+            let (line, mut next) = read_resp_line(input, offset + 1)?;
+            let len = line
+                .parse::<isize>()
+                .map_err(|_| AppError::bad_request("invalid Redis array length"))?;
+            if len < 0 {
+                return Ok((RespValue::Array(None), next));
+            }
+            let mut values = Vec::with_capacity(len as usize);
+            for _ in 0..len {
+                let (value, value_next) = parse_resp_at(input, next)?;
+                values.push(value);
+                next = value_next;
+            }
+            Ok((RespValue::Array(Some(values)), next))
+        }
+        _ => Err(AppError::bad_request("unsupported Redis response type")),
+    }
+}
+
+fn read_resp_line(input: &[u8], offset: usize) -> Result<(String, usize), AppError> {
+    let mut cursor = offset;
+    while cursor + 1 < input.len() {
+        if input[cursor] == b'\r' && input[cursor + 1] == b'\n' {
+            return Ok((
+                String::from_utf8_lossy(&input[offset..cursor]).to_string(),
+                cursor + 2,
+            ));
+        }
+        cursor += 1;
+    }
+    Err(AppError::bad_request("unterminated Redis response line"))
+}
+
+fn parse_xreadgroup_execution_jobs(
+    response: &str,
+) -> Result<Vec<(String, RedisExecutionJobPayload)>, AppError> {
+    let value = parse_resp(response)?;
+    let Some(streams) = resp_array(&value) else {
+        return Ok(Vec::new());
+    };
+    let mut jobs = Vec::new();
+    for stream in streams {
+        let Some(stream_parts) = resp_array(stream) else {
+            continue;
+        };
+        let Some(messages) = stream_parts.get(1).and_then(resp_array) else {
+            continue;
+        };
+        for message in messages {
+            let Some(message_parts) = resp_array(message) else {
+                continue;
+            };
+            let Some(message_id) = message_parts.first().and_then(resp_string) else {
+                continue;
+            };
+            let Some(fields) = message_parts.get(1).and_then(resp_array) else {
+                continue;
+            };
+            let payload = redis_field_value(fields, "payload")
+                .ok_or_else(|| AppError::bad_request("Redis stream message missing payload"))?;
+            let payload =
+                serde_json::from_str::<RedisExecutionJobPayload>(&payload).map_err(|error| {
+                    AppError::bad_request(format!("invalid Redis job payload: {error}"))
+                })?;
+            jobs.push((message_id, payload));
+        }
+    }
+    Ok(jobs)
+}
+
+fn resp_array(value: &RespValue) -> Option<&[RespValue]> {
+    match value {
+        RespValue::Array(Some(values)) => Some(values.as_slice()),
+        _ => None,
+    }
+}
+
+fn resp_string(value: &RespValue) -> Option<String> {
+    match value {
+        RespValue::Simple(value) | RespValue::Bulk(Some(value)) => Some(value.clone()),
+        RespValue::Integer(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn redis_field_value(fields: &[RespValue], key: &str) -> Option<String> {
+    fields.chunks(2).find_map(|chunk| {
+        let field = chunk.first().and_then(resp_string)?;
+        if field == key {
+            chunk.get(1).and_then(resp_string)
+        } else {
+            None
+        }
+    })
 }
 
 #[async_trait]
@@ -324,18 +526,24 @@ impl BrokerQueueHealthCheck for ReservedBrokerQueueHealthCheck {
 pub(crate) struct BrokerExecutionQueue {
     kind: BrokerQueueKind,
     config: Option<BrokerQueueConfig>,
+    pending: Arc<RwLock<HashMap<Uuid, RedisPendingExecutionJob>>>,
 }
 
 #[allow(dead_code)]
 impl BrokerExecutionQueue {
     pub(crate) fn new(kind: BrokerQueueKind) -> Self {
-        Self { kind, config: None }
+        Self {
+            kind,
+            config: None,
+            pending: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     pub(crate) fn redis(config: BrokerQueueConfig) -> Self {
         Self {
             kind: BrokerQueueKind::Redis,
             config: Some(config),
+            pending: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -345,18 +553,47 @@ impl BrokerExecutionQueue {
             self.kind
         ))
     }
+
+    async fn redis_config(&self) -> Result<&BrokerQueueConfig, AppError> {
+        if self.kind != BrokerQueueKind::Redis {
+            return Err(self.reserved_error());
+        }
+        self.config
+            .as_ref()
+            .ok_or_else(|| AppError::bad_request("Redis execution queue config is missing"))
+    }
+
+    async fn ensure_redis_group(&self, config: &BrokerQueueConfig) -> Result<(), AppError> {
+        let command = RedisStreamCommand::xgroup_create(config)?;
+        match RedisStreamClient::execute(config, &command).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.message.contains("BUSYGROUP") => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn ack_redis_job(
+        &self,
+        config: &BrokerQueueConfig,
+        job_id: Uuid,
+    ) -> Result<(), AppError> {
+        let message_id = {
+            let pending = self.pending.read().await;
+            pending
+                .get(&job_id)
+                .map(|pending| pending.message_id.clone())
+                .ok_or_else(|| AppError::not_found("execution job not found"))?
+        };
+        let command = RedisStreamCommand::xack(config, message_id)?;
+        RedisStreamClient::execute(config, &command).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl ExecutionQueueBackend for BrokerExecutionQueue {
     async fn enqueue(&self, request: ExecutionJobRequest) -> Result<ExecutionJob, AppError> {
-        if self.kind != BrokerQueueKind::Redis {
-            return Err(self.reserved_error());
-        }
-        let config = self
-            .config
-            .as_ref()
-            .ok_or_else(|| AppError::bad_request("Redis execution queue config is missing"))?;
+        let config = self.redis_config().await?;
         let job = ExecutionJob {
             id: Uuid::new_v4(),
             session_id: request.session_id,
@@ -370,35 +607,83 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             worker_id: None,
             lease_expires_at: None,
         };
-        let payload = RedisExecutionJobPayload {
-            session_id: job.session_id,
-            approval_id: job.approval_id,
-            tool_call_id: job.tool_call_id,
-            tool_name: job.tool_name.clone(),
-        };
+        let payload = RedisExecutionJobPayload::from_job(&job);
         let command = RedisStreamCommand::xadd_enqueue(config, &payload)?;
         RedisStreamClient::execute(config, &command).await?;
         Ok(job)
     }
 
-    async fn start(&self, _job_id: Uuid, _worker_id: &str) -> Result<ExecutionJob, AppError> {
-        Err(self.reserved_error())
+    async fn start(&self, job_id: Uuid, worker_id: &str) -> Result<ExecutionJob, AppError> {
+        self.redis_config().await?;
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        pending_job.job.status = ExecutionJobStatus::Running;
+        pending_job.job.started_at = Some(Utc::now());
+        pending_job.job.worker_id = Some(worker_id.to_string());
+        pending_job.job.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
+        Ok(pending_job.job.clone())
     }
 
-    async fn complete(&self, _job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        Err(self.reserved_error())
+    async fn complete(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+        let config = self.redis_config().await?;
+        self.ack_redis_job(config, job_id).await?;
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        pending_job.job.status = ExecutionJobStatus::Completed;
+        pending_job.job.completed_at = Some(Utc::now());
+        pending_job.job.lease_expires_at = None;
+        Ok(pending_job.job.clone())
     }
 
-    async fn fail(&self, _job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        Err(self.reserved_error())
+    async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+        let config = self.redis_config().await?;
+        self.ack_redis_job(config, job_id).await?;
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        pending_job.job.status = ExecutionJobStatus::Failed;
+        pending_job.job.completed_at = Some(Utc::now());
+        pending_job.job.lease_expires_at = None;
+        Ok(pending_job.job.clone())
     }
 
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
-        Err(self.reserved_error())
+        let config = self.redis_config().await?;
+        self.ensure_redis_group(config).await?;
+        let command = RedisStreamCommand::xreadgroup_next(config, "api-worker", 10, 1)?;
+        let response = RedisStreamClient::execute_raw(config, &command).await?;
+        let messages = parse_xreadgroup_execution_jobs(&response)?;
+        {
+            let mut pending = self.pending.write().await;
+            for (message_id, payload) in messages {
+                let job = payload.into_execution_job();
+                pending
+                    .entry(job.id)
+                    .or_insert(RedisPendingExecutionJob { message_id, job });
+            }
+        }
+        Ok(self
+            .pending
+            .read()
+            .await
+            .values()
+            .map(|pending| pending.job.clone())
+            .collect())
     }
 
-    async fn get(&self, _job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        Err(self.reserved_error())
+    async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+        self.redis_config().await?;
+        self.pending
+            .read()
+            .await
+            .get(&job_id)
+            .map(|pending| pending.job.clone())
+            .ok_or_else(|| AppError::not_found("execution job not found"))
     }
 }
 
@@ -407,7 +692,8 @@ mod tests {
     use super::{
         BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind,
         RedisExecutionJobPayload, RedisStreamClient, RedisStreamCommand,
-        ReservedBrokerQueueHealthCheck, encode_resp_array, parse_redis_response, redis_tcp_addr,
+        ReservedBrokerQueueHealthCheck, encode_resp_array, parse_redis_response,
+        parse_xreadgroup_execution_jobs, redis_tcp_addr,
     };
     use crate::execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
     use tokio::{
@@ -582,6 +868,26 @@ mod tests {
     }
 
     #[test]
+    fn redis_stream_client_parses_xreadgroup_payloads() {
+        let payload = "{\"job_id\":\"00000000-0000-4000-8000-000000000004\",\"session_id\":\"00000000-0000-4000-8000-000000000001\",\"approval_id\":\"00000000-0000-4000-8000-000000000002\",\"tool_call_id\":\"00000000-0000-4000-8000-000000000003\",\"tool_name\":\"file.write\"}";
+        let response = format!(
+            "*1\r\n*2\r\n$25\r\nmandoforge:execution-jobs\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$7\r\npayload\r\n${}\r\n{}\r\n",
+            payload.len(),
+            payload
+        );
+
+        let jobs = parse_xreadgroup_execution_jobs(&response).expect("xreadgroup payload");
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, "1-0");
+        assert_eq!(jobs[0].1.tool_name, "file.write");
+        assert_eq!(
+            jobs[0].1.job_id.expect("job id").to_string(),
+            "00000000-0000-4000-8000-000000000004"
+        );
+    }
+
+    #[test]
     fn redis_stream_client_encodes_resp_arrays() {
         let encoded = encode_resp_array(&[
             "XACK".to_string(),
@@ -676,5 +982,66 @@ mod tests {
         server.await.expect("server");
         assert_eq!(job.status, ExecutionJobStatus::Queued);
         assert_eq!(job.tool_name, "file.write");
+    }
+
+    #[tokio::test]
+    async fn broker_execution_queue_drains_and_acks_redis_stream_jobs() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let payload = "{\"job_id\":\"00000000-0000-4000-8000-000000000004\",\"session_id\":\"00000000-0000-4000-8000-000000000001\",\"approval_id\":\"00000000-0000-4000-8000-000000000002\",\"tool_call_id\":\"00000000-0000-4000-8000-000000000003\",\"tool_name\":\"file.write\"}";
+        let read_response = format!(
+            "*1\r\n*2\r\n$25\r\nmandoforge:execution-jobs\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$7\r\npayload\r\n${}\r\n{}\r\n",
+            payload.len(),
+            payload
+        );
+        let server = tokio::spawn(async move {
+            for step in 0..3 {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buffer = vec![0; 4096];
+                let bytes = socket.read(&mut buffer).await.expect("read");
+                let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                match step {
+                    0 => {
+                        assert!(request.contains("XGROUP"));
+                        socket.write_all(b"+OK\r\n").await.expect("write");
+                    }
+                    1 => {
+                        assert!(request.contains("XREADGROUP"));
+                        socket
+                            .write_all(read_response.as_bytes())
+                            .await
+                            .expect("write");
+                    }
+                    _ => {
+                        assert!(request.contains("XACK"));
+                        assert!(request.contains("1-0"));
+                        socket.write_all(b":1\r\n").await.expect("write");
+                    }
+                }
+            }
+        });
+        let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Redis, |key| match key {
+            "MANDOFORGE_REDIS_URL" => Some(format!("redis://{addr}/0")),
+            _ => None,
+        })
+        .expect("redis config");
+        let queue = BrokerExecutionQueue::redis(config);
+
+        let jobs = queue.list().await.expect("read redis jobs");
+        let job_id = "00000000-0000-4000-8000-000000000004"
+            .parse()
+            .expect("job id");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, job_id);
+        assert_eq!(jobs[0].status, ExecutionJobStatus::Queued);
+
+        let running = queue.start(job_id, "worker-1").await.expect("start job");
+        assert_eq!(running.status, ExecutionJobStatus::Running);
+        assert_eq!(running.worker_id.as_deref(), Some("worker-1"));
+
+        let completed = queue.complete(job_id).await.expect("ack job");
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+
+        server.await.expect("server");
     }
 }

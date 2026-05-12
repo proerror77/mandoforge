@@ -21,7 +21,7 @@ Aligned:
 - Admin-only policy inspection and tool-decision simulation APIs expose the active YAML policy in structured form and let the static Policy Console test allow/deny/approval decisions without editing the runtime policy.
 - Admin-only Vault health checks report whether the secret provider is reserved or Vault, expose only redacted configuration checks, and keep secret reads fail-closed unless Vault is explicitly configured.
 - Approved shell execution can use the optional Docker runner.
-- Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh`, the `mandoforge-worker` Rust binary, or the static Worker Dashboard; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
+- Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh`, the `mandoforge-worker` Rust binary, or the static Worker Dashboard; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim. Redis mode now uses `XADD` for enqueue, `XREADGROUP` for API-backed drain, and `XACK` for completion/failure acknowledgement.
 - Worker deployment entries exist for Docker Compose and Kubernetes.
 - Approval resume executes the approved tool, rebuilds harness context, resumes the provider for provider-run sessions, and then emits the final provider response before completing the session.
 - Approval v2 groundwork includes an `approver` role, `POST /api/approvals/:id/modify`, which updates pending tool-call arguments, appends `approval.modified`, and leaves the approval pending for approve/reject, plus `expires_at` and `POST /api/approvals/:id/expire`, which append `approval.expired` and make later decisions fail closed. Manual approval requests can delegate a decision to an `approver_subject`; non-admin principals must match that subject while admins can override. Approval groups and escalation rules are persisted through Admin-only APIs, `POST /api/approvals/:id/escalate` assigns pending approvals to a configured group/rule, and non-admin approvers must belong to the delegated group before deciding. The static Approval Queue exposes original args, modified args, delegated approver/group, a JSON-path argument diff table, decision payload, and pending-approval modify/escalate controls before approve/reject.
@@ -41,7 +41,7 @@ Aligned:
 
 Not yet aligned:
 
-- External worker mode is still API-drained for memory/Postgres queues; Redis Streams enqueue is now available through `MANDOFORGE_EXECUTION_QUEUE_BACKEND=redis`, while Redis readgroup/ack worker drain and NATS remain later-stage work.
+- External worker mode is API-drained for memory/Postgres/Redis queues. Redis Streams enqueue and drain are available through `MANDOFORGE_EXECUTION_QUEUE_BACKEND=redis`; NATS remains later-stage work.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
 - MCP Gateway execution is now available through `mcp.call` when configured; global server allowlists are enforced by the gateway config, and team-scoped sessions must also pass the persisted MCP server registry/tool allowlist before the HTTP call. Admins can call the team MCP server discovery endpoint to import gateway-discovered tools into the persisted allowlist, and the static Admin Console can manage team server allowlists and trigger discovery.
 - Adding production-grade telemetry spans/metrics, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
@@ -224,10 +224,10 @@ Current worker boundary:
 - Keep output-size limits on approved shell and Codex execution results.
 - Keep `execution_queue.rs` as the queue facade for approved tool jobs.
 - Keep `ExecutionQueueBackend` as the backend seam for memory, Postgres, and later broker-backed queues.
-- Keep `execution_queue_broker.rs` as the reserved Redis/NATS backend skeleton; it must fail closed until real broker operations are implemented. Redis Stream enqueue/group/read/ack command shape and narrow RESP TCP client boundary are locally verified before live Redis backend selection.
+- Keep `execution_queue_broker.rs` as the broker backend boundary. Redis Stream enqueue/group/read/ack operations are implemented behind the `ExecutionQueueBackend` facade and locally verified with mock Redis TCP tests; NATS still fails closed until a real backend is implemented.
 - Keep `BrokerQueueConfig` and `BrokerQueueHealthCheck` as the broker configuration and readiness boundary before selecting a concrete Redis or NATS client.
 - Keep `codex_app_server.rs` as the env-gated HTTP adapter boundary for experimental Codex App Server thread, turn, command, and interrupt APIs. The reserved client fails closed unless `MANDOFORGE_CODEX_APP_SERVER_URL` is configured, and the static Codex App Server panel should surface that reserved state without bypassing the approval-governed `codex.exec` path. Keep App Server artifact sync inside the existing artifact/event/audit path so replay does not depend on App Server state. Keep `codex.exec` strategy selection explicit: `app-server` fails closed on App Server errors, `cli` stays on Codex CLI, and `auto` records fallback before returning to CLI.
-- Keep `MANDOFORGE_EXECUTION_QUEUE_BACKEND` fail-closed: `auto`, `memory`, and `postgres` are selectable now; `broker`, `redis`, and `nats` are reserved until implemented.
+- Keep `MANDOFORGE_EXECUTION_QUEUE_BACKEND` fail-closed for unsupported values: `auto`, `memory`, `postgres`, and `redis` are selectable now; `broker` and `nats` remain reserved until implemented.
 - Keep `ExecutionWorker` as the swappable worker interface and `InlineExecutionWorker` as the current local implementation.
 - Keep queue-backed worker mode, the API-drained `mandoforge-worker` binary, and the shell worker loop as the current external-worker handoff.
 - Replace the API-drained queue with a broker-backed queue in a later production stage.
