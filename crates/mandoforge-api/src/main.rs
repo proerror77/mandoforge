@@ -712,14 +712,7 @@ impl AppState {
         }
         let telemetry_event = TelemetryEvent {
             name: event.event_type.clone(),
-            attributes: json!({
-                "tenant_id": self.tenant_id,
-                "session_id": event.session_id,
-                "event_id": event.id,
-                "seq": event.seq,
-                "actor_type": event.actor_type,
-                "actor_id": event.actor_id,
-            }),
+            attributes: telemetry_attributes_for_event(event, self.tenant_id),
         };
         if let Err(error) = self
             .telemetry_exporter
@@ -728,6 +721,78 @@ impl AppState {
         {
             warn!(%error.message, "telemetry export failed");
         }
+    }
+}
+
+fn telemetry_attributes_for_event(event: &SessionEvent, tenant_id: Uuid) -> Value {
+    let category = event.event_type.split('.').next().unwrap_or("event");
+    let status = telemetry_status_for_event(event);
+    let duration_ms = event
+        .payload
+        .get("duration_ms")
+        .or_else(|| event.payload.get("latency_ms"))
+        .and_then(Value::as_i64);
+    let mut attributes = json!({
+        "tenant_id": tenant_id,
+        "session_id": event.session_id,
+        "event_id": event.id,
+        "seq": event.seq,
+        "actor_type": event.actor_type,
+        "actor_id": event.actor_id,
+        "signal": {
+            "type": telemetry_signal_type(category),
+            "category": category,
+            "span_name": format!("mandoforge.{}", event.event_type),
+            "status": status,
+        },
+        "metrics": {
+            "event_count": 1,
+            "metric_name": format!("mandoforge.{}.events", category),
+        }
+    });
+    if let Some(duration_ms) = duration_ms {
+        attributes["metrics"]["duration_ms"] = json!(duration_ms);
+    }
+    copy_payload_key(&mut attributes, &event.payload, "provider");
+    copy_payload_key(&mut attributes, &event.payload, "client");
+    copy_payload_key(&mut attributes, &event.payload, "tool");
+    copy_payload_key(&mut attributes, &event.payload, "tool_call_id");
+    copy_payload_key(&mut attributes, &event.payload, "approval_id");
+    copy_payload_key(&mut attributes, &event.payload, "worker_id");
+    if let Some(tool_calls) = event.payload.get("tool_calls").and_then(Value::as_array) {
+        attributes["metrics"]["tool_call_count"] = json!(tool_calls.len());
+    }
+    attributes
+}
+
+fn telemetry_signal_type(category: &str) -> &'static str {
+    match category {
+        "llm" | "tool" | "approval" | "session" | "worker" | "sandbox" | "codex" => "span",
+        _ => "log",
+    }
+}
+
+fn telemetry_status_for_event(event: &SessionEvent) -> &'static str {
+    if event.event_type.ends_with(".failed")
+        || event.event_type.ends_with(".error")
+        || event.event_type.ends_with(".denied")
+        || event.payload.get("status").and_then(Value::as_str) == Some("failed")
+    {
+        "error"
+    } else if event.event_type.ends_with(".requested")
+        || event.event_type.ends_with(".started")
+        || event.event_type.ends_with(".call")
+        || event.event_type.ends_with(".request")
+    {
+        "started"
+    } else {
+        "ok"
+    }
+}
+
+fn copy_payload_key(attributes: &mut Value, payload: &Value, key: &str) {
+    if let Some(value) = payload.get(key) {
+        attributes[key] = value.clone();
     }
 }
 
@@ -3193,11 +3258,33 @@ not json
             )
             .await
             .expect("append event");
+        state
+            .append_event(
+                "agent",
+                None,
+                session.id,
+                "llm.response",
+                json!({
+                    "provider": "governed-mock",
+                    "client": "mock-openai-compatible",
+                    "tool_calls": [{"tool": "file.read"}],
+                    "duration_ms": 42
+                }),
+            )
+            .await
+            .expect("append provider event");
 
         let events = exporter.events.lock().await;
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert_eq!(events[0].name, "session.started");
         assert_eq!(events[0].attributes["session_id"], session.id.to_string());
+        assert_eq!(events[0].attributes["signal"]["type"], "span");
+        assert_eq!(events[0].attributes["metrics"]["event_count"], 1);
+        assert_eq!(events[1].name, "llm.response");
+        assert_eq!(events[1].attributes["provider"], "governed-mock");
+        assert_eq!(events[1].attributes["client"], "mock-openai-compatible");
+        assert_eq!(events[1].attributes["metrics"]["duration_ms"], 42);
+        assert_eq!(events[1].attributes["metrics"]["tool_call_count"], 1);
     }
 
     #[tokio::test]
