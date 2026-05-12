@@ -294,6 +294,9 @@ async function refreshApprovals() {
   approvalRoot.querySelectorAll("[data-reject]").forEach((button) => {
     button.addEventListener("click", () => decide(button.dataset.reject, "reject"));
   });
+  approvalRoot.querySelectorAll("[data-expire]").forEach((button) => {
+    button.addEventListener("click", () => decide(button.dataset.expire, "expire"));
+  });
 }
 
 async function decide(id, decision) {
@@ -595,10 +598,11 @@ function renderApproval(approval) {
     <div class="item">
       <strong>${escapeHtml(approval.action)}</strong>
       <div class="muted">${escapeHtml(approval.risk_level)} · ${escapeHtml(approval.status)}</div>
+      <div class="muted">Expires: ${escapeHtml(approval.expires_at || "not set")}</div>
       <p>${escapeHtml(approval.reason)}</p>
       ${
         isPending
-          ? `<button class="secondary" data-approve="${approval.id}">Approve</button><button class="secondary reject" data-reject="${approval.id}">Reject</button>`
+          ? `<button class="secondary" data-approve="${approval.id}">Approve</button><button class="secondary reject" data-reject="${approval.id}">Reject</button><button class="secondary" data-expire="${approval.id}">Expire</button>`
           : ""
       }
     </div>

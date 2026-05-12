@@ -97,6 +97,7 @@ pub(crate) fn approval_from_row(row: PgRow) -> Result<Approval, AppError> {
             .try_get::<Option<Value>, _>("decision_payload")?
             .unwrap_or(json!({})),
         status: row.try_get("status")?,
+        expires_at: row.try_get("expires_at")?,
         created_at: row.try_get("created_at")?,
         decided_at: row.try_get("decided_at")?,
     })

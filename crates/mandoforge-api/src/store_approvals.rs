@@ -19,8 +19,8 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO approvals (id, tenant_id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, created_at, decided_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                    "INSERT INTO approvals (id, tenant_id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, expires_at, created_at, decided_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 )
                 .bind(approval.id)
                 .bind(self.tenant_id)
@@ -32,6 +32,7 @@ impl AppState {
                 .bind(&approval.evidence)
                 .bind(&approval.decision_payload)
                 .bind(&approval.status)
+                .bind(approval.expires_at)
                 .bind(approval.created_at)
                 .bind(approval.decided_at)
                 .execute(pool)
@@ -48,7 +49,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, created_at, decided_at
+                    "SELECT id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, expires_at, created_at, decided_at
                      FROM approvals
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
@@ -72,7 +73,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("approval not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, created_at, decided_at
+                    "SELECT id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, expires_at, created_at, decided_at
                      FROM approvals
                      WHERE tenant_id = $1 AND id = $2",
                 )
@@ -107,7 +108,7 @@ impl AppState {
                     "UPDATE approvals
                      SET status = $1, decided_at = now()
                      WHERE tenant_id = $2 AND id = $3
-                     RETURNING id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, created_at, decided_at",
+                     RETURNING id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, expires_at, created_at, decided_at",
                 )
                 .bind(status)
                 .bind(self.tenant_id)
@@ -150,7 +151,7 @@ impl AppState {
                     "UPDATE approvals
                      SET decision_payload = $1
                      WHERE tenant_id = $2 AND id = $3 AND status = 'pending'
-                     RETURNING id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, created_at, decided_at",
+                     RETURNING id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, expires_at, created_at, decided_at",
                 )
                 .bind(&decision_payload)
                 .bind(self.tenant_id)

@@ -237,6 +237,7 @@ struct Approval {
     evidence: Value,
     decision_payload: Value,
     status: String,
+    expires_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     decided_at: Option<DateTime<Utc>>,
 }
@@ -736,6 +737,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
+        .route("/api/approvals/{id}/expire", post(expire))
         .route("/api/approvals/{id}/modify", post(modify_approval))
         .route("/api/execution-jobs", get(list_execution_jobs))
         .route(
@@ -1746,6 +1748,7 @@ impl ToolExecutor for ApprovalRequestTool {
             .get("evidence")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let created_at = Utc::now();
         let approval = Approval {
             id: Uuid::new_v4(),
             session_id: input.session_id,
@@ -1756,7 +1759,8 @@ impl ToolExecutor for ApprovalRequestTool {
             evidence,
             decision_payload: json!({}),
             status: "pending".to_string(),
-            created_at: Utc::now(),
+            expires_at: approval_expires_at(created_at, input.args.get("expires_in_seconds")),
+            created_at,
             decided_at: None,
         };
         let approval = state.insert_approval(approval).await?;
@@ -1766,7 +1770,7 @@ impl ToolExecutor for ApprovalRequestTool {
                 Some(approval.id),
                 input.session_id,
                 "approval.requested",
-                json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence, "tool_call_id": tool_call.id}),
+                json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence, "expires_at": approval.expires_at, "tool_call_id": tool_call.id}),
             )
             .await?;
         state
@@ -1777,7 +1781,7 @@ impl ToolExecutor for ApprovalRequestTool {
                 "approval.requested",
                 "approval",
                 Some(approval.id),
-                json!({"action": approval.action, "risk_level": approval.risk_level}),
+                json!({"action": approval.action, "risk_level": approval.risk_level, "expires_at": approval.expires_at}),
             ))
             .await?;
         state
@@ -2028,6 +2032,7 @@ async fn execute_tool_invocation(
     }
 
     if policy_decision.decision == "requires_approval" {
+        let created_at = Utc::now();
         let approval = Approval {
             id: Uuid::new_v4(),
             session_id: input.session_id,
@@ -2038,7 +2043,8 @@ async fn execute_tool_invocation(
             evidence: json!({"tool": name, "args": input.args}),
             decision_payload: json!({}),
             status: "pending".to_string(),
-            created_at: Utc::now(),
+            expires_at: approval_expires_at(created_at, None),
+            created_at,
             decided_at: None,
         };
         let approval = state.insert_approval(approval).await?;
@@ -2076,7 +2082,7 @@ async fn execute_tool_invocation(
                 Some(approval.id),
                 input.session_id,
                 "approval.requested",
-                json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence}),
+                json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence, "expires_at": approval.expires_at}),
             )
             .await?;
         state
@@ -2087,7 +2093,7 @@ async fn execute_tool_invocation(
                 "approval.requested",
                 "approval",
                 Some(approval.id),
-                json!({"tool_call_id": approval.tool_call_id, "action": approval.action, "risk_level": approval.risk_level}),
+                json!({"tool_call_id": approval.tool_call_id, "action": approval.action, "risk_level": approval.risk_level, "expires_at": approval.expires_at}),
             ))
             .await?;
         state
@@ -2687,6 +2693,17 @@ fn token_cost_cents(tokens: i64, price_per_1k_cents: Option<f64>) -> f64 {
     (tokens.max(0) as f64 / 1000.0) * price
 }
 
+fn approval_expires_at(
+    created_at: DateTime<Utc>,
+    expires_in_seconds: Option<&Value>,
+) -> Option<DateTime<Utc>> {
+    let seconds = expires_in_seconds
+        .and_then(Value::as_i64)
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(86_400);
+    Some(created_at + chrono::Duration::seconds(seconds))
+}
+
 async fn list_approvals(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2720,6 +2737,15 @@ async fn reject(
     decide_approval(state, id, "rejected").await
 }
 
+async fn expire(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Approval>, AppError> {
+    authorize_approval_decision(&state, &headers, id).await?;
+    Ok(Json(expire_approval_record(&state, id).await?))
+}
+
 async fn modify_approval(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -2732,6 +2758,10 @@ async fn modify_approval(
         return Err(AppError::bad_request(
             "only pending approvals can be modified",
         ));
+    }
+    if approval_is_expired(&approval) {
+        expire_approval_record(&state, id).await?;
+        return Err(AppError::bad_request("approval expired"));
     }
     if let Some(tool_call_id) = approval.tool_call_id {
         state
@@ -2939,6 +2969,16 @@ async fn decide_approval(
     approval_id: Uuid,
     status: &str,
 ) -> Result<Json<Approval>, AppError> {
+    let approval = state.get_approval(approval_id).await?;
+    if approval.status != "pending" {
+        return Err(AppError::bad_request(
+            "only pending approvals can be decided",
+        ));
+    }
+    if approval_is_expired(&approval) {
+        expire_approval_record(&state, approval_id).await?;
+        return Err(AppError::bad_request("approval expired"));
+    }
     let updated = state.decide_approval(approval_id, status).await?;
     state
         .append_event(
@@ -2977,6 +3017,42 @@ async fn decide_approval(
         ))
         .await?;
     Ok(Json(updated))
+}
+
+fn approval_is_expired(approval: &Approval) -> bool {
+    approval.status == "pending"
+        && approval
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+}
+
+async fn expire_approval_record(state: &AppState, approval_id: Uuid) -> Result<Approval, AppError> {
+    let approval = state.get_approval(approval_id).await?;
+    if approval.status != "pending" {
+        return Ok(approval);
+    }
+    let updated = state.decide_approval(approval_id, "expired").await?;
+    state
+        .append_event(
+            "system",
+            Some(approval_id),
+            updated.session_id,
+            "approval.expired",
+            json!({"approval_id": approval_id, "decision": "expired", "expires_at": updated.expires_at}),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(updated.session_id),
+            "system",
+            Some(approval_id),
+            "approval.expired",
+            "approval",
+            Some(approval_id),
+            json!({"tool_call_id": updated.tool_call_id, "decision": "expired", "expires_at": updated.expires_at}),
+        ))
+        .await?;
+    Ok(updated)
 }
 
 async fn complete_session_after_approval(
@@ -4687,11 +4763,42 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(approvals.iter().any(|approval| {
-            approval.session_id == session.id
-                && approval.action == "manual.review"
-                && approval.status == "pending"
-        }));
+        let pending_approval = approvals
+            .iter()
+            .find(|approval| {
+                approval.session_id == session.id
+                    && approval.action == "manual.review"
+                    && approval.status == "pending"
+            })
+            .expect("pending manual approval");
+        assert!(pending_approval.expires_at.is_some());
+
+        let expired: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{}/expire", pending_approval.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(expired.status, "expired");
+        let (status, approval_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{}/approve", pending_approval.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            approval_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("only pending approvals")
+        );
 
         let waiting: Session = request_json(
             app.clone(),
@@ -4702,6 +4809,20 @@ not json
         )
         .await;
         assert!(matches!(waiting.status, SessionStatus::WaitingApproval));
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "approval.expired")
+        );
 
         let tool_calls: Vec<ToolCall> = request_json(
             app,
