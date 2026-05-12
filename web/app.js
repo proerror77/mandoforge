@@ -21,6 +21,7 @@ const state = {
   evalDatasets: [],
   evalCases: [],
   evalRuns: [],
+  evalJudgeProfiles: [],
   evalGates: {},
   evalDrifts: {},
   agentReleases: {},
@@ -95,6 +96,7 @@ const rollbackPolicyRolloutButton = document.querySelector("#rollback-policy-rol
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
+const evalJudgeProfileRoot = document.querySelector("#eval-judge-profiles");
 const agentReleaseRoot = document.querySelector("#agent-releases");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
@@ -123,6 +125,7 @@ const approvalGovernanceRoot = document.querySelector("#approval-governance");
 const providerForm = document.querySelector("#provider-form");
 const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
 const secretForm = document.querySelector("#secret-form");
+const evalJudgeProfileForm = document.querySelector("#eval-judge-profile-form");
 const evalDatasetForm = document.querySelector("#eval-dataset-form");
 const evalCaseForm = document.querySelector("#eval-case-form");
 const evalRunForm = document.querySelector("#eval-run-form");
@@ -159,6 +162,7 @@ runDueApprovalEscalationsButton.addEventListener("click", runDueApprovalEscalati
 providerForm.addEventListener("submit", createProvider);
 providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
 secretForm.addEventListener("submit", createSecretRecord);
+evalJudgeProfileForm.addEventListener("submit", createEvalJudgeProfile);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
 policyForm.addEventListener("submit", simulatePolicy);
 policyTestForm.addEventListener("submit", testPolicy);
@@ -608,6 +612,22 @@ async function createEvalDataset(event) {
   await refreshOps();
 }
 
+async function createEvalJudgeProfile(event) {
+  event.preventDefault();
+  const form = new FormData(evalJudgeProfileForm);
+  await api("/api/eval/judge-profiles", {
+    method: "POST",
+    body: JSON.stringify({
+      name: String(form.get("name") || "").trim(),
+      endpoint: String(form.get("endpoint") || "").trim(),
+      model: String(form.get("model") || "").trim(),
+      api_key_ref: String(form.get("api_key_ref") || "").trim() || null,
+      timeout_seconds: Number(form.get("timeout_seconds") || 30),
+    }),
+  });
+  await refreshOps();
+}
+
 async function createEvalCase(event) {
   event.preventDefault();
   const form = new FormData(evalCaseForm);
@@ -1006,6 +1026,7 @@ async function refreshOps() {
     policy,
     policyRuntime,
     policyRevisions,
+    evalJudgeProfiles,
     evalDatasets,
     evalRuns,
     usage,
@@ -1023,6 +1044,7 @@ async function refreshOps() {
       api("/api/policy"),
       api("/api/policy/runtime"),
       api("/api/policy/revisions"),
+      api("/api/eval/judge-profiles"),
       api("/api/eval/datasets"),
       api("/api/eval/runs"),
       api("/api/usage"),
@@ -1039,6 +1061,7 @@ async function refreshOps() {
   state.policy = policy;
   state.policyRuntime = policyRuntime;
   state.policyRevisions = policyRevisions;
+  state.evalJudgeProfiles = evalJudgeProfiles;
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
   state.usage = usage;
@@ -1186,6 +1209,7 @@ function renderOps() {
   renderSecretRecords();
   renderApprovalGovernance();
   renderPolicy();
+  renderEvalJudgeProfiles();
   renderEvalDatasets();
   renderEvalCases();
   renderEvalRuns();
@@ -2237,6 +2261,37 @@ function renderEvalRuns() {
       promoteEvalRun(button.dataset.evalPromoteProd, "prod"),
     );
   });
+}
+
+function renderEvalJudgeProfiles() {
+  evalJudgeProfileRoot.innerHTML = state.evalJudgeProfiles.length
+    ? state.evalJudgeProfiles
+        .map(
+          (profile) => `
+            <div class="item">
+              <strong>${escapeHtml(profile.name)}</strong>
+              <div class="muted">${escapeHtml(profile.status)} · ${escapeHtml(profile.default_model || "no model")}</div>
+              <div class="muted">${escapeHtml(profile.base_url || "no endpoint")}</div>
+              <div class="muted">API key ref: ${escapeHtml(profile.config?.api_key_ref ? "configured" : "not configured")}</div>
+              <pre>${escapeHtml(
+                JSON.stringify(
+                  {
+                    provider_type: profile.provider_type,
+                    timeout_seconds: profile.config?.timeout_seconds,
+                    grading_policy: {
+                      kind: "judge",
+                      judge_profile: profile.name,
+                    },
+                  },
+                  null,
+                  2,
+                ),
+              )}</pre>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No eval judge profiles</div>`;
 }
 
 function renderAgentReleases() {

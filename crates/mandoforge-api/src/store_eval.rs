@@ -4,7 +4,7 @@ use serde_json::Value;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::eval_judge::EvalJudgeRequest;
+use crate::eval_judge::{EvalJudgeConfig, EvalJudgeRequest};
 use crate::policy::ensure_read_only_sql_with_policy;
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{eval_case_from_row, eval_dataset_from_row, eval_run_from_row};
@@ -12,6 +12,12 @@ use crate::{
     AppError, AppState, CreateEvalCase, CreateEvalDataset, CreateEvalRun, EvalCase, EvalDataset,
     EvalRun,
 };
+
+struct EvalJudgeRuntime {
+    config: EvalJudgeConfig,
+    grading_policy: Value,
+    evidence: Value,
+}
 
 impl AppState {
     pub(crate) async fn list_eval_datasets(&self) -> Result<Vec<EvalDataset>, AppError> {
@@ -289,27 +295,31 @@ impl AppState {
         case: &EvalCase,
         agent_version: &crate::AgentVersion,
     ) -> EvalCaseResult {
-        let Some(config) = self.eval_judge_config.as_ref() else {
-            return EvalCaseResult::fail(
-                case.id,
-                "judge",
-                "eval judge is not configured",
-                json!({
-                    "configured": false,
-                    "required_env": ["MANDOFORGE_EVAL_JUDGE_URL"],
-                }),
-            );
+        let runtime = match self.eval_judge_runtime(case).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return EvalCaseResult::fail(
+                    case.id,
+                    "judge",
+                    error.message,
+                    json!({
+                        "configured": false,
+                        "required_env": ["MANDOFORGE_EVAL_JUDGE_URL"],
+                        "profile_hint": "set grading_policy.judge_profile to an active eval_judge provider",
+                    }),
+                );
+            }
         };
 
         let request = EvalJudgeRequest {
             case_id: case.id,
             input: case.input.clone(),
             expected: case.expected.clone(),
-            grading_policy: case.grading_policy.clone(),
+            grading_policy: runtime.grading_policy.clone(),
             agent_id: agent_version.agent_id,
             agent_version_id: agent_version.id,
         };
-        match self.eval_judge_client.grade(config, request).await {
+        match self.eval_judge_client.grade(&runtime.config, request).await {
             Ok(response) => EvalCaseResult::from_match(
                 case.id,
                 "judge",
@@ -319,6 +329,7 @@ impl AppState {
                     "configured": true,
                     "score": response.score,
                     "judge_details": response.details,
+                    "judge": runtime.evidence,
                     "agent_id": agent_version.agent_id,
                     "agent_version_id": agent_version.id,
                 }),
@@ -329,11 +340,103 @@ impl AppState {
                 error.message,
                 json!({
                     "configured": true,
+                    "judge": runtime.evidence,
                     "agent_id": agent_version.agent_id,
                     "agent_version_id": agent_version.id,
                 }),
             ),
         }
+    }
+
+    async fn eval_judge_runtime(&self, case: &EvalCase) -> Result<EvalJudgeRuntime, AppError> {
+        let profile_name = case
+            .grading_policy
+            .get("judge_profile")
+            .or_else(|| case.grading_policy.get("profile"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if let Some(profile_name) = profile_name {
+            let provider = self
+                .provider_by_name(profile_name)
+                .await?
+                .ok_or_else(|| AppError::bad_request("eval judge profile not found"))?;
+            if provider.provider_type != "eval_judge" {
+                return Err(AppError::bad_request(
+                    "configured judge_profile is not an eval_judge provider",
+                ));
+            }
+            if provider.status != "active" {
+                return Err(AppError::bad_request(
+                    "configured eval judge profile is not active",
+                ));
+            }
+            let endpoint = provider
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AppError::bad_request("eval judge profile endpoint is required"))?
+                .to_string();
+            let model = provider
+                .default_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AppError::bad_request("eval judge profile model is required"))?
+                .to_string();
+            let timeout_seconds = provider
+                .config
+                .get("timeout_seconds")
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+                .unwrap_or(30)
+                .min(600);
+            let api_key_ref_configured = provider
+                .config
+                .get("api_key_ref")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty());
+            let mut grading_policy = case.grading_policy.clone();
+            if let Some(object) = grading_policy.as_object_mut() {
+                object.insert("judge_profile".to_string(), json!(provider.name));
+                object.insert("judge_provider_id".to_string(), json!(provider.id));
+                object.insert("judge_model".to_string(), json!(model));
+                object.insert(
+                    "judge_api_key_ref_configured".to_string(),
+                    json!(api_key_ref_configured),
+                );
+            }
+            return Ok(EvalJudgeRuntime {
+                config: EvalJudgeConfig {
+                    endpoint,
+                    timeout_seconds,
+                },
+                grading_policy,
+                evidence: json!({
+                    "source": "profile",
+                    "profile": provider.name,
+                    "provider_id": provider.id,
+                    "model": model,
+                    "timeout_seconds": timeout_seconds,
+                    "api_key_ref_configured": api_key_ref_configured,
+                }),
+            });
+        }
+
+        let Some(config) = self.eval_judge_config.as_ref() else {
+            return Err(AppError::bad_request("eval judge is not configured"));
+        };
+        Ok(EvalJudgeRuntime {
+            config: config.clone(),
+            grading_policy: case.grading_policy.clone(),
+            evidence: json!({
+                "source": "env",
+                "endpoint_configured": true,
+                "timeout_seconds": config.timeout_seconds,
+            }),
+        })
     }
 
     async fn grade_policy_case(

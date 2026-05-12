@@ -423,6 +423,29 @@
             </div>
             <div>
               <h3>Eval Runs</h3>
+              <form id="eval-judge-profile-form" class="stack-form compact-form">
+                <label>
+                  Judge profile
+                  <input name="name" required value="quality-judge" />
+                </label>
+                <label>
+                  Endpoint
+                  <input name="endpoint" required value="http://judge.local" />
+                </label>
+                <label>
+                  Model
+                  <input name="model" required value="judge-model-v1" />
+                </label>
+                <label>
+                  API key ref
+                  <input name="api_key_ref" value="vault:eval/judges/default#api_key" />
+                </label>
+                <label>
+                  Timeout seconds
+                  <input name="timeout_seconds" type="number" min="1" max="600" value="30" />
+                </label>
+                <button type="submit">Create Judge Profile</button>
+              </form>
               <form id="eval-dataset-form" class="stack-form compact-form">
                 <label>
                   Dataset name
@@ -465,6 +488,7 @@
                 <button type="submit">Run Eval</button>
                 <button type="button" class="secondary form-inline-action" id="load-eval-cases">Load Cases</button>
               </form>
+              <div id="eval-judge-profiles" class="list"></div>
               <div id="eval-datasets" class="list"></div>
               <div id="eval-cases" class="list"></div>
               <div id="eval-runs" class="list"></div>

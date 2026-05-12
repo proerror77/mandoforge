@@ -1190,6 +1190,17 @@ struct CreateEvalRun {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateEvalJudgeProfile {
+    name: String,
+    endpoint: String,
+    model: String,
+    #[serde(default)]
+    api_key_ref: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct EvalGateRequest {
     #[serde(default)]
     min_score: Option<f64>,
@@ -1590,6 +1601,10 @@ fn build_router(state: AppState) -> Router {
             "/api/eval/datasets/{id}/runs",
             get(list_dataset_eval_runs).post(create_eval_run),
         )
+        .route(
+            "/api/eval/judge-profiles",
+            get(list_eval_judge_profiles).post(create_eval_judge_profile),
+        )
         .route("/api/eval/runs", get(list_eval_runs))
         .route("/api/eval/runs/{id}/gate", post(gate_eval_run))
         .route("/api/eval/runs/{id}/drift", get(get_eval_run_drift))
@@ -1712,16 +1727,9 @@ fn eval_judge_config_from_env() -> Result<Option<EvalJudgeConfig>> {
 }
 
 fn eval_judge_client_from_env() -> Result<Arc<dyn EvalJudgeClient>> {
-    if std::env::var("MANDOFORGE_EVAL_JUDGE_URL")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        Ok(Arc::new(
-            HttpEvalJudgeClient::new().map_err(|error| anyhow::anyhow!(error.message))?,
-        ))
-    } else {
-        Ok(Arc::new(ReservedEvalJudgeClient))
-    }
+    Ok(Arc::new(
+        HttpEvalJudgeClient::new().map_err(|error| anyhow::anyhow!(error.message))?,
+    ))
 }
 
 fn cost_alert_webhook_url_from_env() -> Option<String> {
@@ -6444,6 +6452,86 @@ async fn create_eval_case(
     Ok(Json(state.create_eval_case(id, input).await?))
 }
 
+async fn list_eval_judge_profiles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ProviderRecord>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "eval_judge_profiles",
+        None,
+    )
+    .await?;
+    let mut profiles: Vec<_> = state
+        .list_providers()
+        .await?
+        .into_iter()
+        .filter(|provider| provider.provider_type == "eval_judge")
+        .collect();
+    profiles.sort_by_key(|profile| profile.created_at);
+    profiles.reverse();
+    Ok(Json(profiles))
+}
+
+async fn create_eval_judge_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateEvalJudgeProfile>,
+) -> Result<Json<ProviderRecord>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "eval_judge_profile".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let name = required_trimmed(&input.name, "name")?;
+    let endpoint = required_trimmed(&input.endpoint, "endpoint")?;
+    let model = required_trimmed(&input.model, "model")?;
+    let mut config = serde_json::Map::new();
+    config.insert(
+        "timeout_seconds".to_string(),
+        json!(input.timeout_seconds.unwrap_or(30).clamp(1, 600)),
+    );
+    if let Some(api_key_ref) = optional_trimmed(input.api_key_ref.as_deref()) {
+        config.insert(
+            "api_key_ref".to_string(),
+            json!(normalize_provider_api_key_ref(&api_key_ref)?),
+        );
+    }
+    let profile = state
+        .create_provider(CreateProviderRecord {
+            provider_type: "eval_judge".to_string(),
+            name,
+            base_url: Some(endpoint),
+            default_model: Some(model),
+            config: Value::Object(config),
+        })
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "eval.judge_profile_saved",
+            "eval_judge_profile",
+            Some(profile.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": profile.name,
+                "model": profile.default_model,
+                "endpoint_configured": profile.base_url.is_some(),
+                "api_key_ref_configured": profile.config.get("api_key_ref").is_some()
+            }),
+        ))
+        .await?;
+    Ok(Json(profile))
+}
+
 async fn list_dataset_eval_runs(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -10682,15 +10770,17 @@ not json
     #[derive(Default)]
     struct RecordingEvalJudgeClient {
         requests: tokio::sync::Mutex<Vec<EvalJudgeRequest>>,
+        configs: tokio::sync::Mutex<Vec<EvalJudgeConfig>>,
     }
 
     #[async_trait::async_trait]
     impl EvalJudgeClient for RecordingEvalJudgeClient {
         async fn grade(
             &self,
-            _config: &EvalJudgeConfig,
+            config: &EvalJudgeConfig,
             request: EvalJudgeRequest,
         ) -> Result<EvalJudgeResponse, AppError> {
+            self.configs.lock().await.push(config.clone());
             self.requests.lock().await.push(request);
             Ok(EvalJudgeResponse {
                 passed: true,
@@ -16555,6 +16645,166 @@ not json
             )
             .expect("valid uuid")
         );
+        assert_eq!(run.details["cases"][0]["details"]["judge"]["source"], "env");
+    }
+
+    #[tokio::test]
+    async fn eval_judge_case_uses_persisted_profile_and_augments_policy() {
+        let judge = Arc::new(RecordingEvalJudgeClient::default());
+        let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.eval_judge_client = judge.clone();
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let profile = state
+            .create_provider(CreateProviderRecord {
+                provider_type: "eval_judge".to_string(),
+                name: "quality-judge".to_string(),
+                base_url: Some("http://judge.profile".to_string()),
+                default_model: Some("judge-model-v1".to_string()),
+                config: json!({
+                    "timeout_seconds": 45,
+                    "api_key_ref": "vault:eval/judges/default#api_key"
+                }),
+            })
+            .await
+            .expect("create judge profile");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("list agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let dataset = state
+            .create_eval_dataset(CreateEvalDataset {
+                name: "profile judge eval".to_string(),
+                description: None,
+            })
+            .await
+            .expect("create dataset");
+        let case = state
+            .create_eval_case(
+                dataset.id,
+                CreateEvalCase {
+                    input: json!({"final_answer": "profile judged answer"}),
+                    expected: Some(json!({"rubric": "answer_quality"})),
+                    grading_policy: json!({
+                        "kind": "judge",
+                        "judge_profile": "quality-judge",
+                        "rubric": "answer_quality"
+                    }),
+                },
+            )
+            .await
+            .expect("create judge case");
+
+        let run = state
+            .create_eval_run(dataset.id, CreateEvalRun { agent_id: agent.id })
+            .await
+            .expect("create eval run");
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.score, Some(1.0));
+        assert_eq!(
+            run.details["cases"][0]["details"]["judge"]["source"],
+            "profile"
+        );
+        assert_eq!(
+            run.details["cases"][0]["details"]["judge"]["profile"],
+            "quality-judge"
+        );
+        assert_eq!(
+            run.details["cases"][0]["details"]["judge"]["model"],
+            "judge-model-v1"
+        );
+        assert_eq!(
+            run.details["cases"][0]["details"]["judge"]["provider_id"],
+            profile.id.to_string()
+        );
+        assert_eq!(
+            run.details["cases"][0]["details"]["judge"]["api_key_ref_configured"],
+            true
+        );
+
+        let configs = judge.configs.lock().await;
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].endpoint, "http://judge.profile");
+        assert_eq!(configs[0].timeout_seconds, 45);
+        drop(configs);
+
+        let requests = judge.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].case_id, case.id);
+        assert_eq!(requests[0].grading_policy["judge_profile"], "quality-judge");
+        assert_eq!(requests[0].grading_policy["judge_model"], "judge-model-v1");
+        assert_eq!(
+            requests[0].grading_policy["judge_provider_id"],
+            profile.id.to_string()
+        );
+        assert_eq!(
+            requests[0].grading_policy["judge_api_key_ref_configured"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_judge_profile_api_normalizes_secret_ref_and_audits() {
+        let app = test_app().await;
+        let profile: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/eval/judge-profiles")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "quality-judge",
+                        "endpoint": "http://judge.profile",
+                        "model": "judge-model-v1",
+                        "api_key_ref": " vault:eval/judges/default#api_key ",
+                        "timeout_seconds": 45
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(profile.provider_type, "eval_judge");
+        assert_eq!(profile.name, "quality-judge");
+        assert_eq!(profile.base_url.as_deref(), Some("http://judge.profile"));
+        assert_eq!(profile.default_model.as_deref(), Some("judge-model-v1"));
+        assert_eq!(
+            profile.config["api_key_ref"],
+            "vault:eval/judges/default#api_key"
+        );
+        assert_eq!(profile.config["timeout_seconds"], 45);
+
+        let profiles: Vec<ProviderRecord> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/eval/judge-profiles")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(profiles.iter().any(|candidate| candidate.id == profile.id));
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "eval.judge_profile_saved"
+                && log.resource_id == Some(profile.id)
+                && log.details["api_key_ref_configured"] == true
+        }));
     }
 
     #[tokio::test]
