@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -8,7 +9,9 @@ use uuid::Uuid;
 
 use crate::{
     AppError,
-    execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionQueueBackend},
+    execution_queue::{
+        ExecutionJob, ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,12 +323,20 @@ impl BrokerQueueHealthCheck for ReservedBrokerQueueHealthCheck {
 #[allow(dead_code)]
 pub(crate) struct BrokerExecutionQueue {
     kind: BrokerQueueKind,
+    config: Option<BrokerQueueConfig>,
 }
 
 #[allow(dead_code)]
 impl BrokerExecutionQueue {
     pub(crate) fn new(kind: BrokerQueueKind) -> Self {
-        Self { kind }
+        Self { kind, config: None }
+    }
+
+    pub(crate) fn redis(config: BrokerQueueConfig) -> Self {
+        Self {
+            kind: BrokerQueueKind::Redis,
+            config: Some(config),
+        }
     }
 
     fn reserved_error(&self) -> AppError {
@@ -338,8 +349,36 @@ impl BrokerExecutionQueue {
 
 #[async_trait]
 impl ExecutionQueueBackend for BrokerExecutionQueue {
-    async fn enqueue(&self, _request: ExecutionJobRequest) -> Result<ExecutionJob, AppError> {
-        Err(self.reserved_error())
+    async fn enqueue(&self, request: ExecutionJobRequest) -> Result<ExecutionJob, AppError> {
+        if self.kind != BrokerQueueKind::Redis {
+            return Err(self.reserved_error());
+        }
+        let config = self
+            .config
+            .as_ref()
+            .ok_or_else(|| AppError::bad_request("Redis execution queue config is missing"))?;
+        let job = ExecutionJob {
+            id: Uuid::new_v4(),
+            session_id: request.session_id,
+            approval_id: request.approval_id,
+            tool_call_id: request.tool_call_id,
+            tool_name: request.tool_name.clone(),
+            status: ExecutionJobStatus::Queued,
+            enqueued_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            worker_id: None,
+            lease_expires_at: None,
+        };
+        let payload = RedisExecutionJobPayload {
+            session_id: job.session_id,
+            approval_id: job.approval_id,
+            tool_call_id: job.tool_call_id,
+            tool_name: job.tool_name.clone(),
+        };
+        let command = RedisStreamCommand::xadd_enqueue(config, &payload)?;
+        RedisStreamClient::execute(config, &command).await?;
+        Ok(job)
     }
 
     async fn start(&self, _job_id: Uuid, _worker_id: &str) -> Result<ExecutionJob, AppError> {
@@ -366,11 +405,11 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind, RedisExecutionJobPayload,
-        RedisStreamClient, RedisStreamCommand, ReservedBrokerQueueHealthCheck, encode_resp_array,
-        parse_redis_response, redis_tcp_addr,
+        BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind,
+        RedisExecutionJobPayload, RedisStreamClient, RedisStreamCommand,
+        ReservedBrokerQueueHealthCheck, encode_resp_array, parse_redis_response, redis_tcp_addr,
     };
-    use crate::execution_queue::ExecutionJobRequest;
+    use crate::execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -598,5 +637,44 @@ mod tests {
 
         server.await.expect("server");
         assert_eq!(response, "1-0");
+    }
+
+    #[tokio::test]
+    async fn broker_execution_queue_enqueues_to_redis_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0; 4096];
+            let bytes = socket.read(&mut buffer).await.expect("read");
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            assert!(request.contains("file.write"));
+            socket.write_all(b"$3\r\n1-0\r\n").await.expect("write");
+        });
+        let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Redis, |key| match key {
+            "MANDOFORGE_REDIS_URL" => Some(format!("redis://{addr}/0")),
+            _ => None,
+        })
+        .expect("redis config");
+        let queue = BrokerExecutionQueue::redis(config);
+        let job = queue
+            .enqueue(ExecutionJobRequest {
+                session_id: "00000000-0000-4000-8000-000000000001"
+                    .parse()
+                    .expect("session id"),
+                approval_id: "00000000-0000-4000-8000-000000000002"
+                    .parse()
+                    .expect("approval id"),
+                tool_call_id: "00000000-0000-4000-8000-000000000003"
+                    .parse()
+                    .expect("tool call id"),
+                tool_name: "file.write".to_string(),
+            })
+            .await
+            .expect("enqueue redis job");
+
+        server.await.expect("server");
+        assert_eq!(job.status, ExecutionJobStatus::Queued);
+        assert_eq!(job.tool_name, "file.write");
     }
 }

@@ -38,6 +38,7 @@
 - [x] Add Rust `mandoforge-worker` binary for API-drained execution jobs.
 - [x] Add Docker Compose and Kubernetes worker deployment entries.
 - [x] Add static Worker Dashboard for execution job status and API drain.
+- [x] Add Redis Streams execution queue enqueue backend with mock Redis coverage.
 - [x] Split Postgres row mappers out of the store module.
 - [x] Split store backend type definitions out of the store method module.
 - [x] Split agent, agent-version, and session store methods out of the remaining store module.

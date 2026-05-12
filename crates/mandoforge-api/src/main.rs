@@ -72,8 +72,7 @@ use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
 use execution_queue::ExecutionQueue;
 #[cfg(test)]
 use execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
-#[cfg(test)]
-use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueKind};
+use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueKind};
 use mcp_gateway::{
     HttpMcpGatewayClient, McpCallRequest, McpGatewayClient, McpGatewayConfig,
     ReservedMcpGatewayClient,
@@ -123,6 +122,7 @@ struct AppState {
 enum ExecutionQueueBackendSelection {
     Memory,
     Postgres,
+    Redis,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -991,14 +991,15 @@ fn select_execution_queue_backend(
                 anyhow::bail!("MANDOFORGE_EXECUTION_QUEUE_BACKEND=postgres requires DATABASE_URL");
             }
         }
-        "broker" | "redis" | "nats" => {
+        "redis" => Ok(ExecutionQueueBackendSelection::Redis),
+        "broker" | "nats" => {
             anyhow::bail!(
-                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is reserved for a future broker-backed queue; use auto, memory, or postgres"
+                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is reserved for a future broker-backed queue; use auto, memory, postgres, or redis"
             );
         }
         other => {
             anyhow::bail!(
-                "unsupported MANDOFORGE_EXECUTION_QUEUE_BACKEND={other}; use auto, memory, or postgres"
+                "unsupported MANDOFORGE_EXECUTION_QUEUE_BACKEND={other}; use auto, memory, postgres, or redis"
             );
         }
     }
@@ -1018,6 +1019,13 @@ fn execution_queue_from_env(store: &StoreBackend, tenant_id: Uuid) -> Result<Exe
         }
         (ExecutionQueueBackendSelection::Postgres, StoreBackend::Memory(_)) => {
             anyhow::bail!("Postgres execution queue selected without a Postgres store")
+        }
+        (ExecutionQueueBackendSelection::Redis, _) => {
+            let config = BrokerQueueConfig::from_env(BrokerQueueKind::Redis)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            Ok(ExecutionQueue::broker(Arc::new(
+                BrokerExecutionQueue::redis(config),
+            )))
         }
     }
 }
@@ -5980,9 +5988,9 @@ not json
             select_execution_queue_backend(Some("postgres"), false).is_err(),
             "forced postgres queue should require DATABASE_URL"
         );
-        assert!(
-            select_execution_queue_backend(Some("redis"), true).is_err(),
-            "broker-backed queue names are reserved until implemented"
+        assert_eq!(
+            select_execution_queue_backend(Some("redis"), true).expect("redis queue"),
+            ExecutionQueueBackendSelection::Redis
         );
     }
 

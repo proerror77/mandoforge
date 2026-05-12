@@ -29,6 +29,10 @@ impl ExecutionQueue {
         }
     }
 
+    pub(crate) fn broker(backend: Arc<dyn ExecutionQueueBackend>) -> Self {
+        Self { backend }
+    }
+
     pub(crate) async fn enqueue(
         &self,
         request: ExecutionJobRequest,
