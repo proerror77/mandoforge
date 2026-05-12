@@ -1086,7 +1086,43 @@ async fn authorize_request(
         resource_type: resource_type.into(),
         resource_id,
     };
-    state.authorizer.authorize(&principal, &request).await
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(state, &principal, &request).await
+}
+
+async fn enforce_resource_scope(
+    state: &AppState,
+    principal: &Principal,
+    request: &AuthorizationRequest,
+) -> Result<(), AppError> {
+    if principal.roles.contains(&Role::Admin) {
+        return Ok(());
+    }
+    let Some(resource_id) = request.resource_id else {
+        return Ok(());
+    };
+    let team_id = match request.resource_type.as_str() {
+        "agent" => state.get_agent(resource_id).await?.team_id,
+        "session" => {
+            let session = state.get_session(resource_id).await?;
+            state.get_agent(session.agent_id).await?.team_id
+        }
+        _ => None,
+    };
+    let Some(team_id) = team_id else {
+        return Ok(());
+    };
+    if state
+        .subject_can_access_team(&principal.subject_id, team_id)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(AppError::forbidden(format!(
+            "principal {} has no membership for scoped {}",
+            principal.subject_id, request.resource_type
+        )))
+    }
 }
 
 async fn list_events(
@@ -1441,6 +1477,14 @@ async fn execute_tool(
     Json(input): Json<ExecuteTool>,
 ) -> Result<Json<Value>, AppError> {
     authorize_tool_execution(&state, &headers, &name).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(input.session_id),
+    )
+    .await?;
     Ok(Json(execute_tool_invocation(&state, &name, input).await?))
 }
 
@@ -2076,7 +2120,15 @@ async fn authorize_approval_decision(
         resource_type: "approval".to_string(),
         resource_id: Some(approval_id),
     };
-    state.authorizer.authorize(&principal, &request).await
+    state.authorizer.authorize(&principal, &request).await?;
+    let approval = state.get_approval(approval_id).await?;
+    let session_request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::SessionsRead,
+        resource_type: "session".to_string(),
+        resource_id: Some(approval.session_id),
+    };
+    enforce_resource_scope(state, &principal, &session_request).await
 }
 
 async fn list_artifacts(
@@ -2177,7 +2229,15 @@ async fn authorize_execution_job_run(
         resource_type: "execution_job".to_string(),
         resource_id: Some(job_id),
     };
-    state.authorizer.authorize(&principal, &request).await
+    state.authorizer.authorize(&principal, &request).await?;
+    let job = state.execution_queue.get(job_id).await?;
+    let session_request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::SessionsRead,
+        resource_type: "session".to_string(),
+        resource_id: Some(job.session_id),
+    };
+    enforce_resource_scope(state, &principal, &session_request).await
 }
 
 async fn list_session_audit_logs(
@@ -4099,6 +4159,50 @@ not json
         .await;
         assert_eq!(scoped_agent.team_id, Some(team.id));
         assert_eq!(scoped_agent.project_id, Some(project.id));
+
+        let scoped_session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": scoped_agent.id, "title": "scoped session"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let (status, scoped_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", scoped_session.id))
+                .header("x-mandoforge-subject", "outside-operator")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            scoped_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no membership")
+        );
+
+        let scoped_read: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", scoped_session.id))
+                .header("x-mandoforge-subject", "approver-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(scoped_read.id, scoped_session.id);
 
         let projects: Vec<Project> = request_json(
             app,

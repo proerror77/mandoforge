@@ -323,6 +323,48 @@ impl AppState {
         Ok(roles)
     }
 
+    pub(crate) async fn subject_can_access_team(
+        &self,
+        subject_id: &str,
+        team_id: Uuid,
+    ) -> Result<bool, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                let Some(team) = store.teams.get(&team_id) else {
+                    return Ok(false);
+                };
+                Ok(store.memberships.values().any(|membership| {
+                    membership.user_id == subject_id
+                        && (membership.team_id == Some(team_id)
+                            || (membership.team_id.is_none()
+                                && membership.organization_id == Some(team.organization_id)))
+                }))
+            }
+            StoreBackend::Postgres(pool) => {
+                let can_access: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                        SELECT 1
+                        FROM memberships m
+                        JOIN teams t ON t.id = $3 AND t.tenant_id = $1
+                        WHERE m.tenant_id = $1
+                          AND m.user_id = $2
+                          AND (
+                            m.team_id = $3
+                            OR (m.team_id IS NULL AND m.organization_id = t.organization_id)
+                          )
+                    )",
+                )
+                .bind(self.tenant_id)
+                .bind(subject_id)
+                .bind(team_id)
+                .fetch_one(pool)
+                .await?;
+                Ok(can_access)
+            }
+        }
+    }
+
     async fn ensure_organization_exists(&self, organization_id: Uuid) -> Result<(), AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {

@@ -31,6 +31,31 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn get_agent(&self, agent_id: Uuid) -> Result<Agent, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .agents
+                .get(&agent_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("agent not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, name, kind, provider, model, system_prompt, tools, created_at, team_id, project_id
+                     FROM agents
+                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL",
+                )
+                .bind(self.tenant_id)
+                .bind(agent_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent not found"))?;
+                agent_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn create_agent(&self, input: CreateAgent) -> Result<Agent, AppError> {
         let agent = Agent {
             id: Uuid::new_v4(),
