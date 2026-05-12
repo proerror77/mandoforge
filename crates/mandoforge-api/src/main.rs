@@ -37,6 +37,7 @@ mod policy;
 mod provider;
 mod secrets;
 mod shell_runner;
+mod store_approval_groups;
 mod store_approvals;
 mod store_artifacts;
 mod store_audit;
@@ -288,6 +289,52 @@ struct Approval {
     expires_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalGroup {
+    id: Uuid,
+    name: String,
+    subjects: Vec<String>,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateApprovalGroup {
+    name: String,
+    subjects: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalEscalationRule {
+    id: Uuid,
+    name: String,
+    risk_level: String,
+    group_id: Uuid,
+    order_index: i32,
+    after_seconds: i32,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateApprovalEscalationRule {
+    name: String,
+    risk_level: String,
+    group_id: Uuid,
+    #[serde(default)]
+    order_index: i32,
+    #[serde(default)]
+    after_seconds: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct EscalateApproval {
+    #[serde(default)]
+    group_id: Option<Uuid>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1075,6 +1122,15 @@ fn build_router(state: AppState) -> Router {
         .route("/api/approvals/{id}/expire", post(expire))
         .route("/api/approvals/{id}/modify", post(modify_approval))
         .route("/api/approvals/{id}/deliver", post(deliver_approval))
+        .route("/api/approvals/{id}/escalate", post(escalate_approval))
+        .route(
+            "/api/approval-groups",
+            get(list_approval_groups).post(create_approval_group),
+        )
+        .route(
+            "/api/approval-escalation-rules",
+            get(list_approval_escalation_rules).post(create_approval_escalation_rule),
+        )
         .route("/api/execution-jobs", get(list_execution_jobs))
         .route(
             "/api/execution-jobs/{id}/run",
@@ -2221,6 +2277,29 @@ impl ToolExecutor for ApprovalRequestTool {
                     "approver_subject": approver_subject,
                 });
             }
+        }
+        if let Some(group_id) = input
+            .args
+            .get("approver_group_id")
+            .or_else(|| input.args.get("delegated_approver_group_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| AppError::bad_request("approver_group_id must be a UUID"))?
+        {
+            let group = state.get_approval_group(group_id).await?;
+            if group.status != "active" {
+                return Err(AppError::bad_request("approval group is not active"));
+            }
+            merge_approval_evidence(
+                &mut evidence,
+                json!({
+                    "approver_group_id": group.id,
+                    "approver_group_name": group.name
+                }),
+            );
         }
         let created_at = Utc::now();
         let approval = Approval {
@@ -4336,6 +4415,63 @@ fn approval_expires_at(
     Some(created_at + chrono::Duration::seconds(seconds))
 }
 
+fn validate_approval_group_input(
+    mut input: CreateApprovalGroup,
+) -> Result<CreateApprovalGroup, AppError> {
+    input.name = input.name.trim().to_string();
+    if input.name.is_empty() {
+        return Err(AppError::bad_request("approval group name is required"));
+    }
+    input.subjects = input
+        .subjects
+        .into_iter()
+        .map(|subject| subject.trim().to_string())
+        .filter(|subject| !subject.is_empty())
+        .collect();
+    input.subjects.sort();
+    input.subjects.dedup();
+    if input.subjects.is_empty() {
+        return Err(AppError::bad_request(
+            "approval group requires at least one subject",
+        ));
+    }
+    Ok(input)
+}
+
+fn validate_approval_escalation_rule_input(
+    mut input: CreateApprovalEscalationRule,
+) -> Result<CreateApprovalEscalationRule, AppError> {
+    input.name = input.name.trim().to_string();
+    input.risk_level = input.risk_level.trim().to_string();
+    if input.name.is_empty() {
+        return Err(AppError::bad_request(
+            "approval escalation rule name is required",
+        ));
+    }
+    if input.risk_level.is_empty() {
+        return Err(AppError::bad_request(
+            "approval escalation rule risk_level is required",
+        ));
+    }
+    input.order_index = input.order_index.max(0);
+    input.after_seconds = input.after_seconds.max(0);
+    Ok(input)
+}
+
+fn merge_approval_evidence(target: &mut Value, patch: Value) {
+    if !target.is_object() {
+        *target = json!({"details": target.clone()});
+    }
+    let Some(target_map) = target.as_object_mut() else {
+        return;
+    };
+    if let Value::Object(patch_map) = patch {
+        for (key, value) in patch_map {
+            target_map.insert(key, value);
+        }
+    }
+}
+
 async fn list_approvals(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4349,6 +4485,100 @@ async fn list_approvals(
     )
     .await?;
     Ok(Json(state.list_approvals().await?))
+}
+
+async fn list_approval_groups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ApprovalGroup>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "approval_groups", None).await?;
+    Ok(Json(state.list_approval_groups().await?))
+}
+
+async fn create_approval_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateApprovalGroup>,
+) -> Result<Json<ApprovalGroup>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "approval_groups".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let group = state
+        .create_approval_group(validate_approval_group_input(input)?)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "approval.group_created",
+            "approval_group",
+            Some(group.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": group.name,
+                "subject_count": group.subjects.len()
+            }),
+        ))
+        .await?;
+    Ok(Json(group))
+}
+
+async fn list_approval_escalation_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ApprovalEscalationRule>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "approval_escalation_rules",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_approval_escalation_rules().await?))
+}
+
+async fn create_approval_escalation_rule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateApprovalEscalationRule>,
+) -> Result<Json<ApprovalEscalationRule>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "approval_escalation_rules".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let rule = state
+        .create_approval_escalation_rule(validate_approval_escalation_rule_input(input)?)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "approval.escalation_rule_created",
+            "approval_escalation_rule",
+            Some(rule.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": rule.name,
+                "risk_level": rule.risk_level,
+                "group_id": rule.group_id
+            }),
+        ))
+        .await?;
+    Ok(Json(rule))
 }
 
 async fn approve(
@@ -4429,6 +4659,97 @@ async fn modify_approval(
                 "tool_call_id": updated.tool_call_id,
                 "action": updated.action,
                 "comment": updated.decision_payload.get("comment").cloned().unwrap_or(Value::Null),
+            }),
+        ))
+        .await?;
+    Ok(Json(updated))
+}
+
+async fn escalate_approval(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<EscalateApproval>,
+) -> Result<Json<Approval>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "approval".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let approval = state.get_approval(id).await?;
+    if approval.status != "pending" {
+        return Err(AppError::bad_request(
+            "only pending approvals can be escalated",
+        ));
+    }
+    if approval_is_expired(&approval) {
+        expire_approval_record(&state, id).await?;
+        return Err(AppError::bad_request("approval expired"));
+    }
+    let (group, rule_id) = if let Some(group_id) = input.group_id {
+        (state.get_approval_group(group_id).await?, None)
+    } else {
+        let rule = state
+            .first_active_escalation_rule_for_risk(&approval.risk_level)
+            .await?
+            .ok_or_else(|| AppError::bad_request("no active escalation rule for approval risk"))?;
+        (
+            state.get_approval_group(rule.group_id).await?,
+            Some(rule.id),
+        )
+    };
+    if group.status != "active" {
+        return Err(AppError::bad_request("approval group is not active"));
+    }
+    let escalated_at = Utc::now();
+    let mut evidence = approval.evidence.clone();
+    merge_approval_evidence(
+        &mut evidence,
+        json!({
+            "approver_group_id": group.id,
+            "approver_group_name": group.name,
+            "escalation": {
+                "rule_id": rule_id,
+                "group_id": group.id,
+                "reason": input.reason.unwrap_or_else(|| "Manual escalation".to_string()),
+                "escalated_by": principal.subject_id,
+                "escalated_at": escalated_at
+            }
+        }),
+    );
+    let updated = state.update_approval_evidence(id, evidence).await?;
+    state
+        .append_event(
+            "user",
+            Some(id),
+            updated.session_id,
+            "approval.escalated",
+            json!({
+                "approval_id": id,
+                "group_id": group.id,
+                "group_name": group.name,
+                "rule_id": rule_id,
+                "escalated_at": escalated_at
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(updated.session_id),
+            "user",
+            Some(id),
+            "approval.escalated",
+            "approval",
+            Some(id),
+            json!({
+                "group_id": group.id,
+                "group_name": group.name,
+                "rule_id": rule_id,
+                "subject_count": group.subjects.len()
             }),
         ))
         .await?;
@@ -4523,22 +4844,40 @@ async fn authorize_approval_decision(
         resource_id: Some(approval.session_id),
     };
     enforce_resource_scope(state, &principal, &session_request).await?;
-    enforce_delegated_approver(&principal, &approval)
+    enforce_delegated_approver(state, &principal, &approval).await
 }
 
-fn enforce_delegated_approver(principal: &Principal, approval: &Approval) -> Result<(), AppError> {
+async fn enforce_delegated_approver(
+    state: &AppState,
+    principal: &Principal,
+    approval: &Approval,
+) -> Result<(), AppError> {
     if principal.roles.contains(&Role::Admin) {
         return Ok(());
     }
-    let Some(approver_subject) = delegated_approver_subject(approval) else {
-        return Ok(());
-    };
-    if principal.subject_id == approver_subject {
-        return Ok(());
+    if let Some(approver_subject) = delegated_approver_subject(approval) {
+        if principal.subject_id == approver_subject {
+            return Ok(());
+        }
+        return Err(AppError::forbidden(format!(
+            "approval is delegated to {approver_subject}"
+        )));
     }
-    Err(AppError::forbidden(format!(
-        "approval is delegated to {approver_subject}"
-    )))
+    if let Some(group_id) = delegated_approver_group_id(approval) {
+        let group = state.get_approval_group(group_id).await?;
+        if group
+            .subjects
+            .iter()
+            .any(|subject| subject == &principal.subject_id)
+        {
+            return Ok(());
+        }
+        return Err(AppError::forbidden(format!(
+            "approval is delegated to approval group {}",
+            group.name
+        )));
+    }
+    Ok(())
 }
 
 fn delegated_approver_subject(approval: &Approval) -> Option<&str> {
@@ -4561,6 +4900,27 @@ fn delegated_approver_subject(approval: &Approval) -> Option<&str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn delegated_approver_group_id(approval: &Approval) -> Option<Uuid> {
+    approval
+        .evidence
+        .get("approver_group_id")
+        .or_else(|| approval.evidence.get("delegated_approver_group_id"))
+        .or_else(|| {
+            approval
+                .evidence
+                .get("args")
+                .and_then(|args| args.get("approver_group_id"))
+        })
+        .or_else(|| {
+            approval
+                .evidence
+                .get("args")
+                .and_then(|args| args.get("delegated_approver_group_id"))
+        })
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value.trim()).ok())
 }
 
 async fn list_artifacts(
@@ -5411,6 +5771,7 @@ not json
         assert!(names.contains(&"0007_secret_records.sql"));
         assert!(names.contains(&"0008_policy_revisions.sql"));
         assert!(names.contains(&"0009_policy_revision_gates.sql"));
+        assert!(names.contains(&"0010_approval_groups.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -7319,6 +7680,167 @@ not json
         )
         .await;
         assert_eq!(admin_approved.status, "approved");
+    }
+
+    #[tokio::test]
+    async fn approval_groups_and_escalation_rules_delegate_decisions() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "approval group escalation"}),
+            ),
+        )
+        .await;
+
+        let group: ApprovalGroup = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approval-groups")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "risk-approvers",
+                        "subjects": ["approver-2", "approver-2", " approver-3 "]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(group.subjects, vec!["approver-2", "approver-3"]);
+
+        let rule: ApprovalEscalationRule = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approval-escalation-rules")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "high-risk-default",
+                        "risk_level": "high",
+                        "group_id": group.id,
+                        "order_index": 0,
+                        "after_seconds": 0
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rule.group_id, group.id);
+
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/approval.request/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "action": "manual.escalated_review",
+                        "risk_level": "high",
+                        "reason": "Escalate this approval to a group."
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+
+        let escalated: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/escalate"))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"reason": "Primary approver unavailable"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(escalated.evidence["approver_group_id"], json!(group.id));
+        assert_eq!(escalated.evidence["escalation"]["rule_id"], json!(rule.id));
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "approver-1")
+                .header("x-mandoforge-roles", "approver")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("approval group risk-approvers")
+        );
+
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "approver-2")
+                .header("x-mandoforge-roles", "approver")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "approval.group_created")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "approval.escalation_rule_created")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "approval.escalated")
+        );
     }
 
     #[tokio::test]

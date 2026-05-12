@@ -35,6 +35,8 @@ const state = {
   selectedOrganizationId: "",
   selectedTeamId: "",
   approvalDeliveries: {},
+  approvalGroups: [],
+  approvalEscalationRules: [],
   selectedArtifactId: null,
   selectedToolCallId: null,
   selectedAuditLogId: null,
@@ -80,6 +82,9 @@ const organizationForm = document.querySelector("#organization-form");
 const teamForm = document.querySelector("#team-form");
 const projectForm = document.querySelector("#project-form");
 const membershipForm = document.querySelector("#membership-form");
+const approvalGroupForm = document.querySelector("#approval-group-form");
+const approvalEscalationRuleForm = document.querySelector("#approval-escalation-rule-form");
+const approvalGovernanceRoot = document.querySelector("#approval-governance");
 const providerForm = document.querySelector("#provider-form");
 const secretForm = document.querySelector("#secret-form");
 const evalDatasetForm = document.querySelector("#eval-dataset-form");
@@ -98,6 +103,8 @@ organizationForm.addEventListener("submit", createOrganization);
 teamForm.addEventListener("submit", createTeam);
 projectForm.addEventListener("submit", createProject);
 membershipForm.addEventListener("submit", createMembership);
+approvalGroupForm.addEventListener("submit", createApprovalGroup);
+approvalEscalationRuleForm.addEventListener("submit", createApprovalEscalationRule);
 providerForm.addEventListener("submit", createProvider);
 secretForm.addEventListener("submit", createSecretRecord);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
@@ -219,6 +226,38 @@ async function createMembership(event) {
     body: JSON.stringify(payload),
   });
   setOrganizationId(organizationId);
+  await refreshOps();
+}
+
+async function createApprovalGroup(event) {
+  event.preventDefault();
+  const form = new FormData(approvalGroupForm);
+  await api("/api/approval-groups", {
+    method: "POST",
+    body: JSON.stringify({
+      name: String(form.get("name") || "").trim(),
+      subjects: String(form.get("subjects") || "")
+        .split(/[,\n]/)
+        .map((subject) => subject.trim())
+        .filter(Boolean),
+    }),
+  });
+  await refreshOps();
+}
+
+async function createApprovalEscalationRule(event) {
+  event.preventDefault();
+  const form = new FormData(approvalEscalationRuleForm);
+  await api("/api/approval-escalation-rules", {
+    method: "POST",
+    body: JSON.stringify({
+      name: String(form.get("name") || "").trim(),
+      risk_level: String(form.get("risk_level") || "").trim(),
+      group_id: String(form.get("group_id") || "").trim(),
+      order_index: 0,
+      after_seconds: 0,
+    }),
+  });
   await refreshOps();
 }
 
@@ -549,6 +588,8 @@ async function refreshOps() {
     usageRollups,
     organizations,
     executionJobs,
+    approvalGroups,
+    approvalEscalationRules,
   ] =
     await Promise.all([
       api("/api/providers"),
@@ -561,6 +602,8 @@ async function refreshOps() {
       api("/api/usage/rollups"),
       api("/api/organizations"),
       api("/api/execution-jobs"),
+      api("/api/approval-groups"),
+      api("/api/approval-escalation-rules"),
     ]);
   state.providers = providers;
   state.secretRecords = secretRecords;
@@ -572,6 +615,8 @@ async function refreshOps() {
   state.usageRollups = usageRollups;
   state.organizations = organizations;
   state.executionJobs = executionJobs;
+  state.approvalGroups = approvalGroups;
+  state.approvalEscalationRules = approvalEscalationRules;
   await refreshAgentReleases(false);
   if (
     state.selectedOrganizationId &&
@@ -649,6 +694,9 @@ async function refreshApprovals() {
       deliverApprovalNotification(button.dataset.deliverApproval),
     );
   });
+  approvalRoot.querySelectorAll("[data-escalate-approval]").forEach((button) => {
+    button.addEventListener("click", () => escalateApproval(button.dataset.escalateApproval));
+  });
   approvalRoot.querySelectorAll("[data-approval-modify]").forEach((form) => {
     form.addEventListener("submit", (event) => modifyApproval(event, form.dataset.approvalModify));
   });
@@ -683,12 +731,23 @@ async function deliverApprovalNotification(id) {
   await refreshApprovals();
 }
 
+async function escalateApproval(id) {
+  await api(`/api/approvals/${id}/escalate`, {
+    method: "POST",
+    body: JSON.stringify({ reason: "Escalated from static console" }),
+  });
+  await refreshApprovals();
+  await refreshSession();
+  await refreshOps();
+}
+
 function renderOps() {
   renderUsage();
   renderTenantGovernance();
   renderProviders();
   renderVaultHealth();
   renderSecretRecords();
+  renderApprovalGovernance();
   renderPolicy();
   renderEvalDatasets();
   renderEvalCases();
@@ -1222,6 +1281,42 @@ function renderSecretRecords() {
   });
 }
 
+function renderApprovalGovernance() {
+  approvalGovernanceRoot.innerHTML = `
+    <h4>Approval Groups</h4>
+    ${
+      state.approvalGroups.length
+        ? state.approvalGroups
+            .map(
+              (group) => `
+                <div class="item">
+                  <strong>${escapeHtml(group.name)}</strong>
+                  <div class="muted">${escapeHtml(group.status)} · ${escapeHtml(group.id)}</div>
+                  <div class="muted">${escapeHtml(group.subjects.join(", "))}</div>
+                </div>
+              `,
+            )
+            .join("")
+        : `<div class="muted">No approval groups</div>`
+    }
+    <h4>Escalation Rules</h4>
+    ${
+      state.approvalEscalationRules.length
+        ? state.approvalEscalationRules
+            .map(
+              (rule) => `
+                <div class="item">
+                  <strong>${escapeHtml(rule.name)}</strong>
+                  <div class="muted">${escapeHtml(rule.risk_level)} · group ${escapeHtml(rule.group_id)}</div>
+                </div>
+              `,
+            )
+            .join("")
+        : `<div class="muted">No escalation rules</div>`
+    }
+  `;
+}
+
 function renderEvalRuns() {
   evalRunRoot.innerHTML = state.evalRuns.length
     ? state.evalRuns
@@ -1537,6 +1632,11 @@ function renderApproval(approval) {
     approval.evidence?.args?.approver_subject ??
     approval.evidence?.args?.delegated_approver ??
     null;
+  const delegatedGroup =
+    approval.evidence?.approver_group_name ??
+    approval.evidence?.approver_group_id ??
+    approval.evidence?.args?.approver_group_id ??
+    null;
   const delivery = state.approvalDeliveries[approval.id];
   return `
     <div class="item">
@@ -1544,6 +1644,7 @@ function renderApproval(approval) {
       <div class="muted">${escapeHtml(approval.risk_level)} · ${escapeHtml(approval.status)}</div>
       <div class="muted">Expires: ${escapeHtml(approval.expires_at || "not set")}</div>
       ${delegatedApprover ? `<div class="muted">Delegated approver: ${escapeHtml(delegatedApprover)}</div>` : ""}
+      ${delegatedGroup ? `<div class="muted">Delegated group: ${escapeHtml(delegatedGroup)}</div>` : ""}
       <p>${escapeHtml(approval.reason)}</p>
       <dl>
         <dt>Original args</dt>
@@ -1570,7 +1671,7 @@ function renderApproval(approval) {
               </label>
               <button type="submit" class="secondary">Modify Args</button>
             </form>
-            <button class="secondary" data-deliver-approval="${approval.id}">Deliver</button><button class="secondary" data-approve="${approval.id}">Approve</button><button class="secondary reject" data-reject="${approval.id}">Reject</button><button class="secondary" data-expire="${approval.id}">Expire</button>`
+            <button class="secondary" data-deliver-approval="${approval.id}">Deliver</button><button class="secondary" data-escalate-approval="${approval.id}">Escalate</button><button class="secondary" data-approve="${approval.id}">Approve</button><button class="secondary reject" data-reject="${approval.id}">Reject</button><button class="secondary" data-expire="${approval.id}">Expire</button>`
           : ""
       }
       ${

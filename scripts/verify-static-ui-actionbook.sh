@@ -56,6 +56,7 @@ wait_for_static_ui() {
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
     hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy') && text.includes('POLICY REVISIONS') && text.includes('Create Policy Revision'),
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),
+    hasApprovalGovernance: text.includes('Approval Governance') && text.includes('Create Approval Group') && text.includes('Create Escalation Rule'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
@@ -73,6 +74,7 @@ wait_for_static_ui() {
     && result.hasProviderCredentialFields
     && result.hasPolicyConsole
     && result.hasVaultHealthAction
+    && result.hasApprovalGovernance
     && result.hasTenantGovernance
     && result.hasEvalGateAction
     && result.hasEvalDriftAction

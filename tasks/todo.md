@@ -113,6 +113,7 @@
 - [x] Add static approval JSON-path diff visualization for modified args.
 - [x] Add delegated approval subject enforcement and UI visibility.
 - [x] Add env-gated approval webhook delivery route and static delivery action.
+- [x] Add approval groups, escalation rules, group decision enforcement, and static governance controls.
 - [x] Add persistent org/team/project/membership schema and Admin-only hierarchy APIs.
 - [x] Make Postgres migration runner execute all SQL files under `db/migrations`.
 - [x] Derive principal roles from persisted memberships when role headers are absent.

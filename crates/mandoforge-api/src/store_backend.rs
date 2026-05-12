@@ -5,9 +5,10 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
-    Agent, AgentRelease, AgentVersion, Approval, Artifact, AuditLog, EvalCase, EvalDataset,
-    EvalRun, McpServerRecord, Membership, Organization, PolicyRevision, Project, ProviderAccess,
-    ProviderRecord, SecretRecord, Session, SessionEvent, Team, ToolCall, UsageRollup,
+    Agent, AgentRelease, AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup, Artifact,
+    AuditLog, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
+    PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent,
+    Team, ToolCall, UsageRollup,
 };
 
 #[derive(Default)]
@@ -20,6 +21,8 @@ pub(crate) struct MemoryStore {
     pub(crate) sessions: HashMap<Uuid, Session>,
     pub(crate) events: HashMap<Uuid, Vec<SessionEvent>>,
     pub(crate) approvals: HashMap<Uuid, Approval>,
+    pub(crate) approval_groups: HashMap<Uuid, ApprovalGroup>,
+    pub(crate) approval_escalation_rules: HashMap<Uuid, ApprovalEscalationRule>,
     pub(crate) artifacts: HashMap<Uuid, Artifact>,
     pub(crate) tool_calls: HashMap<Uuid, ToolCall>,
     pub(crate) audit_logs: HashMap<Uuid, AuditLog>,

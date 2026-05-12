@@ -182,6 +182,36 @@
               <div id="secret-records" class="list"></div>
             </div>
             <div>
+              <h3>Approval Governance</h3>
+              <form id="approval-group-form" class="stack-form compact-form">
+                <label>
+                  Group name
+                  <input name="name" required value="risk-approvers" />
+                </label>
+                <label>
+                  Subjects
+                  <textarea name="subjects" rows="2">approver-1,approver-2</textarea>
+                </label>
+                <button type="submit">Create Approval Group</button>
+              </form>
+              <form id="approval-escalation-rule-form" class="stack-form compact-form">
+                <label>
+                  Rule name
+                  <input name="name" required value="high-risk-default" />
+                </label>
+                <label>
+                  Risk level
+                  <input name="risk_level" value="high" />
+                </label>
+                <label>
+                  Group ID
+                  <input name="group_id" placeholder="Approval group UUID" />
+                </label>
+                <button type="submit">Create Escalation Rule</button>
+              </form>
+              <div id="approval-governance" class="list"></div>
+            </div>
+            <div>
               <h3>Policy Console</h3>
               <form id="policy-simulate-form" class="stack-form compact-form">
                 <label>

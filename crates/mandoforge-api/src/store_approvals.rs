@@ -163,4 +163,37 @@ impl AppState {
             }
         }
     }
+
+    pub(crate) async fn update_approval_evidence(
+        &self,
+        approval_id: Uuid,
+        evidence: Value,
+    ) -> Result<Approval, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let approval = store
+                    .approvals
+                    .get_mut(&approval_id)
+                    .ok_or_else(|| AppError::not_found("approval not found"))?;
+                approval.evidence = evidence;
+                Ok(approval.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE approvals
+                     SET evidence = $1
+                     WHERE tenant_id = $2 AND id = $3
+                     RETURNING id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, expires_at, created_at, decided_at",
+                )
+                .bind(&evidence)
+                .bind(self.tenant_id)
+                .bind(approval_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("approval not found"))?;
+                approval_from_row(row)
+            }
+        }
+    }
 }

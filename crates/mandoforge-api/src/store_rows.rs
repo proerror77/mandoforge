@@ -3,10 +3,10 @@ use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
 use crate::{
-    Agent, AgentRelease, AgentVersion, AppError, Approval, Artifact, AuditLog, EvalCase,
-    EvalDataset, EvalRun, McpServerRecord, Membership, Organization, PolicyRevision, Project,
-    ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent, Team, ToolCall,
-    UsageRollup,
+    Agent, AgentRelease, AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
+    Artifact, AuditLog, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
+    PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent,
+    Team, ToolCall, UsageRollup,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -147,6 +147,32 @@ pub(crate) fn approval_from_row(row: PgRow) -> Result<Approval, AppError> {
         expires_at: row.try_get("expires_at")?,
         created_at: row.try_get("created_at")?,
         decided_at: row.try_get("decided_at")?,
+    })
+}
+
+pub(crate) fn approval_group_from_row(row: PgRow) -> Result<ApprovalGroup, AppError> {
+    let subjects: Value = row.try_get("subjects")?;
+    Ok(ApprovalGroup {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        subjects: serde_json::from_value(subjects).unwrap_or_default(),
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn approval_escalation_rule_from_row(
+    row: PgRow,
+) -> Result<ApprovalEscalationRule, AppError> {
+    Ok(ApprovalEscalationRule {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        risk_level: row.try_get("risk_level")?,
+        group_id: row.try_get("group_id")?,
+        order_index: row.try_get("order_index")?,
+        after_seconds: row.try_get("after_seconds")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 
