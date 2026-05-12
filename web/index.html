@@ -81,6 +81,77 @@
               <div id="usage-rollups" class="list"></div>
             </div>
             <div>
+              <h3>Tenant Governance</h3>
+              <form id="organization-form" class="stack-form compact-form">
+                <label>
+                  Organization name
+                  <input name="name" required value="Platform Org" />
+                </label>
+                <label>
+                  Organization slug
+                  <input name="slug" required value="platform" />
+                </label>
+                <button type="submit">Create Organization</button>
+              </form>
+              <form id="team-form" class="stack-form compact-form">
+                <label>
+                  Organization ID
+                  <input name="organization_id" required placeholder="Organization UUID" />
+                </label>
+                <label>
+                  Team name
+                  <input name="name" required value="Runtime Team" />
+                </label>
+                <label>
+                  Team slug
+                  <input name="slug" required value="runtime" />
+                </label>
+                <button type="submit">Create Team</button>
+              </form>
+              <form id="project-form" class="stack-form compact-form">
+                <label>
+                  Team ID
+                  <input name="team_id" required placeholder="Team UUID" />
+                </label>
+                <label>
+                  Project name
+                  <input name="name" required value="Kernel Pilot" />
+                </label>
+                <label>
+                  Project slug
+                  <input name="slug" required value="kernel-pilot" />
+                </label>
+                <button type="submit">Create Project</button>
+              </form>
+              <form id="membership-form" class="stack-form compact-form">
+                <label>
+                  Organization ID
+                  <input name="organization_id" required placeholder="Organization UUID" />
+                </label>
+                <label>
+                  User ID
+                  <input name="user_id" required value="approver-1" />
+                </label>
+                <label>
+                  Team ID
+                  <input name="team_id" placeholder="Optional team UUID" />
+                </label>
+                <label>
+                  Project ID
+                  <input name="project_id" placeholder="Optional project UUID" />
+                </label>
+                <label>
+                  Role
+                  <input name="role" required value="approver" />
+                </label>
+                <button type="submit">Create Membership</button>
+              </form>
+              <div id="organizations" class="list"></div>
+              <div id="teams" class="list"></div>
+              <div id="projects" class="list"></div>
+              <div id="memberships" class="list"></div>
+            </div>
+            <div>
               <h3>Providers</h3>
               <form id="provider-form" class="stack-form compact-form">
                 <label>

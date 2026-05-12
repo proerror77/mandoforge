@@ -13,6 +13,12 @@ const state = {
   mcpTeamId: "",
   usageRollups: [],
   usage: null,
+  organizations: [],
+  teams: [],
+  projects: [],
+  memberships: [],
+  selectedOrganizationId: "",
+  selectedTeamId: "",
   selectedArtifactId: null,
   selectedToolCallId: null,
   selectedAuditLogId: null,
@@ -38,7 +44,15 @@ const mcpServerRoot = document.querySelector("#mcp-servers");
 const usageRoot = document.querySelector("#usage-summary");
 const usageRollupRoot = document.querySelector("#usage-rollups");
 const governanceRoot = document.querySelector("#governance-status");
+const organizationRoot = document.querySelector("#organizations");
+const teamRoot = document.querySelector("#teams");
+const projectRoot = document.querySelector("#projects");
+const membershipRoot = document.querySelector("#memberships");
 const agentForm = document.querySelector("#agent-form");
+const organizationForm = document.querySelector("#organization-form");
+const teamForm = document.querySelector("#team-form");
+const projectForm = document.querySelector("#project-form");
+const membershipForm = document.querySelector("#membership-form");
 const providerForm = document.querySelector("#provider-form");
 const evalDatasetForm = document.querySelector("#eval-dataset-form");
 const evalCaseForm = document.querySelector("#eval-case-form");
@@ -50,6 +64,10 @@ const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
+organizationForm.addEventListener("submit", createOrganization);
+teamForm.addEventListener("submit", createTeam);
+projectForm.addEventListener("submit", createProject);
+membershipForm.addEventListener("submit", createMembership);
 providerForm.addEventListener("submit", createProvider);
 evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
@@ -98,6 +116,73 @@ async function createAgent(event) {
   });
   state.agents = [agent, ...state.agents.filter((existing) => existing.id !== agent.id)];
   renderAgents();
+}
+
+async function createOrganization(event) {
+  event.preventDefault();
+  const form = new FormData(organizationForm);
+  const organization = await api("/api/organizations", {
+    method: "POST",
+    body: JSON.stringify({
+      name: form.get("name"),
+      slug: form.get("slug"),
+    }),
+  });
+  setOrganizationId(organization.id);
+  await refreshOps();
+}
+
+async function createTeam(event) {
+  event.preventDefault();
+  const form = new FormData(teamForm);
+  const organizationId = String(form.get("organization_id") || state.selectedOrganizationId).trim();
+  const team = await api(`/api/organizations/${organizationId}/teams`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: form.get("name"),
+      slug: form.get("slug"),
+    }),
+  });
+  setOrganizationId(organizationId);
+  setTeamId(team.id);
+  await refreshOps();
+}
+
+async function createProject(event) {
+  event.preventDefault();
+  const form = new FormData(projectForm);
+  const teamId = String(form.get("team_id") || state.selectedTeamId).trim();
+  await api(`/api/teams/${teamId}/projects`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: form.get("name"),
+      slug: form.get("slug"),
+    }),
+  });
+  setTeamId(teamId);
+  await refreshOps();
+}
+
+async function createMembership(event) {
+  event.preventDefault();
+  const form = new FormData(membershipForm);
+  const organizationId = String(
+    form.get("organization_id") || state.selectedOrganizationId,
+  ).trim();
+  const payload = {
+    user_id: String(form.get("user_id") || "").trim(),
+    role: String(form.get("role") || "").trim(),
+  };
+  const teamId = String(form.get("team_id") || "").trim();
+  const projectId = String(form.get("project_id") || "").trim();
+  if (teamId) payload.team_id = teamId;
+  if (projectId) payload.project_id = projectId;
+  await api(`/api/organizations/${organizationId}/memberships`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  setOrganizationId(organizationId);
+  await refreshOps();
 }
 
 async function createProvider(event) {
@@ -255,18 +340,51 @@ async function runDemo() {
 }
 
 async function refreshOps() {
-  const [providers, evalDatasets, evalRuns, usage, usageRollups] = await Promise.all([
+  const [providers, evalDatasets, evalRuns, usage, usageRollups, organizations] = await Promise.all([
     api("/api/providers"),
     api("/api/eval/datasets"),
     api("/api/eval/runs"),
     api("/api/usage"),
     api("/api/usage/rollups"),
+    api("/api/organizations"),
   ]);
   state.providers = providers;
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
   state.usage = usage;
   state.usageRollups = usageRollups;
+  state.organizations = organizations;
+  if (
+    state.selectedOrganizationId &&
+    !organizations.some((organization) => organization.id === state.selectedOrganizationId)
+  ) {
+    state.selectedOrganizationId = "";
+    state.selectedTeamId = "";
+  }
+  if (!state.selectedOrganizationId && organizations[0]) {
+    setOrganizationId(organizations[0].id);
+  }
+  if (state.selectedOrganizationId) {
+    const [teams, memberships] = await Promise.all([
+      api(`/api/organizations/${state.selectedOrganizationId}/teams`),
+      api(`/api/organizations/${state.selectedOrganizationId}/memberships`),
+    ]);
+    state.teams = teams;
+    state.memberships = memberships;
+    if (state.selectedTeamId && !teams.some((team) => team.id === state.selectedTeamId)) {
+      state.selectedTeamId = "";
+    }
+    if (!state.selectedTeamId && teams[0]) {
+      setTeamId(teams[0].id);
+    }
+  } else {
+    state.teams = [];
+    state.memberships = [];
+    state.selectedTeamId = "";
+  }
+  state.projects = state.selectedTeamId
+    ? await api(`/api/teams/${state.selectedTeamId}/projects`)
+    : [];
   renderOps();
 }
 
@@ -308,6 +426,7 @@ async function decide(id, decision) {
 
 function renderOps() {
   renderUsage();
+  renderTenantGovernance();
   renderProviders();
   renderEvalDatasets();
   renderEvalCases();
@@ -325,6 +444,89 @@ function renderOps() {
       <dd>Gateway calls require global and team-scoped allowlists; discovery can import gateway tools into a team server allowlist</dd>
     </dl>
   `;
+}
+
+function renderTenantGovernance() {
+  organizationRoot.innerHTML = state.organizations.length
+    ? state.organizations
+        .map(
+          (organization) => `
+            <button class="item-button${organization.id === state.selectedOrganizationId ? " selected" : ""}" data-organization="${organization.id}">
+              <strong>${escapeHtml(organization.name)}</strong>
+              <span>${escapeHtml(organization.slug)} · ${escapeHtml(organization.id)}</span>
+            </button>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No organizations yet</div>`;
+  organizationRoot.querySelectorAll("[data-organization]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      setOrganizationId(button.dataset.organization);
+      state.selectedTeamId = "";
+      await refreshOps();
+    });
+  });
+
+  teamRoot.innerHTML = state.selectedOrganizationId
+    ? state.teams.length
+      ? state.teams
+          .map(
+            (team) => `
+              <button class="item-button${team.id === state.selectedTeamId ? " selected" : ""}" data-team="${team.id}">
+                <strong>${escapeHtml(team.name)}</strong>
+                <span>${escapeHtml(team.slug)} · ${escapeHtml(team.id)}</span>
+              </button>
+            `,
+          )
+          .join("")
+      : `<div class="muted">No teams for selected organization</div>`
+    : `<div class="muted">Select an organization to manage teams</div>`;
+  teamRoot.querySelectorAll("[data-team]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      setTeamId(button.dataset.team);
+      await refreshOps();
+    });
+  });
+
+  projectRoot.innerHTML = state.selectedTeamId
+    ? state.projects.length
+      ? state.projects
+          .map(
+            (project) => `
+              <div class="item">
+                <strong>${escapeHtml(project.name)}</strong>
+                <div class="muted">${escapeHtml(project.slug)} · ${escapeHtml(project.id)}</div>
+              </div>
+            `,
+          )
+          .join("")
+      : `<div class="muted">No projects for selected team</div>`
+    : `<div class="muted">Select a team to manage projects</div>`;
+
+  membershipRoot.innerHTML = state.selectedOrganizationId
+    ? state.memberships.length
+      ? state.memberships
+          .map(
+            (membership) => `
+              <div class="item">
+                <strong>${escapeHtml(membership.user_id)}</strong>
+                <div class="muted">${escapeHtml(membership.role)} · ${escapeHtml(membership.id)}</div>
+                <pre>${escapeHtml(
+                  JSON.stringify(
+                    {
+                      team_id: membership.team_id,
+                      project_id: membership.project_id,
+                    },
+                    null,
+                    2,
+                  ),
+                )}</pre>
+              </div>
+            `,
+          )
+          .join("")
+      : `<div class="muted">No memberships for selected organization</div>`
+    : `<div class="muted">Select an organization to manage memberships</div>`;
 }
 
 function renderUsage() {
@@ -550,6 +752,19 @@ function renderEvalCases() {
 function setEvalDatasetId(datasetId) {
   evalCaseForm.elements.dataset_id.value = datasetId;
   evalRunForm.elements.dataset_id.value = datasetId;
+}
+
+function setOrganizationId(organizationId) {
+  state.selectedOrganizationId = organizationId;
+  teamForm.elements.organization_id.value = organizationId;
+  membershipForm.elements.organization_id.value = organizationId;
+}
+
+function setTeamId(teamId) {
+  state.selectedTeamId = teamId;
+  projectForm.elements.team_id.value = teamId;
+  membershipForm.elements.team_id.value = teamId;
+  mcpForm.elements.team_id.value = teamId;
 }
 
 function parseJsonField(value, label) {

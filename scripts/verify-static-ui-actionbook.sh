@@ -85,6 +85,7 @@ actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser eval "
     title: document.title,
     hasProviderBreakdown: text.includes('PROVIDER COST BREAKDOWN'),
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
+    hasTenantGovernance: text.includes('Tenant Governance'),
     metricCards: document.querySelectorAll('.metric').length,
     hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
     hasAdminConsole: text.includes('Admin Console')
@@ -92,6 +93,7 @@ actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser eval "
   const ok = result.title === 'MandoForge Agent OS Kernel'
     && result.hasProviderBreakdown
     && result.hasToolBreakdown
+    && result.hasTenantGovernance
     && result.metricCards >= 4
     && result.hasUsageRoot
     && result.hasAdminConsole;

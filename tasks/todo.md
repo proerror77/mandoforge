@@ -108,6 +108,7 @@
 - [x] Enforce team membership for scoped agent/session/tool/approval/job resource paths.
 - [x] Filter agent/session list APIs by principal membership scope.
 - [x] Add project-level permissions instead of only team-level inheritance.
+- [x] Add static org/team/project/membership management UI.
 - [x] Add provider access/model allowlist enforcement for team-scoped agent creation.
 - [x] Add provider budgets and runtime provider selection from stored provider rows.
 - [x] Add provider daily cost budget enforcement over a 24-hour window.
