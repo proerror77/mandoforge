@@ -106,6 +106,7 @@
 - [ ] Scope Agent/Session/Tool routes through project or team and derive authorization from memberships.
 - [x] Add provider access/model allowlist enforcement for team-scoped agent creation.
 - [ ] Add provider budgets and runtime provider selection from stored provider rows.
-- [ ] Add eval dataset/case/run schema and a first eval runner.
+- [x] Add eval dataset/case/run schema and a first version-bound eval runner skeleton.
+- [ ] Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
 - [ ] Wire OTel export into session/provider/tool/approval/worker request paths.
 - [ ] Enable MCP registry and `mcp.call` behind policy and audit.

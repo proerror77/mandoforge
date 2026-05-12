@@ -48,6 +48,36 @@ CREATE TABLE IF NOT EXISTS provider_access (
     UNIQUE(team_id, provider_name)
 );
 
+CREATE TABLE IF NOT EXISTS eval_datasets (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    name TEXT NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS eval_cases (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    dataset_id UUID NOT NULL REFERENCES eval_datasets(id),
+    input JSONB NOT NULL,
+    expected JSONB,
+    grading_policy JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    dataset_id UUID NOT NULL REFERENCES eval_datasets(id),
+    agent_id UUID NOT NULL REFERENCES agents(id),
+    agent_version_id UUID NOT NULL REFERENCES agent_versions(id),
+    status TEXT NOT NULL,
+    score DOUBLE PRECISION,
+    details JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES teams(id);
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id);
 
@@ -56,3 +86,6 @@ CREATE INDEX IF NOT EXISTS idx_projects_team ON projects(tenant_id, team_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_org ON memberships(tenant_id, organization_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_team ON memberships(tenant_id, team_id);
 CREATE INDEX IF NOT EXISTS idx_provider_access_team ON provider_access(tenant_id, team_id);
+CREATE INDEX IF NOT EXISTS idx_eval_cases_dataset ON eval_cases(tenant_id, dataset_id);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_dataset ON eval_runs(tenant_id, dataset_id);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_agent ON eval_runs(tenant_id, agent_id);

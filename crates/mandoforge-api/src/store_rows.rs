@@ -3,8 +3,8 @@ use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
 use crate::{
-    Agent, AgentVersion, AppError, Approval, Artifact, AuditLog, Membership, Organization, Project,
-    ProviderAccess, Session, SessionEvent, Team, ToolCall,
+    Agent, AgentVersion, AppError, Approval, Artifact, AuditLog, EvalCase, EvalDataset, EvalRun,
+    Membership, Organization, Project, ProviderAccess, Session, SessionEvent, Team, ToolCall,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -181,6 +181,39 @@ pub(crate) fn provider_access_from_row(row: PgRow) -> Result<ProviderAccess, App
         provider_name: row.try_get("provider_name")?,
         model_allowlist: serde_json::from_value(model_allowlist).unwrap_or_default(),
         status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn eval_dataset_from_row(row: PgRow) -> Result<EvalDataset, AppError> {
+    Ok(EvalDataset {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn eval_case_from_row(row: PgRow) -> Result<EvalCase, AppError> {
+    Ok(EvalCase {
+        id: row.try_get("id")?,
+        dataset_id: row.try_get("dataset_id")?,
+        input: row.try_get("input")?,
+        expected: row.try_get("expected")?,
+        grading_policy: row.try_get("grading_policy")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn eval_run_from_row(row: PgRow) -> Result<EvalRun, AppError> {
+    Ok(EvalRun {
+        id: row.try_get("id")?,
+        dataset_id: row.try_get("dataset_id")?,
+        agent_id: row.try_get("agent_id")?,
+        agent_version_id: row.try_get("agent_version_id")?,
+        status: row.try_get("status")?,
+        score: row.try_get("score")?,
+        details: row.try_get("details")?,
         created_at: row.try_get("created_at")?,
     })
 }

@@ -35,6 +35,7 @@ mod store_artifacts;
 mod store_audit;
 mod store_backend;
 mod store_entities;
+mod store_eval;
 mod store_events;
 mod store_governance;
 mod store_rows;
@@ -346,6 +347,57 @@ struct CreateProviderAccess {
     model_allowlist: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EvalDataset {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateEvalDataset {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EvalCase {
+    id: Uuid,
+    dataset_id: Uuid,
+    input: Value,
+    expected: Option<Value>,
+    grading_policy: Value,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateEvalCase {
+    input: Value,
+    #[serde(default)]
+    expected: Option<Value>,
+    #[serde(default = "empty_json_object")]
+    grading_policy: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EvalRun {
+    id: Uuid,
+    dataset_id: Uuid,
+    agent_id: Uuid,
+    agent_version_id: Uuid,
+    status: String,
+    score: Option<f64>,
+    details: Value,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateEvalRun {
+    agent_id: Uuid,
+}
+
 #[derive(Debug, Serialize)]
 struct ToolDescriptor {
     name: &'static str,
@@ -529,6 +581,19 @@ fn build_router(state: AppState) -> Router {
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
         )
+        .route(
+            "/api/eval/datasets",
+            get(list_eval_datasets).post(create_eval_dataset),
+        )
+        .route(
+            "/api/eval/datasets/{id}/cases",
+            get(list_eval_cases).post(create_eval_case),
+        )
+        .route(
+            "/api/eval/datasets/{id}/runs",
+            get(list_dataset_eval_runs).post(create_eval_run),
+        )
+        .route("/api/eval/runs", get(list_eval_runs))
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
@@ -1709,6 +1774,97 @@ async fn create_provider_access(
     Ok(Json(state.create_provider_access(id, input).await?))
 }
 
+async fn list_eval_datasets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<EvalDataset>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "eval_datasets", None).await?;
+    Ok(Json(state.list_eval_datasets().await?))
+}
+
+async fn create_eval_dataset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateEvalDataset>,
+) -> Result<Json<EvalDataset>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "eval_datasets", None).await?;
+    Ok(Json(state.create_eval_dataset(input).await?))
+}
+
+async fn list_eval_cases(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<EvalCase>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "eval_dataset",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_eval_cases(id).await?))
+}
+
+async fn create_eval_case(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateEvalCase>,
+) -> Result<Json<EvalCase>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "eval_dataset",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.create_eval_case(id, input).await?))
+}
+
+async fn list_dataset_eval_runs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<EvalRun>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "eval_dataset",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_eval_runs(Some(id)).await?))
+}
+
+async fn list_eval_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<EvalRun>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "eval_runs", None).await?;
+    Ok(Json(state.list_eval_runs(None).await?))
+}
+
+async fn create_eval_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateEvalRun>,
+) -> Result<Json<EvalRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "eval_dataset",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.create_eval_run(id, input).await?))
+}
+
 async fn list_approvals(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2121,6 +2277,10 @@ fn default_model() -> String {
 
 fn default_session_title() -> String {
     "Untitled session".to_string()
+}
+
+fn empty_json_object() -> Value {
+    json!({})
 }
 
 #[derive(Debug)]
@@ -3627,6 +3787,91 @@ not json
         .await;
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].slug, "kernel-pilot");
+    }
+
+    #[tokio::test]
+    async fn admin_can_create_eval_dataset_cases_and_version_bound_run() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let dataset: EvalDataset = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/eval/datasets")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "Stage 2 policy eval",
+                        "description": "Checks policy and tool selection plumbing."
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(dataset.name, "Stage 2 policy eval");
+
+        let case: EvalCase = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/datasets/{}/cases", dataset.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "input": {"message": "run shell command"},
+                        "expected": {"tool": "shell.exec", "decision": "requires_approval"},
+                        "grading_policy": {"kind": "policy"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(case.dataset_id, dataset.id);
+
+        let run: EvalRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/datasets/{}/runs", dataset.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"agent_id": agent.id}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run.dataset_id, dataset.id);
+        assert_eq!(run.agent_id, agent.id);
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.details["case_count"], 1);
+
+        let runs: Vec<EvalRun> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/eval/runs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].agent_version_id, run.agent_version_id);
     }
 
     #[tokio::test]

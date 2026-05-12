@@ -25,6 +25,7 @@ Aligned:
 - Approval v2 groundwork includes an `approver` role and `POST /api/approvals/:id/modify`, which updates pending tool-call arguments, appends `approval.modified`, and leaves the approval pending for approve/reject.
 - Stage 2 governance groundwork includes `organizations`, `teams`, `projects`, and `memberships` tables plus Admin-only CRUD/list routes for the hierarchy.
 - Provider governance groundwork includes `provider_access` rows per team, Admin-only provider-access routes, and model allowlist enforcement when creating a team-scoped agent.
+- Evaluation groundwork includes eval datasets, cases, and version-bound run records with a first skeleton runner that persists case count and agent version evidence.
 - OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed on the default reserved provider. `MANDOFORGE_SECRET_PROVIDER=vault` explicitly selects the Vault KV v2 provider boundary, while the default remains `reserved`.
 
 Not yet aligned:
