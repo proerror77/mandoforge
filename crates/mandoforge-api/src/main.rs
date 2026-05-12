@@ -506,6 +506,24 @@ struct CreateEvalRun {
     agent_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+struct EvalGateRequest {
+    #[serde(default)]
+    min_score: Option<f64>,
+    #[serde(default)]
+    require_completed: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EvalGateDecision {
+    run_id: Uuid,
+    status: String,
+    score: Option<f64>,
+    min_score: f64,
+    failure_reasons: Vec<String>,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageRollup {
     id: Uuid,
@@ -735,6 +753,7 @@ fn build_router(state: AppState) -> Router {
             get(list_dataset_eval_runs).post(create_eval_run),
         )
         .route("/api/eval/runs", get(list_eval_runs))
+        .route("/api/eval/runs/{id}/gate", post(gate_eval_run))
         .route("/api/usage", get(get_usage_summary))
         .route(
             "/api/usage/rollups",
@@ -2522,6 +2541,78 @@ async fn create_eval_run(
     )
     .await?;
     Ok(Json(state.create_eval_run(id, input).await?))
+}
+
+async fn gate_eval_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<EvalGateRequest>,
+) -> Result<Json<EvalGateDecision>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "eval_run", Some(id)).await?;
+    let min_score = input.min_score.unwrap_or(1.0);
+    if !(0.0..=1.0).contains(&min_score) {
+        return Err(AppError::bad_request(
+            "eval gate min_score must be between 0.0 and 1.0",
+        ));
+    }
+    let require_completed = input.require_completed.unwrap_or(true);
+    let run = state
+        .list_eval_runs(None)
+        .await?
+        .into_iter()
+        .find(|run| run.id == id)
+        .ok_or_else(|| AppError::not_found("eval run not found"))?;
+    Ok(Json(build_eval_gate_decision(
+        &run,
+        min_score,
+        require_completed,
+    )))
+}
+
+fn build_eval_gate_decision(
+    run: &EvalRun,
+    min_score: f64,
+    require_completed: bool,
+) -> EvalGateDecision {
+    let mut failure_reasons = Vec::new();
+    let score = run.score.unwrap_or(0.0);
+    if score < min_score {
+        failure_reasons.push(format!(
+            "score {score:.4} is below required minimum {min_score:.4}"
+        ));
+    }
+    if require_completed && run.status != "completed" {
+        failure_reasons.push(format!("eval run status is {}", run.status));
+    }
+    let case_count = run
+        .details
+        .get("case_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let passed_count = run
+        .details
+        .get("passed_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if case_count == 0 {
+        failure_reasons.push("eval run has no cases".to_string());
+    }
+    if passed_count < case_count {
+        failure_reasons.push(format!("{passed_count} of {case_count} eval cases passed"));
+    }
+    EvalGateDecision {
+        run_id: run.id,
+        status: if failure_reasons.is_empty() {
+            "passed".to_string()
+        } else {
+            "failed".to_string()
+        },
+        score: run.score,
+        min_score,
+        failure_reasons,
+        checked_at: Utc::now(),
+    }
 }
 
 async fn get_usage_summary(
@@ -6003,6 +6094,112 @@ not json
         assert_eq!(run.details["case_count"], 3);
         assert_eq!(run.details["passed_count"], 3);
 
+        let gate: EvalGateDecision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/runs/{}/gate", run.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"min_score": 1.0}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(gate.run_id, run.id);
+        assert_eq!(gate.status, "passed");
+        assert!(gate.failure_reasons.is_empty());
+
+        let (status, gate_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/runs/{}/gate", run.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"min_score": 1.1}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            gate_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("min_score must be between")
+        );
+
+        let failing_dataset: EvalDataset = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/eval/datasets")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "Stage 2 failing eval",
+                        "description": "Checks eval gate failure evidence."
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _: EvalCase = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/datasets/{}/cases", failing_dataset.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "input": {"message": "read files"},
+                        "expected": {"required_tools": ["production_db.write"]},
+                        "grading_policy": {"kind": "tool_selection"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let failing_run: EvalRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/datasets/{}/runs", failing_dataset.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"agent_id": agent.id}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(failing_run.status, "failed");
+        let failed_gate: EvalGateDecision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/runs/{}/gate", failing_run.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"min_score": 1.0}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(failed_gate.status, "failed");
+        assert!(
+            failed_gate
+                .failure_reasons
+                .iter()
+                .any(|reason| reason.contains("score"))
+        );
+
         let runs: Vec<EvalRun> = request_json(
             app,
             Request::builder()
@@ -6013,8 +6210,9 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].agent_version_id, run.agent_version_id);
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().any(|listed| listed.id == run.id));
+        assert!(runs.iter().any(|listed| listed.id == failing_run.id));
     }
 
     #[tokio::test]

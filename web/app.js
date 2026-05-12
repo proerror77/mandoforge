@@ -9,6 +9,7 @@ const state = {
   evalDatasets: [],
   evalCases: [],
   evalRuns: [],
+  evalGates: {},
   mcpServers: [],
   mcpTeamId: "",
   usageRollups: [],
@@ -257,6 +258,15 @@ async function createEvalRun(event) {
   });
   setEvalDatasetId(datasetId);
   await refreshOps();
+}
+
+async function gateEvalRun(runId) {
+  const decision = await api(`/api/eval/runs/${runId}/gate`, {
+    method: "POST",
+    body: JSON.stringify({ min_score: 1.0, require_completed: true }),
+  });
+  state.evalGates[runId] = decision;
+  renderEvalRuns();
 }
 
 async function createMcpServer(event) {
@@ -700,16 +710,29 @@ function renderEvalRuns() {
   evalRunRoot.innerHTML = state.evalRuns.length
     ? state.evalRuns
         .map(
-          (run) => `
+          (run) => {
+            const gate = state.evalGates[run.id];
+            return `
             <div class="item">
               <strong>${escapeHtml(run.status)} · score ${escapeHtml(run.score ?? "n/a")}</strong>
               <div class="muted">${escapeHtml(run.created_at)}</div>
+              <button class="secondary" data-eval-gate="${run.id}">Gate 100%</button>
+              ${
+                gate
+                  ? `<div class="muted">Gate: ${escapeHtml(gate.status)} · min ${escapeHtml(gate.min_score)}</div>
+                     <pre>${escapeHtml(JSON.stringify(gate.failure_reasons, null, 2))}</pre>`
+                  : ""
+              }
               <pre>${escapeHtml(JSON.stringify(run.details, null, 2))}</pre>
             </div>
-          `,
+          `;
+          },
         )
         .join("")
     : `<div class="muted">No eval runs</div>`;
+  evalRunRoot.querySelectorAll("[data-eval-gate]").forEach((button) => {
+    button.addEventListener("click", () => gateEvalRun(button.dataset.evalGate));
+  });
 }
 
 function renderEvalDatasets() {
