@@ -1892,6 +1892,7 @@ function renderObservability() {
                   before: remediation.before,
                   after: remediation.after,
                   approval_escalation_run: remediation.approval_escalation_run,
+                  codex_app_server_stale_polls: remediation.codex_app_server_stale_polls,
                 },
                 null,
                 2,

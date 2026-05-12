@@ -863,6 +863,7 @@ struct ObservabilityRemediationRun {
     before: ObservabilityBackpressure,
     after: ObservabilityBackpressure,
     approval_escalation_run: Option<ApprovalEscalationDueRun>,
+    codex_app_server_stale_polls: Option<CodexAppServerStalePollRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -9361,6 +9362,18 @@ async fn run_observability_remediation(
     } else {
         None
     };
+    let codex_app_server_stale_polls = execute_stale_codex_app_server_polls(
+        &state,
+        CodexAppServerStalePollRequest::default(),
+        "system",
+        "observability",
+    )
+    .await?;
+    if codex_app_server_stale_polls.polled_count > 0
+        || codex_app_server_stale_polls.failed_count > 0
+    {
+        actions.push("codex_app_server_stale_poll_due_run".to_string());
+    }
     if before.queued_jobs > 0 || before.retryable_jobs > 0 {
         actions.push("worker_drain_required".to_string());
     }
@@ -9379,6 +9392,7 @@ async fn run_observability_remediation(
         before,
         after: after_summary.backpressure,
         approval_escalation_run,
+        codex_app_server_stale_polls: Some(codex_app_server_stale_polls),
     };
     state
         .append_audit_log(new_audit_log(
@@ -16896,6 +16910,14 @@ not json
                 .contains(&"approval_escalation_due_run".to_string())
         );
         assert!(remediation.approval_escalation_run.is_some());
+        assert_eq!(
+            remediation
+                .codex_app_server_stale_polls
+                .as_ref()
+                .expect("codex stale poll run")
+                .candidate_count,
+            0
+        );
 
         let audit_logs: Vec<AuditLog> = request_json(
             app,
