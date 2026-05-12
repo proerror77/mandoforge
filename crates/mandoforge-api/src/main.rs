@@ -1836,11 +1836,29 @@ impl ToolExecutor for ApprovalRequestTool {
             .and_then(Value::as_str)
             .unwrap_or("Tool requested human approval.")
             .to_string();
-        let evidence = input
+        let mut evidence = input
             .args
             .get("evidence")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        if let Some(approver_subject) = input
+            .args
+            .get("approver_subject")
+            .or_else(|| input.args.get("delegated_approver"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+        {
+            if let Value::Object(map) = &mut evidence {
+                map.insert("approver_subject".to_string(), json!(approver_subject));
+            } else {
+                evidence = json!({
+                    "details": evidence,
+                    "approver_subject": approver_subject,
+                });
+            }
+        }
         let created_at = Utc::now();
         let approval = Approval {
             id: Uuid::new_v4(),
@@ -3358,7 +3376,45 @@ async fn authorize_approval_decision(
         resource_type: "session".to_string(),
         resource_id: Some(approval.session_id),
     };
-    enforce_resource_scope(state, &principal, &session_request).await
+    enforce_resource_scope(state, &principal, &session_request).await?;
+    enforce_delegated_approver(&principal, &approval)
+}
+
+fn enforce_delegated_approver(principal: &Principal, approval: &Approval) -> Result<(), AppError> {
+    if principal.roles.contains(&Role::Admin) {
+        return Ok(());
+    }
+    let Some(approver_subject) = delegated_approver_subject(approval) else {
+        return Ok(());
+    };
+    if principal.subject_id == approver_subject {
+        return Ok(());
+    }
+    Err(AppError::forbidden(format!(
+        "approval is delegated to {approver_subject}"
+    )))
+}
+
+fn delegated_approver_subject(approval: &Approval) -> Option<&str> {
+    approval
+        .evidence
+        .get("approver_subject")
+        .or_else(|| approval.evidence.get("delegated_approver"))
+        .or_else(|| {
+            approval
+                .evidence
+                .get("args")
+                .and_then(|args| args.get("approver_subject"))
+        })
+        .or_else(|| {
+            approval
+                .evidence
+                .get("args")
+                .and_then(|args| args.get("delegated_approver"))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 async fn list_artifacts(
@@ -5450,6 +5506,130 @@ not json
             .find(|approval| approval.id.to_string() == approval_id)
             .expect("approval remains visible");
         assert_eq!(pending.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn delegated_approval_requires_matching_subject_or_admin() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "delegated approval"}),
+            ),
+        )
+        .await;
+
+        let delegated_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/approval.request/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "action": "manual.delegated_review",
+                        "risk_level": "medium",
+                        "reason": "Only the delegated approver should decide.",
+                        "approver_subject": "approver-1",
+                        "evidence": {"artifact": "summary.json"}
+                    }
+                }),
+            ),
+        )
+        .await;
+        let delegated_id = delegated_result["approval_id"]
+            .as_str()
+            .expect("delegated approval id");
+
+        let approvals: Vec<Approval> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let delegated = approvals
+            .iter()
+            .find(|approval| approval.id.to_string() == delegated_id)
+            .expect("delegated approval persisted");
+        assert_eq!(delegated.evidence["approver_subject"], "approver-1");
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{delegated_id}/approve"))
+                .header("x-mandoforge-subject", "approver-2")
+                .header("x-mandoforge-roles", "approver")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("delegated to approver-1")
+        );
+
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{delegated_id}/approve"))
+                .header("x-mandoforge-subject", "approver-1")
+                .header("x-mandoforge-roles", "approver")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+
+        let admin_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/approval.request/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "action": "manual.admin_override",
+                        "risk_level": "medium",
+                        "reason": "Admins may override delegated approvals.",
+                        "delegated_approver": "approver-1"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let admin_approval_id = admin_result["approval_id"]
+            .as_str()
+            .expect("admin override approval id");
+        let admin_approved: Approval = request_json(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{admin_approval_id}/approve"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(admin_approved.status, "approved");
     }
 
     #[tokio::test]

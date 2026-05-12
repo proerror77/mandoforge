@@ -1186,11 +1186,18 @@ function renderApproval(approval) {
   const isPending = approval.status === "pending";
   const originalArgs = approval.evidence?.args ?? {};
   const modifiedArgs = approval.decision_payload?.modified_args;
+  const delegatedApprover =
+    approval.evidence?.approver_subject ??
+    approval.evidence?.delegated_approver ??
+    approval.evidence?.args?.approver_subject ??
+    approval.evidence?.args?.delegated_approver ??
+    null;
   return `
     <div class="item">
       <strong>${escapeHtml(approval.action)}</strong>
       <div class="muted">${escapeHtml(approval.risk_level)} · ${escapeHtml(approval.status)}</div>
       <div class="muted">Expires: ${escapeHtml(approval.expires_at || "not set")}</div>
+      ${delegatedApprover ? `<div class="muted">Delegated approver: ${escapeHtml(delegatedApprover)}</div>` : ""}
       <p>${escapeHtml(approval.reason)}</p>
       <dl>
         <dt>Original args</dt>
