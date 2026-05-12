@@ -1,7 +1,7 @@
 #[cfg(test)]
 use std::path::Path as FsPath;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
@@ -567,6 +567,35 @@ struct CodexAppServerPollResponse {
     attempts: u32,
     terminal: bool,
     last_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerTraceSummary {
+    generated_at: DateTime<Utc>,
+    run_count: usize,
+    turn_count: usize,
+    active_turn_count: usize,
+    failed_turn_count: usize,
+    by_status: HashMap<String, usize>,
+    by_operation: HashMap<String, usize>,
+    traces: Vec<CodexTurnTrace>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexTurnTrace {
+    trace_key: String,
+    turn_id: Option<String>,
+    thread_id: Option<String>,
+    latest_run_id: Uuid,
+    latest_status: String,
+    terminal: bool,
+    run_count: usize,
+    command_count: usize,
+    poll_count: usize,
+    error_count: usize,
+    operations: Vec<String>,
+    first_seen_at: DateTime<Utc>,
+    last_seen_at: DateTime<Utc>,
 }
 
 fn default_codex_poll_attempts() -> u32 {
@@ -1762,6 +1791,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/codex-app-server/runs",
             get(list_codex_app_server_runs),
+        )
+        .route(
+            "/api/codex-app-server/traces",
+            get(get_codex_app_server_traces),
         )
         .route(
             "/api/codex-app-server/runs/{run_id}/poll",
@@ -5633,6 +5666,22 @@ async fn list_codex_app_server_runs(
     Ok(Json(state.list_codex_app_server_runs().await?))
 }
 
+async fn get_codex_app_server_traces(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CodexAppServerTraceSummary>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "codex_app_server",
+        None,
+    )
+    .await?;
+    let runs = state.list_codex_app_server_runs().await?;
+    Ok(Json(build_codex_app_server_trace_summary(&runs)))
+}
+
 async fn poll_codex_app_server_run(
     State(state): State<AppState>,
     Path(run_id): Path<Uuid>,
@@ -5732,6 +5781,89 @@ fn codex_turn_status_is_terminal(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
         "completed" | "failed" | "cancelled" | "canceled" | "interrupted"
+    )
+}
+
+fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppServerTraceSummary {
+    let mut by_status = HashMap::new();
+    let mut by_operation = HashMap::new();
+    let mut grouped = BTreeMap::<String, Vec<&CodexAppServerRun>>::new();
+    for run in runs {
+        increment_count(&mut by_status, run.status.as_str());
+        increment_count(&mut by_operation, run.operation.as_str());
+        let trace_key = run
+            .turn_id
+            .clone()
+            .or_else(|| run.command_id.clone())
+            .unwrap_or_else(|| format!("run:{}", run.id));
+        grouped.entry(trace_key).or_default().push(run);
+    }
+    let mut traces = Vec::new();
+    for (trace_key, mut group) in grouped {
+        group.sort_by_key(|run| run.created_at);
+        let first = group.first().expect("group has at least one run");
+        let latest = group.last().expect("group has at least one run");
+        let mut operations = BTreeSet::new();
+        let mut command_count = 0usize;
+        let mut poll_count = 0usize;
+        let mut error_count = 0usize;
+        for run in &group {
+            operations.insert(run.operation.clone());
+            if run.operation.contains("command") || run.command_id.is_some() {
+                command_count += 1;
+            }
+            if run.operation.contains("poll") {
+                poll_count += 1;
+            }
+            if run.error.is_some() || codex_run_status_failed(&run.status) {
+                error_count += 1;
+            }
+        }
+        let latest_status = latest.status.clone();
+        traces.push(CodexTurnTrace {
+            trace_key,
+            turn_id: latest.turn_id.clone().or_else(|| first.turn_id.clone()),
+            thread_id: latest.thread_id.clone().or_else(|| first.thread_id.clone()),
+            latest_run_id: latest.id,
+            latest_status: latest_status.clone(),
+            terminal: codex_turn_status_is_terminal(&latest_status),
+            run_count: group.len(),
+            command_count,
+            poll_count,
+            error_count,
+            operations: operations.into_iter().collect(),
+            first_seen_at: first.created_at,
+            last_seen_at: latest.created_at,
+        });
+    }
+    traces.sort_by(|left, right| right.last_seen_at.cmp(&left.last_seen_at));
+    let active_turn_count = traces
+        .iter()
+        .filter(|trace| trace.turn_id.is_some() && !trace.terminal)
+        .count();
+    let failed_turn_count = traces
+        .iter()
+        .filter(|trace| codex_run_status_failed(&trace.latest_status) || trace.error_count > 0)
+        .count();
+    CodexAppServerTraceSummary {
+        generated_at: Utc::now(),
+        run_count: runs.len(),
+        turn_count: traces
+            .iter()
+            .filter(|trace| trace.turn_id.is_some())
+            .count(),
+        active_turn_count,
+        failed_turn_count,
+        by_status,
+        by_operation,
+        traces,
+    }
+}
+
+fn codex_run_status_failed(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "failed" | "poll_failed" | "cancelled" | "canceled" | "interrupted"
     )
 }
 
@@ -11028,6 +11160,86 @@ not json
                 .iter()
                 .any(|recommendation| recommendation == "cost_growth_investigation")
         );
+    }
+
+    #[test]
+    fn builds_codex_app_server_turn_trace_summary() {
+        let base_time = "2026-05-13T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid time");
+        let runs = vec![
+            CodexAppServerRun {
+                id: Uuid::new_v4(),
+                operation: "turn.create".to_string(),
+                thread_id: Some("thread-1".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                command_id: None,
+                status: "running".to_string(),
+                request: json!({"message": "inspect"}),
+                response: json!({"turn_id": "turn-1"}),
+                error: None,
+                created_at: base_time,
+            },
+            CodexAppServerRun {
+                id: Uuid::new_v4(),
+                operation: "command.execute".to_string(),
+                thread_id: Some("thread-1".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                command_id: Some("command-1".to_string()),
+                status: "running".to_string(),
+                request: json!({"command": "ls"}),
+                response: json!({"command_id": "command-1"}),
+                error: None,
+                created_at: base_time + chrono::Duration::seconds(1),
+            },
+            CodexAppServerRun {
+                id: Uuid::new_v4(),
+                operation: "turn.poll".to_string(),
+                thread_id: Some("thread-1".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                command_id: None,
+                status: "completed".to_string(),
+                request: json!({}),
+                response: json!({"status": "completed"}),
+                error: None,
+                created_at: base_time + chrono::Duration::seconds(2),
+            },
+            CodexAppServerRun {
+                id: Uuid::new_v4(),
+                operation: "turn.poll".to_string(),
+                thread_id: Some("thread-1".to_string()),
+                turn_id: Some("turn-2".to_string()),
+                command_id: None,
+                status: "poll_failed".to_string(),
+                request: json!({}),
+                response: json!({}),
+                error: Some(json!({"message": "timeout"})),
+                created_at: base_time + chrono::Duration::seconds(3),
+            },
+        ];
+        let summary = build_codex_app_server_trace_summary(&runs);
+        assert_eq!(summary.run_count, 4);
+        assert_eq!(summary.turn_count, 2);
+        assert_eq!(summary.failed_turn_count, 1);
+        assert_eq!(summary.active_turn_count, 1);
+        assert_eq!(summary.by_operation["turn.poll"], 2);
+        let turn_1 = summary
+            .traces
+            .iter()
+            .find(|trace| trace.turn_id.as_deref() == Some("turn-1"))
+            .expect("turn-1 trace");
+        assert_eq!(turn_1.run_count, 3);
+        assert_eq!(turn_1.command_count, 1);
+        assert_eq!(turn_1.poll_count, 1);
+        assert!(turn_1.terminal);
+        assert!(turn_1.operations.contains(&"command.execute".to_string()));
+        let turn_2 = summary
+            .traces
+            .iter()
+            .find(|trace| trace.turn_id.as_deref() == Some("turn-2"))
+            .expect("turn-2 trace");
+        assert_eq!(turn_2.error_count, 1);
+        assert_eq!(turn_2.latest_status, "poll_failed");
     }
 
     #[test]

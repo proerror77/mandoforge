@@ -64,6 +64,7 @@ const state = {
     interrupt: null,
     sync: null,
     runs: [],
+    traces: null,
     error: null,
   },
   selectedArtifactId: null,
@@ -886,7 +887,12 @@ async function checkCodexAppServerHealth() {
 
 async function loadCodexAppServerRuns() {
   await captureCodexAppServer("runs", async () => {
-    state.codexAppServer.runs = await api("/api/codex-app-server/runs");
+    const [runs, traces] = await Promise.all([
+      api("/api/codex-app-server/runs"),
+      api("/api/codex-app-server/traces"),
+    ]);
+    state.codexAppServer.runs = runs;
+    state.codexAppServer.traces = traces;
   });
 }
 
@@ -900,6 +906,7 @@ async function pollCodexRun(runId) {
       }),
     });
     state.codexAppServer.runs = await api("/api/codex-app-server/runs");
+    state.codexAppServer.traces = await api("/api/codex-app-server/traces");
   });
 }
 
@@ -1465,6 +1472,48 @@ function renderCodexAppServer() {
       `,
     )
     .join("");
+  const traceSummary = codex.traces;
+  const traceRows = (traceSummary?.traces || [])
+    .slice(0, 8)
+    .map(
+      (trace) => `
+        <tr>
+          <td>${escapeHtml(trace.turn_id || trace.trace_key)}</td>
+          <td>${escapeHtml(trace.latest_status)}</td>
+          <td>${formatInteger(trace.run_count)} runs · ${formatInteger(trace.command_count)} commands · ${formatInteger(trace.poll_count)} polls</td>
+          <td>${formatInteger(trace.error_count)}</td>
+          <td>${escapeHtml((trace.operations || []).join(", "))}</td>
+          <td>${escapeHtml(trace.last_seen_at)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+  const traceDashboard = traceSummary
+    ? `<h4>Per-turn Trace Summary</h4>
+      <div class="metric-grid compact-metrics">
+        <div class="metric"><span>Runs</span><strong>${formatInteger(traceSummary.run_count)}</strong></div>
+        <div class="metric"><span>Turns</span><strong>${formatInteger(traceSummary.turn_count)}</strong></div>
+        <div class="metric"><span>Active</span><strong>${formatInteger(traceSummary.active_turn_count)}</strong></div>
+        <div class="metric"><span>Failed</span><strong>${formatInteger(traceSummary.failed_turn_count)}</strong></div>
+      </div>
+      ${
+        traceRows
+          ? `<table class="usage-table">
+              <thead>
+                <tr>
+                  <th>Turn</th>
+                  <th>Status</th>
+                  <th>Activity</th>
+                  <th>Errors</th>
+                  <th>Operations</th>
+                  <th>Last Seen</th>
+                </tr>
+              </thead>
+              <tbody>${traceRows}</tbody>
+            </table>`
+          : `<div class="muted">No Codex turn traces yet.</div>`
+      }`
+    : "";
   const runDashboard = `
       <h4>Long-running Steering</h4>
       <div class="metric-grid compact-metrics">
@@ -1493,6 +1542,7 @@ function renderCodexAppServer() {
     }
     ${responseCards || `<div class="muted">No Codex App Server responses yet.</div>`}
     ${runDashboard}
+    ${traceDashboard}
     ${runs ? `<h4>Persisted Codex Runs</h4>${runs}` : ""}
   `;
   codexAppServerRoot.querySelectorAll("[data-poll-codex-run]").forEach((button) => {
