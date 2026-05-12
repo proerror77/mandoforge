@@ -522,6 +522,17 @@ struct SimulatePolicy {
     tool_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TestPolicyRequest {
+    tool_names: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PolicyTestResult {
+    decisions: Vec<policy::ToolPolicyDecision>,
+    tested_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SecretProviderHealth {
     provider_kind: String,
@@ -877,6 +888,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/providers/{id}/health", get(get_provider_health))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/simulate", post(simulate_policy))
+        .route("/api/policy/test", post(test_policy))
         .route("/api/vault/health", get(get_vault_health))
         .route(
             "/api/codex-app-server/health",
@@ -2679,12 +2691,94 @@ async fn simulate_policy(
     headers: HeaderMap,
     Json(input): Json<SimulatePolicy>,
 ) -> Result<Json<policy::ToolPolicyDecision>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "policy".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
     let tool_name = input.tool_name.trim();
     if tool_name.is_empty() {
         return Err(AppError::bad_request("tool_name is required"));
     }
-    Ok(Json(state.policy.evaluate_tool(tool_name)))
+    let decision = state.policy.evaluate_tool(tool_name);
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.simulated",
+            "policy",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "tool_name": tool_name,
+                "decision": decision.decision,
+                "risk_level": decision.risk_level,
+                "reason": decision.reason
+            }),
+        ))
+        .await?;
+    Ok(Json(decision))
+}
+
+async fn test_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<TestPolicyRequest>,
+) -> Result<Json<PolicyTestResult>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "policy".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let tool_names: Vec<_> = input
+        .tool_names
+        .iter()
+        .map(|tool| tool.trim())
+        .filter(|tool| !tool.is_empty())
+        .collect();
+    if tool_names.is_empty() {
+        return Err(AppError::bad_request(
+            "tool_names must include at least one tool",
+        ));
+    }
+    if tool_names.len() > 50 {
+        return Err(AppError::bad_request(
+            "policy test supports at most 50 tool names",
+        ));
+    }
+    let decisions: Vec<_> = tool_names
+        .iter()
+        .map(|tool_name| state.policy.evaluate_tool(tool_name))
+        .collect();
+    let result = PolicyTestResult {
+        decisions,
+        tested_at: Utc::now(),
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.tested",
+            "policy",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "tool_names": tool_names,
+                "decision_count": result.decisions.len()
+            }),
+        ))
+        .await?;
+    Ok(Json(result))
 }
 
 async fn get_vault_health(
@@ -6703,6 +6797,45 @@ not json
         )
         .await;
         assert_eq!(policy_decision["decision"], "requires_approval");
+
+        let policy_test: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/test")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"tool_names": ["shell.exec", "secret.read", "file.read"]}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            policy_test["decisions"]
+                .as_array()
+                .expect("decisions array")
+                .len(),
+            3
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "policy.simulated")
+        );
+        assert!(audit_logs.iter().any(|log| log.action == "policy.tested"));
 
         let reserved_secret_health = secret_provider_health_from_lookup(|_| None).await;
         assert_eq!(reserved_secret_health.provider_kind, "reserved");

@@ -166,6 +166,13 @@
                 </label>
                 <button type="submit">Simulate Policy</button>
               </form>
+              <form id="policy-test-form" class="stack-form compact-form">
+                <label>
+                  Tool names
+                  <textarea name="tool_names" rows="2">shell.exec,file.write,secret.read,file.read</textarea>
+                </label>
+                <button type="submit">Test Policy</button>
+              </form>
               <div id="policy-summary" class="detail-panel"></div>
               <div id="policy-decision" class="list"></div>
             </div>

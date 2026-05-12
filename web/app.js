@@ -10,6 +10,7 @@ const state = {
   vaultHealth: null,
   policy: null,
   policyDecision: null,
+  policyTest: null,
   evalDatasets: [],
   evalCases: [],
   evalRuns: [],
@@ -50,6 +51,7 @@ const vaultHealthRoot = document.querySelector("#vault-health");
 const checkVaultHealthButton = document.querySelector("#check-vault-health");
 const policyRoot = document.querySelector("#policy-summary");
 const policyForm = document.querySelector("#policy-simulate-form");
+const policyTestForm = document.querySelector("#policy-test-form");
 const policyDecisionRoot = document.querySelector("#policy-decision");
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
@@ -89,6 +91,7 @@ membershipForm.addEventListener("submit", createMembership);
 providerForm.addEventListener("submit", createProvider);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
 policyForm.addEventListener("submit", simulatePolicy);
+policyTestForm.addEventListener("submit", testPolicy);
 evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
 evalRunForm.addEventListener("submit", createEvalRun);
@@ -252,6 +255,20 @@ async function simulatePolicy(event) {
     body: JSON.stringify({
       tool_name: String(form.get("tool_name") || "").trim(),
     }),
+  });
+  renderPolicy();
+}
+
+async function testPolicy(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const toolNames = String(form.get("tool_names") || "")
+    .split(/[,\n]/)
+    .map((tool) => tool.trim())
+    .filter(Boolean);
+  state.policyTest = await api("/api/policy/test", {
+    method: "POST",
+    body: JSON.stringify({ tool_names: toolNames }),
   });
   renderPolicy();
 }
@@ -920,6 +937,15 @@ function renderPolicy() {
         <pre>${escapeHtml(JSON.stringify(state.policyDecision, null, 2))}</pre>
       </div>`
     : `<div class="muted">No policy simulation yet.</div>`;
+  if (state.policyTest) {
+    policyDecisionRoot.innerHTML += `
+      <div class="item">
+        <strong>Policy test</strong>
+        <div class="muted">${escapeHtml(state.policyTest.tested_at)}</div>
+        <pre>${escapeHtml(JSON.stringify(state.policyTest.decisions, null, 2))}</pre>
+      </div>
+    `;
+  }
 }
 
 function renderProviders() {

@@ -99,6 +99,7 @@
 - [x] Enforce RBAC on core write API paths with default demo operator compatibility.
 - [x] Enforce RBAC on the tool catalog API while keeping health/static public.
 - [x] Add Admin-only policy inspection and tool-decision simulation APIs.
+- [x] Add audited batch policy test API.
 - [x] Add local-verified HTTP MCP Gateway client boundary before enabling `mcp.call`.
 - [x] Add local-verified HTTP OTel exporter boundary before wiring runtime telemetry export.
 - [x] Add local-verified Redis Stream command boundary before enabling a live broker queue backend.
@@ -145,5 +146,6 @@
 - [x] Add Actionbook CLI static UI smoke verification as the browser fallback.
 - [x] Add static Admin Console panels for usage, providers, eval runs, and governance status.
 - [x] Add static Policy Console for policy inspection and tool-decision simulation.
+- [x] Add static Policy Console batch test controls.
 - [x] Add static Provider Settings form for creating/updating stored providers with budget and pricing config.
 - [x] Add static Provider Settings fields for base URL and API key env/ref config.
