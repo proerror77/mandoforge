@@ -1,6 +1,12 @@
 #[cfg(test)]
 use std::path::Path as FsPath;
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -564,6 +570,39 @@ struct PolicyTestResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyDiffChange {
+    path: String,
+    kind: String,
+    current: Value,
+    proposed: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyRevisionDiff {
+    revision_id: Uuid,
+    changes: Vec<PolicyDiffChange>,
+    generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyRevisionGate {
+    revision_id: Uuid,
+    status: String,
+    cases: Vec<PolicyGateCaseResult>,
+    diff: PolicyRevisionDiff,
+    checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyGateCaseResult {
+    tool_name: String,
+    expected_decision: String,
+    actual_decision: String,
+    passed: bool,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PolicyRevision {
     id: Uuid,
     name: String,
@@ -572,6 +611,9 @@ struct PolicyRevision {
     created_by: Option<String>,
     created_at: DateTime<Utc>,
     activated_at: Option<DateTime<Utc>>,
+    gate_status: Option<String>,
+    gate_result: Value,
+    gated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -975,6 +1017,11 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/policy/revisions/{id}/activate",
             post(activate_policy_revision),
+        )
+        .route("/api/policy/revisions/{id}/diff", get(diff_policy_revision))
+        .route(
+            "/api/policy/revisions/{id}/gate",
+            post(gate_policy_revision),
         )
         .route("/api/vault/health", get(get_vault_health))
         .route(
@@ -2926,6 +2973,60 @@ async fn create_policy_revision(
     Ok(Json(revision))
 }
 
+async fn diff_policy_revision(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRevisionDiff>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "policy_revision",
+        Some(id),
+    )
+    .await?;
+    let revision = state.get_policy_revision(id).await?;
+    Ok(Json(build_policy_revision_diff(&state.policy, &revision)?))
+}
+
+async fn gate_policy_revision(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRevisionGate>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "policy_revision".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let revision = state.get_policy_revision(id).await?;
+    let gate = build_policy_revision_gate(&state.policy, &revision)?;
+    state.update_policy_revision_gate(&gate).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.revision_gated",
+            "policy_revision",
+            Some(revision.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": revision.name,
+                "status": gate.status,
+                "case_count": gate.cases.len(),
+                "change_count": gate.diff.changes.len()
+            }),
+        ))
+        .await?;
+    Ok(Json(gate))
+}
+
 async fn activate_policy_revision(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -2975,6 +3076,106 @@ fn validate_policy_revision_input(
     serde_json::from_value::<PolicyConfig>(input.body.clone())
         .map_err(|error| AppError::bad_request(format!("invalid policy body: {error}")))?;
     Ok(input)
+}
+
+fn build_policy_revision_diff(
+    current_policy: &PolicyConfig,
+    revision: &PolicyRevision,
+) -> Result<PolicyRevisionDiff, AppError> {
+    let current = serde_json::to_value(current_policy)?;
+    let mut changes = Vec::new();
+    collect_policy_diff("", &current, &revision.body, &mut changes);
+    Ok(PolicyRevisionDiff {
+        revision_id: revision.id,
+        changes,
+        generated_at: Utc::now(),
+    })
+}
+
+fn collect_policy_diff(
+    path: &str,
+    current: &Value,
+    proposed: &Value,
+    changes: &mut Vec<PolicyDiffChange>,
+) {
+    match (current, proposed) {
+        (Value::Object(current_map), Value::Object(proposed_map)) => {
+            let keys: BTreeSet<_> = current_map.keys().chain(proposed_map.keys()).collect();
+            for key in keys {
+                let child_path = if path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{path}.{key}")
+                };
+                match (current_map.get(key), proposed_map.get(key)) {
+                    (Some(current_value), Some(proposed_value)) => {
+                        collect_policy_diff(&child_path, current_value, proposed_value, changes);
+                    }
+                    (Some(current_value), None) => changes.push(PolicyDiffChange {
+                        path: child_path,
+                        kind: "removed".to_string(),
+                        current: current_value.clone(),
+                        proposed: Value::Null,
+                    }),
+                    (None, Some(proposed_value)) => changes.push(PolicyDiffChange {
+                        path: child_path,
+                        kind: "added".to_string(),
+                        current: Value::Null,
+                        proposed: proposed_value.clone(),
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        _ if current != proposed => changes.push(PolicyDiffChange {
+            path: path.to_string(),
+            kind: "changed".to_string(),
+            current: current.clone(),
+            proposed: proposed.clone(),
+        }),
+        _ => {}
+    }
+}
+
+fn build_policy_revision_gate(
+    current_policy: &PolicyConfig,
+    revision: &PolicyRevision,
+) -> Result<PolicyRevisionGate, AppError> {
+    let proposed_policy = serde_json::from_value::<PolicyConfig>(revision.body.clone())
+        .map_err(|error| AppError::bad_request(format!("invalid policy body: {error}")))?;
+    let cases = [
+        ("secret.read", "denied"),
+        ("shell.exec", "requires_approval"),
+        ("file.write", "requires_approval"),
+        ("sql.query", "allowed"),
+        ("file.read", "allowed"),
+    ]
+    .into_iter()
+    .map(|(tool_name, expected_decision)| {
+        let decision = proposed_policy.evaluate_tool(tool_name);
+        let passed = decision.decision == expected_decision;
+        PolicyGateCaseResult {
+            tool_name: tool_name.to_string(),
+            expected_decision: expected_decision.to_string(),
+            actual_decision: decision.decision.to_string(),
+            passed,
+            reason: decision.reason,
+        }
+    })
+    .collect::<Vec<_>>();
+    let status = if cases.iter().all(|case| case.passed) {
+        "passed"
+    } else {
+        "failed"
+    }
+    .to_string();
+    Ok(PolicyRevisionGate {
+        revision_id: revision.id,
+        status,
+        cases,
+        diff: build_policy_revision_diff(current_policy, revision)?,
+        checked_at: Utc::now(),
+    })
 }
 
 async fn get_vault_health(
@@ -5208,6 +5409,8 @@ not json
         assert!(names.contains(&"0005_approval_expiry.sql"));
         assert!(names.contains(&"0006_agent_releases.sql"));
         assert!(names.contains(&"0007_secret_records.sql"));
+        assert!(names.contains(&"0008_policy_revisions.sql"));
+        assert!(names.contains(&"0009_policy_revision_gates.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -7428,6 +7631,60 @@ not json
         .await;
         assert_eq!(policy_revision.status, "draft");
 
+        let (premature_activation_status, premature_activation_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/activate",
+                    policy_revision.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(premature_activation_status, StatusCode::BAD_REQUEST);
+        assert!(
+            premature_activation_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rollout gate")
+        );
+
+        let policy_revision_diff: PolicyRevisionDiff = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/policy/revisions/{}/diff", policy_revision.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(policy_revision_diff.revision_id, policy_revision.id);
+        assert!(
+            policy_revision_diff
+                .changes
+                .iter()
+                .any(|change| change.path == "blocked_tools")
+        );
+
+        let policy_revision_gate: PolicyRevisionGate = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/policy/revisions/{}/gate", policy_revision.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(policy_revision_gate.status, "passed");
+        assert!(policy_revision_gate.cases.iter().all(|case| case.passed));
+
         let invalid_policy_revision = request_value(
             app.clone(),
             Request::builder()
@@ -7449,6 +7706,51 @@ not json
         )
         .await;
         assert_eq!(invalid_policy_revision.0, StatusCode::BAD_REQUEST);
+
+        let unsafe_policy_revision: PolicyRevision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/revisions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "unsafe-policy",
+                        "body": {
+                            "blocked_tools": [],
+                            "approval_required": [],
+                            "allowed_tools": {
+                                "generic-orchestrator-agent": ["secret.read", "file.read", "sql.query"]
+                            },
+                            "sql_policy": {
+                                "max_rows": 500,
+                                "blocked_keywords": ["INSERT", "UPDATE", "DELETE", "DROP"]
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let unsafe_gate: PolicyRevisionGate = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/gate",
+                    unsafe_policy_revision.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(unsafe_gate.status, "failed");
+        assert!(unsafe_gate.cases.iter().any(|case| !case.passed));
 
         let active_policy_revision: PolicyRevision = request_json(
             app.clone(),
@@ -7503,6 +7805,11 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "policy.revision_created")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "policy.revision_gated")
         );
         assert!(
             audit_logs

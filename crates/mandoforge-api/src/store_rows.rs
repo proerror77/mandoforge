@@ -80,6 +80,9 @@ pub(crate) fn policy_revision_from_row(row: PgRow) -> Result<PolicyRevision, App
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
         activated_at: row.try_get("activated_at")?,
+        gate_status: row.try_get("gate_status")?,
+        gate_result: row.try_get("gate_result")?,
+        gated_at: row.try_get("gated_at")?,
     })
 }
 

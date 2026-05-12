@@ -13,6 +13,8 @@ const state = {
   policyDecision: null,
   policyTest: null,
   policyRevisions: [],
+  policyRevisionDiffs: {},
+  policyRevisionGates: {},
   evalDatasets: [],
   evalCases: [],
   evalRuns: [],
@@ -325,6 +327,19 @@ async function createPolicyRevision(event) {
 
 async function activatePolicyRevision(id) {
   await api(`/api/policy/revisions/${id}/activate`, { method: "POST" });
+  state.policyRevisions = await api("/api/policy/revisions");
+  renderPolicy();
+}
+
+async function diffPolicyRevision(id) {
+  state.policyRevisionDiffs[id] = await api(`/api/policy/revisions/${id}/diff`);
+  renderPolicy();
+}
+
+async function gatePolicyRevision(id) {
+  state.policyRevisionGates[id] = await api(`/api/policy/revisions/${id}/gate`, {
+    method: "POST",
+  });
   state.policyRevisions = await api("/api/policy/revisions");
   renderPolicy();
 }
@@ -1069,23 +1084,47 @@ function renderPolicy() {
       state.policyRevisions.length
         ? state.policyRevisions
             .map(
-              (revision) => `
-                <div class="item">
-                  <strong>${escapeHtml(revision.name)}</strong>
-                  <div class="muted">${escapeHtml(revision.status)} · ${escapeHtml(revision.created_at)}</div>
-                  <pre>${escapeHtml(JSON.stringify(revision.body, null, 2))}</pre>
-                  ${
-                    revision.status === "active"
-                      ? `<span class="badge">Active</span>`
-                      : `<button type="button" data-policy-activate="${escapeHtml(revision.id)}">Activate</button>`
-                  }
-                </div>
-              `,
+              (revision) => {
+                const diff = state.policyRevisionDiffs[revision.id];
+                const gate = state.policyRevisionGates[revision.id] || revision.gate_result;
+                return `
+                  <div class="item">
+                    <strong>${escapeHtml(revision.name)}</strong>
+                    <div class="muted">${escapeHtml(revision.status)} · gate ${escapeHtml(revision.gate_status || "not_run")} · ${escapeHtml(revision.created_at)}</div>
+                    <pre>${escapeHtml(JSON.stringify(revision.body, null, 2))}</pre>
+                    <button type="button" data-policy-diff="${escapeHtml(revision.id)}">Diff</button>
+                    <button type="button" data-policy-gate="${escapeHtml(revision.id)}">Gate</button>
+                    ${
+                      revision.status === "active"
+                        ? `<span class="badge">Active</span>`
+                        : revision.gate_status === "passed"
+                          ? `<button type="button" data-policy-activate="${escapeHtml(revision.id)}">Activate</button>`
+                          : `<span class="muted">Activation requires passed gate</span>`
+                    }
+                    ${
+                      diff
+                        ? `<pre>${escapeHtml(JSON.stringify(diff.changes, null, 2))}</pre>`
+                        : ""
+                    }
+                    ${
+                      gate && Object.keys(gate).length
+                        ? `<pre>${escapeHtml(JSON.stringify(gate, null, 2))}</pre>`
+                        : ""
+                    }
+                  </div>
+                `;
+              },
             )
             .join("")
         : `<div class="muted">No policy revisions yet.</div>`
     }
   `;
+  policyRevisionRoot.querySelectorAll("[data-policy-diff]").forEach((button) => {
+    button.addEventListener("click", () => diffPolicyRevision(button.dataset.policyDiff));
+  });
+  policyRevisionRoot.querySelectorAll("[data-policy-gate]").forEach((button) => {
+    button.addEventListener("click", () => gatePolicyRevision(button.dataset.policyGate));
+  });
   policyRevisionRoot.querySelectorAll("[data-policy-activate]").forEach((button) => {
     button.addEventListener("click", () => activatePolicyRevision(button.dataset.policyActivate));
   });
