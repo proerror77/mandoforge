@@ -30,6 +30,7 @@ const state = {
   memberships: [],
   selectedOrganizationId: "",
   selectedTeamId: "",
+  approvalDeliveries: {},
   selectedArtifactId: null,
   selectedToolCallId: null,
   selectedAuditLogId: null,
@@ -559,6 +560,11 @@ async function refreshApprovals() {
   approvalRoot.querySelectorAll("[data-expire]").forEach((button) => {
     button.addEventListener("click", () => decide(button.dataset.expire, "expire"));
   });
+  approvalRoot.querySelectorAll("[data-deliver-approval]").forEach((button) => {
+    button.addEventListener("click", () =>
+      deliverApprovalNotification(button.dataset.deliverApproval),
+    );
+  });
   approvalRoot.querySelectorAll("[data-approval-modify]").forEach((form) => {
     form.addEventListener("submit", (event) => modifyApproval(event, form.dataset.approvalModify));
   });
@@ -584,6 +590,13 @@ async function modifyApproval(event, id) {
   await refreshApprovals();
   await refreshSession();
   await refreshOps();
+}
+
+async function deliverApprovalNotification(id) {
+  state.approvalDeliveries[id] = await api(`/api/approvals/${id}/deliver`, {
+    method: "POST",
+  });
+  await refreshApprovals();
 }
 
 function renderOps() {
@@ -1362,6 +1375,7 @@ function renderApproval(approval) {
     approval.evidence?.args?.approver_subject ??
     approval.evidence?.args?.delegated_approver ??
     null;
+  const delivery = state.approvalDeliveries[approval.id];
   return `
     <div class="item">
       <strong>${escapeHtml(approval.action)}</strong>
@@ -1394,7 +1408,12 @@ function renderApproval(approval) {
               </label>
               <button type="submit" class="secondary">Modify Args</button>
             </form>
-            <button class="secondary" data-approve="${approval.id}">Approve</button><button class="secondary reject" data-reject="${approval.id}">Reject</button><button class="secondary" data-expire="${approval.id}">Expire</button>`
+            <button class="secondary" data-deliver-approval="${approval.id}">Deliver</button><button class="secondary" data-approve="${approval.id}">Approve</button><button class="secondary reject" data-reject="${approval.id}">Reject</button><button class="secondary" data-expire="${approval.id}">Expire</button>`
+          : ""
+      }
+      ${
+        delivery
+          ? `<div class="muted">Delivery: ${escapeHtml(delivery.status)} · ${escapeHtml(delivery.channel)} · ${escapeHtml(delivery.webhook_configured ? "webhook configured" : "webhook not configured")}</div>`
           : ""
       }
     </div>

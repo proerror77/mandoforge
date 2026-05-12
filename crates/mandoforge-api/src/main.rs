@@ -102,6 +102,7 @@ struct AppState {
     codex_app_server_config: Option<CodexAppServerConfig>,
     codex_app_server_client: Arc<dyn CodexAppServerClient>,
     cost_alert_webhook_url: Option<String>,
+    approval_webhook_url: Option<String>,
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
@@ -279,6 +280,16 @@ struct Approval {
     expires_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationDelivery {
+    status: String,
+    delivered: bool,
+    channel: String,
+    webhook_configured: bool,
+    approval_id: Uuid,
+    delivered_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -766,6 +777,7 @@ async fn main() -> Result<()> {
         codex_app_server_config: codex_app_server_config_from_env()?,
         codex_app_server_client: codex_app_server_client_from_env()?,
         cost_alert_webhook_url: cost_alert_webhook_url_from_env(),
+        approval_webhook_url: approval_webhook_url_from_env(),
         workspace_root,
         tenant_id,
         policy,
@@ -952,6 +964,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/approvals/{id}/reject", post(reject))
         .route("/api/approvals/{id}/expire", post(expire))
         .route("/api/approvals/{id}/modify", post(modify_approval))
+        .route("/api/approvals/{id}/deliver", post(deliver_approval))
         .route("/api/execution-jobs", get(list_execution_jobs))
         .route(
             "/api/execution-jobs/{id}/run",
@@ -1031,6 +1044,13 @@ fn codex_app_server_client_from_env() -> Result<Arc<dyn CodexAppServerClient>> {
 
 fn cost_alert_webhook_url_from_env() -> Option<String> {
     std::env::var("MANDOFORGE_COST_ALERT_WEBHOOK_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn approval_webhook_url_from_env() -> Option<String> {
+    std::env::var("MANDOFORGE_APPROVAL_WEBHOOK_URL")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -3956,6 +3976,73 @@ async fn modify_approval(
     Ok(Json(updated))
 }
 
+async fn deliver_approval(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ApprovalNotificationDelivery>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "approval", Some(id)).await?;
+    let approval = state.get_approval(id).await?;
+    if approval.status != "pending" {
+        return Err(AppError::bad_request(
+            "only pending approvals can be delivered",
+        ));
+    }
+    if approval_is_expired(&approval) {
+        expire_approval_record(&state, id).await?;
+        return Err(AppError::bad_request("approval expired"));
+    }
+    let delivered_at = Utc::now();
+    let Some(webhook_url) = state.approval_webhook_url.as_ref() else {
+        return Ok(Json(ApprovalNotificationDelivery {
+            status: "reserved".to_string(),
+            delivered: false,
+            channel: "webhook".to_string(),
+            webhook_configured: false,
+            approval_id: id,
+            delivered_at,
+        }));
+    };
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        reqwest::Client::new()
+            .post(webhook_url)
+            .json(&json!({
+                "type": "mandoforge.approval_requested",
+                "approval": approval,
+                "delivered_at": delivered_at,
+            }))
+            .send(),
+    )
+    .await??;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "approval webhook returned status {}",
+            response.status()
+        )));
+    }
+    let delivery = ApprovalNotificationDelivery {
+        status: "delivered".to_string(),
+        delivered: true,
+        channel: "webhook".to_string(),
+        webhook_configured: true,
+        approval_id: id,
+        delivered_at,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "system",
+            Some(id),
+            "approval.notification_delivered",
+            "approval",
+            Some(id),
+            serde_json::to_value(&delivery)?,
+        ))
+        .await?;
+    Ok(Json(delivery))
+}
+
 async fn authorize_approval_decision(
     state: &AppState,
     headers: &HeaderMap,
@@ -4885,6 +4972,33 @@ not json
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
             cost_alert_webhook_url: None,
+            approval_webhook_url: None,
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: PolicyConfig::default(),
+        };
+        state.seed_demo_agent().await.expect("seed demo agent");
+        build_router(state)
+    }
+
+    async fn test_app_with_approval_webhook(approval_webhook_url: String) -> Router {
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(InlineExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: None,
+            codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            cost_alert_webhook_url: None,
+            approval_webhook_url: Some(approval_webhook_url),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -5041,6 +5155,12 @@ not json
         Json(json!({"accepted": true}))
     }
 
+    async fn mock_approval_webhook(Json(payload): Json<Value>) -> Json<Value> {
+        assert_eq!(payload["type"], "mandoforge.approval_requested");
+        assert!(payload["approval"]["id"].as_str().is_some());
+        Json(json!({"accepted": true}))
+    }
+
     #[tokio::test]
     async fn appended_session_events_export_telemetry_when_enabled() {
         let exporter = Arc::new(RecordingTelemetryExporter::default());
@@ -5060,6 +5180,7 @@ not json
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
             cost_alert_webhook_url: None,
+            approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -5142,6 +5263,7 @@ not json
             }),
             codex_app_server_client: codex_client.clone(),
             cost_alert_webhook_url: None,
+            approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -5281,6 +5403,7 @@ not json
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
             cost_alert_webhook_url: Some(format!("http://{addr}/alerts")),
+            approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -5450,6 +5573,7 @@ not json
             codex_app_server_config: None,
             codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
             cost_alert_webhook_url: None,
+            approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -6446,6 +6570,89 @@ not json
                     && call.policy_decision["decision"] == "allowed"
             }));
         }
+    }
+
+    #[tokio::test]
+    async fn approval_notification_delivery_posts_pending_approval_to_webhook() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let webhook = Router::new().route("/approval", post(mock_approval_webhook));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, webhook)
+                .await
+                .expect("mock approval webhook");
+        });
+        let app = test_app_with_approval_webhook(format!("http://{addr}/approval")).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "approval notification"}),
+            ),
+        )
+        .await;
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/approval.request/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "action": "manual.review",
+                        "risk_level": "medium",
+                        "reason": "Notify an approver."
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let delivery: ApprovalNotificationDelivery = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/deliver"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(delivery.status, "delivered");
+        assert!(delivery.delivered);
+        assert_eq!(delivery.approval_id.to_string(), approval_id);
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "approval.notification_delivered")
+        );
+        server.abort();
     }
 
     #[tokio::test]
