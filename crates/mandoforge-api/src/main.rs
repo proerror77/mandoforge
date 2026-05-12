@@ -669,6 +669,34 @@ struct CodexAppServerTraceSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerControlPlaneSummary {
+    generated_at: DateTime<Utc>,
+    configured: bool,
+    status: String,
+    endpoint_configured: bool,
+    timeout_seconds: Option<u64>,
+    run_count: usize,
+    turn_count: usize,
+    active_turn_count: usize,
+    failed_turn_count: usize,
+    stale_candidate_count: usize,
+    pollable_turn_count: usize,
+    latest_seen_at: Option<DateTime<Utc>>,
+    by_status: HashMap<String, usize>,
+    by_operation: HashMap<String, usize>,
+    attention_items: Vec<CodexAppServerControlPlaneAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerControlPlaneAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
+    trace_key: Option<String>,
+    turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexTurnTrace {
     trace_key: String,
     turn_id: Option<String>,
@@ -2096,6 +2124,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/codex-app-server/traces",
             get(get_codex_app_server_traces),
+        )
+        .route(
+            "/api/codex-app-server/control-plane/summary",
+            get(get_codex_app_server_control_plane_summary),
         )
         .route(
             "/api/codex-app-server/traces/{trace_key}",
@@ -6321,6 +6353,26 @@ async fn get_codex_app_server_traces(
     Ok(Json(build_codex_app_server_trace_summary(&runs)))
 }
 
+async fn get_codex_app_server_control_plane_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CodexAppServerControlPlaneSummary>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "codex_app_server",
+        None,
+    )
+    .await?;
+    let runs = state.list_codex_app_server_runs().await?;
+    Ok(Json(build_codex_app_server_control_plane_summary(
+        state.codex_app_server_config.as_ref(),
+        &runs,
+        Utc::now(),
+    )))
+}
+
 async fn get_codex_app_server_trace_detail(
     State(state): State<AppState>,
     Path(trace_key): Path<String>,
@@ -6675,6 +6727,113 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
         by_status,
         by_operation,
         traces,
+    }
+}
+
+fn build_codex_app_server_control_plane_summary(
+    config: Option<&CodexAppServerConfig>,
+    runs: &[CodexAppServerRun],
+    generated_at: DateTime<Utc>,
+) -> CodexAppServerControlPlaneSummary {
+    let trace_summary = build_codex_app_server_trace_summary(runs);
+    let stale_candidates =
+        select_stale_codex_app_server_runs(runs, generated_at, default_codex_stale_after_seconds());
+    let stale_candidate_count = stale_candidates.len();
+    let pollable_turn_count = trace_summary
+        .traces
+        .iter()
+        .filter(|trace| trace.turn_id.is_some() && !trace.terminal)
+        .count();
+    let latest_seen_at = trace_summary
+        .traces
+        .iter()
+        .map(|trace| trace.last_seen_at)
+        .max()
+        .or_else(|| runs.iter().map(|run| run.created_at).max());
+    let mut attention_items = Vec::new();
+
+    if config.is_none() {
+        attention_items.push(CodexAppServerControlPlaneAttentionItem {
+            kind: "reserved_adapter".to_string(),
+            severity: "warning".to_string(),
+            message:
+                "Codex App Server is reserved until MANDOFORGE_CODEX_APP_SERVER_URL is configured"
+                    .to_string(),
+            trace_key: None,
+            turn_id: None,
+        });
+    }
+    for trace in &trace_summary.traces {
+        if codex_run_status_failed(&trace.latest_status) || trace.error_count > 0 {
+            attention_items.push(CodexAppServerControlPlaneAttentionItem {
+                kind: "failed_trace".to_string(),
+                severity: "critical".to_string(),
+                message: format!(
+                    "trace latest status is {} with {} error signals",
+                    trace.latest_status, trace.error_count
+                ),
+                trace_key: Some(trace.trace_key.clone()),
+                turn_id: trace.turn_id.clone(),
+            });
+        } else if trace.turn_id.is_some() && !trace.terminal {
+            attention_items.push(CodexAppServerControlPlaneAttentionItem {
+                kind: "active_turn".to_string(),
+                severity: "warning".to_string(),
+                message: "turn is still non-terminal and should be polled or interrupted"
+                    .to_string(),
+                trace_key: Some(trace.trace_key.clone()),
+                turn_id: trace.turn_id.clone(),
+            });
+        }
+    }
+    for run in stale_candidates {
+        attention_items.push(CodexAppServerControlPlaneAttentionItem {
+            kind: "stale_turn".to_string(),
+            severity: if config.is_some() {
+                "warning".to_string()
+            } else {
+                "critical".to_string()
+            },
+            message: format!(
+                "turn has not reached a terminal state within {} seconds",
+                default_codex_stale_after_seconds()
+            ),
+            trace_key: Some(codex_app_server_trace_key(&run)),
+            turn_id: run.turn_id,
+        });
+    }
+
+    let status = if config.is_none() {
+        "reserved"
+    } else if attention_items
+        .iter()
+        .any(|item| item.severity == "critical")
+    {
+        "critical"
+    } else if attention_items.is_empty() {
+        "ready"
+    } else {
+        "attention"
+    }
+    .to_string();
+    let timeout_seconds = config.map(|config| config.timeout_seconds);
+
+    CodexAppServerControlPlaneSummary {
+        generated_at,
+        configured: config.is_some(),
+        status,
+        endpoint_configured: config.is_some(),
+        timeout_seconds,
+        run_count: trace_summary.run_count,
+        turn_count: trace_summary.turn_count,
+        active_turn_count: trace_summary.active_turn_count,
+        failed_turn_count: trace_summary.failed_turn_count,
+        stale_candidate_count,
+        pollable_turn_count,
+        latest_seen_at,
+        by_status: trace_summary.by_status,
+        by_operation: trace_summary.by_operation,
+        attention_items,
     }
 }
 
@@ -15630,6 +15789,27 @@ not json
         assert_eq!(trace_detail.trace.turn_id.as_deref(), Some("turn-1"));
         assert_eq!(trace_detail.runs.len(), 3);
         assert_eq!(trace_detail.status_timeline.len(), 3);
+
+        let control_summary: CodexAppServerControlPlaneSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/codex-app-server/control-plane/summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(control_summary.configured);
+        assert_eq!(control_summary.status, "critical");
+        assert_eq!(control_summary.run_count, 4);
+        assert_eq!(control_summary.turn_count, 1);
+        assert_eq!(control_summary.failed_turn_count, 1);
+        assert_eq!(control_summary.stale_candidate_count, 0);
+        assert_eq!(control_summary.pollable_turn_count, 0);
+        assert!(control_summary.attention_items.iter().any(|item| {
+            item.kind == "failed_trace" && item.turn_id.as_deref() == Some("turn-1")
+        }));
 
         let synced: CodexArtifactSyncResponse = request_json(
             app.clone(),

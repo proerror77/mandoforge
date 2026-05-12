@@ -72,6 +72,7 @@ const state = {
     sync: null,
     runs: [],
     traces: null,
+    controlSummary: null,
     traceDetail: null,
     error: null,
   },
@@ -900,18 +901,25 @@ async function createCostAlertRoute(event) {
 
 async function checkCodexAppServerHealth() {
   await captureCodexAppServer("health", async () => {
-    state.codexAppServer.health = await api("/api/codex-app-server/health");
+    const [health, controlSummary] = await Promise.all([
+      api("/api/codex-app-server/health"),
+      api("/api/codex-app-server/control-plane/summary"),
+    ]);
+    state.codexAppServer.health = health;
+    state.codexAppServer.controlSummary = controlSummary;
   });
 }
 
 async function loadCodexAppServerRuns() {
   await captureCodexAppServer("runs", async () => {
-    const [runs, traces] = await Promise.all([
+    const [runs, traces, controlSummary] = await Promise.all([
       api("/api/codex-app-server/runs"),
       api("/api/codex-app-server/traces"),
+      api("/api/codex-app-server/control-plane/summary"),
     ]);
     state.codexAppServer.runs = runs;
     state.codexAppServer.traces = traces;
+    state.codexAppServer.controlSummary = controlSummary;
   });
 }
 
@@ -924,8 +932,14 @@ async function pollCodexRun(runId) {
         retry_interval_ms: 0,
       }),
     });
-    state.codexAppServer.runs = await api("/api/codex-app-server/runs");
-    state.codexAppServer.traces = await api("/api/codex-app-server/traces");
+    const [runs, traces, controlSummary] = await Promise.all([
+      api("/api/codex-app-server/runs"),
+      api("/api/codex-app-server/traces"),
+      api("/api/codex-app-server/control-plane/summary"),
+    ]);
+    state.codexAppServer.runs = runs;
+    state.codexAppServer.traces = traces;
+    state.codexAppServer.controlSummary = controlSummary;
   });
 }
 
@@ -940,8 +954,14 @@ async function pollStaleCodexRuns() {
         max_runs: 20,
       }),
     });
-    state.codexAppServer.runs = await api("/api/codex-app-server/runs");
-    state.codexAppServer.traces = await api("/api/codex-app-server/traces");
+    const [runs, traces, controlSummary] = await Promise.all([
+      api("/api/codex-app-server/runs"),
+      api("/api/codex-app-server/traces"),
+      api("/api/codex-app-server/control-plane/summary"),
+    ]);
+    state.codexAppServer.runs = runs;
+    state.codexAppServer.traces = traces;
+    state.codexAppServer.controlSummary = controlSummary;
   });
 }
 
@@ -1536,6 +1556,8 @@ function renderCodexAppServer() {
     )
     .join("");
   const traceSummary = codex.traces;
+  const controlSummary = codex.controlSummary;
+  const controlAttention = controlSummary?.attention_items || [];
   const traceRows = (traceSummary?.traces || [])
     .slice(0, 8)
     .map(
@@ -1592,6 +1614,48 @@ function renderCodexAppServer() {
         <div class="muted">${escapeHtml(runSummary.pollableLabels.join(", ") || "none")}</div>
       </div>
     `;
+  const controlDashboard = controlSummary
+    ? `<h4>Control-plane Summary</h4>
+      <div class="metric-grid compact-metrics">
+        <div class="metric"><span>Status</span><strong>${escapeHtml(controlSummary.status)}</strong></div>
+        <div class="metric"><span>Runs</span><strong>${formatInteger(controlSummary.run_count)}</strong></div>
+        <div class="metric"><span>Turns</span><strong>${formatInteger(controlSummary.turn_count)}</strong></div>
+        <div class="metric"><span>Active</span><strong>${formatInteger(controlSummary.active_turn_count)}</strong></div>
+        <div class="metric"><span>Failed</span><strong>${formatInteger(controlSummary.failed_turn_count)}</strong></div>
+        <div class="metric"><span>Stale</span><strong>${formatInteger(controlSummary.stale_candidate_count)}</strong></div>
+        <div class="metric"><span>Pollable</span><strong>${formatInteger(controlSummary.pollable_turn_count)}</strong></div>
+        <div class="metric"><span>Attention</span><strong>${formatInteger(controlAttention.length)}</strong></div>
+      </div>
+      <div class="muted">Configured: ${escapeHtml(controlSummary.configured ? "yes" : "no")} · timeout ${escapeHtml(controlSummary.timeout_seconds ?? "n/a")}s · latest ${escapeHtml(controlSummary.latest_seen_at || "none")}</div>
+      ${
+        controlAttention.length
+          ? `<table class="usage-table">
+              <thead>
+                <tr>
+                  <th>Severity</th>
+                  <th>Signal</th>
+                  <th>Turn</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${controlAttention
+                  .map(
+                    (item) => `
+                      <tr>
+                        <td><span class="budget-status ${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</span></td>
+                        <td>${escapeHtml(item.kind)}</td>
+                        <td>${escapeHtml(item.turn_id || item.trace_key || "global")}</td>
+                        <td>${escapeHtml(item.message)}</td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>`
+          : `<div class="muted">No Codex App Server attention items.</div>`
+      }`
+    : "";
   codexAppServerRoot.innerHTML = `
     <div class="item">
       <strong>Codex steering</strong>
@@ -1606,6 +1670,7 @@ function renderCodexAppServer() {
         : ""
     }
     ${responseCards || `<div class="muted">No Codex App Server responses yet.</div>`}
+    ${controlDashboard}
     ${runDashboard}
     ${traceDashboard}
     ${runs ? `<h4>Persisted Codex Runs</h4>${runs}` : ""}
