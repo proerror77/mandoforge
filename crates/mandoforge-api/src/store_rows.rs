@@ -4,8 +4,8 @@ use sqlx::{Row, postgres::PgRow};
 
 use crate::{
     Agent, AgentVersion, AppError, Approval, Artifact, AuditLog, EvalCase, EvalDataset, EvalRun,
-    Membership, Organization, Project, ProviderAccess, ProviderRecord, Session, SessionEvent, Team,
-    ToolCall,
+    McpServerRecord, Membership, Organization, Project, ProviderAccess, ProviderRecord, Session,
+    SessionEvent, Team, ToolCall,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -195,6 +195,20 @@ pub(crate) fn provider_record_from_row(row: PgRow) -> Result<ProviderRecord, App
         base_url: row.try_get("base_url")?,
         default_model: row.try_get("default_model")?,
         config: row.try_get("config")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn mcp_server_from_row(row: PgRow) -> Result<McpServerRecord, AppError> {
+    let tool_allowlist: Value = row.try_get("tool_allowlist")?;
+    Ok(McpServerRecord {
+        id: row.try_get("id")?,
+        team_id: row.try_get("team_id")?,
+        name: row.try_get("name")?,
+        transport: row.try_get("transport")?,
+        config: row.try_get("config")?,
+        tool_allowlist: serde_json::from_value(tool_allowlist).unwrap_or_default(),
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })

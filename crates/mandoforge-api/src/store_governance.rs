@@ -4,13 +4,13 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{
-    membership_from_row, organization_from_row, project_from_row, provider_access_from_row,
-    provider_record_from_row, team_from_row,
+    mcp_server_from_row, membership_from_row, organization_from_row, project_from_row,
+    provider_access_from_row, provider_record_from_row, team_from_row,
 };
 use crate::{
-    AppError, AppState, CreateMembership, CreateOrganization, CreateProject, CreateProviderAccess,
-    CreateProviderRecord, CreateTeam, Membership, Organization, Project, ProviderAccess,
-    ProviderRecord, Role, Team,
+    AppError, AppState, CreateMcpServerRecord, CreateMembership, CreateOrganization, CreateProject,
+    CreateProviderAccess, CreateProviderRecord, CreateTeam, McpServerRecord, Membership,
+    Organization, Project, ProviderAccess, ProviderRecord, Role, Team,
 };
 
 impl AppState {
@@ -772,6 +772,126 @@ impl AppState {
                 .await?;
                 Ok(count)
             }
+        }
+    }
+
+    pub(crate) async fn list_mcp_servers(
+        &self,
+        team_id: Uuid,
+    ) -> Result<Vec<McpServerRecord>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut servers: Vec<_> = inner
+                    .read()
+                    .await
+                    .mcp_servers
+                    .values()
+                    .filter(|server| server.team_id == team_id)
+                    .cloned()
+                    .collect();
+                servers.sort_by_key(|server| server.created_at);
+                servers.reverse();
+                Ok(servers)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, team_id, name, transport, config, tool_allowlist, status, created_at
+                     FROM mcp_servers
+                     WHERE tenant_id = $1 AND team_id = $2
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(mcp_server_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_mcp_server(
+        &self,
+        team_id: Uuid,
+        input: CreateMcpServerRecord,
+    ) -> Result<McpServerRecord, AppError> {
+        self.ensure_team_exists(team_id).await?;
+        let server = McpServerRecord {
+            id: Uuid::new_v4(),
+            team_id,
+            name: input.name,
+            transport: input.transport,
+            config: input.config,
+            tool_allowlist: input.tool_allowlist,
+            status: "active".to_string(),
+            created_at: Utc::now(),
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                if let Some(existing_id) = store.mcp_servers.iter().find_map(|(id, existing)| {
+                    (existing.team_id == team_id && existing.name == server.name).then_some(*id)
+                }) {
+                    let mut updated = server.clone();
+                    updated.id = existing_id;
+                    store.mcp_servers.insert(existing_id, updated);
+                } else {
+                    store.mcp_servers.insert(server.id, server.clone());
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "INSERT INTO mcp_servers (id, tenant_id, team_id, name, transport, config, tool_allowlist, status, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (team_id, name)
+                     DO UPDATE SET transport = EXCLUDED.transport,
+                                   config = EXCLUDED.config,
+                                   tool_allowlist = EXCLUDED.tool_allowlist,
+                                   status = EXCLUDED.status
+                     RETURNING id, team_id, name, transport, config, tool_allowlist, status, created_at",
+                )
+                .bind(server.id)
+                .bind(self.tenant_id)
+                .bind(server.team_id)
+                .bind(&server.name)
+                .bind(&server.transport)
+                .bind(&server.config)
+                .bind(serde_json::json!(server.tool_allowlist))
+                .bind(&server.status)
+                .bind(server.created_at)
+                .fetch_one(pool)
+                .await?;
+                return mcp_server_from_row(row);
+            }
+        }
+        Ok(server)
+    }
+
+    pub(crate) async fn ensure_mcp_tool_allowed_for_session(
+        &self,
+        session_id: Uuid,
+        server_name: &str,
+        tool_name: &str,
+    ) -> Result<(), AppError> {
+        let session = self.get_session(session_id).await?;
+        let agent = self.get_agent(session.agent_id).await?;
+        let Some(team_id) = agent.team_id else {
+            return Ok(());
+        };
+        let servers = self.list_mcp_servers(team_id).await?;
+        let Some(server) = servers
+            .iter()
+            .find(|server| server.name == server_name && server.status == "active")
+        else {
+            return Err(AppError::forbidden(format!(
+                "MCP server {server_name} is not registered for this session team"
+            )));
+        };
+        if server.tool_allowlist.iter().any(|tool| tool == tool_name) {
+            Ok(())
+        } else {
+            Err(AppError::forbidden(format!(
+                "MCP tool {tool_name} is not allowed for server {server_name}"
+            )))
         }
     }
 }

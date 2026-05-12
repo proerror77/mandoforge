@@ -388,6 +388,29 @@ struct CreateProviderRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerRecord {
+    id: Uuid,
+    team_id: Uuid,
+    name: String,
+    transport: String,
+    config: Value,
+    tool_allowlist: Vec<String>,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateMcpServerRecord {
+    name: String,
+    #[serde(default = "default_mcp_transport")]
+    transport: String,
+    #[serde(default)]
+    config: Value,
+    #[serde(default)]
+    tool_allowlist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct EvalDataset {
     id: Uuid,
     name: String,
@@ -626,6 +649,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
+        )
+        .route(
+            "/api/teams/{id}/mcp-servers",
+            get(list_mcp_servers).post(create_mcp_server),
         )
         .route("/api/providers", get(list_providers).post(create_provider))
         .route(
@@ -1630,6 +1657,9 @@ impl ToolExecutor for McpCallTool {
             .as_ref()
             .ok_or_else(|| AppError::bad_request("MCP gateway is not configured"))?;
         let request: McpCallRequest = serde_json::from_value(_input.args.clone())?;
+        state
+            .ensure_mcp_tool_allowed_for_session(_input.session_id, &request.server, &request.tool)
+            .await?;
         let response = state.mcp_gateway_client.call(config, request).await?;
         Ok(json!({
             "status": "called",
@@ -2165,6 +2195,25 @@ async fn create_provider(
     Ok(Json(state.create_provider(input).await?))
 }
 
+async fn list_mcp_servers(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<McpServerRecord>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
+    Ok(Json(state.list_mcp_servers(id).await?))
+}
+
+async fn create_mcp_server(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateMcpServerRecord>,
+) -> Result<Json<McpServerRecord>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
+    Ok(Json(state.create_mcp_server(id, input).await?))
+}
+
 async fn list_eval_datasets(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2677,6 +2726,10 @@ fn default_agent_kind() -> String {
 
 fn default_provider() -> String {
     "openai-compatible".to_string()
+}
+
+fn default_mcp_transport() -> String {
+    "http".to_string()
 }
 
 fn default_model() -> String {
@@ -3312,40 +3365,88 @@ not json
             policy: PolicyConfig::default(),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
+        let organization = state
+            .create_organization(CreateOrganization {
+                name: "MCP Org".to_string(),
+                slug: "mcp-org".to_string(),
+            })
+            .await
+            .expect("create org");
+        let team = state
+            .create_team(
+                organization.id,
+                CreateTeam {
+                    name: "MCP Team".to_string(),
+                    slug: "mcp-team".to_string(),
+                },
+            )
+            .await
+            .expect("create team");
+        state
+            .create_provider_access(
+                team.id,
+                CreateProviderAccess {
+                    provider_name: "openai-compatible".to_string(),
+                    model_allowlist: vec!["gpt-5.4-mini".to_string()],
+                },
+            )
+            .await
+            .expect("create provider access");
+        state
+            .create_mcp_server(
+                team.id,
+                CreateMcpServerRecord {
+                    name: "docs".to_string(),
+                    transport: "http".to_string(),
+                    config: json!({"source": "test"}),
+                    tool_allowlist: vec!["search".to_string()],
+                },
+            )
+            .await
+            .expect("create mcp server");
+        let scoped_agent = state
+            .create_agent(CreateAgent {
+                name: "MCP Scoped Agent".to_string(),
+                kind: "orchestrator".to_string(),
+                provider: "openai-compatible".to_string(),
+                model: "gpt-5.4-mini".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                system_prompt: "Use governed MCP tools.".to_string(),
+                tools: vec!["mcp.call".to_string()],
+            })
+            .await
+            .expect("create scoped agent");
+        let scoped_session = state
+            .create_session(CreateSession {
+                agent_id: scoped_agent.id,
+                title: "scoped mcp call".to_string(),
+                message: None,
+            })
+            .await
+            .expect("create scoped session");
         let app = build_router(state);
-        let agents: Vec<Agent> = request_json(
-            app.clone(),
-            Request::builder()
-                .uri("/api/agents")
-                .body(Body::empty())
-                .expect("valid request"),
-        )
-        .await;
-        let agent = agents.first().expect("seeded agent");
-        let session: Session = request_json(
-            app.clone(),
-            json_request(
-                "POST",
-                "/api/sessions",
-                json!({"agent_id": agent.id, "title": "mcp call"}),
-            ),
-        )
-        .await;
 
         let result: Value = request_json(
             app.clone(),
-            json_request(
-                "POST",
-                "/api/tools/mcp.call/execute",
-                json!({
-                    "session_id": session.id,
-                    "args": {
-                        "server": "docs",
-                        "tool": "search",
-                        "args": {"q": "policy"}
-                    }
-                }),
-            ),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/mcp.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": scoped_session.id,
+                        "args": {
+                            "server": "docs",
+                            "tool": "search",
+                            "args": {"q": "policy"}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
         )
         .await;
         assert_eq!(result["status"], "called");
@@ -3356,10 +3457,42 @@ not json
         assert_eq!(requests[0].tool, "search");
         drop(requests);
 
+        let (status, denied) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/mcp.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": scoped_session.id,
+                        "args": {
+                            "server": "docs",
+                            "tool": "write",
+                            "args": {"q": "policy"}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            denied["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
         let tool_calls: Vec<ToolCall> = request_json(
             app,
             Request::builder()
-                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .uri(format!("/api/sessions/{}/tool-calls", scoped_session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
                 .body(Body::empty())
                 .expect("valid request"),
         )

@@ -114,4 +114,5 @@
 - [x] Wire OTel export into append-only session event paths.
 - [x] Add rich OTel spans/metrics for session/provider/tool/approval/worker paths.
 - [x] Enable `mcp.call` through Tool Router, MCP Gateway allowlist, events, tool calls, and audit.
-- [ ] Add MCP server registry, tool discovery import, per-team MCP config, and UI management.
+- [x] Add MCP server registry and per-team tool allowlist enforcement before `mcp.call`.
+- [ ] Add MCP tool discovery import and UI management.

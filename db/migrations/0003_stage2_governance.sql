@@ -49,6 +49,19 @@ CREATE TABLE IF NOT EXISTS provider_access (
     UNIQUE(team_id, provider_name)
 );
 
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    team_id UUID NOT NULL REFERENCES teams(id),
+    name TEXT NOT NULL,
+    transport TEXT NOT NULL,
+    config JSONB NOT NULL DEFAULT '{}',
+    tool_allowlist JSONB NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(team_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS eval_datasets (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -90,6 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_memberships_team ON memberships(tenant_id, team_i
 CREATE INDEX IF NOT EXISTS idx_memberships_project ON memberships(tenant_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_provider_access_team ON provider_access(tenant_id, team_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_providers_tenant_name ON providers(tenant_id, name);
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_team ON mcp_servers(tenant_id, team_id);
 CREATE INDEX IF NOT EXISTS idx_eval_cases_dataset ON eval_cases(tenant_id, dataset_id);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_dataset ON eval_runs(tenant_id, dataset_id);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_agent ON eval_runs(tenant_id, agent_id);
