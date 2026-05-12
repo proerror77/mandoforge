@@ -182,4 +182,5 @@
 - [x] Add bounded Codex App Server turn polling and retry with persisted run status/audit.
 - [x] Add production Codex App Server worker-backed steering orchestration.
 - [x] Add Codex App Server retry orchestration across worker leases.
-- [ ] Add richer long-running Codex App Server steering dashboards and external scheduler integration.
+- [x] Add long-running Codex App Server steering summary metrics.
+- [ ] Add external scheduler integration and richer per-turn Codex App Server trace dashboards.

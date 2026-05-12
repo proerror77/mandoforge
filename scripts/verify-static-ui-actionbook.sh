@@ -59,7 +59,7 @@ wait_for_static_ui() {
     hasPolicyRolloutCancel: text.includes('Cancel Staged Rollout') && text.includes('RUNTIME ROLLOUT'),
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),
     hasApprovalGovernance: text.includes('Approval Governance') && text.includes('Create Approval Group') && text.includes('Create Escalation Rule'),
-    hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Load Codex Runs') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering'),
+    hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Load Codex Runs') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering') && text.includes('LONG-RUNNING STEERING'),
     hasMcpLifecycle: text.includes('MCP Servers') && text.includes('Config JSON') && text.includes('Load Team Servers') && text.includes('Run Team Health') && text.includes('Run Due Health'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),

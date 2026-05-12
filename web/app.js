@@ -1046,6 +1046,7 @@ function renderOps() {
 
 function renderCodexAppServer() {
   const codex = state.codexAppServer;
+  const runSummary = summarizeCodexRuns(codex.runs || []);
   const responseCards = [
     ["Health", codex.health],
     ["Thread", codex.thread],
@@ -1082,6 +1083,19 @@ function renderCodexAppServer() {
       `,
     )
     .join("");
+  const runDashboard = `
+      <h4>Long-running Steering</h4>
+      <div class="metric-grid compact-metrics">
+        <div class="metric"><span>Total Runs</span><strong>${formatInteger(runSummary.total)}</strong></div>
+        <div class="metric"><span>Active Turns</span><strong>${formatInteger(runSummary.active)}</strong></div>
+        <div class="metric"><span>Terminal Runs</span><strong>${formatInteger(runSummary.terminal)}</strong></div>
+        <div class="metric"><span>Failed Runs</span><strong>${formatInteger(runSummary.failed)}</strong></div>
+      </div>
+      <div class="item">
+        <strong>Pollable turns</strong>
+        <div class="muted">${escapeHtml(runSummary.pollableLabels.join(", ") || "none")}</div>
+      </div>
+    `;
   codexAppServerRoot.innerHTML = `
     <div class="item">
       <strong>Codex steering</strong>
@@ -1096,11 +1110,35 @@ function renderCodexAppServer() {
         : ""
     }
     ${responseCards || `<div class="muted">No Codex App Server responses yet.</div>`}
+    ${runDashboard}
     ${runs ? `<h4>Persisted Codex Runs</h4>${runs}` : ""}
   `;
   codexAppServerRoot.querySelectorAll("[data-poll-codex-run]").forEach((button) => {
     button.addEventListener("click", () => pollCodexRun(button.dataset.pollCodexRun));
   });
+}
+
+function summarizeCodexRuns(runs) {
+  const terminalStatuses = new Set(["completed", "failed", "cancelled", "canceled", "interrupted"]);
+  const failedStatuses = new Set(["failed", "poll_failed", "cancelled", "canceled", "interrupted"]);
+  const summary = {
+    total: runs.length,
+    active: 0,
+    terminal: 0,
+    failed: 0,
+    pollableLabels: [],
+  };
+  runs.forEach((run) => {
+    const status = String(run.status || "unknown").toLowerCase();
+    const terminal = terminalStatuses.has(status);
+    if (terminal) summary.terminal += 1;
+    if (!terminal && run.turn_id) summary.active += 1;
+    if (failedStatuses.has(status)) summary.failed += 1;
+    if (run.turn_id && !terminal) {
+      summary.pollableLabels.push(`${run.operation}:${run.turn_id}`);
+    }
+  });
+  return summary;
 }
 
 function renderExecutionJobs() {
