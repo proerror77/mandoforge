@@ -64,6 +64,7 @@ const state = {
     turn: null,
     command: null,
     interrupt: null,
+    stalePoll: null,
     sync: null,
     runs: [],
     traces: null,
@@ -157,6 +158,7 @@ const exportUsageCsvButton = document.querySelector("#export-usage-csv");
 const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
 const checkCodexHealthButton = document.querySelector("#check-codex-health");
 const loadCodexRunsButton = document.querySelector("#load-codex-runs");
+const pollStaleCodexRunsButton = document.querySelector("#poll-stale-codex-runs");
 const codexThreadForm = document.querySelector("#codex-thread-form");
 const codexTurnForm = document.querySelector("#codex-turn-form");
 const codexCommandForm = document.querySelector("#codex-command-form");
@@ -207,6 +209,7 @@ runSchedulerDueButton.addEventListener("click", runSchedulerDueTasks);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
 checkCodexHealthButton.addEventListener("click", checkCodexAppServerHealth);
 loadCodexRunsButton.addEventListener("click", loadCodexAppServerRuns);
+pollStaleCodexRunsButton.addEventListener("click", pollStaleCodexRuns);
 codexThreadForm.addEventListener("submit", createCodexThread);
 codexTurnForm.addEventListener("submit", createCodexTurn);
 codexCommandForm.addEventListener("submit", executeCodexCommand);
@@ -912,6 +915,22 @@ async function pollCodexRun(runId) {
   });
 }
 
+async function pollStaleCodexRuns() {
+  await captureCodexAppServer("stalePoll", async () => {
+    state.codexAppServer.stalePoll = await api("/api/codex-app-server/runs/poll-stale", {
+      method: "POST",
+      body: JSON.stringify({
+        stale_after_seconds: 300,
+        max_attempts: 1,
+        retry_interval_ms: 0,
+        max_runs: 20,
+      }),
+    });
+    state.codexAppServer.runs = await api("/api/codex-app-server/runs");
+    state.codexAppServer.traces = await api("/api/codex-app-server/traces");
+  });
+}
+
 async function createCodexThread(event) {
   event.preventDefault();
   const form = new FormData(codexThreadForm);
@@ -1454,6 +1473,7 @@ function renderCodexAppServer() {
     ["Command", codex.command],
     ["Interrupt", codex.interrupt],
     ["Poll", codex.poll],
+    ["Stale Poll", codex.stalePoll],
     ["Sync", codex.sync],
   ]
     .filter(([, value]) => value)
@@ -1869,6 +1889,7 @@ function renderObservability() {
                   agent_releases: schedulerDueRun.agent_releases,
                   mcp_health_runs: schedulerDueRun.mcp_health_runs,
                   mcp_rollout_runs: schedulerDueRun.mcp_rollout_runs,
+                  codex_app_server_stale_polls: schedulerDueRun.codex_app_server_stale_polls,
                 },
                 null,
                 2,

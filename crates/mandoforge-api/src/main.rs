@@ -510,6 +510,7 @@ struct SchedulerDueRun {
     agent_releases: AgentReleaseAutomationRun,
     mcp_health_runs: Vec<McpServerScheduledHealthRun>,
     mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
+    codex_app_server_stale_polls: CodexAppServerStalePollRun,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -615,6 +616,41 @@ struct CodexAppServerPollResponse {
     last_status: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct CodexAppServerStalePollRequest {
+    #[serde(default = "default_codex_stale_after_seconds")]
+    stale_after_seconds: u64,
+    #[serde(default = "default_codex_poll_attempts")]
+    max_attempts: u32,
+    #[serde(default)]
+    retry_interval_ms: u64,
+    #[serde(default = "default_codex_stale_poll_max_runs")]
+    max_runs: usize,
+}
+
+impl Default for CodexAppServerStalePollRequest {
+    fn default() -> Self {
+        Self {
+            stale_after_seconds: default_codex_stale_after_seconds(),
+            max_attempts: default_codex_poll_attempts(),
+            retry_interval_ms: 0,
+            max_runs: default_codex_stale_poll_max_runs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerStalePollRun {
+    checked_at: DateTime<Utc>,
+    stale_after_seconds: u64,
+    candidate_count: usize,
+    polled_count: usize,
+    terminal_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    results: Vec<Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexAppServerTraceSummary {
     generated_at: DateTime<Utc>,
@@ -646,6 +682,14 @@ struct CodexTurnTrace {
 
 fn default_codex_poll_attempts() -> u32 {
     3
+}
+
+fn default_codex_stale_after_seconds() -> u64 {
+    300
+}
+
+fn default_codex_stale_poll_max_runs() -> usize {
+    20
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1907,6 +1951,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/codex-app-server/runs/{run_id}/poll",
             post(poll_codex_app_server_run),
+        )
+        .route(
+            "/api/codex-app-server/runs/poll-stale",
+            post(poll_stale_codex_app_server_runs),
         )
         .route("/api/codex-app-server/threads", post(create_codex_thread))
         .route(
@@ -5963,7 +6011,38 @@ async fn poll_codex_app_server_run(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
-    let config = codex_app_server_config(&state)?;
+    Ok(Json(
+        poll_codex_app_server_run_inner(&state, run_id, input, "user", principal.subject_id)
+            .await?,
+    ))
+}
+
+async fn poll_stale_codex_app_server_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CodexAppServerStalePollRequest>,
+) -> Result<Json<CodexAppServerStalePollRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "codex_app_server".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    Ok(Json(
+        execute_stale_codex_app_server_polls(&state, input, "user", &principal.subject_id).await?,
+    ))
+}
+
+async fn poll_codex_app_server_run_inner(
+    state: &AppState,
+    run_id: Uuid,
+    input: CodexAppServerPollRequest,
+    actor_type: &str,
+    subject: String,
+) -> Result<CodexAppServerPollResponse, AppError> {
+    let config = codex_app_server_config(state)?;
     let run = state.get_codex_app_server_run(run_id).await?;
     let turn_id = run
         .turn_id
@@ -6025,13 +6104,13 @@ async fn poll_codex_app_server_run(
     state
         .append_audit_log(new_audit_log(
             None,
-            "user",
+            actor_type,
             None,
             "codex_app_server.run_polled",
             "codex_app_server_run",
             Some(run_id),
             json!({
-                "subject": principal.subject_id,
+                "subject": subject,
                 "run_id": run_id,
                 "turn_id": turn_id,
                 "attempts": response.attempts,
@@ -6040,7 +6119,140 @@ async fn poll_codex_app_server_run(
             }),
         ))
         .await?;
-    Ok(Json(response))
+    Ok(response)
+}
+
+async fn execute_stale_codex_app_server_polls(
+    state: &AppState,
+    input: CodexAppServerStalePollRequest,
+    actor_type: &str,
+    subject: &str,
+) -> Result<CodexAppServerStalePollRun, AppError> {
+    let checked_at = Utc::now();
+    let stale_after_seconds = input.stale_after_seconds.min(86_400);
+    let max_runs = input.max_runs.clamp(1, 100);
+    let runs = state.list_codex_app_server_runs().await?;
+    let candidates = select_stale_codex_app_server_runs(&runs, checked_at, stale_after_seconds);
+    let candidate_count = candidates.len();
+    let mut results = Vec::new();
+    let mut polled_count = 0usize;
+    let mut terminal_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut skipped_count = candidate_count.saturating_sub(max_runs);
+
+    if state.codex_app_server_config.is_none() {
+        skipped_count = candidate_count;
+        for run in candidates {
+            results.push(json!({
+                "run_id": run.id,
+                "turn_id": run.turn_id,
+                "status": "skipped",
+                "reason": "codex_app_server_reserved",
+            }));
+        }
+    } else {
+        for run in candidates.into_iter().take(max_runs) {
+            let poll_input = CodexAppServerPollRequest {
+                max_attempts: input.max_attempts,
+                retry_interval_ms: input.retry_interval_ms,
+            };
+            match poll_codex_app_server_run_inner(
+                state,
+                run.id,
+                poll_input,
+                actor_type,
+                subject.to_string(),
+            )
+            .await
+            {
+                Ok(response) => {
+                    polled_count += 1;
+                    if response.terminal {
+                        terminal_count += 1;
+                    }
+                    results.push(json!({
+                        "run_id": response.run.id,
+                        "turn_id": response.run.turn_id,
+                        "status": "polled",
+                        "last_status": response.last_status,
+                        "attempts": response.attempts,
+                        "terminal": response.terminal,
+                    }));
+                }
+                Err(error) => {
+                    failed_count += 1;
+                    results.push(json!({
+                        "run_id": run.id,
+                        "turn_id": run.turn_id,
+                        "status": "failed",
+                        "error": error.message,
+                    }));
+                }
+            }
+        }
+    }
+
+    let run = CodexAppServerStalePollRun {
+        checked_at,
+        stale_after_seconds,
+        candidate_count,
+        polled_count,
+        terminal_count,
+        skipped_count,
+        failed_count,
+        results,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            actor_type,
+            None,
+            "codex_app_server.stale_poll_due_run",
+            "codex_app_server",
+            None,
+            json!({
+                "subject": subject,
+                "stale_after_seconds": run.stale_after_seconds,
+                "candidate_count": run.candidate_count,
+                "polled_count": run.polled_count,
+                "terminal_count": run.terminal_count,
+                "skipped_count": run.skipped_count,
+                "failed_count": run.failed_count,
+            }),
+        ))
+        .await?;
+    Ok(run)
+}
+
+fn select_stale_codex_app_server_runs(
+    runs: &[CodexAppServerRun],
+    now: DateTime<Utc>,
+    stale_after_seconds: u64,
+) -> Vec<CodexAppServerRun> {
+    let cutoff = now - chrono::Duration::seconds(stale_after_seconds as i64);
+    let mut latest_by_turn = BTreeMap::<String, &CodexAppServerRun>::new();
+    for run in runs {
+        let Some(turn_id) = run.turn_id.as_ref() else {
+            continue;
+        };
+        if !run.operation.starts_with("turn.") {
+            continue;
+        }
+        if codex_turn_status_is_terminal(&run.status) || run.created_at > cutoff {
+            continue;
+        }
+        latest_by_turn
+            .entry(turn_id.clone())
+            .and_modify(|existing| {
+                if existing.created_at < run.created_at {
+                    *existing = run;
+                }
+            })
+            .or_insert(run);
+    }
+    let mut candidates = latest_by_turn.into_values().cloned().collect::<Vec<_>>();
+    candidates.sort_by_key(|run| run.created_at);
+    candidates
 }
 
 fn codex_turn_status_is_terminal(status: &str) -> bool {
@@ -8752,6 +8964,13 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     let policy_rollout = execute_due_policy_rollouts(state, "scheduler", "system").await?;
     let approval_escalations = execute_due_approval_escalations(state).await?;
     let agent_releases = execute_due_agent_release_promotions(state).await?;
+    let codex_app_server_stale_polls = execute_stale_codex_app_server_polls(
+        state,
+        CodexAppServerStalePollRequest::default(),
+        "system",
+        "system",
+    )
+    .await?;
     let mut mcp_health_runs = Vec::new();
     let mut mcp_rollout_runs = Vec::new();
     let mut team_count = 0usize;
@@ -8791,6 +9010,11 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     {
         actions.push("mcp_rollouts_processed".to_string());
     }
+    if codex_app_server_stale_polls.polled_count > 0
+        || codex_app_server_stale_polls.failed_count > 0
+    {
+        actions.push("codex_app_server_stale_polls_processed".to_string());
+    }
     let status = if actions.is_empty() {
         "noop"
     } else {
@@ -8807,6 +9031,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
         agent_releases,
         mcp_health_runs,
         mcp_rollout_runs,
+        codex_app_server_stale_polls,
     };
     state
         .append_audit_log(new_audit_log(
@@ -14037,6 +14262,29 @@ not json
         assert_eq!(turn.turn_id, "turn-1");
         assert_eq!(turn.result["message"], "Inspect");
 
+        let stale_poll: CodexAppServerStalePollRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/codex-app-server/runs/poll-stale")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "stale_after_seconds": 0,
+                        "max_attempts": 1,
+                        "retry_interval_ms": 0
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(stale_poll.candidate_count, 1);
+        assert_eq!(stale_poll.polled_count, 1);
+        assert_eq!(stale_poll.terminal_count, 1);
+
         let command: CodexCommandResponse = request_json(
             app.clone(),
             Request::builder()
@@ -14194,6 +14442,9 @@ not json
         assert!(global_audit_logs.iter().any(|log| {
             log.action == "codex_app_server.run_polled" && log.details["last_status"] == "completed"
         }));
+        assert!(global_audit_logs.iter().any(|log| {
+            log.action == "codex_app_server.stale_poll_due_run" && log.details["polled_count"] == 1
+        }));
 
         assert_eq!(
             codex_client.calls.lock().await.as_slice(),
@@ -14201,6 +14452,7 @@ not json
                 "health",
                 "thread",
                 "turn:thread-1",
+                "poll:turn-1",
                 "command:turn-1",
                 "interrupt:turn-1",
                 "poll:turn-1"
@@ -17514,6 +17766,7 @@ not json
         assert_eq!(run.mcp_health_runs[0].team_id, team.id);
         assert_eq!(run.mcp_health_runs[0].due_count, 1);
         assert_eq!(run.mcp_rollout_runs.len(), 1);
+        assert_eq!(run.codex_app_server_stale_polls.candidate_count, 0);
         assert!(
             run.actions
                 .iter()
