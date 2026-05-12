@@ -6,6 +6,8 @@ const state = {
   toolCalls: [],
   auditLogs: [],
   providers: [],
+  evalDatasets: [],
+  evalCases: [],
   evalRuns: [],
   mcpServers: [],
   mcpTeamId: "",
@@ -29,6 +31,8 @@ const toolDetailRoot = document.querySelector("#tool-detail");
 const auditLogRoot = document.querySelector("#audit-logs");
 const auditDetailRoot = document.querySelector("#audit-detail");
 const providerRoot = document.querySelector("#providers");
+const evalDatasetRoot = document.querySelector("#eval-datasets");
+const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const usageRoot = document.querySelector("#usage-summary");
@@ -36,15 +40,23 @@ const usageRollupRoot = document.querySelector("#usage-rollups");
 const governanceRoot = document.querySelector("#governance-status");
 const agentForm = document.querySelector("#agent-form");
 const providerForm = document.querySelector("#provider-form");
+const evalDatasetForm = document.querySelector("#eval-dataset-form");
+const evalCaseForm = document.querySelector("#eval-case-form");
+const evalRunForm = document.querySelector("#eval-run-form");
 const mcpForm = document.querySelector("#mcp-form");
 const loadMcpButton = document.querySelector("#load-mcp");
+const loadEvalCasesButton = document.querySelector("#load-eval-cases");
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
 providerForm.addEventListener("submit", createProvider);
+evalDatasetForm.addEventListener("submit", createEvalDataset);
+evalCaseForm.addEventListener("submit", createEvalCase);
+evalRunForm.addEventListener("submit", createEvalRun);
 mcpForm.addEventListener("submit", createMcpServer);
 loadMcpButton.addEventListener("click", loadMcpServers);
+loadEvalCasesButton.addEventListener("click", loadEvalCases);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 
 async function api(path, options = {}) {
@@ -114,6 +126,50 @@ async function createProvider(event) {
   await refreshOps();
 }
 
+async function createEvalDataset(event) {
+  event.preventDefault();
+  const form = new FormData(evalDatasetForm);
+  const dataset = await api("/api/eval/datasets", {
+    method: "POST",
+    body: JSON.stringify({
+      name: form.get("name"),
+      description: form.get("description"),
+    }),
+  });
+  setEvalDatasetId(dataset.id);
+  await refreshOps();
+}
+
+async function createEvalCase(event) {
+  event.preventDefault();
+  const form = new FormData(evalCaseForm);
+  const datasetId = String(form.get("dataset_id") || "").trim();
+  await api(`/api/eval/datasets/${datasetId}/cases`, {
+    method: "POST",
+    body: JSON.stringify({
+      input: parseJsonField(form.get("input"), "Input JSON"),
+      expected: parseJsonField(form.get("expected"), "Expected JSON"),
+      grading_policy: parseJsonField(form.get("grading_policy"), "Grading policy JSON"),
+    }),
+  });
+  setEvalDatasetId(datasetId);
+  await loadEvalCases();
+}
+
+async function createEvalRun(event) {
+  event.preventDefault();
+  const form = new FormData(evalRunForm);
+  const datasetId = String(form.get("dataset_id") || "").trim();
+  await api(`/api/eval/datasets/${datasetId}/runs`, {
+    method: "POST",
+    body: JSON.stringify({
+      agent_id: String(form.get("agent_id") || "").trim(),
+    }),
+  });
+  setEvalDatasetId(datasetId);
+  await refreshOps();
+}
+
 async function createMcpServer(event) {
   event.preventDefault();
   const form = new FormData(mcpForm);
@@ -140,6 +196,18 @@ async function createUsageRollup() {
     body: JSON.stringify({}),
   });
   await refreshOps();
+}
+
+async function loadEvalCases() {
+  const form = new FormData(evalCaseForm);
+  const datasetId = String(form.get("dataset_id") || "").trim();
+  if (!datasetId) {
+    evalCaseRoot.innerHTML = `<div class="muted">Enter a dataset ID to load eval cases.</div>`;
+    return;
+  }
+  setEvalDatasetId(datasetId);
+  state.evalCases = await api(`/api/eval/datasets/${datasetId}/cases`);
+  renderEvalCases();
 }
 
 async function loadMcpServers() {
@@ -183,13 +251,15 @@ async function runDemo() {
 }
 
 async function refreshOps() {
-  const [providers, evalRuns, usage, usageRollups] = await Promise.all([
+  const [providers, evalDatasets, evalRuns, usage, usageRollups] = await Promise.all([
     api("/api/providers"),
+    api("/api/eval/datasets"),
     api("/api/eval/runs"),
     api("/api/usage"),
     api("/api/usage/rollups"),
   ]);
   state.providers = providers;
+  state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
   state.usage = usage;
   state.usageRollups = usageRollups;
@@ -232,6 +302,8 @@ async function decide(id, decision) {
 function renderOps() {
   renderUsage();
   renderProviders();
+  renderEvalDatasets();
+  renderEvalCases();
   renderEvalRuns();
   renderMcpServers();
   governanceRoot.innerHTML = `
@@ -315,6 +387,56 @@ function renderEvalRuns() {
         )
         .join("")
     : `<div class="muted">No eval runs</div>`;
+}
+
+function renderEvalDatasets() {
+  evalDatasetRoot.innerHTML = state.evalDatasets.length
+    ? state.evalDatasets
+        .map(
+          (dataset) => `
+            <button class="item-button" data-eval-dataset="${dataset.id}">
+              <strong>${escapeHtml(dataset.name)}</strong>
+              <span>${escapeHtml(dataset.id)}</span>
+            </button>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No eval datasets</div>`;
+  evalDatasetRoot.querySelectorAll("[data-eval-dataset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setEvalDatasetId(button.dataset.evalDataset);
+      loadEvalCases();
+    });
+  });
+}
+
+function renderEvalCases() {
+  evalCaseRoot.innerHTML = state.evalCases.length
+    ? state.evalCases
+        .map(
+          (testCase) => `
+            <div class="item">
+              <strong>${escapeHtml(testCase.grading_policy.kind || "eval case")}</strong>
+              <div class="muted">${escapeHtml(testCase.id)}</div>
+              <pre>${escapeHtml(JSON.stringify({ input: testCase.input, expected: testCase.expected }, null, 2))}</pre>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No loaded eval cases</div>`;
+}
+
+function setEvalDatasetId(datasetId) {
+  evalCaseForm.elements.dataset_id.value = datasetId;
+  evalRunForm.elements.dataset_id.value = datasetId;
+}
+
+function parseJsonField(value, label) {
+  try {
+    return JSON.parse(String(value || "{}"));
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON: ${error.message}`);
+  }
 }
 
 function renderMcpServers() {

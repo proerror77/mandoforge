@@ -117,6 +117,50 @@
             </div>
             <div>
               <h3>Eval Runs</h3>
+              <form id="eval-dataset-form" class="stack-form compact-form">
+                <label>
+                  Dataset name
+                  <input name="name" required value="Stage 2 regression suite" />
+                </label>
+                <label>
+                  Description
+                  <input name="description" value="Policy, tool, SQL, sandbox, and answer checks" />
+                </label>
+                <button type="submit">Create Dataset</button>
+              </form>
+              <form id="eval-case-form" class="stack-form compact-form">
+                <label>
+                  Dataset ID
+                  <input name="dataset_id" required placeholder="Dataset UUID" />
+                </label>
+                <label>
+                  Input JSON
+                  <textarea name="input" rows="3">{"tool":"shell.exec","sql":"UPDATE users SET role='admin'"}</textarea>
+                </label>
+                <label>
+                  Expected JSON
+                  <textarea name="expected" rows="3">{"tool":"shell.exec","decision":"requires_approval"}</textarea>
+                </label>
+                <label>
+                  Grading policy JSON
+                  <textarea name="grading_policy" rows="2">{"kind":"policy"}</textarea>
+                </label>
+                <button type="submit">Add Eval Case</button>
+              </form>
+              <form id="eval-run-form" class="stack-form compact-form">
+                <label>
+                  Dataset ID
+                  <input name="dataset_id" required placeholder="Dataset UUID" />
+                </label>
+                <label>
+                  Agent ID
+                  <input name="agent_id" required placeholder="Agent UUID" />
+                </label>
+                <button type="submit">Run Eval</button>
+                <button type="button" class="secondary form-inline-action" id="load-eval-cases">Load Cases</button>
+              </form>
+              <div id="eval-datasets" class="list"></div>
+              <div id="eval-cases" class="list"></div>
               <div id="eval-runs" class="list"></div>
             </div>
             <div>
