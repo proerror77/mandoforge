@@ -21,6 +21,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod authorization;
+mod codex_app_server;
 mod execution;
 mod execution_queue;
 mod execution_queue_broker;
@@ -45,6 +46,11 @@ mod store_usage_rollups;
 
 use authorization::{
     AuthorizationRequest, Authorizer, Permission, Principal, Role, RoleBasedAuthorizer,
+};
+use codex_app_server::{
+    CodexAppServerClient, CodexAppServerConfig, CodexCommandRequest, CodexCommandResponse,
+    CodexInterruptResponse, CodexThreadRequest, CodexThreadResponse, CodexTurnRequest,
+    CodexTurnResponse, HttpCodexAppServerClient, ReservedCodexAppServerClient,
 };
 use execution::{
     ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker, QueueBackedExecutionWorker,
@@ -92,6 +98,8 @@ struct AppState {
     telemetry_exporter: Arc<dyn TelemetryExporter>,
     mcp_gateway_config: Option<McpGatewayConfig>,
     mcp_gateway_client: Arc<dyn McpGatewayClient>,
+    codex_app_server_config: Option<CodexAppServerConfig>,
+    codex_app_server_client: Arc<dyn CodexAppServerClient>,
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
@@ -669,6 +677,8 @@ async fn main() -> Result<()> {
         telemetry_exporter: telemetry_exporter_from_env()?,
         mcp_gateway_config: mcp_gateway_config_from_env()?,
         mcp_gateway_client: mcp_gateway_client_from_env()?,
+        codex_app_server_config: codex_app_server_config_from_env()?,
+        codex_app_server_client: codex_app_server_client_from_env()?,
         workspace_root,
         tenant_id,
         policy,
@@ -802,6 +812,23 @@ fn build_router(state: AppState) -> Router {
         .route("/api/policy/simulate", post(simulate_policy))
         .route("/api/vault/health", get(get_vault_health))
         .route(
+            "/api/codex-app-server/health",
+            get(get_codex_app_server_health),
+        )
+        .route("/api/codex-app-server/threads", post(create_codex_thread))
+        .route(
+            "/api/codex-app-server/threads/{thread_id}/turns",
+            post(create_codex_turn),
+        )
+        .route(
+            "/api/codex-app-server/turns/{turn_id}/interrupt",
+            post(interrupt_codex_turn),
+        )
+        .route(
+            "/api/codex-app-server/turns/{turn_id}/commands",
+            post(execute_codex_command),
+        )
+        .route(
             "/api/eval/datasets",
             get(list_eval_datasets).post(create_eval_dataset),
         )
@@ -878,6 +905,28 @@ fn mcp_gateway_client_from_env() -> Result<Arc<dyn McpGatewayClient>> {
         ))
     } else {
         Ok(Arc::new(ReservedMcpGatewayClient))
+    }
+}
+
+fn codex_app_server_config_from_env() -> Result<Option<CodexAppServerConfig>> {
+    match std::env::var("MANDOFORGE_CODEX_APP_SERVER_URL") {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(
+            CodexAppServerConfig::from_env().map_err(|error| anyhow::anyhow!(error.message))?,
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn codex_app_server_client_from_env() -> Result<Arc<dyn CodexAppServerClient>> {
+    if std::env::var("MANDOFORGE_CODEX_APP_SERVER_URL")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        Ok(Arc::new(
+            HttpCodexAppServerClient::new().map_err(|error| anyhow::anyhow!(error.message))?,
+        ))
+    } else {
+        Ok(Arc::new(ReservedCodexAppServerClient))
     }
 }
 
@@ -2492,6 +2541,149 @@ async fn get_vault_health(
     Ok(Json(
         secret_provider_health_from_lookup(|key| std::env::var(key).ok()).await,
     ))
+}
+
+async fn get_codex_app_server_health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "codex_app_server",
+        None,
+    )
+    .await?;
+    let checked_at = Utc::now();
+    let Some(config) = state.codex_app_server_config.as_ref() else {
+        return Ok(Json(json!({
+            "status": "reserved",
+            "healthy": false,
+            "issues": ["Codex App Server is disabled until MANDOFORGE_CODEX_APP_SERVER_URL is configured"],
+            "checks": {"provider": "reserved"},
+            "checked_at": checked_at,
+        })));
+    };
+    match state.codex_app_server_client.health_check(config).await {
+        Ok(()) => Ok(Json(json!({
+            "status": "healthy",
+            "healthy": true,
+            "issues": [],
+            "checks": {
+                "endpoint_configured": true,
+                "timeout_seconds": config.timeout_seconds,
+            },
+            "checked_at": checked_at,
+        }))),
+        Err(error) => Ok(Json(json!({
+            "status": "unhealthy",
+            "healthy": false,
+            "issues": [error.message],
+            "checks": {
+                "endpoint_configured": true,
+                "timeout_seconds": config.timeout_seconds,
+            },
+            "checked_at": checked_at,
+        }))),
+    }
+}
+
+async fn create_codex_thread(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CodexThreadRequest>,
+) -> Result<Json<CodexThreadResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "codex_app_server",
+        None,
+    )
+    .await?;
+    let config = codex_app_server_config(&state)?;
+    Ok(Json(
+        state
+            .codex_app_server_client
+            .create_thread(config, input)
+            .await?,
+    ))
+}
+
+async fn create_codex_turn(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<CodexTurnRequest>,
+) -> Result<Json<CodexTurnResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "codex_app_server",
+        None,
+    )
+    .await?;
+    let config = codex_app_server_config(&state)?;
+    Ok(Json(
+        state
+            .codex_app_server_client
+            .create_turn(config, &thread_id, input)
+            .await?,
+    ))
+}
+
+async fn interrupt_codex_turn(
+    State(state): State<AppState>,
+    Path(turn_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<CodexInterruptResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "codex_app_server",
+        None,
+    )
+    .await?;
+    let config = codex_app_server_config(&state)?;
+    Ok(Json(
+        state
+            .codex_app_server_client
+            .interrupt_turn(config, &turn_id)
+            .await?,
+    ))
+}
+
+async fn execute_codex_command(
+    State(state): State<AppState>,
+    Path(turn_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<CodexCommandRequest>,
+) -> Result<Json<CodexCommandResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "codex_app_server",
+        None,
+    )
+    .await?;
+    let config = codex_app_server_config(&state)?;
+    Ok(Json(
+        state
+            .codex_app_server_client
+            .execute_command(config, &turn_id, input)
+            .await?,
+    ))
+}
+
+fn codex_app_server_config(state: &AppState) -> Result<&CodexAppServerConfig, AppError> {
+    state
+        .codex_app_server_config
+        .as_ref()
+        .ok_or_else(|| AppError::bad_request("Codex App Server is not configured"))
 }
 
 async fn secret_provider_health_from_lookup<F>(lookup: F) -> SecretProviderHealth
@@ -4259,6 +4451,8 @@ not json
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
             mcp_gateway_config: None,
             mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: None,
+            codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -4338,6 +4532,73 @@ not json
         }
     }
 
+    #[derive(Default)]
+    struct RecordingCodexAppServerClient {
+        calls: tokio::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CodexAppServerClient for RecordingCodexAppServerClient {
+        async fn health_check(&self, _config: &CodexAppServerConfig) -> Result<(), AppError> {
+            self.calls.lock().await.push("health".to_string());
+            Ok(())
+        }
+
+        async fn create_thread(
+            &self,
+            _config: &CodexAppServerConfig,
+            request: CodexThreadRequest,
+        ) -> Result<CodexThreadResponse, AppError> {
+            self.calls.lock().await.push("thread".to_string());
+            Ok(CodexThreadResponse {
+                thread_id: "thread-1".to_string(),
+                status: Some("created".to_string()),
+                metadata: request.metadata,
+            })
+        }
+
+        async fn create_turn(
+            &self,
+            _config: &CodexAppServerConfig,
+            thread_id: &str,
+            request: CodexTurnRequest,
+        ) -> Result<CodexTurnResponse, AppError> {
+            self.calls.lock().await.push(format!("turn:{thread_id}"));
+            Ok(CodexTurnResponse {
+                turn_id: "turn-1".to_string(),
+                thread_id: Some(thread_id.to_string()),
+                status: Some("running".to_string()),
+                result: json!({"message": request.message}),
+            })
+        }
+
+        async fn interrupt_turn(
+            &self,
+            _config: &CodexAppServerConfig,
+            turn_id: &str,
+        ) -> Result<CodexInterruptResponse, AppError> {
+            self.calls.lock().await.push(format!("interrupt:{turn_id}"));
+            Ok(CodexInterruptResponse {
+                turn_id: turn_id.to_string(),
+                status: Some("interrupted".to_string()),
+            })
+        }
+
+        async fn execute_command(
+            &self,
+            _config: &CodexAppServerConfig,
+            turn_id: &str,
+            request: CodexCommandRequest,
+        ) -> Result<CodexCommandResponse, AppError> {
+            self.calls.lock().await.push(format!("command:{turn_id}"));
+            Ok(CodexCommandResponse {
+                command_id: "command-1".to_string(),
+                status: Some("completed".to_string()),
+                result: json!({"command": request.command, "args": request.args}),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn appended_session_events_export_telemetry_when_enabled() {
         let exporter = Arc::new(RecordingTelemetryExporter::default());
@@ -4354,6 +4615,8 @@ not json
             telemetry_exporter: exporter.clone(),
             mcp_gateway_config: None,
             mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: None,
+            codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),
@@ -4415,6 +4678,138 @@ not json
     }
 
     #[tokio::test]
+    async fn codex_app_server_routes_require_admin_and_call_adapter() {
+        let codex_client = Arc::new(RecordingCodexAppServerClient::default());
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(InlineExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: Some(CodexAppServerConfig {
+                endpoint: "http://codex-app-server.test".to_string(),
+                timeout_seconds: 5,
+            }),
+            codex_app_server_client: codex_client.clone(),
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: PolicyConfig::default(),
+        };
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state);
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .uri("/api/codex-app-server/health")
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let health: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/codex-app-server/health")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(health["status"], "healthy");
+
+        let thread: CodexThreadResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/codex-app-server/threads")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"metadata": {"session_id": "s1"}}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(thread.thread_id, "thread-1");
+        assert_eq!(thread.metadata["session_id"], "s1");
+
+        let turn: CodexTurnResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/codex-app-server/threads/thread-1/turns")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"message": "Inspect"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(turn.turn_id, "turn-1");
+        assert_eq!(turn.result["message"], "Inspect");
+
+        let command: CodexCommandResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/codex-app-server/turns/turn-1/commands")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"command": "ls", "args": {"cwd": "/workspace"}}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(command.command_id, "command-1");
+        assert_eq!(command.result["command"], "ls");
+
+        let interrupt: CodexInterruptResponse = request_json(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/codex-app-server/turns/turn-1/interrupt")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(interrupt.status.as_deref(), Some("interrupted"));
+
+        assert_eq!(
+            codex_client.calls.lock().await.as_slice(),
+            [
+                "health",
+                "thread",
+                "turn:thread-1",
+                "command:turn-1",
+                "interrupt:turn-1"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
         let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
         let state = AppState {
@@ -4434,6 +4829,8 @@ not json
                 allowed_servers: vec!["docs".to_string()],
             }),
             mcp_gateway_client: mcp_client.clone(),
+            codex_app_server_config: None,
+            codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             policy: PolicyConfig::default(),

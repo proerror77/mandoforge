@@ -34,6 +34,7 @@ Aligned:
 - OTel groundwork is now wired into the session event append path, so session, provider, tool, approval, sandbox, codex, and worker events can be exported through the configured telemetry exporter with span-like signal metadata, status, counters, duration, provider/client/tool IDs, approval IDs, worker IDs, and tool-call counts when those fields are present.
 - OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed on the default reserved provider. `MANDOFORGE_SECRET_PROVIDER=vault` explicitly selects the Vault KV v2 provider boundary, while the default remains `reserved`.
 - The static Vault panel can run `GET /api/vault/health` to verify reserved/vault provider state without exposing secret values.
+- Codex App Server groundwork includes an env-gated `CodexAppServerClient` boundary and Admin-only adapter routes for health, thread creation, turn creation, command execution, and interrupt. If `MANDOFORGE_CODEX_APP_SERVER_URL` is unset, the adapter fails closed and `codex.exec` continues using the CLI path.
 
 Not yet aligned:
 
@@ -62,7 +63,7 @@ Execution Layer
   approval.request / artifact.create / mcp.call
 
 Sandbox / Worker Layer
-  session workspace / Docker runner / Codex CLI adapter
+  session workspace / Docker runner / Codex CLI adapter / Codex App Server adapter
   gVisor and distributed workers later
 
 Context / Data Foundation
@@ -222,6 +223,7 @@ Current worker boundary:
 - Keep `ExecutionQueueBackend` as the backend seam for memory, Postgres, and later broker-backed queues.
 - Keep `execution_queue_broker.rs` as the reserved Redis/NATS backend skeleton; it must fail closed until real broker operations are implemented. Redis Stream enqueue/group/read/ack command shape and narrow RESP TCP client boundary are locally verified before live Redis backend selection.
 - Keep `BrokerQueueConfig` and `BrokerQueueHealthCheck` as the broker configuration and readiness boundary before selecting a concrete Redis or NATS client.
+- Keep `codex_app_server.rs` as the env-gated HTTP adapter boundary for experimental Codex App Server thread, turn, command, and interrupt APIs. The reserved client fails closed unless `MANDOFORGE_CODEX_APP_SERVER_URL` is configured.
 - Keep `MANDOFORGE_EXECUTION_QUEUE_BACKEND` fail-closed: `auto`, `memory`, and `postgres` are selectable now; `broker`, `redis`, and `nats` are reserved until implemented.
 - Keep `ExecutionWorker` as the swappable worker interface and `InlineExecutionWorker` as the current local implementation.
 - Keep queue-backed worker mode, the API-drained `mandoforge-worker` binary, and the shell worker loop as the current external-worker handoff.

@@ -71,6 +71,7 @@
 - [x] Implement harness context builder and provider request/response events.
 - [x] Implement Codex JSONL event ingestion.
 - [x] Persist Codex final-message artifact from approved `codex.exec`.
+- [x] Add env-gated Codex App Server thread/turn/interrupt/command adapter boundary.
 - [x] Load and enforce `config/policy.stage1.yaml`.
 - [x] Add env-gated OpenAI-compatible HTTP provider transport.
 - [x] Add credential-gated external provider smoke verification script.

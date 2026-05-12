@@ -160,6 +160,16 @@ Verify Docker shell runner mode against a running API started with `MANDOFORGE_S
 BASE_URL=http://127.0.0.1:8787 ./scripts/verify-docker-shell-runner.sh
 ```
 
+Optional Codex App Server adapter:
+
+```bash
+MANDOFORGE_CODEX_APP_SERVER_URL=http://127.0.0.1:8789 \
+MANDOFORGE_CODEX_APP_SERVER_TIMEOUT_SECONDS=30 \
+cargo run -p mandoforge-api
+```
+
+When configured, Admin-only routes under `/api/codex-app-server/*` can health-check the App Server, create threads, create turns, execute turn-scoped commands, and interrupt turns. When unset, the adapter fails closed and approved `codex.exec` continues to use the Codex CLI path.
+
 ## Docker
 
 ```bash
@@ -227,6 +237,11 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/eval/datasets/:id/runs`
 - `POST /api/eval/datasets/:id/runs`
 - `GET /api/eval/runs`
+- `GET /api/codex-app-server/health`
+- `POST /api/codex-app-server/threads`
+- `POST /api/codex-app-server/threads/:thread_id/turns`
+- `POST /api/codex-app-server/turns/:turn_id/commands`
+- `POST /api/codex-app-server/turns/:turn_id/interrupt`
 
 ## Security Boundary
 
