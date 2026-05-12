@@ -55,6 +55,7 @@ wait_for_static_ui() {
     hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
     hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy'),
+    hasVaultHealthAction: text.includes('Check Vault Health'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
@@ -70,6 +71,7 @@ wait_for_static_ui() {
     && result.hasProviderBudgetForecast
     && result.hasProviderCredentialFields
     && result.hasPolicyConsole
+    && result.hasVaultHealthAction
     && result.hasTenantGovernance
     && result.hasEvalGateAction
     && result.hasEvalDriftAction

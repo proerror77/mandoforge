@@ -19,6 +19,7 @@ Aligned:
 - Stage 1 YAML policy is loaded and enforced globally, then narrowed by session agent-version tool allowlists.
 - Session run, tool catalog reads, manual tool execution, approval decisions, execution job drain, read/list API paths, and core write API paths now pass through the RBAC `Authorizer`; the demo default principal is an operator, and explicit invalid/no-role principals fail closed.
 - Admin-only policy inspection and tool-decision simulation APIs expose the active YAML policy in structured form and let the static Policy Console test allow/deny/approval decisions without editing the runtime policy.
+- Admin-only Vault health checks report whether the secret provider is reserved or Vault, expose only redacted configuration checks, and keep secret reads fail-closed unless Vault is explicitly configured.
 - Approved shell execution can use the optional Docker runner.
 - Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh`, the `mandoforge-worker` Rust binary, or the static Worker Dashboard; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim.
 - Worker deployment entries exist for Docker Compose and Kubernetes.
@@ -32,6 +33,7 @@ Aligned:
 - Evaluation groundwork includes eval datasets, cases, and version-bound run records with deterministic Stage 2 graders for policy decisions, tool allowlist coverage, SQL safety, sandbox path checks, and final-answer required fragments. `POST /api/eval/runs/:id/gate` evaluates a run against score/status requirements and returns pass/fail reasons. `GET /api/eval/runs/:id/drift` compares a run to the previous run for the same dataset and agent. The static console can create eval datasets, add JSON eval cases, run an agent against a dataset, inspect cases/runs, gate a run at 100%, and check drift.
 - OTel groundwork is now wired into the session event append path, so session, provider, tool, approval, sandbox, codex, and worker events can be exported through the configured telemetry exporter with span-like signal metadata, status, counters, duration, provider/client/tool IDs, approval IDs, worker IDs, and tool-call counts when those fields are present.
 - OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed on the default reserved provider. `MANDOFORGE_SECRET_PROVIDER=vault` explicitly selects the Vault KV v2 provider boundary, while the default remains `reserved`.
+- The static Vault panel can run `GET /api/vault/health` to verify reserved/vault provider state without exposing secret values.
 
 Not yet aligned:
 

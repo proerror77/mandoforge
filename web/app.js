@@ -7,6 +7,7 @@ const state = {
   auditLogs: [],
   providers: [],
   providerHealth: {},
+  vaultHealth: null,
   policy: null,
   policyDecision: null,
   evalDatasets: [],
@@ -43,6 +44,8 @@ const toolDetailRoot = document.querySelector("#tool-detail");
 const auditLogRoot = document.querySelector("#audit-logs");
 const auditDetailRoot = document.querySelector("#audit-detail");
 const providerRoot = document.querySelector("#providers");
+const vaultHealthRoot = document.querySelector("#vault-health");
+const checkVaultHealthButton = document.querySelector("#check-vault-health");
 const policyRoot = document.querySelector("#policy-summary");
 const policyForm = document.querySelector("#policy-simulate-form");
 const policyDecisionRoot = document.querySelector("#policy-decision");
@@ -80,6 +83,7 @@ teamForm.addEventListener("submit", createTeam);
 projectForm.addEventListener("submit", createProject);
 membershipForm.addEventListener("submit", createMembership);
 providerForm.addEventListener("submit", createProvider);
+checkVaultHealthButton.addEventListener("click", checkVaultHealth);
 policyForm.addEventListener("submit", simulatePolicy);
 evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
@@ -511,6 +515,7 @@ function renderOps() {
   renderUsage();
   renderTenantGovernance();
   renderProviders();
+  renderVaultHealth();
   renderPolicy();
   renderEvalDatasets();
   renderEvalCases();
@@ -911,6 +916,21 @@ async function checkProviderHealth(providerId) {
   const health = await api(`/api/providers/${providerId}/health`);
   state.providerHealth[providerId] = health;
   renderProviders();
+}
+
+async function checkVaultHealth() {
+  state.vaultHealth = await api("/api/vault/health");
+  renderVaultHealth();
+}
+
+function renderVaultHealth() {
+  vaultHealthRoot.innerHTML = state.vaultHealth
+    ? `<div class="item">
+        <strong>${escapeHtml(state.vaultHealth.status)}</strong>
+        <div class="muted">${escapeHtml(state.vaultHealth.provider_kind)} · ${escapeHtml(state.vaultHealth.healthy ? "healthy" : "unhealthy")}</div>
+        <pre>${escapeHtml(JSON.stringify({ issues: state.vaultHealth.issues, checks: state.vaultHealth.checks }, null, 2))}</pre>
+      </div>`
+    : `<div class="muted">No Vault health check run yet.</div>`;
 }
 
 function renderEvalRuns() {

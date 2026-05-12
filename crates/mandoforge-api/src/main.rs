@@ -74,7 +74,10 @@ use provider::{
     HarnessContext, MockProviderClient, OpenAiCompatibleProviderClient, ProviderClient,
     ProviderResponse,
 };
-use secrets::secret_provider_from_env;
+use secrets::{
+    SecretProvider, SecretProviderConfig, SecretProviderKind, VaultSecretProvider,
+    secret_provider_from_env,
+};
 #[cfg(test)]
 use shell_runner::docker_shell_args;
 use store_backend::{MemoryStore, StoreBackend};
@@ -454,6 +457,16 @@ struct SimulatePolicy {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct SecretProviderHealth {
+    provider_kind: String,
+    healthy: bool,
+    status: String,
+    issues: Vec<String>,
+    checks: Value,
+    checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct ProviderHealth {
     provider_id: Uuid,
     name: String,
@@ -787,6 +800,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/providers/{id}/health", get(get_provider_health))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/simulate", post(simulate_policy))
+        .route("/api/vault/health", get(get_vault_health))
         .route(
             "/api/eval/datasets",
             get(list_eval_datasets).post(create_eval_dataset),
@@ -2450,6 +2464,97 @@ async fn simulate_policy(
         return Err(AppError::bad_request("tool_name is required"));
     }
     Ok(Json(state.policy.evaluate_tool(tool_name)))
+}
+
+async fn get_vault_health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SecretProviderHealth>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
+    Ok(Json(
+        secret_provider_health_from_lookup(|key| std::env::var(key).ok()).await,
+    ))
+}
+
+async fn secret_provider_health_from_lookup<F>(lookup: F) -> SecretProviderHealth
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let checked_at = Utc::now();
+    let kind = match SecretProviderKind::from_lookup(&lookup) {
+        Ok(kind) => kind,
+        Err(error) => {
+            return SecretProviderHealth {
+                provider_kind: "invalid".to_string(),
+                healthy: false,
+                status: "misconfigured".to_string(),
+                issues: vec![error.message],
+                checks: json!({}),
+                checked_at,
+            };
+        }
+    };
+    match kind {
+        SecretProviderKind::Reserved => SecretProviderHealth {
+            provider_kind: "reserved".to_string(),
+            healthy: false,
+            status: "reserved".to_string(),
+            issues: vec![
+                "secret reads are disabled until MANDOFORGE_SECRET_PROVIDER=vault is configured"
+                    .to_string(),
+            ],
+            checks: json!({"provider": "reserved"}),
+            checked_at,
+        },
+        SecretProviderKind::Vault => match SecretProviderConfig::from_lookup(&lookup) {
+            Ok(config) => match VaultSecretProvider::new() {
+                Ok(provider) => match provider.health_check(&config).await {
+                    Ok(()) => SecretProviderHealth {
+                        provider_kind: "vault".to_string(),
+                        healthy: true,
+                        status: "healthy".to_string(),
+                        issues: vec![],
+                        checks: json!({
+                            "vault_addr_configured": !config.vault_addr.trim().is_empty(),
+                            "mount": config.mount,
+                            "namespace_configured": config.namespace.is_some(),
+                            "token_configured": config.token.is_some(),
+                        }),
+                        checked_at,
+                    },
+                    Err(error) => SecretProviderHealth {
+                        provider_kind: "vault".to_string(),
+                        healthy: false,
+                        status: "unhealthy".to_string(),
+                        issues: vec![error.message],
+                        checks: json!({
+                            "vault_addr_configured": !config.vault_addr.trim().is_empty(),
+                            "mount": config.mount,
+                            "namespace_configured": config.namespace.is_some(),
+                            "token_configured": config.token.is_some(),
+                        }),
+                        checked_at,
+                    },
+                },
+                Err(error) => SecretProviderHealth {
+                    provider_kind: "vault".to_string(),
+                    healthy: false,
+                    status: "client_error".to_string(),
+                    issues: vec![error.message],
+                    checks: json!({}),
+                    checked_at,
+                },
+            },
+            Err(error) => SecretProviderHealth {
+                provider_kind: "vault".to_string(),
+                healthy: false,
+                status: "misconfigured".to_string(),
+                issues: vec![error.message],
+                checks: json!({"provider": "vault"}),
+                checked_at,
+            },
+        },
+    }
 }
 
 async fn update_provider_status(
@@ -5601,6 +5706,16 @@ not json
         )
         .await;
         assert_eq!(policy_decision["decision"], "requires_approval");
+
+        let reserved_secret_health = secret_provider_health_from_lookup(|_| None).await;
+        assert_eq!(reserved_secret_health.provider_kind, "reserved");
+        assert!(!reserved_secret_health.healthy);
+        assert!(
+            reserved_secret_health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("secret reads are disabled"))
+        );
 
         let governed_provider: ProviderRecord = request_json(
             app.clone(),
