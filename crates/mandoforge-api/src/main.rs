@@ -894,6 +894,27 @@ struct UpdateProviderStatus {
 }
 
 #[derive(Debug, Deserialize)]
+struct RequestProviderStatusApproval {
+    status: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    approver_subject: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecideProviderStatusApproval {
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderStatusApprovalResponse {
+    provider: ProviderRecord,
+    approval: Value,
+}
+
+#[derive(Debug, Deserialize)]
 struct RotateProviderApiKeyRef {
     api_key_ref: String,
 }
@@ -1482,6 +1503,18 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/{id}/status", patch(update_provider_status))
+        .route(
+            "/api/providers/{id}/status-approval",
+            post(request_provider_status_approval),
+        )
+        .route(
+            "/api/providers/{id}/status-approval/approve",
+            post(approve_provider_status_approval),
+        )
+        .route(
+            "/api/providers/{id}/status-approval/reject",
+            post(reject_provider_status_approval),
+        )
         .route(
             "/api/providers/{id}/api-key-ref/rotate",
             post(rotate_provider_api_key_ref),
@@ -5364,6 +5397,197 @@ async fn update_provider_status(
         ))
         .await?;
     Ok(Json(provider))
+}
+
+async fn request_provider_status_approval(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RequestProviderStatusApproval>,
+) -> Result<Json<ProviderStatusApprovalResponse>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "provider".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let requested_status = normalize_provider_status(&input.status)?;
+    let provider = provider_by_id(&state, id).await?;
+    if provider.status == requested_status {
+        return Err(AppError::bad_request(
+            "provider already has requested status",
+        ));
+    }
+    if provider
+        .config
+        .get("pending_status_approval")
+        .and_then(|approval| approval.get("status"))
+        .and_then(Value::as_str)
+        == Some("pending")
+    {
+        return Err(AppError::bad_request(
+            "provider already has a pending status approval",
+        ));
+    }
+    let requested_at = Utc::now();
+    let approval = json!({
+        "id": Uuid::new_v4(),
+        "status": "pending",
+        "provider_id": provider.id,
+        "provider_name": provider.name,
+        "previous_status": provider.status,
+        "requested_status": requested_status,
+        "requested_by": principal.subject_id,
+        "reason": optional_trimmed(input.reason.as_deref()),
+        "approver_subject": optional_trimmed(input.approver_subject.as_deref()),
+        "requested_at": requested_at,
+    });
+    let mut config = provider.config.as_object().cloned().unwrap_or_default();
+    config.insert("pending_status_approval".to_string(), approval.clone());
+    let updated = state
+        .update_provider_config(id, Value::Object(config))
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "provider.status_approval_requested",
+            "provider",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "provider_name": provider.name,
+                "previous_status": provider.status,
+                "requested_status": requested_status,
+                "approval": approval
+            }),
+        ))
+        .await?;
+    Ok(Json(ProviderStatusApprovalResponse {
+        provider: updated,
+        approval,
+    }))
+}
+
+async fn approve_provider_status_approval(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<DecideProviderStatusApproval>,
+) -> Result<Json<ProviderStatusApprovalResponse>, AppError> {
+    decide_provider_status_approval(state, id, headers, "approved", input.comment).await
+}
+
+async fn reject_provider_status_approval(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<DecideProviderStatusApproval>,
+) -> Result<Json<ProviderStatusApprovalResponse>, AppError> {
+    decide_provider_status_approval(state, id, headers, "rejected", input.comment).await
+}
+
+async fn decide_provider_status_approval(
+    state: AppState,
+    id: Uuid,
+    headers: HeaderMap,
+    decision: &str,
+    comment: Option<String>,
+) -> Result<Json<ProviderStatusApprovalResponse>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "provider".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let provider = provider_by_id(&state, id).await?;
+    let mut approval = provider
+        .config
+        .get("pending_status_approval")
+        .cloned()
+        .ok_or_else(|| AppError::bad_request("provider has no pending status approval"))?;
+    if approval.get("status").and_then(Value::as_str) != Some("pending") {
+        return Err(AppError::bad_request(
+            "provider status approval is not pending",
+        ));
+    }
+    let requested_by = approval
+        .get("requested_by")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if requested_by == principal.subject_id {
+        return Err(AppError::forbidden(
+            "provider status approval requires a different approver",
+        ));
+    }
+    if let Some(approver_subject) = approval
+        .get("approver_subject")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if approver_subject != principal.subject_id {
+            return Err(AppError::forbidden(format!(
+                "provider status approval is delegated to {approver_subject}"
+            )));
+        }
+    }
+    let decided_at = Utc::now();
+    approval["status"] = json!(decision);
+    approval["decided_by"] = json!(principal.subject_id.clone());
+    approval["decided_at"] = json!(decided_at);
+    approval["comment"] = json!(optional_trimmed(comment.as_deref()));
+    let mut config = provider.config.as_object().cloned().unwrap_or_default();
+    config.remove("pending_status_approval");
+    config.insert("last_status_approval".to_string(), approval.clone());
+    let updated = state
+        .update_provider_config(id, Value::Object(config))
+        .await?;
+    let updated = if decision == "approved" {
+        let requested_status = approval
+            .get("requested_status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::bad_request("pending approval missing requested_status"))?;
+        state.update_provider_status(id, requested_status).await?
+    } else {
+        updated
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            &format!("provider.status_approval_{decision}"),
+            "provider",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "provider_name": provider.name,
+                "decision": decision,
+                "approval": approval
+            }),
+        ))
+        .await?;
+    Ok(Json(ProviderStatusApprovalResponse {
+        provider: updated,
+        approval,
+    }))
+}
+
+async fn provider_by_id(state: &AppState, id: Uuid) -> Result<ProviderRecord, AppError> {
+    state
+        .list_providers()
+        .await?
+        .into_iter()
+        .find(|provider| provider.id == id)
+        .ok_or_else(|| AppError::not_found("provider not found"))
 }
 
 async fn rotate_provider_api_key_ref(
@@ -9850,6 +10074,144 @@ not json
             log.action == "provider.status_updated"
                 && log.details["provider_name"] == "archive-lifecycle-mock"
                 && log.details["status"] == "archived"
+        }));
+    }
+
+    #[tokio::test]
+    async fn provider_status_approval_requires_separate_approver_and_audits_decision() {
+        let app = test_app().await;
+        let provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "approval-governed-provider",
+                        "provider_type": "openai_compatible",
+                        "base_url": "https://example.invalid/v1",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {"api_key_env": "OPENAI_API_KEY"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(provider.status, "active");
+
+        let requested: ProviderStatusApprovalResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/providers/{}/status-approval", provider.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "status": "disabled",
+                        "reason": "Rotate credentials before reuse",
+                        "approver_subject": "provider-approver-1"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            requested.approval["requested_status"].as_str(),
+            Some("disabled")
+        );
+        assert_eq!(
+            requested
+                .provider
+                .config
+                .get("pending_status_approval")
+                .and_then(|approval| approval.get("status"))
+                .and_then(Value::as_str),
+            Some("pending")
+        );
+
+        let (status, self_approval) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/providers/{}/status-approval/approve",
+                    provider.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            self_approval["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("different approver")
+        );
+
+        let approved: ProviderStatusApprovalResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/providers/{}/status-approval/approve",
+                    provider.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "provider-approver-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"comment": "Approved after review"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.provider.status, "disabled");
+        assert_eq!(approved.approval["status"], "approved");
+        assert!(
+            approved
+                .provider
+                .config
+                .get("pending_status_approval")
+                .is_none()
+        );
+        assert_eq!(
+            approved
+                .provider
+                .config
+                .get("last_status_approval")
+                .and_then(|approval| approval.get("status"))
+                .and_then(Value::as_str),
+            Some("approved")
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider.status_approval_requested"
+                && log.details["provider_name"] == "approval-governed-provider"
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider.status_approval_approved"
+                && log.details["approval"]["requested_status"] == "disabled"
         }));
     }
 

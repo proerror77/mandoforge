@@ -400,6 +400,25 @@
                 </label>
                 <button type="submit">Save Provider</button>
               </form>
+              <form id="provider-status-approval-form" class="stack-form compact-form">
+                <label>
+                  Provider ID
+                  <input name="provider_id" placeholder="Provider UUID" />
+                </label>
+                <label>
+                  Requested status
+                  <input name="status" value="disabled" />
+                </label>
+                <label>
+                  Approver subject
+                  <input name="approver_subject" value="provider-approver-1" />
+                </label>
+                <label>
+                  Reason
+                  <input name="reason" value="Provider lifecycle change requires review" />
+                </label>
+                <button type="submit">Request Provider Approval</button>
+              </form>
               <div id="providers" class="list"></div>
             </div>
             <div>

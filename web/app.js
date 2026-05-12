@@ -121,6 +121,7 @@ const approvalEscalationRuleForm = document.querySelector("#approval-escalation-
 const runDueApprovalEscalationsButton = document.querySelector("#run-due-approval-escalations");
 const approvalGovernanceRoot = document.querySelector("#approval-governance");
 const providerForm = document.querySelector("#provider-form");
+const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
 const secretForm = document.querySelector("#secret-form");
 const evalDatasetForm = document.querySelector("#eval-dataset-form");
 const evalCaseForm = document.querySelector("#eval-case-form");
@@ -156,6 +157,7 @@ approvalGroupForm.addEventListener("submit", createApprovalGroup);
 approvalEscalationRuleForm.addEventListener("submit", createApprovalEscalationRule);
 runDueApprovalEscalationsButton.addEventListener("click", runDueApprovalEscalations);
 providerForm.addEventListener("submit", createProvider);
+providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
 secretForm.addEventListener("submit", createSecretRecord);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
 policyForm.addEventListener("submit", simulatePolicy);
@@ -457,6 +459,24 @@ async function createProvider(event) {
       base_url: baseUrl || null,
       default_model: form.get("default_model"),
       config,
+    }),
+  });
+  await refreshOps();
+}
+
+async function requestProviderStatusApproval(event) {
+  event.preventDefault();
+  const form = new FormData(providerStatusApprovalForm);
+  const providerId = String(form.get("provider_id") || "").trim();
+  if (!providerId) {
+    throw new Error("Provider ID is required");
+  }
+  await api(`/api/providers/${providerId}/status-approval`, {
+    method: "POST",
+    body: JSON.stringify({
+      status: String(form.get("status") || "").trim(),
+      reason: String(form.get("reason") || "").trim(),
+      approver_subject: String(form.get("approver_subject") || "").trim(),
     }),
   });
   await refreshOps();
@@ -2005,15 +2025,33 @@ function renderProviders() {
         .map(
           (provider) => {
             const health = state.providerHealth[provider.id];
+            const pendingApproval = provider.config?.pending_status_approval;
+            const lastApproval = provider.config?.last_status_approval;
             return `
             <div class="item">
               <strong>${escapeHtml(provider.name)}</strong>
               <div class="muted">${escapeHtml(provider.provider_type)} · ${escapeHtml(provider.status)}</div>
-              <div class="muted">${escapeHtml(provider.default_model || "no default model")} · ${escapeHtml(provider.base_url || "no base URL")}</div>
+              <div class="muted">${escapeHtml(provider.id)} · ${escapeHtml(provider.default_model || "no default model")} · ${escapeHtml(provider.base_url || "no base URL")}</div>
               <button class="secondary" data-provider-status="${provider.id}" data-status="active">Activate</button>
               <button class="secondary reject" data-provider-status="${provider.id}" data-status="disabled">Disable</button>
               <button class="secondary reject" data-provider-status="${provider.id}" data-status="archived">Archive Provider</button>
               <button class="secondary" data-provider-health="${provider.id}">Check Health</button>
+              ${
+                pendingApproval
+                  ? `<div class="item">
+                      <strong>Pending provider approval</strong>
+                      <div class="muted">${escapeHtml(pendingApproval.previous_status)} → ${escapeHtml(pendingApproval.requested_status)} · requested by ${escapeHtml(pendingApproval.requested_by || "unknown")}</div>
+                      <div class="muted">Approver: ${escapeHtml(pendingApproval.approver_subject || "any different admin")} · ${escapeHtml(pendingApproval.reason || "no reason")}</div>
+                      <button class="secondary" data-provider-approval="${provider.id}" data-decision="approve">Approve Provider Change</button>
+                      <button class="secondary reject" data-provider-approval="${provider.id}" data-decision="reject">Reject Provider Change</button>
+                    </div>`
+                  : ""
+              }
+              ${
+                lastApproval
+                  ? `<div class="muted">Last provider approval: ${escapeHtml(lastApproval.status)} · ${escapeHtml(lastApproval.previous_status)} → ${escapeHtml(lastApproval.requested_status)} · ${escapeHtml(lastApproval.decided_at || "not decided")}</div>`
+                  : ""
+              }
               ${
                 health
                   ? `<div class="muted">Health: ${escapeHtml(health.healthy ? "healthy" : "unhealthy")} · ${escapeHtml(health.checked_at)}</div>
@@ -2035,12 +2073,25 @@ function renderProviders() {
   providerRoot.querySelectorAll("[data-provider-health]").forEach((button) => {
     button.addEventListener("click", () => checkProviderHealth(button.dataset.providerHealth));
   });
+  providerRoot.querySelectorAll("[data-provider-approval]").forEach((button) => {
+    button.addEventListener("click", () =>
+      decideProviderStatusApproval(button.dataset.providerApproval, button.dataset.decision),
+    );
+  });
 }
 
 async function updateProviderStatus(providerId, status) {
   await api(`/api/providers/${providerId}/status`, {
     method: "PATCH",
     body: JSON.stringify({ status }),
+  });
+  await refreshOps();
+}
+
+async function decideProviderStatusApproval(providerId, decision) {
+  await api(`/api/providers/${providerId}/status-approval/${decision}`, {
+    method: "POST",
+    body: JSON.stringify({ comment: `Provider change ${decision} from static console` }),
   });
   await refreshOps();
 }
