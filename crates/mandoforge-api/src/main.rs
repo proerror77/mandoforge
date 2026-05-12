@@ -1590,7 +1590,7 @@ impl AppState {
         })
     }
 
-    async fn record_codex_app_server_run(
+    pub(crate) async fn record_codex_app_server_run(
         &self,
         operation: &str,
         thread_id: Option<String>,
@@ -1605,7 +1605,11 @@ impl AppState {
             thread_id,
             turn_id,
             command_id,
-            status: "completed".to_string(),
+            status: response
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("completed")
+                .to_string(),
             request,
             response,
             error: None,
@@ -8457,7 +8461,187 @@ not json
         }));
         assert_eq!(
             codex_client.calls.lock().await.as_slice(),
-            ["thread", "turn:thread-1"]
+            ["thread", "turn:thread-1", "poll:turn-1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_backed_worker_runs_codex_app_server_polling() {
+        let codex_client = Arc::new(RecordingCodexAppServerClient::default());
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(QueueBackedExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: Some(CodexAppServerConfig {
+                endpoint: "http://codex-app-server.test".to_string(),
+                timeout_seconds: 5,
+            }),
+            codex_app_server_client: codex_client.clone(),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
+            cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
+            approval_webhook_url: None,
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: runtime_policy(PolicyConfig::default()),
+        };
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state);
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agents[0].id, "title": "queued codex app server"}),
+            ),
+        )
+        .await;
+
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/codex.exec/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "task": "Inspect the workspace through the app server",
+                        "sandbox_mode": "workspace-write",
+                        "execution_strategy": "app-server",
+                        "poll_attempts": 2,
+                        "poll_interval_ms": 0
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(approval_required["status"], "approval_required");
+        let approval_id = Uuid::parse_str(
+            approval_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval uuid");
+
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+        assert!(
+            codex_client.calls.lock().await.is_empty(),
+            "queue-backed approvals should not call the app server inline"
+        );
+
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job = jobs
+            .iter()
+            .find(|job| job.approval_id == approved.id && job.tool_name == "codex.exec")
+            .expect("codex execution job queued");
+        assert_eq!(job.status, ExecutionJobStatus::Queued);
+        let job_id = job.id;
+
+        let completed: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "codex-worker-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        assert_eq!(completed.worker_id.as_deref(), Some("codex-worker-1"));
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let codex_call = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "codex.exec")
+            .expect("codex tool call");
+        assert_eq!(codex_call.status, "completed");
+        let result = codex_call.result.as_ref().expect("codex result");
+        assert_eq!(result["runner"], "app-server");
+        assert_eq!(result["terminal"], true);
+        assert_eq!(result["poll_attempts"], 1);
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "execution.queued" && event.payload["tool"] == "codex.exec"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "codex.task.event"
+                && event.payload["runner"] == "app-server"
+                && event.payload["status"] == "completed"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "codex.task.completed"
+                && event.payload["runner"] == "app-server"
+                && event.payload["poll_attempts"] == 1
+        }));
+
+        let runs: Vec<CodexAppServerRun> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/codex-app-server/runs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(runs.iter().any(|run| {
+            run.operation == "turn.create"
+                && run.turn_id.as_deref() == Some("turn-1")
+                && run.status == "completed"
+        }));
+        assert_eq!(
+            codex_client.calls.lock().await.as_slice(),
+            ["thread", "turn:thread-1", "poll:turn-1"]
         );
     }
 

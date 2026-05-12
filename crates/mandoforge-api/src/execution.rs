@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest};
+use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnResponse};
 use crate::execution_queue::{ExecutionJob, ExecutionJobRequest};
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{AppError, AppState, Approval, Artifact, ToolCall, new_audit_log};
@@ -27,6 +27,10 @@ pub(crate) struct CodexRequest {
     sandbox_mode: String,
     #[serde(default)]
     execution_strategy: Option<String>,
+    #[serde(default)]
+    poll_attempts: Option<u32>,
+    #[serde(default)]
+    poll_interval_ms: Option<u64>,
 }
 
 #[allow(dead_code)]
@@ -463,62 +467,245 @@ async fn run_codex_app_server(
         )
         .await?;
 
+    let thread_request = CodexThreadRequest {
+        metadata: json!({
+            "session_id": session_id,
+            "workspace": workspace,
+            "sandbox_mode": &request.sandbox_mode,
+            "source": "approved_codex_exec",
+        }),
+    };
     let thread = state
         .codex_app_server_client
-        .create_thread(
-            config,
-            CodexThreadRequest {
-                metadata: json!({
-                    "session_id": session_id,
-                    "workspace": workspace,
-                    "sandbox_mode": &request.sandbox_mode,
-                    "source": "approved_codex_exec",
-                }),
-            },
+        .create_thread(config, thread_request.clone())
+        .await?;
+    state
+        .record_codex_app_server_run(
+            "thread.create",
+            Some(thread.thread_id.clone()),
+            None,
+            None,
+            serde_json::to_value(&thread_request)?,
+            serde_json::to_value(&thread)?,
         )
         .await?;
+
+    let turn_request = CodexTurnRequest {
+        message: request.task.clone(),
+        metadata: json!({
+            "session_id": session_id,
+            "workspace": workspace,
+            "sandbox_mode": &request.sandbox_mode,
+            "source": "approved_codex_exec",
+        }),
+    };
     let turn = state
         .codex_app_server_client
-        .create_turn(
-            config,
-            &thread.thread_id,
-            CodexTurnRequest {
-                message: request.task.clone(),
-                metadata: json!({
-                    "session_id": session_id,
-                    "workspace": workspace,
-                    "sandbox_mode": &request.sandbox_mode,
-                    "source": "approved_codex_exec",
-                }),
-            },
+        .create_turn(config, &thread.thread_id, turn_request.clone())
+        .await?;
+    let turn_run = state
+        .record_codex_app_server_run(
+            "turn.create",
+            Some(thread.thread_id.clone()),
+            Some(turn.turn_id.clone()),
+            None,
+            serde_json::to_value(&turn_request)?,
+            serde_json::to_value(&turn)?,
         )
         .await?;
+    let poll_result = poll_codex_app_server_turn_for_worker(
+        state,
+        config,
+        session_id,
+        turn_run.id,
+        turn.clone(),
+        request.poll_attempts,
+        request.poll_interval_ms,
+    )
+    .await?;
+    let final_turn = poll_result.turn;
+    let final_status = final_turn
+        .status
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let event_type =
+        if poll_result.terminal && codex_app_server_turn_status_succeeded(&final_status) {
+            "codex.task.completed"
+        } else {
+            "codex.task.failed"
+        };
 
     state
         .append_event(
             "tool",
             None,
             session_id,
-            "codex.task.completed",
+            event_type,
             json!({
                 "runner": "app-server",
                 "thread_id": thread.thread_id,
-                "turn_id": turn.turn_id,
-                "status": turn.status,
-                "result": turn.result,
+                "turn_id": final_turn.turn_id,
+                "status": final_status,
+                "terminal": poll_result.terminal,
+                "poll_attempts": poll_result.attempts,
+                "result": final_turn.result,
                 "fallback_used": false,
             }),
         )
         .await?;
 
+    if event_type == "codex.task.failed" {
+        return Err(AppError::bad_request(format!(
+            "Codex App Server turn ended with status {final_status}"
+        )));
+    }
+
     Ok(json!({
         "runner": "app-server",
         "thread_id": thread.thread_id,
-        "turn_id": turn.turn_id,
-        "status": turn.status,
-        "result": turn.result,
+        "turn_id": final_turn.turn_id,
+        "status": final_status,
+        "terminal": poll_result.terminal,
+        "poll_attempts": poll_result.attempts,
+        "result": final_turn.result,
         "fallback_used": false,
     }))
+}
+
+struct CodexAppServerWorkerPollResult {
+    turn: CodexTurnResponse,
+    attempts: u32,
+    terminal: bool,
+}
+
+async fn poll_codex_app_server_turn_for_worker(
+    state: &AppState,
+    config: &crate::codex_app_server::CodexAppServerConfig,
+    session_id: Uuid,
+    run_id: Uuid,
+    initial_turn: CodexTurnResponse,
+    requested_attempts: Option<u32>,
+    requested_interval_ms: Option<u64>,
+) -> Result<CodexAppServerWorkerPollResult, AppError> {
+    let mut turn = initial_turn;
+    let mut status = turn.status.clone().unwrap_or_else(|| "unknown".to_string());
+    if codex_app_server_turn_status_is_terminal(&status) {
+        return Ok(CodexAppServerWorkerPollResult {
+            turn,
+            attempts: 0,
+            terminal: true,
+        });
+    }
+    let max_attempts = requested_attempts
+        .or_else(codex_app_server_worker_poll_attempts_from_env)
+        .unwrap_or(3)
+        .clamp(1, 20);
+    let retry_interval_ms = requested_interval_ms
+        .or_else(codex_app_server_worker_poll_interval_from_env)
+        .unwrap_or(0)
+        .min(30_000);
+    let mut attempts = 0;
+    let mut terminal = false;
+    while attempts < max_attempts && !terminal {
+        attempts += 1;
+        match state
+            .codex_app_server_client
+            .get_turn_status(config, &turn.turn_id)
+            .await
+        {
+            Ok(response) => {
+                status = response
+                    .status
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                terminal = codex_app_server_turn_status_is_terminal(&status);
+                turn = response;
+                state
+                    .update_codex_app_server_run_status(
+                        run_id,
+                        status.clone(),
+                        serde_json::to_value(&turn)?,
+                        None,
+                    )
+                    .await?;
+                state
+                    .append_event(
+                        "worker",
+                        Some(run_id),
+                        session_id,
+                        "codex.task.event",
+                        json!({
+                            "runner": "app-server",
+                            "run_id": run_id,
+                            "turn_id": turn.turn_id,
+                            "attempt": attempts,
+                            "status": status,
+                            "terminal": terminal,
+                        }),
+                    )
+                    .await?;
+            }
+            Err(error) => {
+                status = "poll_failed".to_string();
+                state
+                    .update_codex_app_server_run_status(
+                        run_id,
+                        status.clone(),
+                        serde_json::to_value(&turn)?,
+                        Some(json!({"message": error.message, "attempt": attempts})),
+                    )
+                    .await?;
+                state
+                    .append_event(
+                        "worker",
+                        Some(run_id),
+                        session_id,
+                        "codex.task.event",
+                        json!({
+                            "runner": "app-server",
+                            "run_id": run_id,
+                            "turn_id": turn.turn_id,
+                            "attempt": attempts,
+                            "status": status,
+                            "terminal": false,
+                            "error": error.message,
+                        }),
+                    )
+                    .await?;
+            }
+        }
+        if attempts < max_attempts && !terminal && retry_interval_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(retry_interval_ms)).await;
+        }
+    }
+    Ok(CodexAppServerWorkerPollResult {
+        turn,
+        attempts,
+        terminal,
+    })
+}
+
+fn codex_app_server_worker_poll_attempts_from_env() -> Option<u32> {
+    std::env::var("MANDOFORGE_CODEX_APP_SERVER_WORKER_POLL_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+}
+
+fn codex_app_server_worker_poll_interval_from_env() -> Option<u64> {
+    std::env::var("MANDOFORGE_CODEX_APP_SERVER_WORKER_POLL_INTERVAL_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn codex_app_server_turn_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "completed" | "failed" | "cancelled" | "canceled" | "interrupted"
+    )
+}
+
+fn codex_app_server_turn_status_succeeded(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("completed")
 }
 
 #[allow(dead_code)]

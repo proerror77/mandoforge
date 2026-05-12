@@ -179,4 +179,5 @@
 - [x] Add CLI/App Server fallback orchestration for approved Codex worker execution.
 - [x] Persist Codex App Server steering responses for replay/debugging.
 - [x] Add bounded Codex App Server turn polling and retry with persisted run status/audit.
-- [ ] Add production Codex App Server worker-backed steering orchestration.
+- [x] Add production Codex App Server worker-backed steering orchestration.
+- [ ] Add Codex App Server retry orchestration across worker leases and richer long-running steering dashboards.
