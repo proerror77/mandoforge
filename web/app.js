@@ -6,6 +6,7 @@ const state = {
   toolCalls: [],
   auditLogs: [],
   providers: [],
+  providerSummary: null,
   providerHealth: {},
   vaultHealth: null,
   secretRecords: [],
@@ -1265,6 +1266,7 @@ async function runDemo() {
 async function refreshOps() {
   const [
     providers,
+    providerSummary,
     secretRecords,
     policy,
     policyRuntime,
@@ -1284,6 +1286,7 @@ async function refreshOps() {
   ] =
     await Promise.all([
       api("/api/providers"),
+      api("/api/providers/summary"),
       api("/api/vault/secrets"),
       api("/api/policy"),
       api("/api/policy/runtime"),
@@ -1302,6 +1305,7 @@ async function refreshOps() {
       api("/api/approval-escalation-rules"),
     ]);
   state.providers = providers;
+  state.providerSummary = providerSummary;
   state.secretRecords = secretRecords;
   state.policy = policy;
   state.policyRuntime = policyRuntime;
@@ -2569,7 +2573,56 @@ function countPolicyDiffChanges(changes = []) {
 }
 
 function renderProviders() {
-  providerRoot.innerHTML = state.providers.length
+  const summary = state.providerSummary;
+  const attentionItems = summary?.attention_items || [];
+  const summaryHtml = summary
+    ? `
+      <div class="detail-panel">
+        <div class="metric-grid compact-metrics">
+          <div class="metric"><span>Providers</span><strong>${formatInteger(summary.provider_count)}</strong></div>
+          <div class="metric"><span>Active</span><strong>${formatInteger(summary.active_provider_count)}</strong></div>
+          <div class="metric"><span>Pending</span><strong>${formatInteger(summary.pending_status_approval_count)}</strong></div>
+          <div class="metric"><span>Emergency Changes</span><strong>${formatInteger(summary.emergency_lifecycle_count)}</strong></div>
+          <div class="metric"><span>Vault Refs</span><strong>${formatInteger(summary.credential_ref_count)}</strong></div>
+          <div class="metric"><span>Missing Keys</span><strong>${formatInteger(summary.missing_credential_count)}</strong></div>
+          <div class="metric"><span>Budgeted</span><strong>${formatInteger(summary.budgeted_provider_count)}</strong></div>
+          <div class="metric"><span>Attention</span><strong>${formatInteger(attentionItems.length)}</strong></div>
+        </div>
+        <div class="muted">Status: ${escapeHtml(formatCounts(summary.by_status))}</div>
+        <div class="muted">Type: ${escapeHtml(formatCounts(summary.by_type))}</div>
+        <div class="muted">Generated: ${escapeHtml(summary.generated_at)}</div>
+        ${
+          attentionItems.length
+            ? `<table class="compact-table">
+                <thead>
+                  <tr>
+                    <th>Severity</th>
+                    <th>Provider</th>
+                    <th>Signal</th>
+                    <th>Message</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${attentionItems
+                    .map(
+                      (item) => `
+                        <tr>
+                          <td><span class="budget-status ${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</span></td>
+                          <td>${escapeHtml(item.provider_name)}</td>
+                          <td>${escapeHtml(item.kind)}</td>
+                          <td>${escapeHtml(item.message)}</td>
+                        </tr>
+                      `,
+                    )
+                    .join("")}
+                </tbody>
+              </table>`
+            : `<div class="muted">No provider governance attention items.</div>`
+        }
+      </div>
+    `
+    : "";
+  const providerListHtml = state.providers.length
     ? state.providers
         .map(
           (provider) => {
@@ -2614,6 +2667,7 @@ function renderProviders() {
         )
         .join("")
     : `<div class="muted">No stored providers</div>`;
+  providerRoot.innerHTML = summaryHtml + providerListHtml;
   providerRoot.querySelectorAll("[data-provider-status]").forEach((button) => {
     button.addEventListener("click", () =>
       updateProviderStatus(button.dataset.providerStatus, button.dataset.status),

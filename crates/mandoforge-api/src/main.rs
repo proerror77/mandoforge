@@ -1214,6 +1214,33 @@ struct ProviderStatusApprovalResponse {
     approval: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderGovernanceSummary {
+    provider_count: usize,
+    by_status: BTreeMap<String, usize>,
+    by_type: BTreeMap<String, usize>,
+    pending_status_approval_count: usize,
+    last_status_approval_count: usize,
+    emergency_lifecycle_count: usize,
+    credential_ref_count: usize,
+    env_key_count: usize,
+    missing_credential_count: usize,
+    budgeted_provider_count: usize,
+    active_provider_count: usize,
+    inactive_provider_count: usize,
+    attention_items: Vec<ProviderGovernanceAttentionItem>,
+    generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderGovernanceAttentionItem {
+    provider_id: Uuid,
+    provider_name: String,
+    kind: String,
+    severity: String,
+    message: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct RotateProviderApiKeyRef {
     api_key_ref: String,
@@ -1955,6 +1982,7 @@ fn build_router(state: AppState) -> Router {
             post(discover_mcp_server_tools),
         )
         .route("/api/providers", get(list_providers).post(create_provider))
+        .route("/api/providers/summary", get(get_provider_summary))
         .route("/api/providers/{id}/status", patch(update_provider_status))
         .route(
             "/api/providers/{id}/status-approval",
@@ -5000,6 +5028,172 @@ async fn create_provider(
 ) -> Result<Json<ProviderRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
     Ok(Json(state.create_provider(input).await?))
+}
+
+async fn get_provider_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderGovernanceSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
+    let providers = state.list_providers().await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    Ok(Json(build_provider_governance_summary(
+        &providers,
+        &audit_logs,
+    )))
+}
+
+fn build_provider_governance_summary(
+    providers: &[ProviderRecord],
+    audit_logs: &[AuditLog],
+) -> ProviderGovernanceSummary {
+    let mut by_status = BTreeMap::new();
+    let mut by_type = BTreeMap::new();
+    let mut pending_status_approval_count = 0;
+    let mut last_status_approval_count = 0;
+    let mut credential_ref_count = 0;
+    let mut env_key_count = 0;
+    let mut missing_credential_count = 0;
+    let mut budgeted_provider_count = 0;
+    let mut active_provider_count = 0;
+    let mut inactive_provider_count = 0;
+    let mut attention_items = Vec::new();
+
+    for provider in providers {
+        *by_status.entry(provider.status.clone()).or_insert(0) += 1;
+        *by_type.entry(provider.provider_type.clone()).or_insert(0) += 1;
+
+        if provider.status == "active" {
+            active_provider_count += 1;
+        } else {
+            inactive_provider_count += 1;
+            attention_items.push(ProviderGovernanceAttentionItem {
+                provider_id: provider.id,
+                provider_name: provider.name.clone(),
+                kind: "inactive_provider".to_string(),
+                severity: if provider.status == "archived" {
+                    "critical".to_string()
+                } else {
+                    "warning".to_string()
+                },
+                message: format!("provider status is {}", provider.status),
+            });
+        }
+
+        if provider
+            .config
+            .get("pending_status_approval")
+            .and_then(|approval| approval.get("status"))
+            .and_then(Value::as_str)
+            == Some("pending")
+        {
+            pending_status_approval_count += 1;
+            attention_items.push(ProviderGovernanceAttentionItem {
+                provider_id: provider.id,
+                provider_name: provider.name.clone(),
+                kind: "pending_status_approval".to_string(),
+                severity: "warning".to_string(),
+                message: "provider lifecycle change is waiting for approval".to_string(),
+            });
+        }
+        if provider.config.get("last_status_approval").is_some() {
+            last_status_approval_count += 1;
+        }
+
+        let has_api_key_ref = provider
+            .config
+            .get("api_key_ref")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        let has_api_key_env = provider
+            .config
+            .get("api_key_env")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        if has_api_key_ref {
+            credential_ref_count += 1;
+        }
+        if has_api_key_env {
+            env_key_count += 1;
+        }
+        if provider_requires_api_key(&provider.provider_type)
+            && !has_api_key_ref
+            && !has_api_key_env
+        {
+            missing_credential_count += 1;
+            attention_items.push(ProviderGovernanceAttentionItem {
+                provider_id: provider.id,
+                provider_name: provider.name.clone(),
+                kind: "missing_credential".to_string(),
+                severity: "critical".to_string(),
+                message: "provider requires config.api_key_ref or config.api_key_env".to_string(),
+            });
+        }
+
+        if provider_requires_base_url(&provider.provider_type)
+            && provider
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .map_or(true, str::is_empty)
+        {
+            attention_items.push(ProviderGovernanceAttentionItem {
+                provider_id: provider.id,
+                provider_name: provider.name.clone(),
+                kind: "missing_base_url".to_string(),
+                severity: "critical".to_string(),
+                message: "provider requires a base URL before external health checks can run"
+                    .to_string(),
+            });
+        }
+
+        if provider_daily_request_limit(provider).is_some()
+            || provider_daily_cost_limit_cents(provider).is_some()
+        {
+            budgeted_provider_count += 1;
+        }
+    }
+
+    let emergency_lifecycle_count = audit_logs
+        .iter()
+        .filter(|log| {
+            log.action == "provider.status_updated"
+                && log.details["policy_decision"]["gate"] == "provider_lifecycle_emergency"
+        })
+        .count();
+
+    ProviderGovernanceSummary {
+        provider_count: providers.len(),
+        by_status,
+        by_type,
+        pending_status_approval_count,
+        last_status_approval_count,
+        emergency_lifecycle_count,
+        credential_ref_count,
+        env_key_count,
+        missing_credential_count,
+        budgeted_provider_count,
+        active_provider_count,
+        inactive_provider_count,
+        attention_items,
+        generated_at: Utc::now(),
+    }
+}
+
+fn provider_requires_api_key(provider_type: &str) -> bool {
+    matches!(
+        provider_type.trim().to_ascii_lowercase().as_str(),
+        "openai-compatible" | "openai_compatible" | "anthropic"
+    )
+}
+
+fn provider_requires_base_url(provider_type: &str) -> bool {
+    matches!(
+        provider_type.trim().to_ascii_lowercase().as_str(),
+        "openai-compatible" | "openai_compatible" | "eval_judge"
+    )
 }
 
 async fn get_policy(
@@ -13753,6 +13947,147 @@ not json
         assert!(audit_logs.iter().any(|log| {
             log.action == "provider.status_approval_approved"
                 && log.details["approval"]["requested_status"] == "disabled"
+        }));
+    }
+
+    #[tokio::test]
+    async fn provider_summary_aggregates_governance_signals() {
+        let app = test_app().await;
+
+        let (status, viewer_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .uri("/api/providers/summary")
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            viewer_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let budgeted_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "summary-budgeted-mock",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {"budget": {"daily_request_limit": 5}}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let misconfigured_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "openai_compatible",
+                        "name": "summary-misconfigured-openai",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let _: ProviderStatusApprovalResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/providers/{}/status-approval",
+                    budgeted_provider.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "status": "disabled",
+                        "reason": "Summary should surface pending provider lifecycle approval"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/providers/{}/status",
+                    misconfigured_provider.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "status": "disabled",
+                        "emergency": true,
+                        "reason": "Summary should surface emergency provider lifecycle changes"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let summary: ProviderGovernanceSummary = request_json(
+            app,
+            Request::builder()
+                .uri("/api/providers/summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(summary.provider_count, 2);
+        assert_eq!(summary.by_type["mock"], 1);
+        assert_eq!(summary.by_type["openai_compatible"], 1);
+        assert_eq!(summary.by_status["active"], 1);
+        assert_eq!(summary.by_status["disabled"], 1);
+        assert_eq!(summary.pending_status_approval_count, 1);
+        assert_eq!(summary.emergency_lifecycle_count, 1);
+        assert_eq!(summary.missing_credential_count, 1);
+        assert_eq!(summary.budgeted_provider_count, 1);
+        assert_eq!(summary.active_provider_count, 1);
+        assert_eq!(summary.inactive_provider_count, 1);
+        assert!(summary.attention_items.iter().any(|item| {
+            item.provider_name == "summary-budgeted-mock" && item.kind == "pending_status_approval"
+        }));
+        assert!(summary.attention_items.iter().any(|item| {
+            item.provider_name == "summary-misconfigured-openai"
+                && item.kind == "missing_credential"
+                && item.severity == "critical"
+        }));
+        assert!(summary.attention_items.iter().any(|item| {
+            item.provider_name == "summary-misconfigured-openai" && item.kind == "inactive_provider"
         }));
     }
 
