@@ -124,4 +124,58 @@ impl AppState {
         }
         Ok(release)
     }
+
+    pub(crate) async fn rollback_agent_release(
+        &self,
+        agent_id: Uuid,
+        release_id: Uuid,
+    ) -> Result<AgentRelease, AppError> {
+        self.get_agent(agent_id).await?;
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let release = store
+                    .agent_releases
+                    .get_mut(&release_id)
+                    .ok_or_else(|| AppError::not_found("agent release not found"))?;
+                if release.agent_id != agent_id {
+                    return Err(AppError::not_found("agent release not found"));
+                }
+                if release.status != "promoted" {
+                    return Err(AppError::bad_request("agent release is not promoted"));
+                }
+                release.status = "rolled_back".to_string();
+                Ok(release.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let existing = sqlx::query(
+                    "SELECT id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, promoted_by, promoted_at, created_at
+                     FROM agent_releases
+                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3",
+                )
+                .bind(self.tenant_id)
+                .bind(agent_id)
+                .bind(release_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent release not found"))
+                .and_then(agent_release_from_row)?;
+                if existing.status != "promoted" {
+                    return Err(AppError::bad_request("agent release is not promoted"));
+                }
+                let row = sqlx::query(
+                    "UPDATE agent_releases
+                     SET status = 'rolled_back'
+                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
+                     RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, promoted_by, promoted_at, created_at",
+                )
+                .bind(self.tenant_id)
+                .bind(agent_id)
+                .bind(release_id)
+                .fetch_one(pool)
+                .await?;
+                agent_release_from_row(row)
+            }
+        }
+    }
 }

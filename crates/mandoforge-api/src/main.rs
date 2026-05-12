@@ -819,6 +819,10 @@ fn build_router(state: AppState) -> Router {
             get(list_agent_releases).post(create_agent_release),
         )
         .route(
+            "/api/agents/{id}/releases/{release_id}/rollback",
+            post(rollback_agent_release),
+        )
+        .route(
             "/api/agents/{id}/versions/{version}",
             get(get_agent_version),
         )
@@ -1223,6 +1227,23 @@ async fn create_agent_release(
             .create_agent_release(id, input, principal.subject_id)
             .await?,
     ))
+}
+
+async fn rollback_agent_release(
+    State(state): State<AppState>,
+    Path((id, release_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<AgentRelease>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "agent".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(state.rollback_agent_release(id, release_id).await?))
 }
 
 async fn get_agent_version(
@@ -7784,6 +7805,67 @@ not json
         )
         .await;
         assert!(releases.iter().any(|listed| listed.id == release.id));
+
+        let (status, viewer_rollback_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/agents/{}/releases/{}/rollback",
+                    agent.id, release.id
+                ))
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            viewer_rollback_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let rolled_back: AgentRelease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/agents/{}/releases/{}/rollback",
+                    agent.id, release.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rolled_back.id, release.id);
+        assert_eq!(rolled_back.status, "rolled_back");
+
+        let (status, rollback_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/agents/{}/releases/{}/rollback",
+                    agent.id, release.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            rollback_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not promoted")
+        );
 
         let (status, release_error) = request_value(
             app.clone(),
