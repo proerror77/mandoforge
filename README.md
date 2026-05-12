@@ -168,7 +168,7 @@ MANDOFORGE_CODEX_APP_SERVER_TIMEOUT_SECONDS=30 \
 cargo run -p mandoforge-api
 ```
 
-When configured, Admin-only routes under `/api/codex-app-server/*` can health-check the App Server, create threads, create turns, execute turn-scoped commands, and interrupt turns. The static Admin Console includes a Codex App Server panel for those steering actions and shows the fail-closed reserved response when the URL is unset. Approved `codex.exec` continues to use the Codex CLI path; artifact sync and automatic CLI/App Server fallback orchestration are still later-stage work.
+When configured, Admin-only routes under `/api/codex-app-server/*` can health-check the App Server, create threads, create turns, execute turn-scoped commands, interrupt turns, and sync returned artifact descriptors into MandoForge session artifacts, timeline events, and audit logs. The static Admin Console includes a Codex App Server panel for those steering and artifact-sync actions and shows the fail-closed reserved response when the URL is unset. Approved `codex.exec` continues to use the Codex CLI path; automatic CLI/App Server fallback orchestration is still later-stage work.
 
 Optional provider cost alert webhook:
 
@@ -276,6 +276,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `POST /api/codex-app-server/threads/:thread_id/turns`
 - `POST /api/codex-app-server/turns/:turn_id/commands`
 - `POST /api/codex-app-server/turns/:turn_id/interrupt`
+- `POST /api/codex-app-server/artifacts/sync`
 
 ## Security Boundary
 

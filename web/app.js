@@ -44,6 +44,7 @@ const state = {
     turn: null,
     command: null,
     interrupt: null,
+    sync: null,
     error: null,
   },
   selectedArtifactId: null,
@@ -111,6 +112,7 @@ const checkCodexHealthButton = document.querySelector("#check-codex-health");
 const codexThreadForm = document.querySelector("#codex-thread-form");
 const codexTurnForm = document.querySelector("#codex-turn-form");
 const codexCommandForm = document.querySelector("#codex-command-form");
+const codexArtifactSyncForm = document.querySelector("#codex-artifact-sync-form");
 const interruptCodexTurnButton = document.querySelector("#interrupt-codex-turn");
 const codexAppServerRoot = document.querySelector("#codex-app-server");
 
@@ -142,6 +144,7 @@ checkCodexHealthButton.addEventListener("click", checkCodexAppServerHealth);
 codexThreadForm.addEventListener("submit", createCodexThread);
 codexTurnForm.addEventListener("submit", createCodexTurn);
 codexCommandForm.addEventListener("submit", executeCodexCommand);
+codexArtifactSyncForm.addEventListener("submit", syncCodexArtifacts);
 interruptCodexTurnButton.addEventListener("click", interruptCodexTurn);
 
 async function api(path, options = {}) {
@@ -572,6 +575,7 @@ async function createCodexTurn(event) {
     });
     state.codexAppServer.turn = turn;
     setCodexTurnId(turn.turn_id);
+    populateCodexArtifactSyncFromResponse(turn);
   });
 }
 
@@ -590,6 +594,7 @@ async function executeCodexCommand(event) {
         }),
       },
     );
+    populateCodexArtifactSyncFromResponse(state.codexAppServer.command);
   });
 }
 
@@ -615,6 +620,31 @@ async function captureCodexAppServer(operation, action) {
     };
   }
   renderCodexAppServer();
+}
+
+async function syncCodexArtifacts(event) {
+  event.preventDefault();
+  const form = new FormData(codexArtifactSyncForm);
+  await captureCodexAppServer("sync", async () => {
+    const sessionId = String(form.get("session_id") || state.session?.id || "").trim();
+    const artifacts = parseJsonField(form.get("artifacts"), "Synced artifacts JSON");
+    if (!Array.isArray(artifacts)) {
+      throw new Error("Synced artifacts JSON must be an array");
+    }
+    state.codexAppServer.sync = await api("/api/codex-app-server/artifacts/sync", {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionId,
+        turn_id: state.codexAppServer.turn?.turn_id || null,
+        command_id: state.codexAppServer.command?.command_id || null,
+        artifacts,
+      }),
+    });
+    if (state.session?.id === sessionId) {
+      state.selectedArtifactId = null;
+      await refreshSession();
+    }
+  });
 }
 
 async function acknowledgeCostAlert(providerName, severity) {
@@ -686,6 +716,7 @@ async function runDemo() {
     }),
   });
   state.session = await api(`/api/sessions/${session.id}/run`, { method: "POST" });
+  setCodexSyncSessionId(state.session.id);
   state.selectedArtifactId = null;
   state.selectedToolCallId = null;
   state.selectedAuditLogId = null;
@@ -786,6 +817,7 @@ async function refreshAgentReleases(render = true) {
 async function refreshSession() {
   if (!state.session) return;
   state.session = await api(`/api/sessions/${state.session.id}`);
+  setCodexSyncSessionId(state.session.id);
   state.events = await api(`/api/sessions/${state.session.id}/events`);
   state.artifacts = await api(`/api/sessions/${state.session.id}/artifacts`);
   state.toolCalls = await api(`/api/sessions/${state.session.id}/tool-calls`);
@@ -899,6 +931,7 @@ function renderCodexAppServer() {
     ["Turn", codex.turn],
     ["Command", codex.command],
     ["Interrupt", codex.interrupt],
+    ["Sync", codex.sync],
   ]
     .filter(([, value]) => value)
     .map(
@@ -913,7 +946,7 @@ function renderCodexAppServer() {
   codexAppServerRoot.innerHTML = `
     <div class="item">
       <strong>Codex steering</strong>
-      <div class="muted">Routes stay fail-closed unless MANDOFORGE_CODEX_APP_SERVER_URL is configured; codex.exec CLI remains the approved fallback path.</div>
+      <div class="muted">Routes stay fail-closed unless MANDOFORGE_CODEX_APP_SERVER_URL is configured; synced artifacts are imported into session artifacts, timeline, and audit.</div>
     </div>
     ${
       codex.error
@@ -1646,6 +1679,18 @@ function setCodexThreadId(threadId) {
 
 function setCodexTurnId(turnId) {
   codexCommandForm.elements.turn_id.value = turnId;
+}
+
+function setCodexSyncSessionId(sessionId) {
+  codexArtifactSyncForm.elements.session_id.value = sessionId;
+}
+
+function populateCodexArtifactSyncFromResponse(response) {
+  const artifacts = response?.result?.artifacts || response?.artifacts;
+  if (!Array.isArray(artifacts) || !artifacts.length) {
+    return;
+  }
+  codexArtifactSyncForm.elements.artifacts.value = JSON.stringify(artifacts, null, 2);
 }
 
 function parseJsonField(value, label) {

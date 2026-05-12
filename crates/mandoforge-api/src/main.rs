@@ -389,6 +389,38 @@ struct Artifact {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct CodexArtifactSyncRequest {
+    session_id: Uuid,
+    #[serde(default)]
+    turn_id: Option<String>,
+    #[serde(default)]
+    command_id: Option<String>,
+    artifacts: Vec<CodexArtifactInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexArtifactInput {
+    name: String,
+    #[serde(default = "default_artifact_type")]
+    artifact_type: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default = "empty_json_object")]
+    content: Value,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexArtifactSyncResponse {
+    session_id: Uuid,
+    turn_id: Option<String>,
+    command_id: Option<String>,
+    artifact_count: usize,
+    artifacts: Vec<Artifact>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageSummary {
     session_count: usize,
@@ -1134,6 +1166,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/codex-app-server/turns/{turn_id}/commands",
             post(execute_codex_command),
+        )
+        .route(
+            "/api/codex-app-server/artifacts/sync",
+            post(sync_codex_artifacts),
         )
         .route(
             "/api/eval/datasets",
@@ -3549,6 +3585,109 @@ async fn execute_codex_command(
     ))
 }
 
+async fn sync_codex_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CodexArtifactSyncRequest>,
+) -> Result<Json<CodexArtifactSyncResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "session",
+        Some(input.session_id),
+    )
+    .await?;
+    if input.artifacts.is_empty() {
+        return Err(AppError::bad_request("at least one artifact is required"));
+    }
+    if input.artifacts.len() > 50 {
+        return Err(AppError::bad_request(
+            "Codex artifact sync accepts at most 50 artifacts per request",
+        ));
+    }
+    state.get_session(input.session_id).await?;
+
+    let mut artifacts = Vec::with_capacity(input.artifacts.len());
+    for artifact_input in input.artifacts {
+        let name = artifact_input.name.trim();
+        if name.is_empty() {
+            return Err(AppError::bad_request("artifact name is required"));
+        }
+        let artifact_type = artifact_input.artifact_type.trim();
+        if artifact_type.is_empty() {
+            return Err(AppError::bad_request("artifact_type is required"));
+        }
+        let path = normalize_codex_artifact_path(artifact_input.path.as_deref())?;
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            artifact_type: artifact_type.to_string(),
+            name: name.to_string(),
+            path,
+            content: artifact_input.content,
+            created_at: Utc::now(),
+        };
+        let artifact = state.insert_artifact(artifact).await?;
+        state
+            .append_event(
+                "worker",
+                Some(artifact.id),
+                input.session_id,
+                "artifact.created",
+                json!({
+                    "artifact_id": artifact.id,
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "source": "codex_app_server",
+                    "turn_id": input.turn_id,
+                    "command_id": input.command_id,
+                    "metadata": artifact_input.metadata,
+                }),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "worker",
+                Some(artifact.id),
+                "codex_app_server.artifact_synced",
+                "artifact",
+                Some(artifact.id),
+                json!({
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "turn_id": input.turn_id,
+                    "command_id": input.command_id,
+                }),
+            ))
+            .await?;
+        artifacts.push(artifact);
+    }
+
+    Ok(Json(CodexArtifactSyncResponse {
+        session_id: input.session_id,
+        turn_id: input.turn_id,
+        command_id: input.command_id,
+        artifact_count: artifacts.len(),
+        artifacts,
+    }))
+}
+
+fn normalize_codex_artifact_path(path: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    if path.starts_with('/') || path.split('/').any(|segment| segment == "..") {
+        return Err(AppError::bad_request(
+            "Codex artifact path must be relative and stay inside the session workspace",
+        ));
+    }
+    Ok(Some(path.to_string()))
+}
+
 fn codex_app_server_config(state: &AppState) -> Result<&CodexAppServerConfig, AppError> {
     state
         .codex_app_server_config
@@ -5522,6 +5661,10 @@ fn default_secret_scope_type() -> String {
     "tenant".to_string()
 }
 
+fn default_artifact_type() -> String {
+    "json".to_string()
+}
+
 fn default_cost_alert_severity_filter() -> String {
     "warning".to_string()
 }
@@ -6336,6 +6479,21 @@ not json
             policy: PolicyConfig::default(),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("list agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let session = state
+            .create_session(CreateSession {
+                agent_id: agent.id,
+                title: "codex app server sync".to_string(),
+                message: None,
+            })
+            .await
+            .expect("create session");
         let app = build_router(state);
 
         let (status, error) = request_value(
@@ -6418,7 +6576,7 @@ not json
         assert_eq!(command.result["command"], "ls");
 
         let interrupt: CodexInterruptResponse = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .method("POST")
                 .uri("/api/codex-app-server/turns/turn-1/interrupt")
@@ -6429,6 +6587,82 @@ not json
         )
         .await;
         assert_eq!(interrupt.status.as_deref(), Some("interrupted"));
+
+        let synced: CodexArtifactSyncResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/codex-app-server/artifacts/sync")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "turn_id": "turn-1",
+                        "command_id": "command-1",
+                        "artifacts": [{
+                            "name": "codex-report.md",
+                            "artifact_type": "markdown",
+                            "path": "artifacts/codex-report.md",
+                            "content": {"markdown": "# Codex Report"},
+                            "metadata": {"source": "mock"}
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(synced.artifact_count, 1);
+        assert_eq!(synced.artifacts[0].name, "codex-report.md");
+
+        let artifacts: Vec<Artifact> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/artifacts", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.name == "codex-report.md")
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "artifact.created"
+                && event.payload["source"] == "codex_app_server"
+                && event.payload["turn_id"] == "turn-1"
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/audit-logs", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "codex_app_server.artifact_synced"
+                && log.details["command_id"] == "command-1"
+        }));
 
         assert_eq!(
             codex_client.calls.lock().await.as_slice(),

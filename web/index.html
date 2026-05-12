@@ -433,6 +433,17 @@
                 <button type="submit">Execute Codex Command</button>
                 <button type="button" class="secondary form-inline-action" id="interrupt-codex-turn">Interrupt Codex Turn</button>
               </form>
+              <form id="codex-artifact-sync-form" class="stack-form compact-form">
+                <label>
+                  Session ID
+                  <input name="session_id" placeholder="MandoForge session UUID" />
+                </label>
+                <label>
+                  Synced artifacts JSON
+                  <textarea name="artifacts" rows="4">[{"name":"codex-report.md","artifact_type":"markdown","path":"artifacts/codex-report.md","content":{"markdown":"# Codex Report"},"metadata":{"source":"codex-app-server"}}]</textarea>
+                </label>
+                <button type="submit">Sync Codex Artifacts</button>
+              </form>
               <div id="codex-app-server" class="list"></div>
             </div>
             <div>
