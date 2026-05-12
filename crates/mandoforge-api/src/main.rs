@@ -42,6 +42,7 @@ mod store_approvals;
 mod store_artifacts;
 mod store_audit;
 mod store_backend;
+mod store_codex_app_server;
 mod store_cost_alert_routes;
 mod store_entities;
 mod store_eval;
@@ -433,6 +434,20 @@ struct CodexArtifactSyncResponse {
     command_id: Option<String>,
     artifact_count: usize,
     artifacts: Vec<Artifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerRun {
+    id: Uuid,
+    operation: String,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    command_id: Option<String>,
+    status: String,
+    request: Value,
+    response: Value,
+    error: Option<Value>,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1223,6 +1238,10 @@ fn build_router(state: AppState) -> Router {
             "/api/codex-app-server/health",
             get(get_codex_app_server_health),
         )
+        .route(
+            "/api/codex-app-server/runs",
+            get(list_codex_app_server_runs),
+        )
         .route("/api/codex-app-server/threads", post(create_codex_thread))
         .route(
             "/api/codex-app-server/threads/{thread_id}/turns",
@@ -1420,6 +1439,30 @@ impl AppState {
                 policy,
             });
         }
+    }
+
+    async fn record_codex_app_server_run(
+        &self,
+        operation: &str,
+        thread_id: Option<String>,
+        turn_id: Option<String>,
+        command_id: Option<String>,
+        request: Value,
+        response: Value,
+    ) -> Result<CodexAppServerRun, AppError> {
+        self.insert_codex_app_server_run(CodexAppServerRun {
+            id: Uuid::new_v4(),
+            operation: operation.to_string(),
+            thread_id,
+            turn_id,
+            command_id,
+            status: "completed".to_string(),
+            request,
+            response,
+            error: None,
+            created_at: Utc::now(),
+        })
+        .await
     }
 
     async fn emit_telemetry_event(&self, event: &SessionEvent) {
@@ -3722,12 +3765,21 @@ async fn create_codex_thread(
     )
     .await?;
     let config = codex_app_server_config(&state)?;
-    Ok(Json(
-        state
-            .codex_app_server_client
-            .create_thread(config, input)
-            .await?,
-    ))
+    let response = state
+        .codex_app_server_client
+        .create_thread(config, input.clone())
+        .await?;
+    state
+        .record_codex_app_server_run(
+            "thread.create",
+            Some(response.thread_id.clone()),
+            None,
+            None,
+            serde_json::to_value(&input)?,
+            serde_json::to_value(&response)?,
+        )
+        .await?;
+    Ok(Json(response))
 }
 
 async fn create_codex_turn(
@@ -3745,12 +3797,21 @@ async fn create_codex_turn(
     )
     .await?;
     let config = codex_app_server_config(&state)?;
-    Ok(Json(
-        state
-            .codex_app_server_client
-            .create_turn(config, &thread_id, input)
-            .await?,
-    ))
+    let response = state
+        .codex_app_server_client
+        .create_turn(config, &thread_id, input.clone())
+        .await?;
+    state
+        .record_codex_app_server_run(
+            "turn.create",
+            Some(thread_id),
+            Some(response.turn_id.clone()),
+            None,
+            serde_json::to_value(&input)?,
+            serde_json::to_value(&response)?,
+        )
+        .await?;
+    Ok(Json(response))
 }
 
 async fn interrupt_codex_turn(
@@ -3767,12 +3828,21 @@ async fn interrupt_codex_turn(
     )
     .await?;
     let config = codex_app_server_config(&state)?;
-    Ok(Json(
-        state
-            .codex_app_server_client
-            .interrupt_turn(config, &turn_id)
-            .await?,
-    ))
+    let response = state
+        .codex_app_server_client
+        .interrupt_turn(config, &turn_id)
+        .await?;
+    state
+        .record_codex_app_server_run(
+            "turn.interrupt",
+            None,
+            Some(turn_id),
+            None,
+            json!({}),
+            serde_json::to_value(&response)?,
+        )
+        .await?;
+    Ok(Json(response))
 }
 
 async fn execute_codex_command(
@@ -3790,12 +3860,36 @@ async fn execute_codex_command(
     )
     .await?;
     let config = codex_app_server_config(&state)?;
-    Ok(Json(
-        state
-            .codex_app_server_client
-            .execute_command(config, &turn_id, input)
-            .await?,
-    ))
+    let response = state
+        .codex_app_server_client
+        .execute_command(config, &turn_id, input.clone())
+        .await?;
+    state
+        .record_codex_app_server_run(
+            "command.execute",
+            None,
+            Some(turn_id),
+            Some(response.command_id.clone()),
+            serde_json::to_value(&input)?,
+            serde_json::to_value(&response)?,
+        )
+        .await?;
+    Ok(Json(response))
+}
+
+async fn list_codex_app_server_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<CodexAppServerRun>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "codex_app_server",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_codex_app_server_runs().await?))
 }
 
 async fn sync_codex_artifacts(
@@ -6577,6 +6671,7 @@ not json
         assert!(names.contains(&"0009_policy_revision_gates.sql"));
         assert!(names.contains(&"0010_approval_groups.sql"));
         assert!(names.contains(&"0011_cost_alert_routes.sql"));
+        assert!(names.contains(&"0012_codex_app_server_runs.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -7056,6 +7151,23 @@ not json
         )
         .await;
         assert_eq!(interrupt.status.as_deref(), Some("interrupted"));
+
+        let codex_runs: Vec<CodexAppServerRun> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/codex-app-server/runs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(codex_runs.len(), 4);
+        assert!(codex_runs.iter().any(|run| {
+            run.operation == "command.execute"
+                && run.turn_id.as_deref() == Some("turn-1")
+                && run.command_id.as_deref() == Some("command-1")
+        }));
 
         let synced: CodexArtifactSyncResponse = request_json(
             app.clone(),

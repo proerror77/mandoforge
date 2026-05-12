@@ -46,6 +46,7 @@ const state = {
     command: null,
     interrupt: null,
     sync: null,
+    runs: [],
     error: null,
   },
   selectedArtifactId: null,
@@ -112,6 +113,7 @@ const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 const deliverCostAlertsButton = document.querySelector("#deliver-cost-alerts");
 const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
 const checkCodexHealthButton = document.querySelector("#check-codex-health");
+const loadCodexRunsButton = document.querySelector("#load-codex-runs");
 const codexThreadForm = document.querySelector("#codex-thread-form");
 const codexTurnForm = document.querySelector("#codex-turn-form");
 const codexCommandForm = document.querySelector("#codex-command-form");
@@ -144,6 +146,7 @@ createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
 checkCodexHealthButton.addEventListener("click", checkCodexAppServerHealth);
+loadCodexRunsButton.addEventListener("click", loadCodexAppServerRuns);
 codexThreadForm.addEventListener("submit", createCodexThread);
 codexTurnForm.addEventListener("submit", createCodexTurn);
 codexCommandForm.addEventListener("submit", executeCodexCommand);
@@ -551,6 +554,12 @@ async function createCostAlertRoute(event) {
 async function checkCodexAppServerHealth() {
   await captureCodexAppServer("health", async () => {
     state.codexAppServer.health = await api("/api/codex-app-server/health");
+  });
+}
+
+async function loadCodexAppServerRuns() {
+  await captureCodexAppServer("runs", async () => {
+    state.codexAppServer.runs = await api("/api/codex-app-server/runs");
   });
 }
 
@@ -992,10 +1001,22 @@ function renderCodexAppServer() {
       `,
     )
     .join("");
+  const runs = (codex.runs || [])
+    .slice(0, 10)
+    .map(
+      (run) => `
+        <div class="item">
+          <strong>${escapeHtml(run.operation)}</strong>
+          <div class="muted">${escapeHtml(run.status)} · ${escapeHtml(run.thread_id || "no thread")} · ${escapeHtml(run.turn_id || "no turn")} · ${escapeHtml(run.created_at)}</div>
+          <pre>${escapeHtml(JSON.stringify(run.response, null, 2))}</pre>
+        </div>
+      `,
+    )
+    .join("");
   codexAppServerRoot.innerHTML = `
     <div class="item">
       <strong>Codex steering</strong>
-      <div class="muted">Routes stay fail-closed unless MANDOFORGE_CODEX_APP_SERVER_URL is configured; synced artifacts are imported into session artifacts, timeline, and audit.</div>
+      <div class="muted">Routes stay fail-closed unless MANDOFORGE_CODEX_APP_SERVER_URL is configured; steering responses are persisted for replay, and synced artifacts are imported into session artifacts, timeline, and audit.</div>
     </div>
     ${
       codex.error
@@ -1006,6 +1027,7 @@ function renderCodexAppServer() {
         : ""
     }
     ${responseCards || `<div class="muted">No Codex App Server responses yet.</div>`}
+    ${runs ? `<h4>Persisted Codex Runs</h4>${runs}` : ""}
   `;
 }
 

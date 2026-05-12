@@ -166,4 +166,5 @@
 - [x] Add static Codex App Server steering panel for health, thread, turn, command, interrupt, and fail-closed responses.
 - [x] Add Codex App Server artifact synchronization into artifacts, timeline, and audit logs.
 - [x] Add CLI/App Server fallback orchestration for approved Codex worker execution.
-- [ ] Add durable long-running Codex App Server steering state.
+- [x] Persist Codex App Server steering responses for replay/debugging.
+- [ ] Add production Codex App Server polling, retry, and worker-backed steering orchestration.
