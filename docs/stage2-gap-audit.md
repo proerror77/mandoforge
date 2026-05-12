@@ -12,7 +12,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 | Vault | Reserved provider and Vault KV v2 HTTP client boundary exist. | Production secret storage, secret CRUD, rotation, and scoped secret references are not implemented. |
 | Worker queue | Postgres/in-memory execution queue, worker binary, lease claims, and reclaim boundary exist; Redis command/client boundary is reserved. | Live Redis/NATS backend and separate broker worker handoff are not enabled. |
 | Approval v2 | Approve/reject exists; modify now updates pending tool args, records `approval.modified`, and preserves the approval for later approve/reject. | Comments are stored in `decision_payload`; expiry, delegated approvers, and parameter diff UI are not implemented. |
-| MCP Gateway | `mcp.call` is enabled through the Tool Router, uses configured MCP Gateway server allowlists, and is persisted through tool call/event/audit paths. Team-level MCP server registry APIs and persisted per-server tool allowlists are implemented; scoped sessions must use a registered active server/tool before the gateway call proceeds. Admins can import discovered tools from the configured MCP Gateway into a team server allowlist. | MCP UI management is not implemented. |
+| MCP Gateway | `mcp.call` is enabled through the Tool Router, uses configured MCP Gateway server allowlists, and is persisted through tool call/event/audit paths. Team-level MCP server registry APIs and persisted per-server tool allowlists are implemented; scoped sessions must use a registered active server/tool before the gateway call proceeds. Admins can import discovered tools from the configured MCP Gateway into a team server allowlist. Static Admin Console MCP management can load team servers, create/update allowlists, and trigger discovery import. | Production connector lifecycle management and richer MCP configuration UI are not implemented. |
 | Codex App Server adapter | Codex CLI adapter exists. | App Server thread/turn/interrupt adapter is not implemented. |
 | Evaluation | Eval datasets, cases, and version-bound run records are implemented with deterministic Stage 2 graders for policy decisions, tool allowlist coverage, SQL safety, sandbox path checks, and final-answer required fragments. Runs persist per-case details, pass count, score, and agent version evidence. | Regression gates, judge integrations, drift detection, and eval dashboards are not implemented. |
 | Observability | OTel exporter boundary exists and session event appends now export telemetry events when OTLP is enabled. Exported telemetry attributes classify session/provider/tool/approval/worker/sandbox/codex events as span-like signals and attach counters, status, duration, provider/client/tool IDs, approval IDs, worker IDs, and tool-call counts when present. | Dashboards, retry/backpressure, and full OTLP-native trace/metric encoding are not implemented. |
@@ -21,7 +21,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 ## Next Stage 2 Slices
 
-1. Add MCP UI management.
-2. Add provider settings UI, token-level provider accounting, persisted cost rollups, and dashboards.
-3. Add eval regression gates, judge integrations, drift detection, and dashboards.
-4. Add dashboards, retry/backpressure, and full OTLP-native trace/metric encoding.
+1. Add token-level provider accounting, persisted cost rollups, and cost dashboards.
+2. Add eval regression gates, judge integrations, drift detection, and dashboards.
+3. Add dashboards, retry/backpressure, and full OTLP-native trace/metric encoding.
+4. Add production connector lifecycle management and richer MCP configuration UI.

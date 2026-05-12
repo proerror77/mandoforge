@@ -110,6 +110,30 @@
               <div id="eval-runs" class="list"></div>
             </div>
             <div>
+              <h3>MCP Servers</h3>
+              <form id="mcp-form" class="stack-form compact-form">
+                <label>
+                  Team ID
+                  <input name="team_id" required placeholder="Team UUID" />
+                </label>
+                <label>
+                  Server name
+                  <input name="name" required value="docs" />
+                </label>
+                <label>
+                  Transport
+                  <input name="transport" required value="http" />
+                </label>
+                <label>
+                  Tool allowlist
+                  <input name="tool_allowlist" value="search,query" />
+                </label>
+                <button type="submit">Save MCP Server</button>
+                <button type="button" class="secondary form-inline-action" id="load-mcp">Load Team Servers</button>
+              </form>
+              <div id="mcp-servers" class="list"></div>
+            </div>
+            <div>
               <h3>Governance</h3>
               <div id="governance-status" class="detail-panel"></div>
             </div>

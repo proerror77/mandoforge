@@ -7,6 +7,8 @@ const state = {
   auditLogs: [],
   providers: [],
   evalRuns: [],
+  mcpServers: [],
+  mcpTeamId: "",
   usage: null,
   selectedArtifactId: null,
   selectedToolCallId: null,
@@ -27,14 +29,19 @@ const auditLogRoot = document.querySelector("#audit-logs");
 const auditDetailRoot = document.querySelector("#audit-detail");
 const providerRoot = document.querySelector("#providers");
 const evalRunRoot = document.querySelector("#eval-runs");
+const mcpServerRoot = document.querySelector("#mcp-servers");
 const usageRoot = document.querySelector("#usage-summary");
 const governanceRoot = document.querySelector("#governance-status");
 const agentForm = document.querySelector("#agent-form");
 const providerForm = document.querySelector("#provider-form");
+const mcpForm = document.querySelector("#mcp-form");
+const loadMcpButton = document.querySelector("#load-mcp");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
 providerForm.addEventListener("submit", createProvider);
+mcpForm.addEventListener("submit", createMcpServer);
+loadMcpButton.addEventListener("click", loadMcpServers);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -95,6 +102,46 @@ async function createProvider(event) {
     }),
   });
   await refreshOps();
+}
+
+async function createMcpServer(event) {
+  event.preventDefault();
+  const form = new FormData(mcpForm);
+  const teamId = String(form.get("team_id") || "").trim();
+  const toolAllowlist = String(form.get("tool_allowlist") || "")
+    .split(",")
+    .map((tool) => tool.trim())
+    .filter(Boolean);
+  await api(`/api/teams/${teamId}/mcp-servers`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: form.get("name"),
+      transport: form.get("transport"),
+      tool_allowlist: toolAllowlist,
+    }),
+  });
+  state.mcpTeamId = teamId;
+  await loadMcpServers();
+}
+
+async function loadMcpServers() {
+  const form = new FormData(mcpForm);
+  const teamId = String(form.get("team_id") || state.mcpTeamId || "").trim();
+  if (!teamId) {
+    mcpServerRoot.innerHTML = `<div class="muted">Enter a team ID to load MCP servers.</div>`;
+    return;
+  }
+  state.mcpTeamId = teamId;
+  state.mcpServers = await api(`/api/teams/${teamId}/mcp-servers`);
+  renderMcpServers();
+}
+
+async function discoverMcpTools(serverId) {
+  if (!state.mcpTeamId) return;
+  await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/discover`, {
+    method: "POST",
+  });
+  await loadMcpServers();
 }
 
 async function runDemo() {
@@ -166,6 +213,7 @@ function renderOps() {
   renderUsage();
   renderProviders();
   renderEvalRuns();
+  renderMcpServers();
   governanceRoot.innerHTML = `
     <dl>
       <dt>Policy</dt>
@@ -175,7 +223,7 @@ function renderOps() {
       <dt>Workers</dt>
       <dd>Execution queue and worker drain APIs are enabled</dd>
       <dt>MCP</dt>
-      <dd>Gateway calls require global and team-scoped allowlists</dd>
+      <dd>Gateway calls require global and team-scoped allowlists; discovery can import gateway tools into a team server allowlist</dd>
     </dl>
   `;
 }
@@ -232,6 +280,29 @@ function renderEvalRuns() {
         )
         .join("")
     : `<div class="muted">No eval runs</div>`;
+}
+
+function renderMcpServers() {
+  mcpServerRoot.innerHTML = state.mcpServers.length
+    ? state.mcpServers
+        .map(
+          (server) => `
+            <div class="item">
+              <strong>${escapeHtml(server.name)}</strong>
+              <div class="muted">${escapeHtml(server.transport)} · ${escapeHtml(server.status)}</div>
+              <div class="muted">Tools: ${escapeHtml(server.tool_allowlist.join(", ") || "none")}</div>
+              <button class="secondary" data-discover-mcp="${server.id}">Discover Tools</button>
+              <pre>${escapeHtml(JSON.stringify(server.config, null, 2))}</pre>
+            </div>
+          `,
+        )
+        .join("")
+    : state.mcpTeamId
+      ? `<div class="muted">No MCP servers for this team</div>`
+      : `<div class="muted">Enter a team ID to manage MCP servers</div>`;
+  mcpServerRoot.querySelectorAll("[data-discover-mcp]").forEach((button) => {
+    button.addEventListener("click", () => discoverMcpTools(button.dataset.discoverMcp));
+  });
 }
 
 function renderAgents() {

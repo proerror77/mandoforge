@@ -36,7 +36,7 @@ Not yet aligned:
 
 - External worker mode is still API-drained; a separate broker-backed queue remains later-stage work, with Redis Stream command/payload shape now fixed before enabling a live Redis backend.
 - Credentialed external provider verification exists, but only runs when provider credentials are supplied.
-- MCP Gateway execution is now available through `mcp.call` when configured; global server allowlists are enforced by the gateway config, and team-scoped sessions must also pass the persisted MCP server registry/tool allowlist before the HTTP call. Admins can call the team MCP server discovery endpoint to import gateway-discovered tools into the persisted allowlist.
+- MCP Gateway execution is now available through `mcp.call` when configured; global server allowlists are enforced by the gateway config, and team-scoped sessions must also pass the persisted MCP server registry/tool allowlist before the HTTP call. Admins can call the team MCP server discovery endpoint to import gateway-discovered tools into the persisted allowlist, and the static Admin Console can manage team server allowlists and trigger discovery.
 - Adding production-grade telemetry spans/metrics, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
 
 ## Runtime Layers

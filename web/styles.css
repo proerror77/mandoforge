@@ -144,6 +144,10 @@ button.reject {
   min-height: 34px;
 }
 
+.form-inline-action {
+  justify-self: start;
+}
+
 section + section {
   margin-top: 28px;
 }
