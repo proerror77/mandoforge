@@ -5,6 +5,9 @@ const state = {
   artifacts: [],
   toolCalls: [],
   auditLogs: [],
+  providers: [],
+  evalRuns: [],
+  usage: null,
   selectedArtifactId: null,
   selectedToolCallId: null,
   selectedAuditLogId: null,
@@ -22,6 +25,10 @@ const toolCallRoot = document.querySelector("#tool-calls");
 const toolDetailRoot = document.querySelector("#tool-detail");
 const auditLogRoot = document.querySelector("#audit-logs");
 const auditDetailRoot = document.querySelector("#audit-detail");
+const providerRoot = document.querySelector("#providers");
+const evalRunRoot = document.querySelector("#eval-runs");
+const usageRoot = document.querySelector("#usage-summary");
+const governanceRoot = document.querySelector("#governance-status");
 const agentForm = document.querySelector("#agent-form");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
@@ -29,7 +36,11 @@ agentForm.addEventListener("submit", createAgent);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-mandoforge-subject": "web-admin",
+      "x-mandoforge-roles": "admin",
+    },
     ...options,
   });
   if (!response.ok) {
@@ -42,6 +53,7 @@ async function boot() {
   state.agents = await api("/api/agents");
   renderAgents();
   await refreshApprovals();
+  await refreshOps();
 }
 
 async function createAgent(event) {
@@ -80,6 +92,19 @@ async function runDemo() {
   state.selectedAuditLogId = null;
   await refreshSession();
   await refreshApprovals();
+  await refreshOps();
+}
+
+async function refreshOps() {
+  const [providers, evalRuns, usage] = await Promise.all([
+    api("/api/providers"),
+    api("/api/eval/runs"),
+    api("/api/usage"),
+  ]);
+  state.providers = providers;
+  state.evalRuns = evalRuns;
+  state.usage = usage;
+  renderOps();
 }
 
 async function refreshSession() {
@@ -112,6 +137,79 @@ async function decide(id, decision) {
   await api(`/api/approvals/${id}/${decision}`, { method: "POST" });
   await refreshApprovals();
   await refreshSession();
+  await refreshOps();
+}
+
+function renderOps() {
+  renderUsage();
+  renderProviders();
+  renderEvalRuns();
+  governanceRoot.innerHTML = `
+    <dl>
+      <dt>Policy</dt>
+      <dd>YAML policy enforced through Tool Router</dd>
+      <dt>Vault</dt>
+      <dd>Vault references fail closed unless the Vault provider is configured</dd>
+      <dt>Workers</dt>
+      <dd>Execution queue and worker drain APIs are enabled</dd>
+      <dt>MCP</dt>
+      <dd>Gateway calls require global and team-scoped allowlists</dd>
+    </dl>
+  `;
+}
+
+function renderUsage() {
+  const usage = state.usage;
+  if (!usage) {
+    usageRoot.innerHTML = `<div class="muted">Usage data is not loaded.</div>`;
+    return;
+  }
+  usageRoot.innerHTML = `
+    <dl>
+      <dt>Sessions</dt>
+      <dd>${usage.session_count}</dd>
+      <dt>Provider requests</dt>
+      <dd>${usage.provider_request_count}</dd>
+      <dt>Tool calls</dt>
+      <dd>${usage.tool_call_count} total · ${usage.tool_success_count} completed · ${usage.tool_failed_count} failed</dd>
+      <dt>Approval records</dt>
+      <dd>${usage.approval_count}</dd>
+      <dt>Estimated provider cost</dt>
+      <dd>${Number(usage.estimated_provider_cost_cents || 0).toFixed(2)} cents</dd>
+    </dl>
+  `;
+}
+
+function renderProviders() {
+  providerRoot.innerHTML = state.providers.length
+    ? state.providers
+        .map(
+          (provider) => `
+            <div class="item">
+              <strong>${escapeHtml(provider.name)}</strong>
+              <div class="muted">${escapeHtml(provider.provider_type)} · ${escapeHtml(provider.status)}</div>
+              <pre>${escapeHtml(JSON.stringify(provider.config, null, 2))}</pre>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No stored providers</div>`;
+}
+
+function renderEvalRuns() {
+  evalRunRoot.innerHTML = state.evalRuns.length
+    ? state.evalRuns
+        .map(
+          (run) => `
+            <div class="item">
+              <strong>${escapeHtml(run.status)} · score ${escapeHtml(run.score ?? "n/a")}</strong>
+              <div class="muted">${escapeHtml(run.created_at)}</div>
+              <pre>${escapeHtml(JSON.stringify(run.details, null, 2))}</pre>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No eval runs</div>`;
 }
 
 function renderAgents() {

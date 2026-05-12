@@ -117,3 +117,4 @@
 - [x] Add MCP server registry and per-team tool allowlist enforcement before `mcp.call`.
 - [ ] Add MCP tool discovery import and UI management.
 - [x] Add usage/cost aggregation API for provider requests, tool runtime, approvals, and configured provider pricing.
+- [x] Add static Admin Console panels for usage, providers, eval runs, and governance status.

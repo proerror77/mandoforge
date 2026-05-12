@@ -2415,10 +2415,13 @@ async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError>
         }
     }
 
-    let estimated_provider_cost_cents = by_provider
+    let mut estimated_provider_cost_cents: f64 = by_provider
         .values()
         .map(|usage| usage.estimated_cost_cents)
         .sum();
+    if estimated_provider_cost_cents == 0.0 {
+        estimated_provider_cost_cents = 0.0;
+    }
     Ok(UsageSummary {
         session_count: sessions.len(),
         event_count,
