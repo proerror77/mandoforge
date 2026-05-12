@@ -4806,6 +4806,48 @@ not json
         .await;
         assert_eq!(case.dataset_id, dataset.id);
 
+        let sql_case: EvalCase = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/datasets/{}/cases", dataset.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "input": {"sql": "UPDATE agents SET name = 'bad'"},
+                        "expected": {"allowed": false},
+                        "grading_policy": {"kind": "sql_safety"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(sql_case.dataset_id, dataset.id);
+
+        let tool_case: EvalCase = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/eval/datasets/{}/cases", dataset.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "input": {"message": "read files and query data"},
+                        "expected": {"required_tools": ["file.read", "sql.query"]},
+                        "grading_policy": {"kind": "tool_selection"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(tool_case.dataset_id, dataset.id);
+
         let run: EvalRun = request_json(
             app.clone(),
             Request::builder()
@@ -4821,7 +4863,10 @@ not json
         assert_eq!(run.dataset_id, dataset.id);
         assert_eq!(run.agent_id, agent.id);
         assert_eq!(run.status, "completed");
-        assert_eq!(run.details["case_count"], 1);
+        assert_eq!(run.score, Some(1.0));
+        assert_eq!(run.details["runner"], "stage2-rule-graders");
+        assert_eq!(run.details["case_count"], 3);
+        assert_eq!(run.details["passed_count"], 3);
 
         let runs: Vec<EvalRun> = request_json(
             app,

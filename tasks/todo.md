@@ -110,7 +110,7 @@
 - [x] Add provider access/model allowlist enforcement for team-scoped agent creation.
 - [x] Add provider budgets and runtime provider selection from stored provider rows.
 - [x] Add eval dataset/case/run schema and a first version-bound eval runner skeleton.
-- [ ] Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
+- [x] Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
 - [x] Wire OTel export into append-only session event paths.
 - [ ] Add rich OTel spans/metrics for session/provider/tool/approval/worker paths.
 - [x] Enable `mcp.call` through Tool Router, MCP Gateway allowlist, events, tool calls, and audit.
