@@ -6677,6 +6677,145 @@ not json
     }
 
     #[tokio::test]
+    async fn approved_codex_exec_can_use_app_server_strategy() {
+        let codex_client = Arc::new(RecordingCodexAppServerClient::default());
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(InlineExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: Some(CodexAppServerConfig {
+                endpoint: "http://codex-app-server.test".to_string(),
+                timeout_seconds: 5,
+            }),
+            codex_app_server_client: codex_client.clone(),
+            cost_alert_webhook_url: None,
+            approval_webhook_url: None,
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: PolicyConfig::default(),
+        };
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state);
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "codex app server execution"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/codex.exec/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "args": {
+                            "task": "Inspect the workspace",
+                            "sandbox_mode": "workspace-write",
+                            "execution_strategy": "app-server"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approval_required["status"], "approval_required");
+        let approval_id = Uuid::parse_str(
+            approval_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval uuid");
+
+        let _approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let codex_call = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "codex.exec")
+            .expect("codex tool call");
+        assert_eq!(codex_call.status, "completed");
+        assert_eq!(
+            codex_call
+                .result
+                .as_ref()
+                .and_then(|result| result.get("runner"))
+                .and_then(Value::as_str),
+            Some("app-server")
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "codex.task.completed" && event.payload["runner"] == "app-server"
+        }));
+        assert_eq!(
+            codex_client.calls.lock().await.as_slice(),
+            ["thread", "turn:thread-1"]
+        );
+    }
+
+    #[tokio::test]
     async fn cost_alert_delivery_posts_budget_alerts_to_webhook() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

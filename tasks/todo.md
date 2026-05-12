@@ -159,4 +159,5 @@
 - [x] Add static Provider Settings fields for base URL and API key env/ref config.
 - [x] Add static Codex App Server steering panel for health, thread, turn, command, interrupt, and fail-closed responses.
 - [x] Add Codex App Server artifact synchronization into artifacts, timeline, and audit logs.
-- [ ] Add CLI/App Server fallback orchestration for Codex worker execution.
+- [x] Add CLI/App Server fallback orchestration for approved Codex worker execution.
+- [ ] Add durable long-running Codex App Server steering state.

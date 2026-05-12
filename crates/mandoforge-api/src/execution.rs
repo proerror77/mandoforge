@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest};
 use crate::execution_queue::{ExecutionJob, ExecutionJobRequest};
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{AppError, AppState, Approval, Artifact, ToolCall, new_audit_log};
@@ -19,11 +20,13 @@ const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const MAX_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CodexRequest {
     task: String,
     #[serde(default = "default_sandbox")]
     sandbox_mode: String,
+    #[serde(default)]
+    execution_strategy: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -377,6 +380,153 @@ async fn run_codex(
             "codex sandbox mode requires approval",
         ));
     }
+    match codex_execution_strategy(&request)? {
+        CodexExecutionStrategy::Cli => run_codex_cli(state, session_id, request).await,
+        CodexExecutionStrategy::AppServer => run_codex_app_server(state, session_id, request).await,
+        CodexExecutionStrategy::Auto => {
+            if state.codex_app_server_config.is_none() {
+                return run_codex_cli(state, session_id, request).await;
+            }
+            let fallback_request = request.clone();
+            match run_codex_app_server(state, session_id, request).await {
+                Ok(result) => Ok(result),
+                Err(error) => {
+                    state
+                        .append_event(
+                            "tool",
+                            None,
+                            session_id,
+                            "codex.task.fallback",
+                            json!({
+                                "from": "app-server",
+                                "to": "cli",
+                                "reason": error.message,
+                            }),
+                        )
+                        .await?;
+                    run_codex_cli(state, session_id, fallback_request).await
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexExecutionStrategy {
+    Auto,
+    Cli,
+    AppServer,
+}
+
+fn codex_execution_strategy(request: &CodexRequest) -> Result<CodexExecutionStrategy, AppError> {
+    let env_strategy = std::env::var("MANDOFORGE_CODEX_EXECUTION_STRATEGY").ok();
+    let raw = request
+        .execution_strategy
+        .as_deref()
+        .or(env_strategy.as_deref())
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase();
+    match raw.as_str() {
+        "auto" => Ok(CodexExecutionStrategy::Auto),
+        "cli" | "codex-cli" => Ok(CodexExecutionStrategy::Cli),
+        "app-server" | "app_server" | "codex-app-server" => Ok(CodexExecutionStrategy::AppServer),
+        other => Err(AppError::bad_request(format!(
+            "unsupported Codex execution strategy: {other}"
+        ))),
+    }
+}
+
+async fn run_codex_app_server(
+    state: &AppState,
+    session_id: Uuid,
+    request: CodexRequest,
+) -> Result<Value, AppError> {
+    let config = state
+        .codex_app_server_config
+        .as_ref()
+        .ok_or_else(|| AppError::bad_request("Codex App Server is not configured"))?;
+    let workspace = state.workspace_root.join(session_id.to_string());
+    tokio::fs::create_dir_all(&workspace).await?;
+    state
+        .append_event(
+            "tool",
+            None,
+            session_id,
+            "codex.task.started",
+            json!({
+                "task": &request.task,
+                "sandbox_mode": &request.sandbox_mode,
+                "workspace": workspace,
+                "runner": "app-server",
+            }),
+        )
+        .await?;
+
+    let thread = state
+        .codex_app_server_client
+        .create_thread(
+            config,
+            CodexThreadRequest {
+                metadata: json!({
+                    "session_id": session_id,
+                    "workspace": workspace,
+                    "sandbox_mode": &request.sandbox_mode,
+                    "source": "approved_codex_exec",
+                }),
+            },
+        )
+        .await?;
+    let turn = state
+        .codex_app_server_client
+        .create_turn(
+            config,
+            &thread.thread_id,
+            CodexTurnRequest {
+                message: request.task.clone(),
+                metadata: json!({
+                    "session_id": session_id,
+                    "workspace": workspace,
+                    "sandbox_mode": &request.sandbox_mode,
+                    "source": "approved_codex_exec",
+                }),
+            },
+        )
+        .await?;
+
+    state
+        .append_event(
+            "tool",
+            None,
+            session_id,
+            "codex.task.completed",
+            json!({
+                "runner": "app-server",
+                "thread_id": thread.thread_id,
+                "turn_id": turn.turn_id,
+                "status": turn.status,
+                "result": turn.result,
+                "fallback_used": false,
+            }),
+        )
+        .await?;
+
+    Ok(json!({
+        "runner": "app-server",
+        "thread_id": thread.thread_id,
+        "turn_id": turn.turn_id,
+        "status": turn.status,
+        "result": turn.result,
+        "fallback_used": false,
+    }))
+}
+
+#[allow(dead_code)]
+async fn run_codex_cli(
+    state: &AppState,
+    session_id: Uuid,
+    request: CodexRequest,
+) -> Result<Value, AppError> {
     let workspace = state.workspace_root.join(session_id.to_string());
     tokio::fs::create_dir_all(&workspace).await?;
     let last_message = workspace.join("last_message.md");
@@ -387,7 +537,7 @@ async fn run_codex(
             None,
             session_id,
             "codex.task.started",
-            json!({"task": request.task, "sandbox_mode": request.sandbox_mode, "workspace": workspace}),
+            json!({"task": &request.task, "sandbox_mode": &request.sandbox_mode, "workspace": workspace, "runner": "cli"}),
         )
         .await?;
 
@@ -474,11 +624,13 @@ async fn run_codex(
                 "stderr_truncated": stderr.truncated,
                 "final_message": final_output.text,
                 "final_message_bytes": final_output.original_bytes,
-                "final_message_truncated": final_output.truncated
+                "final_message_truncated": final_output.truncated,
+                "runner": "cli"
             }),
         )
         .await?;
     Ok(json!({
+        "runner": "cli",
         "status": output.status.code(),
         "stdout": stdout.text,
         "stdout_bytes": stdout.original_bytes,
