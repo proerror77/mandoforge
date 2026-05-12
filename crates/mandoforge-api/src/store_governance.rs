@@ -1,17 +1,18 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{
     mcp_server_from_row, membership_from_row, organization_from_row, project_from_row,
-    provider_access_from_row, provider_record_from_row, team_from_row,
+    provider_access_from_row, provider_record_from_row, team_from_row, tenant_invitation_from_row,
 };
 use crate::{
     AppError, AppState, CreateMcpServerRecord, CreateMembership, CreateOrganization, CreateProject,
-    CreateProviderAccess, CreateProviderRecord, CreateTeam, McpServerRecord, Membership,
-    Organization, Project, ProviderAccess, ProviderRecord, Role, Team, UpdateMcpServerRecord,
+    CreateProviderAccess, CreateProviderRecord, CreateTeam, CreateTenantInvitation,
+    McpServerRecord, Membership, Organization, Project, ProviderAccess, ProviderRecord, Role, Team,
+    TenantInvitation, UpdateMcpServerRecord,
 };
 
 impl AppState {
@@ -393,6 +394,256 @@ impl AppState {
             }
         }
         Ok(membership)
+    }
+
+    pub(crate) async fn list_tenant_invitations(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<TenantInvitation>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut invitations: Vec<_> = inner
+                    .read()
+                    .await
+                    .tenant_invitations
+                    .values()
+                    .filter(|invitation| invitation.organization_id == organization_id)
+                    .cloned()
+                    .collect();
+                invitations.sort_by_key(|invitation| invitation.created_at);
+                invitations.reverse();
+                Ok(invitations)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at
+                     FROM tenant_invitations
+                     WHERE tenant_id = $1 AND organization_id = $2
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .bind(organization_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(tenant_invitation_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_tenant_invitation(
+        &self,
+        organization_id: Uuid,
+        input: CreateTenantInvitation,
+        invited_by: String,
+    ) -> Result<TenantInvitation, AppError> {
+        self.ensure_organization_exists(organization_id).await?;
+        if let Some(team_id) = input.team_id {
+            self.ensure_team_exists(team_id).await?;
+        }
+        if let Some(project_id) = input.project_id {
+            let Some(team_id) = input.team_id else {
+                return Err(AppError::bad_request(
+                    "project_id requires a matching team_id on tenant invitations",
+                ));
+            };
+            self.ensure_project_belongs_to_team(project_id, team_id)
+                .await?;
+        }
+        let role = membership_role_name(membership_role_from_str(&input.role)?).to_string();
+        let email = input.email.trim().to_ascii_lowercase();
+        if email.is_empty() || !email.contains('@') {
+            return Err(AppError::bad_request("tenant invitation email is invalid"));
+        }
+        let expires_in_hours = input.expires_in_hours.unwrap_or(168).clamp(1, 720);
+        let invitation = TenantInvitation {
+            id: Uuid::new_v4(),
+            organization_id,
+            team_id: input.team_id,
+            project_id: input.project_id,
+            email,
+            role,
+            status: "pending".to_string(),
+            token: Uuid::new_v4().to_string(),
+            invited_by: Some(invited_by),
+            accepted_by: None,
+            expires_at: Utc::now() + ChronoDuration::hours(expires_in_hours),
+            created_at: Utc::now(),
+            decided_at: None,
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .tenant_invitations
+                    .insert(invitation.id, invitation.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "INSERT INTO tenant_invitations (id, tenant_id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     RETURNING id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at",
+                )
+                .bind(invitation.id)
+                .bind(self.tenant_id)
+                .bind(invitation.organization_id)
+                .bind(invitation.team_id)
+                .bind(invitation.project_id)
+                .bind(&invitation.email)
+                .bind(&invitation.role)
+                .bind(&invitation.status)
+                .bind(&invitation.token)
+                .bind(&invitation.invited_by)
+                .bind(&invitation.accepted_by)
+                .bind(invitation.expires_at)
+                .bind(invitation.created_at)
+                .bind(invitation.decided_at)
+                .fetch_one(pool)
+                .await?;
+                return tenant_invitation_from_row(row);
+            }
+        }
+        Ok(invitation)
+    }
+
+    pub(crate) async fn revoke_tenant_invitation(
+        &self,
+        invitation_id: Uuid,
+    ) -> Result<TenantInvitation, AppError> {
+        let decided_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let invitation = store
+                    .tenant_invitations
+                    .get_mut(&invitation_id)
+                    .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+                if invitation.status != "pending" {
+                    return Err(AppError::bad_request("tenant invitation is not pending"));
+                }
+                invitation.status = "revoked".to_string();
+                invitation.decided_at = Some(decided_at);
+                Ok(invitation.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE tenant_invitations
+                     SET status = 'revoked', decided_at = $3
+                     WHERE tenant_id = $1 AND id = $2 AND status = 'pending'
+                     RETURNING id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at",
+                )
+                .bind(self.tenant_id)
+                .bind(invitation_id)
+                .bind(decided_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("pending tenant invitation not found"))?;
+                tenant_invitation_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn tenant_invitation_by_token(
+        &self,
+        token: &str,
+    ) -> Result<TenantInvitation, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .tenant_invitations
+                .values()
+                .find(|invitation| invitation.token == token)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("tenant invitation not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at
+                     FROM tenant_invitations
+                     WHERE tenant_id = $1 AND token = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(token)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+                tenant_invitation_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn expire_tenant_invitation(
+        &self,
+        invitation_id: Uuid,
+    ) -> Result<TenantInvitation, AppError> {
+        let decided_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let invitation = store
+                    .tenant_invitations
+                    .get_mut(&invitation_id)
+                    .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+                invitation.status = "expired".to_string();
+                invitation.decided_at = Some(decided_at);
+                Ok(invitation.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE tenant_invitations
+                     SET status = 'expired', decided_at = $3
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at",
+                )
+                .bind(self.tenant_id)
+                .bind(invitation_id)
+                .bind(decided_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+                tenant_invitation_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn mark_tenant_invitation_accepted(
+        &self,
+        invitation_id: Uuid,
+        accepted_by: String,
+    ) -> Result<TenantInvitation, AppError> {
+        let decided_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let invitation = store
+                    .tenant_invitations
+                    .get_mut(&invitation_id)
+                    .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+                if invitation.status != "pending" {
+                    return Err(AppError::bad_request("tenant invitation is not pending"));
+                }
+                invitation.status = "accepted".to_string();
+                invitation.accepted_by = Some(accepted_by);
+                invitation.decided_at = Some(decided_at);
+                Ok(invitation.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE tenant_invitations
+                     SET status = 'accepted', accepted_by = $3, decided_at = $4
+                     WHERE tenant_id = $1 AND id = $2 AND status = 'pending'
+                     RETURNING id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at",
+                )
+                .bind(self.tenant_id)
+                .bind(invitation_id)
+                .bind(accepted_by)
+                .bind(decided_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("pending tenant invitation not found"))?;
+                tenant_invitation_from_row(row)
+            }
+        }
     }
 
     pub(crate) async fn membership_roles_for_subject(
@@ -1273,5 +1524,14 @@ fn membership_role_from_str(role: &str) -> Result<Role, AppError> {
         other => Err(AppError::bad_request(format!(
             "unsupported membership role value: {other}"
         ))),
+    }
+}
+
+fn membership_role_name(role: Role) -> &'static str {
+    match role {
+        Role::Admin => "admin",
+        Role::Operator => "operator",
+        Role::Approver => "approver",
+        Role::Viewer => "viewer",
     }
 }

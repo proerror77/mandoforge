@@ -711,6 +711,46 @@ struct CreateMembership {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantInvitation {
+    id: Uuid,
+    organization_id: Uuid,
+    team_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    email: String,
+    role: String,
+    status: String,
+    token: String,
+    invited_by: Option<String>,
+    accepted_by: Option<String>,
+    expires_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTenantInvitation {
+    email: String,
+    role: String,
+    #[serde(default)]
+    team_id: Option<Uuid>,
+    #[serde(default)]
+    project_id: Option<Uuid>,
+    #[serde(default)]
+    expires_in_hours: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AcceptTenantInvitation {
+    token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AcceptedTenantInvitation {
+    invitation: TenantInvitation,
+    membership: Membership,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProviderAccess {
     id: Uuid,
     team_id: Uuid,
@@ -1286,6 +1326,15 @@ fn build_router(state: AppState) -> Router {
             "/api/organizations/{id}/memberships",
             get(list_memberships).post(create_membership),
         )
+        .route(
+            "/api/organizations/{id}/invitations",
+            get(list_tenant_invitations).post(create_tenant_invitation),
+        )
+        .route(
+            "/api/invitations/{id}/revoke",
+            post(revoke_tenant_invitation),
+        )
+        .route("/api/invitations/accept", post(accept_tenant_invitation))
         .route(
             "/api/teams/{id}/projects",
             get(list_projects).post(create_project),
@@ -2919,6 +2968,21 @@ async fn principal_from_request(
     })
 }
 
+fn subject_from_headers(headers: &HeaderMap) -> Result<String, AppError> {
+    let Some(subject) = header_value(headers, "x-mandoforge-subject") else {
+        return Err(AppError::bad_request(
+            "x-mandoforge-subject header is required",
+        ));
+    };
+    let subject = subject.trim();
+    if subject.is_empty() {
+        return Err(AppError::bad_request(
+            "x-mandoforge-subject header cannot be empty",
+        ));
+    }
+    Ok(subject.to_string())
+}
+
 fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
@@ -3390,6 +3454,163 @@ async fn create_membership(
     )
     .await?;
     Ok(Json(state.create_membership(id, input).await?))
+}
+
+async fn list_tenant_invitations(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TenantInvitation>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_tenant_invitations(id).await?))
+}
+
+async fn create_tenant_invitation(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateTenantInvitation>,
+) -> Result<Json<TenantInvitation>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let invitation = state
+        .create_tenant_invitation(id, input, principal.subject_id.clone())
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.invitation_created",
+            "tenant_invitation",
+            Some(invitation.id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": invitation.organization_id,
+                "team_id": invitation.team_id,
+                "project_id": invitation.project_id,
+                "email": invitation.email,
+                "role": invitation.role,
+                "expires_at": invitation.expires_at
+            }),
+        ))
+        .await?;
+    Ok(Json(invitation))
+}
+
+async fn revoke_tenant_invitation(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<TenantInvitation>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "tenant_invitation".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let invitation = state.revoke_tenant_invitation(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.invitation_revoked",
+            "tenant_invitation",
+            Some(invitation.id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": invitation.organization_id,
+                "email": invitation.email,
+                "decided_at": invitation.decided_at
+            }),
+        ))
+        .await?;
+    Ok(Json(invitation))
+}
+
+async fn accept_tenant_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AcceptTenantInvitation>,
+) -> Result<Json<AcceptedTenantInvitation>, AppError> {
+    let subject_id = subject_from_headers(&headers)?;
+    let invitation = state.tenant_invitation_by_token(input.token.trim()).await?;
+    if invitation.status != "pending" {
+        return Err(AppError::bad_request("tenant invitation is not pending"));
+    }
+    if Utc::now() > invitation.expires_at {
+        let expired = state.expire_tenant_invitation(invitation.id).await?;
+        state
+            .append_audit_log(new_audit_log(
+                None,
+                "system",
+                None,
+                "tenant.invitation_expired",
+                "tenant_invitation",
+                Some(expired.id),
+                json!({
+                    "organization_id": expired.organization_id,
+                    "email": expired.email,
+                    "expires_at": expired.expires_at
+                }),
+            ))
+            .await?;
+        return Err(AppError::bad_request("tenant invitation has expired"));
+    }
+    let membership = state
+        .create_membership(
+            invitation.organization_id,
+            CreateMembership {
+                user_id: subject_id.clone(),
+                team_id: invitation.team_id,
+                project_id: invitation.project_id,
+                role: invitation.role.clone(),
+            },
+        )
+        .await?;
+    let invitation = state
+        .mark_tenant_invitation_accepted(invitation.id, subject_id.clone())
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.invitation_accepted",
+            "tenant_invitation",
+            Some(invitation.id),
+            json!({
+                "subject": subject_id,
+                "organization_id": invitation.organization_id,
+                "team_id": invitation.team_id,
+                "project_id": invitation.project_id,
+                "membership_id": membership.id,
+                "role": membership.role
+            }),
+        ))
+        .await?;
+    Ok(Json(AcceptedTenantInvitation {
+        invitation,
+        membership,
+    }))
 }
 
 async fn list_provider_access(
@@ -7921,6 +8142,7 @@ not json
         assert!(names.contains(&"0012_codex_app_server_runs.sql"));
         assert!(names.contains(&"0013_execution_job_retries.sql"));
         assert!(names.contains(&"0014_tenant_lifecycle_archive.sql"));
+        assert!(names.contains(&"0015_tenant_invitations.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -8199,6 +8421,203 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "project.archived")
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_invitations_create_accept_revoke_and_audit_membership() {
+        let app = test_app().await;
+
+        let organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/organizations")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Invitation Org", "slug": "invitation-org"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/organizations/{}/teams", organization.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Invitation Team", "slug": "invitation-team"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let invitation: TenantInvitation = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/invitations",
+                    organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "email": "Invited.User@Example.COM",
+                        "team_id": team.id,
+                        "role": "viewer",
+                        "expires_in_hours": 24
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(invitation.email, "invited.user@example.com");
+        assert_eq!(invitation.status, "pending");
+        assert_eq!(invitation.team_id, Some(team.id));
+
+        let invitations: Vec<TenantInvitation> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/organizations/{}/invitations",
+                    organization.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(invitations.iter().any(|item| item.id == invitation.id));
+
+        let accepted: AcceptedTenantInvitation = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/invitations/accept")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "invited-user-1")
+                .body(Body::from(json!({"token": invitation.token}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(accepted.invitation.status, "accepted");
+        assert_eq!(
+            accepted.invitation.accepted_by.as_deref(),
+            Some("invited-user-1")
+        );
+        assert_eq!(accepted.membership.user_id, "invited-user-1");
+        assert_eq!(accepted.membership.team_id, Some(team.id));
+        assert_eq!(accepted.membership.role, "viewer");
+
+        let (status, accepted_again_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/invitations/accept")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "invited-user-1")
+                .body(Body::from(json!({"token": invitation.token}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            accepted_again_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not pending")
+        );
+
+        let revoked_invitation: TenantInvitation = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/invitations",
+                    organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "email": "revoked@example.com",
+                        "team_id": team.id,
+                        "role": "viewer"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let revoked: TenantInvitation = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/invitations/{}/revoke", revoked_invitation.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(revoked.status, "revoked");
+
+        let (status, revoked_accept_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/invitations/accept")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "revoked-user")
+                .body(Body::from(
+                    json!({"token": revoked_invitation.token}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            revoked_accept_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not pending")
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "tenant.invitation_created")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "tenant.invitation_accepted")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "tenant.invitation_revoked")
         );
     }
 

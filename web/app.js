@@ -39,6 +39,7 @@ const state = {
   teams: [],
   projects: [],
   memberships: [],
+  tenantInvitations: [],
   selectedOrganizationId: "",
   selectedTeamId: "",
   approvalDeliveries: {},
@@ -102,11 +103,13 @@ const organizationRoot = document.querySelector("#organizations");
 const teamRoot = document.querySelector("#teams");
 const projectRoot = document.querySelector("#projects");
 const membershipRoot = document.querySelector("#memberships");
+const tenantInvitationRoot = document.querySelector("#tenant-invitations");
 const agentForm = document.querySelector("#agent-form");
 const organizationForm = document.querySelector("#organization-form");
 const teamForm = document.querySelector("#team-form");
 const projectForm = document.querySelector("#project-form");
 const membershipForm = document.querySelector("#membership-form");
+const tenantInvitationForm = document.querySelector("#tenant-invitation-form");
 const approvalGroupForm = document.querySelector("#approval-group-form");
 const approvalEscalationRuleForm = document.querySelector("#approval-escalation-rule-form");
 const approvalGovernanceRoot = document.querySelector("#approval-governance");
@@ -139,6 +142,7 @@ organizationForm.addEventListener("submit", createOrganization);
 teamForm.addEventListener("submit", createTeam);
 projectForm.addEventListener("submit", createProject);
 membershipForm.addEventListener("submit", createMembership);
+tenantInvitationForm.addEventListener("submit", createTenantInvitation);
 approvalGroupForm.addEventListener("submit", createApprovalGroup);
 approvalEscalationRuleForm.addEventListener("submit", createApprovalEscalationRule);
 providerForm.addEventListener("submit", createProvider);
@@ -275,6 +279,34 @@ async function createMembership(event) {
     body: JSON.stringify(payload),
   });
   setOrganizationId(organizationId);
+  await refreshOps();
+}
+
+async function createTenantInvitation(event) {
+  event.preventDefault();
+  const form = new FormData(tenantInvitationForm);
+  const organizationId = String(
+    form.get("organization_id") || state.selectedOrganizationId,
+  ).trim();
+  const payload = {
+    email: String(form.get("email") || "").trim(),
+    role: String(form.get("role") || "").trim(),
+    expires_in_hours: Number(form.get("expires_in_hours") || 168),
+  };
+  const teamId = String(form.get("team_id") || "").trim();
+  const projectId = String(form.get("project_id") || "").trim();
+  if (teamId) payload.team_id = teamId;
+  if (projectId) payload.project_id = projectId;
+  await api(`/api/organizations/${organizationId}/invitations`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  setOrganizationId(organizationId);
+  await refreshOps();
+}
+
+async function revokeTenantInvitation(invitationId) {
+  await api(`/api/invitations/${invitationId}/revoke`, { method: "POST" });
   await refreshOps();
 }
 
@@ -945,12 +977,14 @@ async function refreshOps() {
     setOrganizationId(organizations[0].id);
   }
   if (state.selectedOrganizationId) {
-    const [teams, memberships] = await Promise.all([
+    const [teams, memberships, tenantInvitations] = await Promise.all([
       api(`/api/organizations/${state.selectedOrganizationId}/teams`),
       api(`/api/organizations/${state.selectedOrganizationId}/memberships`),
+      api(`/api/organizations/${state.selectedOrganizationId}/invitations`),
     ]);
     state.teams = teams;
     state.memberships = memberships;
+    state.tenantInvitations = tenantInvitations;
     if (state.selectedTeamId && !teams.some((team) => team.id === state.selectedTeamId)) {
       state.selectedTeamId = "";
     }
@@ -960,6 +994,7 @@ async function refreshOps() {
   } else {
     state.teams = [];
     state.memberships = [];
+    state.tenantInvitations = [];
     state.selectedTeamId = "";
   }
   state.projects = state.selectedTeamId
@@ -1335,6 +1370,32 @@ function renderTenantGovernance() {
           .join("")
       : `<div class="muted">No memberships for selected organization</div>`
     : `<div class="muted">Select an organization to manage memberships</div>`;
+
+  tenantInvitationRoot.innerHTML = state.selectedOrganizationId
+    ? state.tenantInvitations.length
+      ? state.tenantInvitations
+          .map(
+            (invitation) => `
+              <div class="item">
+                <strong>${escapeHtml(invitation.email)}</strong>
+                <div class="muted">${escapeHtml(invitation.role)} · ${escapeHtml(invitation.status)} · expires ${escapeHtml(invitation.expires_at)}</div>
+                <div class="muted">token ${escapeHtml(invitation.token)}</div>
+                ${
+                  invitation.status === "pending"
+                    ? `<button type="button" class="secondary reject" data-revoke-invitation="${escapeHtml(invitation.id)}">Revoke Invitation</button>`
+                    : ""
+                }
+              </div>
+            `,
+          )
+          .join("")
+      : `<div class="muted">No tenant invitations for selected organization</div>`
+    : `<div class="muted">Select an organization to manage invitations</div>`;
+  tenantInvitationRoot.querySelectorAll("[data-revoke-invitation]").forEach((button) => {
+    button.addEventListener("click", () =>
+      revokeTenantInvitation(button.dataset.revokeInvitation),
+    );
+  });
 }
 
 function renderUsage() {

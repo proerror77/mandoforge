@@ -168,10 +168,38 @@
                 </label>
                 <button type="submit">Create Membership</button>
               </form>
+              <form id="tenant-invitation-form" class="stack-form compact-form">
+                <label>
+                  Organization ID
+                  <input name="organization_id" required placeholder="Organization UUID" />
+                </label>
+                <label>
+                  Email
+                  <input name="email" required value="new-user@example.com" />
+                </label>
+                <label>
+                  Team ID
+                  <input name="team_id" placeholder="Optional team UUID" />
+                </label>
+                <label>
+                  Project ID
+                  <input name="project_id" placeholder="Optional project UUID" />
+                </label>
+                <label>
+                  Role
+                  <input name="role" required value="viewer" />
+                </label>
+                <label>
+                  Expires in hours
+                  <input name="expires_in_hours" type="number" min="1" max="720" value="168" />
+                </label>
+                <button type="submit">Create Invitation</button>
+              </form>
               <div id="organizations" class="list"></div>
               <div id="teams" class="list"></div>
               <div id="projects" class="list"></div>
               <div id="memberships" class="list"></div>
+              <div id="tenant-invitations" class="list"></div>
             </div>
             <div>
               <h3>Vault</h3>

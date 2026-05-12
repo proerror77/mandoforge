@@ -6,7 +6,7 @@ use crate::{
     Agent, AgentRelease, AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
     Artifact, AuditLog, CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord,
     Membership, Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord,
-    SecretRecord, Session, SessionEvent, Team, ToolCall, UsageRollup,
+    SecretRecord, Session, SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -249,6 +249,24 @@ pub(crate) fn membership_from_row(row: PgRow) -> Result<Membership, AppError> {
         project_id: row.try_get("project_id").unwrap_or(None),
         role: row.try_get("role")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn tenant_invitation_from_row(row: PgRow) -> Result<TenantInvitation, AppError> {
+    Ok(TenantInvitation {
+        id: row.try_get("id")?,
+        organization_id: row.try_get("organization_id")?,
+        team_id: row.try_get("team_id")?,
+        project_id: row.try_get("project_id")?,
+        email: row.try_get("email")?,
+        role: row.try_get("role")?,
+        status: row.try_get("status")?,
+        token: row.try_get("token")?,
+        invited_by: row.try_get("invited_by")?,
+        accepted_by: row.try_get("accepted_by")?,
+        expires_at: row.try_get("expires_at")?,
+        created_at: row.try_get("created_at")?,
+        decided_at: row.try_get("decided_at")?,
     })
 }
 
