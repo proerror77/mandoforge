@@ -43,6 +43,7 @@ const state = {
   costAlertRoutes: [],
   usage: null,
   observability: null,
+  observabilityRemediationPlan: null,
   observabilityRemediation: null,
   schedulerDueRun: null,
   costAlertDelivery: null,
@@ -1279,6 +1280,7 @@ async function refreshOps() {
     usageTrend,
     usageFinanceSummary,
     observability,
+    observabilityRemediationPlan,
     usageRollups,
     costAlertRoutes,
     organizations,
@@ -1300,6 +1302,7 @@ async function refreshOps() {
       api("/api/usage/trends"),
       api("/api/usage/finance-summary"),
       api("/api/observability"),
+      api("/api/observability/remediation/plan"),
       api("/api/usage/rollups"),
       api("/api/usage/alert-routes"),
       api("/api/organizations"),
@@ -1320,6 +1323,7 @@ async function refreshOps() {
   state.usageTrend = usageTrend;
   state.usageFinanceSummary = usageFinanceSummary;
   state.observability = observability;
+  state.observabilityRemediationPlan = observabilityRemediationPlan;
   state.usageRollups = usageRollups;
   state.costAlertRoutes = costAlertRoutes;
   state.organizations = organizations;
@@ -1835,6 +1839,8 @@ function renderObservability() {
   const backpressure = observability.backpressure || {};
   const telemetry = observability.telemetry || {};
   const errorEvents = observability.recent_error_events || [];
+  const remediationPlan = state.observabilityRemediationPlan;
+  const remediationPlanActions = remediationPlan?.actions || [];
   const remediation = state.observabilityRemediation;
   const schedulerDueRun = state.schedulerDueRun;
   observabilityRoot.innerHTML = `
@@ -1872,6 +1878,46 @@ function renderObservability() {
       <dt>Oldest queued job</dt>
       <dd>${escapeHtml(backpressure.oldest_queued_job_age_seconds == null ? "none" : `${backpressure.oldest_queued_job_age_seconds}s`)}</dd>
     </dl>
+    ${
+      remediationPlan
+        ? `<h4>Remediation Plan</h4>
+          <div class="metric-grid compact-metrics">
+            <div class="metric"><span>Status</span><strong>${escapeHtml(remediationPlan.status)}</strong></div>
+            <div class="metric"><span>Auto</span><strong>${formatInteger(remediationPlan.auto_action_count)}</strong></div>
+            <div class="metric"><span>Manual</span><strong>${formatInteger(remediationPlan.manual_action_count)}</strong></div>
+            <div class="metric"><span>Config</span><strong>${formatInteger(remediationPlan.configuration_action_count)}</strong></div>
+          </div>
+          ${
+            remediationPlanActions.length
+              ? `<table class="usage-table">
+                  <thead>
+                    <tr>
+                      <th>Severity</th>
+                      <th>Mode</th>
+                      <th>Action</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${remediationPlanActions
+                      .map(
+                        (action) => `
+                          <tr>
+                            <td><span class="budget-status ${escapeHtml(action.severity)}">${escapeHtml(action.severity)}</span></td>
+                            <td>${escapeHtml(action.mode)}</td>
+                            <td>${escapeHtml(action.action)}</td>
+                            <td>${escapeHtml(action.reason)}</td>
+                          </tr>
+                        `,
+                      )
+                      .join("")}
+                  </tbody>
+                </table>`
+              : `<div class="muted">No remediation actions planned.</div>`
+          }
+          <div class="muted">Generated: ${escapeHtml(remediationPlan.generated_at)}</div>`
+        : ""
+    }
     <h4>Recent Error Events</h4>
     ${
       errorEvents.length

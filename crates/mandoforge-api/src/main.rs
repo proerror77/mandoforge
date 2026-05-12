@@ -866,6 +866,25 @@ struct ObservabilityRemediationRun {
     codex_app_server_stale_polls: Option<CodexAppServerStalePollRun>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityRemediationPlan {
+    status: String,
+    generated_at: DateTime<Utc>,
+    auto_action_count: usize,
+    manual_action_count: usize,
+    configuration_action_count: usize,
+    backpressure: ObservabilityBackpressure,
+    actions: Vec<ObservabilityRemediationPlanAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityRemediationPlanAction {
+    action: String,
+    mode: String,
+    severity: String,
+    reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ProviderUsageSummary {
     request_count: usize,
@@ -2148,6 +2167,10 @@ fn build_router(state: AppState) -> Router {
             get(list_usage_rollups).post(create_usage_rollup),
         )
         .route("/api/observability", get(get_observability_summary))
+        .route(
+            "/api/observability/remediation/plan",
+            get(get_observability_remediation_plan),
+        )
         .route(
             "/api/observability/remediation/run",
             post(run_observability_remediation),
@@ -9738,6 +9761,129 @@ async fn get_observability_summary(
 ) -> Result<Json<ObservabilitySummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
     Ok(Json(build_observability_summary(&state).await?))
+}
+
+async fn get_observability_remediation_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ObservabilityRemediationPlan>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
+    let summary = build_observability_summary(&state).await?;
+    Ok(Json(build_observability_remediation_plan(summary)))
+}
+
+fn build_observability_remediation_plan(
+    summary: ObservabilitySummary,
+) -> ObservabilityRemediationPlan {
+    let mut actions = Vec::new();
+    let backpressure = summary.backpressure;
+
+    if !summary.telemetry.otlp_enabled {
+        actions.push(ObservabilityRemediationPlanAction {
+            action: "configure_otlp_exporter".to_string(),
+            mode: "configuration".to_string(),
+            severity: "warning".to_string(),
+            reason: "OTLP export is disabled; traces, metrics, and logs stay local".to_string(),
+        });
+    } else if !summary.telemetry.endpoint_configured {
+        actions.push(ObservabilityRemediationPlanAction {
+            action: "configure_otlp_endpoint".to_string(),
+            mode: "configuration".to_string(),
+            severity: "warning".to_string(),
+            reason: "OTLP export is enabled without a configured collector endpoint".to_string(),
+        });
+    }
+    if backpressure.pending_approvals > 0 {
+        actions.push(ObservabilityRemediationPlanAction {
+            action: "approval_escalation_due_run".to_string(),
+            mode: "auto".to_string(),
+            severity: "warning".to_string(),
+            reason: format!(
+                "{} pending approvals can be processed through due escalation automation",
+                backpressure.pending_approvals
+            ),
+        });
+    }
+    if backpressure.queued_jobs > 0 || backpressure.retryable_jobs > 0 {
+        actions.push(ObservabilityRemediationPlanAction {
+            action: "worker_drain_required".to_string(),
+            mode: "manual".to_string(),
+            severity: "warning".to_string(),
+            reason: format!(
+                "{} queued and {} retryable jobs require worker drain supervision",
+                backpressure.queued_jobs, backpressure.retryable_jobs
+            ),
+        });
+    }
+    if backpressure
+        .oldest_queued_job_age_seconds
+        .is_some_and(|age| age >= 300)
+    {
+        actions.push(ObservabilityRemediationPlanAction {
+            action: "queue_age_triage_required".to_string(),
+            mode: "manual".to_string(),
+            severity: "critical".to_string(),
+            reason: "oldest queued job is at least five minutes old".to_string(),
+        });
+    }
+    if backpressure.failed_jobs > 0
+        || backpressure.failed_sessions > 0
+        || backpressure.failed_tool_calls > 0
+    {
+        actions.push(ObservabilityRemediationPlanAction {
+            action: "manual_failure_triage_required".to_string(),
+            mode: "manual".to_string(),
+            severity: "critical".to_string(),
+            reason: format!(
+                "{} failed jobs, {} failed sessions, and {} failed tool calls need human triage",
+                backpressure.failed_jobs,
+                backpressure.failed_sessions,
+                backpressure.failed_tool_calls
+            ),
+        });
+    }
+    if !summary.recent_error_events.is_empty() {
+        actions.push(ObservabilityRemediationPlanAction {
+            action: "recent_error_review_required".to_string(),
+            mode: "manual".to_string(),
+            severity: "warning".to_string(),
+            reason: format!(
+                "{} recent error events should be reviewed before declaring the runtime healthy",
+                summary.recent_error_events.len()
+            ),
+        });
+    }
+
+    let auto_action_count = actions
+        .iter()
+        .filter(|action| action.mode == "auto")
+        .count();
+    let manual_action_count = actions
+        .iter()
+        .filter(|action| action.mode == "manual")
+        .count();
+    let configuration_action_count = actions
+        .iter()
+        .filter(|action| action.mode == "configuration")
+        .count();
+    let status = if actions.iter().any(|action| action.severity == "critical") {
+        "critical"
+    } else if actions.is_empty() {
+        "clean"
+    } else {
+        "attention"
+    }
+    .to_string();
+
+    ObservabilityRemediationPlan {
+        status,
+        generated_at: summary.generated_at,
+        auto_action_count,
+        manual_action_count,
+        configuration_action_count,
+        backpressure,
+        actions,
+    }
 }
 
 async fn run_observability_remediation(
@@ -17562,6 +17708,27 @@ not json
                 .unwrap_or(0)
                 >= 2
         );
+
+        let remediation_plan: ObservabilityRemediationPlan = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/observability/remediation/plan")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(remediation_plan.status, "attention");
+        assert_eq!(remediation_plan.auto_action_count, 1);
+        assert_eq!(remediation_plan.configuration_action_count, 1);
+        assert_eq!(remediation_plan.backpressure.pending_approvals, 1);
+        assert!(remediation_plan.actions.iter().any(|action| {
+            action.action == "approval_escalation_due_run" && action.mode == "auto"
+        }));
+        assert!(remediation_plan.actions.iter().any(|action| {
+            action.action == "configure_otlp_exporter" && action.mode == "configuration"
+        }));
 
         let remediation: ObservabilityRemediationRun = request_json(
             app.clone(),
