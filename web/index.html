@@ -152,6 +152,18 @@
               <div id="memberships" class="list"></div>
             </div>
             <div>
+              <h3>Policy Console</h3>
+              <form id="policy-simulate-form" class="stack-form compact-form">
+                <label>
+                  Tool name
+                  <input name="tool_name" required value="shell.exec" />
+                </label>
+                <button type="submit">Simulate Policy</button>
+              </form>
+              <div id="policy-summary" class="detail-panel"></div>
+              <div id="policy-decision" class="list"></div>
+            </div>
+            <div>
               <h3>Providers</h3>
               <form id="provider-form" class="stack-form compact-form">
                 <label>

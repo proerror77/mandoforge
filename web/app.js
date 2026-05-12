@@ -7,6 +7,8 @@ const state = {
   auditLogs: [],
   providers: [],
   providerHealth: {},
+  policy: null,
+  policyDecision: null,
   evalDatasets: [],
   evalCases: [],
   evalRuns: [],
@@ -40,6 +42,9 @@ const toolDetailRoot = document.querySelector("#tool-detail");
 const auditLogRoot = document.querySelector("#audit-logs");
 const auditDetailRoot = document.querySelector("#audit-detail");
 const providerRoot = document.querySelector("#providers");
+const policyRoot = document.querySelector("#policy-summary");
+const policyForm = document.querySelector("#policy-simulate-form");
+const policyDecisionRoot = document.querySelector("#policy-decision");
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
@@ -74,6 +79,7 @@ teamForm.addEventListener("submit", createTeam);
 projectForm.addEventListener("submit", createProject);
 membershipForm.addEventListener("submit", createMembership);
 providerForm.addEventListener("submit", createProvider);
+policyForm.addEventListener("submit", simulatePolicy);
 evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
 evalRunForm.addEventListener("submit", createEvalRun);
@@ -228,6 +234,18 @@ async function createProvider(event) {
   await refreshOps();
 }
 
+async function simulatePolicy(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  state.policyDecision = await api("/api/policy/simulate", {
+    method: "POST",
+    body: JSON.stringify({
+      tool_name: String(form.get("tool_name") || "").trim(),
+    }),
+  });
+  renderPolicy();
+}
+
 async function createEvalDataset(event) {
   event.preventDefault();
   const form = new FormData(evalDatasetForm);
@@ -375,9 +393,10 @@ async function runDemo() {
 }
 
 async function refreshOps() {
-  const [providers, evalDatasets, evalRuns, usage, usageRollups, organizations, executionJobs] =
+  const [providers, policy, evalDatasets, evalRuns, usage, usageRollups, organizations, executionJobs] =
     await Promise.all([
       api("/api/providers"),
+      api("/api/policy"),
       api("/api/eval/datasets"),
       api("/api/eval/runs"),
       api("/api/usage"),
@@ -386,6 +405,7 @@ async function refreshOps() {
       api("/api/execution-jobs"),
     ]);
   state.providers = providers;
+  state.policy = policy;
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
   state.usage = usage;
@@ -484,6 +504,7 @@ function renderOps() {
   renderUsage();
   renderTenantGovernance();
   renderProviders();
+  renderPolicy();
   renderEvalDatasets();
   renderEvalCases();
   renderEvalRuns();
@@ -802,6 +823,36 @@ function formatDurationMs(value) {
     return `${(milliseconds / 1000).toFixed(2)}s`;
   }
   return `${milliseconds.toFixed(0)}ms`;
+}
+
+function renderPolicy() {
+  if (!state.policy) {
+    policyRoot.innerHTML = `<div class="muted">Policy data is not loaded.</div>`;
+    policyDecisionRoot.innerHTML = "";
+    return;
+  }
+  const blockedTools = state.policy.blocked_tools || [];
+  const approvalRequired = state.policy.approval_required || [];
+  const allowedTools = state.policy.allowed_tools || {};
+  policyRoot.innerHTML = `
+    <dl>
+      <dt>Blocked tools</dt>
+      <dd>${escapeHtml(blockedTools.join(", ") || "none")}</dd>
+      <dt>Approval required</dt>
+      <dd>${escapeHtml(approvalRequired.map((rule) => `${rule.tool}:${rule.risk}`).join(", ") || "none")}</dd>
+      <dt>Allowed tool profiles</dt>
+      <dd>${escapeHtml(Object.keys(allowedTools).join(", ") || "none")}</dd>
+      <dt>SQL max rows</dt>
+      <dd>${formatInteger(state.policy.sql_policy?.max_rows)}</dd>
+    </dl>
+  `;
+  policyDecisionRoot.innerHTML = state.policyDecision
+    ? `<div class="item">
+        <strong>${escapeHtml(state.policyDecision.decision)}</strong>
+        <div class="muted">${escapeHtml(state.policyDecision.risk_level)}</div>
+        <pre>${escapeHtml(JSON.stringify(state.policyDecision, null, 2))}</pre>
+      </div>`
+    : `<div class="muted">No policy simulation yet.</div>`;
 }
 
 function renderProviders() {

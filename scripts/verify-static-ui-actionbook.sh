@@ -54,6 +54,7 @@ wait_for_static_ui() {
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
     hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
+    hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasWorkerDashboard: text.includes('Worker Dashboard'),
@@ -67,6 +68,7 @@ wait_for_static_ui() {
     && result.hasToolBreakdown
     && result.hasProviderBudgetForecast
     && result.hasProviderCredentialFields
+    && result.hasPolicyConsole
     && result.hasTenantGovernance
     && result.hasEvalGateAction
     && result.hasWorkerDashboard

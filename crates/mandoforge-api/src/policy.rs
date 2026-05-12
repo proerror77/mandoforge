@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{AgentVersion, AppError};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct PolicyConfig {
     #[serde(default)]
     blocked_tools: Vec<String>,
@@ -18,13 +18,13 @@ pub(crate) struct PolicyConfig {
     pub(crate) sql_policy: SqlPolicy,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct ApprovalRequiredRule {
     tool: String,
     risk: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct SqlPolicy {
     #[serde(default = "default_sql_max_rows")]
     pub(crate) max_rows: i64,
@@ -32,7 +32,7 @@ pub(crate) struct SqlPolicy {
     pub(crate) blocked_keywords: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ToolPolicyDecision {
     pub(crate) decision: &'static str,
     pub(crate) risk_level: String,

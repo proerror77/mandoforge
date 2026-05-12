@@ -448,6 +448,11 @@ struct UpdateProviderStatus {
     status: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SimulatePolicy {
+    tool_name: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ProviderHealth {
     provider_id: Uuid,
@@ -768,6 +773,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/{id}/status", patch(update_provider_status))
         .route("/api/providers/{id}/health", get(get_provider_health))
+        .route("/api/policy", get(get_policy))
+        .route("/api/policy/simulate", post(simulate_policy))
         .route(
             "/api/eval/datasets",
             get(list_eval_datasets).post(create_eval_dataset),
@@ -2409,6 +2416,27 @@ async fn create_provider(
 ) -> Result<Json<ProviderRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
     Ok(Json(state.create_provider(input).await?))
+}
+
+async fn get_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
+    Ok(Json(serde_json::to_value(&state.policy)?))
+}
+
+async fn simulate_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SimulatePolicy>,
+) -> Result<Json<policy::ToolPolicyDecision>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
+    let tool_name = input.tool_name.trim();
+    if tool_name.is_empty() {
+        return Err(AppError::bad_request("tool_name is required"));
+    }
+    Ok(Json(state.policy.evaluate_tool(tool_name)))
 }
 
 async fn update_provider_status(
@@ -5459,6 +5487,37 @@ not json
         )
         .await;
         assert_eq!(provider_access.team_id, team.id);
+
+        let policy_summary: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/policy")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            policy_summary["blocked_tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool == "secret.read")
+        );
+        let policy_decision: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/simulate")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"tool_name": "shell.exec"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(policy_decision["decision"], "requires_approval");
 
         let governed_provider: ProviderRecord = request_json(
             app.clone(),
