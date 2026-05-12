@@ -256,8 +256,18 @@ Current verified path:
 - `cargo fmt --all -- --check`
 - `cargo check -p mandoforge-api --bins`
 - `cargo test -p mandoforge-api` including local mock Vault KV v2 HTTP coverage for token, namespace, path, and secret parsing.
+- `node --check web/app.js`
+- `./scripts/verify-static-ui-actionbook.sh`, the preferred local browser smoke when Playwright or Chrome DevTools MCP is timing out.
+- `kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out`
 - `./scripts/stage1-final-gate.sh`
 - `RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh`
+
+After the actionbook smoke, verify that the self-started API and CDP listeners were cleaned up:
+
+```bash
+lsof -nP -iTCP:8791 -sTCP:LISTEN || true
+lsof -nP -iTCP:9224 -sTCP:LISTEN || true
+```
 
 Focused manual Postgres smoke can still be run with:
 

@@ -67,6 +67,16 @@ Static plus in-memory demo final gate:
 ./scripts/stage1-final-gate.sh
 ```
 
+Static UI browser smoke, using `actionbook` CLI instead of Playwright or Chrome DevTools MCP:
+
+```bash
+./scripts/verify-static-ui-actionbook.sh
+lsof -nP -iTCP:8791 -sTCP:LISTEN || true
+lsof -nP -iTCP:9224 -sTCP:LISTEN || true
+```
+
+The script starts the API on `127.0.0.1:8791` when needed, launches a headless Chrome CDP endpoint on `9224`, checks the static console through `actionbook`, writes `/tmp/mandoforge-actionbook-smoke.png`, and cleans up both listeners.
+
 Live final gate, with API, Postgres, and Docker available:
 
 ```bash
