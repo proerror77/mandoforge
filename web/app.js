@@ -31,6 +31,7 @@ const state = {
   mcpHealth: {},
   mcpHealthRun: null,
   mcpScheduledHealthRun: null,
+  mcpRolloutRun: null,
   executionJobs: [],
   usageRollups: [],
   costAlertRoutes: [],
@@ -138,6 +139,7 @@ const mcpForm = document.querySelector("#mcp-form");
 const loadMcpButton = document.querySelector("#load-mcp");
 const runMcpHealthButton = document.querySelector("#run-mcp-health");
 const runDueMcpHealthButton = document.querySelector("#run-due-mcp-health");
+const runDueMcpRolloutsButton = document.querySelector("#run-due-mcp-rollouts");
 const loadEvalCasesButton = document.querySelector("#load-eval-cases");
 const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jobs");
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
@@ -183,6 +185,7 @@ mcpForm.addEventListener("submit", createMcpServer);
 loadMcpButton.addEventListener("click", loadMcpServers);
 runMcpHealthButton.addEventListener("click", runMcpHealth);
 runDueMcpHealthButton.addEventListener("click", runDueMcpHealth);
+runDueMcpRolloutsButton.addEventListener("click", runDueMcpRollouts);
 loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
@@ -1012,11 +1015,70 @@ async function runDueMcpHealth() {
   await loadMcpServers();
 }
 
+async function runDueMcpRollouts() {
+  if (!state.mcpTeamId) {
+    const form = new FormData(mcpForm);
+    state.mcpTeamId = String(form.get("team_id") || "").trim();
+  }
+  if (!state.mcpTeamId) return;
+  state.mcpRolloutRun = await api(`/api/teams/${state.mcpTeamId}/mcp-servers/rollouts/run-due`, {
+    method: "POST",
+  });
+  await loadMcpServers();
+}
+
 async function updateMcpStatus(serverId, status) {
   if (!state.mcpTeamId) return;
   await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/status`, {
     method: "PATCH",
     body: JSON.stringify({ status }),
+  });
+  await loadMcpServers();
+}
+
+async function requestMcpRollout(serverId) {
+  if (!state.mcpTeamId) return;
+  const server = state.mcpServers.find((item) => item.id === serverId);
+  if (!server) return;
+  const transport = window.prompt("Target transport", server.transport);
+  if (transport === null) return;
+  const tools = window.prompt("Target tool allowlist", server.tool_allowlist.join(","));
+  if (tools === null) return;
+  const config = window.prompt("Target config JSON", JSON.stringify(server.config, null, 2));
+  if (config === null) return;
+  const status = window.prompt("Target status", server.status);
+  if (status === null) return;
+  const activateAfter = window.prompt("Activate after RFC3339 (blank for manual apply)", "");
+  if (activateAfter === null) return;
+  await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/rollouts`, {
+    method: "POST",
+    body: JSON.stringify({
+      transport,
+      config: parseJsonField(config, "MCP rollout config"),
+      tool_allowlist: tools
+        .split(",")
+        .map((tool) => tool.trim())
+        .filter(Boolean),
+      status,
+      activate_after: activateAfter.trim() || null,
+      reason: "Requested from static console",
+    }),
+  });
+  await loadMcpServers();
+}
+
+async function applyMcpRollout(serverId, rolloutId) {
+  if (!state.mcpTeamId) return;
+  await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/rollouts/${rolloutId}/apply`, {
+    method: "POST",
+  });
+  await loadMcpServers();
+}
+
+async function rollbackMcpRollout(serverId, rolloutId) {
+  if (!state.mcpTeamId) return;
+  await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/rollouts/${rolloutId}/rollback`, {
+    method: "POST",
   });
   await loadMcpServers();
 }
@@ -2551,17 +2613,30 @@ function renderMcpServers() {
         <div class="muted">${formatInteger(scheduledRun.due_count)} due · ${formatInteger(scheduledRun.skipped_count)} skipped · ${formatInteger(scheduledRun.healthy_count)} healthy · ${formatInteger(scheduledRun.unhealthy_count)} unhealthy · ${escapeHtml(scheduledRun.checked_at)}</div>
       </div>`
     : "";
+  const rolloutRun = state.mcpRolloutRun;
+  const rolloutRunSummary = rolloutRun
+    ? `<div class="item">
+        <strong>Due rollout run</strong>
+        <div class="muted">${formatInteger(rolloutRun.applied_count)} applied · ${formatInteger(rolloutRun.skipped_count)} skipped · ${formatInteger(rolloutRun.expired_count)} expired · ${formatInteger(rolloutRun.failed_count)} failed · ${escapeHtml(rolloutRun.checked_at)}</div>
+      </div>`
+    : "";
   mcpServerRoot.innerHTML = state.mcpServers.length
-    ? `${runSummary}${scheduledRunSummary}${state.mcpServers
+    ? `${runSummary}${scheduledRunSummary}${rolloutRunSummary}${state.mcpServers
         .map((server) => {
           const health = state.mcpHealth[server.id];
+          const pendingRollout = server.config?.pending_rollout;
+          const lastRollout = server.config?.last_rollout;
           return `
             <div class="item">
               <strong>${escapeHtml(server.name)}</strong>
               <div class="muted">${escapeHtml(server.transport)} · ${escapeHtml(server.status)}</div>
               <div class="muted">Tools: ${escapeHtml(server.tool_allowlist.join(", ") || "none")}</div>
               <div class="muted">Secret refs: ${escapeHtml((server.config?.secret_refs || []).join(", ") || "none")}</div>
+              <div class="muted">Rollout: ${escapeHtml(pendingRollout ? `pending ${pendingRollout.id}` : lastRollout ? `${lastRollout.status} ${lastRollout.id}` : "none")}</div>
               <button class="secondary" data-edit-mcp="${server.id}">Edit Config</button>
+              <button class="secondary" data-rollout-mcp="${server.id}">Request Rollout</button>
+              ${pendingRollout ? `<button class="secondary" data-apply-mcp-rollout="${server.id}" data-rollout-id="${escapeHtml(pendingRollout.id)}">Apply Rollout</button>` : ""}
+              ${lastRollout?.status === "applied" ? `<button class="secondary" data-rollback-mcp-rollout="${server.id}" data-rollout-id="${escapeHtml(lastRollout.id)}">Rollback Rollout</button>` : ""}
               <button class="secondary" data-health-mcp="${server.id}">Check Health</button>
               <button class="secondary" data-discover-mcp="${server.id}">Discover Tools</button>
               <button class="secondary" data-mcp-status="${server.id}" data-status="active">Activate</button>
@@ -2578,13 +2653,26 @@ function renderMcpServers() {
         })
         .join("")}`
     : state.mcpTeamId
-      ? `${runSummary}${scheduledRunSummary}<div class="muted">No MCP servers for this team</div>`
+      ? `${runSummary}${scheduledRunSummary}${rolloutRunSummary}<div class="muted">No MCP servers for this team</div>`
       : `<div class="muted">Enter a team ID to manage MCP servers</div>`;
   mcpServerRoot.querySelectorAll("[data-discover-mcp]").forEach((button) => {
     button.addEventListener("click", () => discoverMcpTools(button.dataset.discoverMcp));
   });
   mcpServerRoot.querySelectorAll("[data-edit-mcp]").forEach((button) => {
     button.addEventListener("click", () => editMcpServer(button.dataset.editMcp));
+  });
+  mcpServerRoot.querySelectorAll("[data-rollout-mcp]").forEach((button) => {
+    button.addEventListener("click", () => requestMcpRollout(button.dataset.rolloutMcp));
+  });
+  mcpServerRoot.querySelectorAll("[data-apply-mcp-rollout]").forEach((button) => {
+    button.addEventListener("click", () =>
+      applyMcpRollout(button.dataset.applyMcpRollout, button.dataset.rolloutId),
+    );
+  });
+  mcpServerRoot.querySelectorAll("[data-rollback-mcp-rollout]").forEach((button) => {
+    button.addEventListener("click", () =>
+      rollbackMcpRollout(button.dataset.rollbackMcpRollout, button.dataset.rolloutId),
+    );
   });
   mcpServerRoot.querySelectorAll("[data-health-mcp]").forEach((button) => {
     button.addEventListener("click", () => checkMcpHealth(button.dataset.healthMcp));

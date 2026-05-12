@@ -1171,6 +1171,42 @@ struct UpdateMcpServerStatus {
     status: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RequestMcpServerRollout {
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    config: Option<Value>,
+    #[serde(default)]
+    tool_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    activate_after: Option<String>,
+    #[serde(default)]
+    activate_before: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct McpServerRolloutResponse {
+    server: McpServerRecord,
+    rollout: Value,
+    preflight_health: Option<McpServerHealth>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct McpServerRolloutDueRun {
+    team_id: Uuid,
+    applied_count: usize,
+    skipped_count: usize,
+    expired_count: usize,
+    failed_count: usize,
+    results: Vec<Value>,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EvalDataset {
     id: Uuid,
@@ -1568,6 +1604,22 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{team_id}/mcp-servers/health/run-due",
             post(run_due_mcp_server_health_checks),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/rollouts/run-due",
+            post(run_due_mcp_server_rollouts),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/{server_id}/rollouts",
+            post(request_mcp_server_rollout),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/{server_id}/rollouts/{rollout_id}/apply",
+            post(apply_mcp_server_rollout),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/{server_id}/rollouts/{rollout_id}/rollback",
+            post(rollback_mcp_server_rollout),
         )
         .route(
             "/api/teams/{team_id}/mcp-servers/{server_id}/discover",
@@ -6499,6 +6551,599 @@ async fn run_due_mcp_server_health_checks(
         ))
         .await?;
     Ok(Json(run))
+}
+
+async fn request_mcp_server_rollout(
+    State(state): State<AppState>,
+    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(mut input): Json<RequestMcpServerRollout>,
+) -> Result<Json<McpServerRolloutResponse>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(team_id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let server = state.get_mcp_server(team_id, server_id).await?;
+    if mcp_pending_rollout(&server).is_some() {
+        return Err(AppError::bad_request(
+            "MCP server already has a pending rollout",
+        ));
+    }
+    let rollout =
+        build_mcp_server_rollout(&state, &server, &principal.subject_id, &mut input).await?;
+    let mut config = server.config.as_object().cloned().unwrap_or_default();
+    config.insert("pending_rollout".to_string(), rollout.rollout.clone());
+    let updated = state
+        .update_mcp_server(
+            team_id,
+            server_id,
+            UpdateMcpServerRecord {
+                transport: None,
+                config: Some(Value::Object(config)),
+                tool_allowlist: None,
+            },
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "mcp.server_rollout_requested",
+            "mcp_server",
+            Some(server_id),
+            json!({
+                "subject": principal.subject_id,
+                "team_id": team_id,
+                "name": server.name,
+                "rollout": rollout.rollout,
+            }),
+        ))
+        .await?;
+    Ok(Json(McpServerRolloutResponse {
+        server: updated,
+        rollout: rollout.rollout,
+        preflight_health: Some(rollout.preflight_health),
+    }))
+}
+
+async fn apply_mcp_server_rollout(
+    State(state): State<AppState>,
+    Path((team_id, server_id, rollout_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerRolloutResponse>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(team_id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(
+        apply_mcp_server_rollout_inner(
+            &state,
+            team_id,
+            server_id,
+            rollout_id,
+            &principal.subject_id,
+        )
+        .await?,
+    ))
+}
+
+async fn rollback_mcp_server_rollout(
+    State(state): State<AppState>,
+    Path((team_id, server_id, rollout_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerRolloutResponse>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(team_id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let server = state.get_mcp_server(team_id, server_id).await?;
+    let last_rollout =
+        server.config.get("last_rollout").cloned().ok_or_else(|| {
+            AppError::bad_request("MCP server has no applied rollout to rollback")
+        })?;
+    if last_rollout.get("id").and_then(Value::as_str) != Some(&rollout_id.to_string()) {
+        return Err(AppError::bad_request(
+            "MCP server last rollout does not match requested rollout id",
+        ));
+    }
+    if last_rollout.get("status").and_then(Value::as_str) != Some("applied") {
+        return Err(AppError::bad_request(
+            "MCP server last rollout is not rollbackable",
+        ));
+    }
+    let snapshot = last_rollout
+        .get("previous_snapshot")
+        .cloned()
+        .ok_or_else(|| AppError::bad_request("MCP server rollout missing previous snapshot"))?;
+    let mut config = snapshot
+        .get("config")
+        .cloned()
+        .ok_or_else(|| AppError::bad_request("MCP server rollout snapshot missing config"))?;
+    config = mcp_config_without_rollout_metadata(&config);
+    let mut last_rollout = last_rollout;
+    last_rollout["status"] = json!("rolled_back");
+    last_rollout["rolled_back_by"] = json!(principal.subject_id.clone());
+    last_rollout["rolled_back_at"] = json!(Utc::now());
+    let mut config_map = config.as_object().cloned().unwrap_or_default();
+    config_map.insert("last_rollout".to_string(), last_rollout.clone());
+    let target_status = snapshot
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("MCP server rollout snapshot missing status"))?;
+    state
+        .update_mcp_server(
+            team_id,
+            server_id,
+            UpdateMcpServerRecord {
+                transport: Some(
+                    snapshot
+                        .get("transport")
+                        .and_then(Value::as_str)
+                        .unwrap_or(server.transport.as_str())
+                        .to_string(),
+                ),
+                config: Some(Value::Object(config_map)),
+                tool_allowlist: Some(
+                    snapshot
+                        .get("tool_allowlist")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .unwrap_or_else(|| server.tool_allowlist.clone()),
+                ),
+            },
+        )
+        .await?;
+    let updated = state
+        .update_mcp_server_status(team_id, server_id, target_status)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "mcp.server_rollout_rolled_back",
+            "mcp_server",
+            Some(server_id),
+            json!({
+                "subject": principal.subject_id,
+                "team_id": team_id,
+                "name": updated.name,
+                "rollout": last_rollout,
+            }),
+        ))
+        .await?;
+    let health = mcp_server_health(&state, &updated).await;
+    Ok(Json(McpServerRolloutResponse {
+        server: updated,
+        rollout: last_rollout,
+        preflight_health: Some(health),
+    }))
+}
+
+async fn run_due_mcp_server_rollouts(
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerRolloutDueRun>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    let checked_at = Utc::now();
+    let servers = state.list_mcp_servers(team_id).await?;
+    let mut applied_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut expired_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut results = Vec::new();
+    for server in servers {
+        let Some(rollout) = mcp_pending_rollout(&server).cloned() else {
+            skipped_count += 1;
+            continue;
+        };
+        let rollout_id = rollout
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        let Some(rollout_id) = rollout_id else {
+            failed_count += 1;
+            results.push(json!({
+                "server_id": server.id,
+                "status": "failed",
+                "error": "pending rollout has invalid id",
+            }));
+            continue;
+        };
+        if mcp_rollout_is_expired(&rollout, checked_at) {
+            expired_count += 1;
+            let expired =
+                mark_mcp_server_rollout_expired(&state, team_id, &server, &rollout).await?;
+            results.push(json!({
+                "server_id": server.id,
+                "rollout_id": rollout_id,
+                "status": "expired",
+                "rollout": expired,
+            }));
+            continue;
+        }
+        if !mcp_rollout_is_due(&rollout, checked_at) {
+            skipped_count += 1;
+            results.push(json!({
+                "server_id": server.id,
+                "rollout_id": rollout_id,
+                "status": "skipped",
+            }));
+            continue;
+        }
+        match apply_mcp_server_rollout_inner(&state, team_id, server.id, rollout_id, "system").await
+        {
+            Ok(response) => {
+                applied_count += 1;
+                results.push(json!({
+                    "server_id": server.id,
+                    "rollout_id": rollout_id,
+                    "status": "applied",
+                    "rollout": response.rollout,
+                }));
+            }
+            Err(error) => {
+                failed_count += 1;
+                results.push(json!({
+                    "server_id": server.id,
+                    "rollout_id": rollout_id,
+                    "status": "failed",
+                    "error": error.message,
+                }));
+            }
+        }
+    }
+    let run = McpServerRolloutDueRun {
+        team_id,
+        applied_count,
+        skipped_count,
+        expired_count,
+        failed_count,
+        results,
+        checked_at,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "mcp.server_rollout_due_run",
+            "team",
+            Some(team_id),
+            json!({
+                "team_id": team_id,
+                "applied_count": run.applied_count,
+                "skipped_count": run.skipped_count,
+                "expired_count": run.expired_count,
+                "failed_count": run.failed_count,
+            }),
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
+struct BuiltMcpServerRollout {
+    rollout: Value,
+    preflight_health: McpServerHealth,
+}
+
+async fn build_mcp_server_rollout(
+    state: &AppState,
+    server: &McpServerRecord,
+    requested_by: &str,
+    input: &mut RequestMcpServerRollout,
+) -> Result<BuiltMcpServerRollout, AppError> {
+    if let Some(transport) = input.transport.as_deref() {
+        input.transport = Some(normalize_mcp_transport(transport)?);
+    }
+    if let Some(config) = input.config.take() {
+        input.config = Some(mcp_config_without_rollout_metadata(&normalize_mcp_config(
+            config,
+        )?));
+    }
+    if let Some(tool_allowlist) = input.tool_allowlist.take() {
+        input.tool_allowlist = Some(normalize_mcp_tool_allowlist(tool_allowlist)?);
+    }
+    if let Some(status) = input.status.as_deref() {
+        input.status = Some(normalize_mcp_status(status)?);
+    }
+    let has_target = input.transport.is_some()
+        || input.config.is_some()
+        || input.tool_allowlist.is_some()
+        || input.status.is_some();
+    if !has_target {
+        return Err(AppError::bad_request(
+            "MCP server rollout requires at least one target field",
+        ));
+    }
+    let activation_window = normalize_policy_activation_window(
+        input.activate_after.as_deref(),
+        input.activate_before.as_deref(),
+    )?;
+    let mut candidate = server.clone();
+    if let Some(transport) = input.transport.clone() {
+        candidate.transport = transport;
+    }
+    if let Some(config) = input.config.clone() {
+        candidate.config = config;
+    }
+    if let Some(tool_allowlist) = input.tool_allowlist.clone() {
+        candidate.tool_allowlist = tool_allowlist;
+    }
+    if let Some(status) = input.status.clone() {
+        candidate.status = status;
+    }
+    let preflight_health = mcp_server_health(state, &candidate).await;
+    if candidate.status == "active" && !preflight_health.healthy {
+        return Err(AppError::bad_request(format!(
+            "MCP server rollout preflight failed: {}",
+            preflight_health.issues.join("; ")
+        )));
+    }
+    let mut target = serde_json::Map::new();
+    if let Some(transport) = input.transport.clone() {
+        target.insert("transport".to_string(), json!(transport));
+    }
+    if let Some(config) = input.config.clone() {
+        target.insert("config".to_string(), config);
+    }
+    if let Some(tool_allowlist) = input.tool_allowlist.clone() {
+        target.insert("tool_allowlist".to_string(), json!(tool_allowlist));
+    }
+    if let Some(status) = input.status.clone() {
+        target.insert("status".to_string(), json!(status));
+    }
+    let rollout = json!({
+        "id": Uuid::new_v4(),
+        "status": "pending",
+        "requested_by": requested_by,
+        "requested_at": Utc::now(),
+        "reason": optional_trimmed(input.reason.as_deref()),
+        "activation_window": activation_window,
+        "target": Value::Object(target),
+        "previous_snapshot": {
+            "transport": server.transport,
+            "config": mcp_config_without_rollout_metadata(&server.config),
+            "tool_allowlist": server.tool_allowlist,
+            "status": server.status,
+        },
+        "preflight": {
+            "healthy": preflight_health.healthy,
+            "issues": preflight_health.issues,
+            "checked_at": preflight_health.checked_at,
+        }
+    });
+    Ok(BuiltMcpServerRollout {
+        rollout,
+        preflight_health,
+    })
+}
+
+async fn apply_mcp_server_rollout_inner(
+    state: &AppState,
+    team_id: Uuid,
+    server_id: Uuid,
+    rollout_id: Uuid,
+    applied_by: &str,
+) -> Result<McpServerRolloutResponse, AppError> {
+    let server = state.get_mcp_server(team_id, server_id).await?;
+    let rollout = mcp_pending_rollout(&server)
+        .cloned()
+        .ok_or_else(|| AppError::bad_request("MCP server has no pending rollout"))?;
+    if rollout.get("id").and_then(Value::as_str) != Some(&rollout_id.to_string()) {
+        return Err(AppError::bad_request(
+            "MCP server pending rollout does not match requested rollout id",
+        ));
+    }
+    if rollout.get("status").and_then(Value::as_str) != Some("pending") {
+        return Err(AppError::bad_request("MCP server rollout is not pending"));
+    }
+    enforce_mcp_rollout_activation_window(&rollout, Utc::now())?;
+    let target = rollout
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::bad_request("MCP server rollout missing target"))?;
+    let mut candidate = server.clone();
+    if let Some(transport) = target.get("transport").and_then(Value::as_str) {
+        candidate.transport = transport.to_string();
+    }
+    if let Some(config) = target.get("config") {
+        candidate.config = config.clone();
+    }
+    if let Some(tool_allowlist) = target.get("tool_allowlist").cloned() {
+        candidate.tool_allowlist = serde_json::from_value(tool_allowlist).map_err(|error| {
+            AppError::bad_request(format!("invalid rollout tool_allowlist: {error}"))
+        })?;
+    }
+    if let Some(status) = target.get("status").and_then(Value::as_str) {
+        candidate.status = status.to_string();
+    }
+    let preflight_health = mcp_server_health(state, &candidate).await;
+    if candidate.status == "active" && !preflight_health.healthy {
+        return Err(AppError::bad_request(format!(
+            "MCP server rollout preflight failed: {}",
+            preflight_health.issues.join("; ")
+        )));
+    }
+    let mut applied_rollout = rollout;
+    applied_rollout["status"] = json!("applied");
+    applied_rollout["applied_by"] = json!(applied_by);
+    applied_rollout["applied_at"] = json!(Utc::now());
+    let mut config = candidate.config.as_object().cloned().unwrap_or_default();
+    config.remove("pending_rollout");
+    config.insert("last_rollout".to_string(), applied_rollout.clone());
+    let updated = state
+        .update_mcp_server(
+            team_id,
+            server_id,
+            UpdateMcpServerRecord {
+                transport: Some(candidate.transport),
+                config: Some(Value::Object(config)),
+                tool_allowlist: Some(candidate.tool_allowlist),
+            },
+        )
+        .await?;
+    let updated = if updated.status != candidate.status {
+        state
+            .update_mcp_server_status(team_id, server_id, &candidate.status)
+            .await?
+    } else {
+        updated
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "mcp.server_rollout_applied",
+            "mcp_server",
+            Some(server_id),
+            json!({
+                "subject": applied_by,
+                "team_id": team_id,
+                "name": updated.name,
+                "rollout": applied_rollout,
+            }),
+        ))
+        .await?;
+    Ok(McpServerRolloutResponse {
+        server: updated,
+        rollout: applied_rollout,
+        preflight_health: Some(preflight_health),
+    })
+}
+
+async fn mark_mcp_server_rollout_expired(
+    state: &AppState,
+    team_id: Uuid,
+    server: &McpServerRecord,
+    rollout: &Value,
+) -> Result<Value, AppError> {
+    let mut expired = rollout.clone();
+    expired["status"] = json!("expired");
+    expired["expired_at"] = json!(Utc::now());
+    let mut config = server.config.as_object().cloned().unwrap_or_default();
+    config.remove("pending_rollout");
+    config.insert("last_rollout".to_string(), expired.clone());
+    state
+        .update_mcp_server(
+            team_id,
+            server.id,
+            UpdateMcpServerRecord {
+                transport: None,
+                config: Some(Value::Object(config)),
+                tool_allowlist: None,
+            },
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "mcp.server_rollout_expired",
+            "mcp_server",
+            Some(server.id),
+            json!({
+                "team_id": team_id,
+                "name": server.name,
+                "rollout": expired,
+            }),
+        ))
+        .await?;
+    Ok(expired)
+}
+
+fn mcp_pending_rollout(server: &McpServerRecord) -> Option<&Value> {
+    server
+        .config
+        .get("pending_rollout")
+        .filter(|rollout| rollout.get("status").and_then(Value::as_str) == Some("pending"))
+}
+
+fn mcp_config_without_rollout_metadata(config: &Value) -> Value {
+    let mut object = config.as_object().cloned().unwrap_or_default();
+    object.remove("pending_rollout");
+    object.remove("last_rollout");
+    Value::Object(object)
+}
+
+fn mcp_rollout_activation_window(rollout: &Value) -> Option<PolicyActivationWindow> {
+    let window = rollout.get("activation_window")?;
+    if window.is_null() {
+        return None;
+    }
+    Some(PolicyActivationWindow {
+        activate_after: window
+            .get("activate_after")
+            .and_then(Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc)),
+        activate_before: window
+            .get("activate_before")
+            .and_then(Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc)),
+    })
+}
+
+fn enforce_mcp_rollout_activation_window(
+    rollout: &Value,
+    now: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let Some(window) = mcp_rollout_activation_window(rollout) else {
+        return Ok(());
+    };
+    if let Some(activate_after) = window.activate_after
+        && now < activate_after
+    {
+        return Err(AppError::bad_request(format!(
+            "MCP server rollout activation window is not open until {}",
+            activate_after.to_rfc3339()
+        )));
+    }
+    if let Some(activate_before) = window.activate_before
+        && now > activate_before
+    {
+        return Err(AppError::bad_request(format!(
+            "MCP server rollout activation window closed at {}",
+            activate_before.to_rfc3339()
+        )));
+    }
+    Ok(())
+}
+
+fn mcp_rollout_is_due(rollout: &Value, now: DateTime<Utc>) -> bool {
+    let Some(window) = mcp_rollout_activation_window(rollout) else {
+        return false;
+    };
+    let Some(activate_after) = window.activate_after else {
+        return false;
+    };
+    now >= activate_after
+}
+
+fn mcp_rollout_is_expired(rollout: &Value, now: DateTime<Utc>) -> bool {
+    mcp_rollout_activation_window(rollout)
+        .and_then(|window| window.activate_before)
+        .is_some_and(|activate_before| now > activate_before)
 }
 
 fn mcp_server_health_check_is_due(server: &McpServerRecord, now: DateTime<Utc>) -> bool {
@@ -13083,6 +13728,102 @@ not json
         assert_eq!(skipped_scheduled_run.due_count, 0);
         assert_eq!(skipped_scheduled_run.skipped_count, 1);
 
+        let activate_after = (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let rollout: McpServerRolloutResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}/rollouts",
+                    team.id, mcp_server.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "transport": "http+json",
+                        "config": {
+                            "source": "rolled-out",
+                            "health_check": {"interval_seconds": 60}
+                        },
+                        "tool_allowlist": ["search"],
+                        "status": "active",
+                        "activate_after": activate_after,
+                        "reason": "test scheduled connector rollout"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rollout.rollout["status"], "pending");
+        assert_eq!(rollout.preflight_health.expect("preflight").healthy, true);
+        assert!(
+            rollout
+                .server
+                .config
+                .get("pending_rollout")
+                .and_then(|value| value.get("id"))
+                .is_some()
+        );
+
+        let rollout_run: McpServerRolloutDueRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/rollouts/run-due",
+                    team.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rollout_run.applied_count, 1);
+        assert_eq!(rollout_run.failed_count, 0);
+
+        let rolled_servers: Vec<McpServerRecord> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/teams/{}/mcp-servers", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let rolled_server = rolled_servers
+            .iter()
+            .find(|server| server.id == mcp_server.id)
+            .expect("rolled server");
+        assert_eq!(rolled_server.config["source"], "rolled-out");
+        assert!(rolled_server.config.get("pending_rollout").is_none());
+        assert_eq!(rolled_server.config["last_rollout"]["status"], "applied");
+        let applied_rollout_id = rolled_server.config["last_rollout"]["id"]
+            .as_str()
+            .expect("rollout id")
+            .to_string();
+
+        let rolled_back: McpServerRolloutResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/{}/rollouts/{}/rollback",
+                    team.id, mcp_server.id, applied_rollout_id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rolled_back.rollout["status"], "rolled_back");
+        assert_eq!(rolled_back.server.config["source"], "scheduled");
+
         let result: Value = request_json(
             app.clone(),
             Request::builder()
@@ -13388,6 +14129,26 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "mcp.server_scheduled_health_run")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "mcp.server_rollout_requested")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "mcp.server_rollout_due_run")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "mcp.server_rollout_applied")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "mcp.server_rollout_rolled_back")
         );
     }
 
