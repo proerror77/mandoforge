@@ -43,6 +43,7 @@ const state = {
   selectedOrganizationId: "",
   selectedTeamId: "",
   approvalDeliveries: {},
+  approvalEscalationDueRun: null,
   approvalGroups: [],
   approvalEscalationRules: [],
   codexAppServer: {
@@ -112,6 +113,7 @@ const membershipForm = document.querySelector("#membership-form");
 const tenantInvitationForm = document.querySelector("#tenant-invitation-form");
 const approvalGroupForm = document.querySelector("#approval-group-form");
 const approvalEscalationRuleForm = document.querySelector("#approval-escalation-rule-form");
+const runDueApprovalEscalationsButton = document.querySelector("#run-due-approval-escalations");
 const approvalGovernanceRoot = document.querySelector("#approval-governance");
 const providerForm = document.querySelector("#provider-form");
 const secretForm = document.querySelector("#secret-form");
@@ -145,6 +147,7 @@ membershipForm.addEventListener("submit", createMembership);
 tenantInvitationForm.addEventListener("submit", createTenantInvitation);
 approvalGroupForm.addEventListener("submit", createApprovalGroup);
 approvalEscalationRuleForm.addEventListener("submit", createApprovalEscalationRule);
+runDueApprovalEscalationsButton.addEventListener("click", runDueApprovalEscalations);
 providerForm.addEventListener("submit", createProvider);
 secretForm.addEventListener("submit", createSecretRecord);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
@@ -361,6 +364,14 @@ async function createApprovalEscalationRule(event) {
       after_seconds: 0,
     }),
   });
+  await refreshOps();
+}
+
+async function runDueApprovalEscalations() {
+  state.approvalEscalationDueRun = await api("/api/approvals/escalations/run-due", {
+    method: "POST",
+  });
+  await refreshApprovals();
   await refreshOps();
 }
 
@@ -1945,7 +1956,14 @@ function renderSecretRecords() {
 }
 
 function renderApprovalGovernance() {
+  const dueRun = state.approvalEscalationDueRun
+    ? `<div class="item">
+        <strong>Due escalation run: ${escapeHtml(state.approvalEscalationDueRun.status)}</strong>
+        <div class="muted">${formatInteger(state.approvalEscalationDueRun.escalated_count)} escalated · ${formatInteger(state.approvalEscalationDueRun.expired_count)} expired · ${formatInteger(state.approvalEscalationDueRun.skipped_count)} skipped · ${escapeHtml(state.approvalEscalationDueRun.checked_at)}</div>
+      </div>`
+    : "";
   approvalGovernanceRoot.innerHTML = `
+    ${dueRun}
     <h4>Approval Groups</h4>
     ${
       state.approvalGroups.length

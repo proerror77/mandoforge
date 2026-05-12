@@ -404,6 +404,16 @@ struct ApprovalNotificationDelivery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalEscalationDueRun {
+    status: String,
+    checked_at: DateTime<Utc>,
+    expired_count: usize,
+    escalated_count: usize,
+    skipped_count: usize,
+    notification_deliveries: Vec<ApprovalNotificationDelivery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolCall {
     id: Uuid,
     session_id: Uuid,
@@ -1485,6 +1495,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/approvals/{id}/modify", post(modify_approval))
         .route("/api/approvals/{id}/deliver", post(deliver_approval))
         .route("/api/approvals/{id}/escalate", post(escalate_approval))
+        .route(
+            "/api/approvals/escalations/run-due",
+            post(run_due_approval_escalations),
+        )
         .route(
             "/api/approval-groups",
             get(list_approval_groups).post(create_approval_group),
@@ -7223,6 +7237,107 @@ async fn escalate_approval(
     if group.status != "active" {
         return Err(AppError::bad_request("approval group is not active"));
     }
+    let updated = escalate_approval_record(
+        &state,
+        &approval,
+        &group,
+        rule_id,
+        input
+            .reason
+            .unwrap_or_else(|| "Manual escalation".to_string()),
+        principal.subject_id,
+        "user",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(updated))
+}
+
+async fn run_due_approval_escalations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApprovalEscalationDueRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "approval_escalation_rules",
+        None,
+    )
+    .await?;
+    let checked_at = Utc::now();
+    let mut expired_count = 0;
+    let mut escalated_count = 0;
+    let mut skipped_count = 0;
+    let mut notification_deliveries = Vec::new();
+    let rules = state.list_approval_escalation_rules().await?;
+    for approval in state
+        .list_approvals()
+        .await?
+        .into_iter()
+        .filter(|approval| approval.status == "pending")
+    {
+        if approval_is_expired_at(&approval, checked_at) {
+            expire_approval_record(&state, approval.id).await?;
+            expired_count += 1;
+            continue;
+        }
+        let Some(rule) = next_due_escalation_rule(&approval, &rules, checked_at) else {
+            skipped_count += 1;
+            continue;
+        };
+        let group = state.get_approval_group(rule.group_id).await?;
+        if group.status != "active" {
+            skipped_count += 1;
+            continue;
+        }
+        let updated = escalate_approval_record(
+            &state,
+            &approval,
+            &group,
+            Some(rule.id),
+            format!("Scheduled escalation after {} seconds", rule.after_seconds),
+            "system".to_string(),
+            "system",
+            None,
+        )
+        .await?;
+        escalated_count += 1;
+        notification_deliveries
+            .push(deliver_approval_notification(&state, &updated, checked_at).await?);
+    }
+    let run = ApprovalEscalationDueRun {
+        status: "completed".to_string(),
+        checked_at,
+        expired_count,
+        escalated_count,
+        skipped_count,
+        notification_deliveries,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "approval.escalation_due_run",
+            "approval_escalation_rules",
+            None,
+            serde_json::to_value(&run)?,
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
+async fn escalate_approval_record(
+    state: &AppState,
+    approval: &Approval,
+    group: &ApprovalGroup,
+    rule_id: Option<Uuid>,
+    reason: String,
+    escalated_by: String,
+    actor_type: &str,
+    actor_id: Option<Uuid>,
+) -> Result<Approval, AppError> {
     let escalated_at = Utc::now();
     let mut evidence = approval.evidence.clone();
     merge_approval_evidence(
@@ -7233,21 +7348,23 @@ async fn escalate_approval(
             "escalation": {
                 "rule_id": rule_id,
                 "group_id": group.id,
-                "reason": input.reason.unwrap_or_else(|| "Manual escalation".to_string()),
-                "escalated_by": principal.subject_id,
+                "reason": reason,
+                "escalated_by": escalated_by,
                 "escalated_at": escalated_at
             }
         }),
     );
-    let updated = state.update_approval_evidence(id, evidence).await?;
+    let updated = state
+        .update_approval_evidence(approval.id, evidence)
+        .await?;
     state
         .append_event(
-            "user",
-            Some(id),
+            actor_type,
+            actor_id,
             updated.session_id,
             "approval.escalated",
             json!({
-                "approval_id": id,
+                "approval_id": approval.id,
                 "group_id": group.id,
                 "group_name": group.name,
                 "rule_id": rule_id,
@@ -7258,11 +7375,11 @@ async fn escalate_approval(
     state
         .append_audit_log(new_audit_log(
             Some(updated.session_id),
-            "user",
-            Some(id),
+            actor_type,
+            actor_id,
             "approval.escalated",
             "approval",
-            Some(id),
+            Some(approval.id),
             json!({
                 "group_id": group.id,
                 "group_name": group.name,
@@ -7271,7 +7388,7 @@ async fn escalate_approval(
             }),
         ))
         .await?;
-    Ok(Json(updated))
+    Ok(updated)
 }
 
 async fn deliver_approval(
@@ -7291,15 +7408,35 @@ async fn deliver_approval(
         return Err(AppError::bad_request("approval expired"));
     }
     let delivered_at = Utc::now();
+    Ok(Json(
+        deliver_approval_notification(&state, &approval, delivered_at).await?,
+    ))
+}
+
+async fn deliver_approval_notification(
+    state: &AppState,
+    approval: &Approval,
+    delivered_at: DateTime<Utc>,
+) -> Result<ApprovalNotificationDelivery, AppError> {
     let Some(webhook_url) = state.approval_webhook_url.as_ref() else {
-        return Ok(Json(ApprovalNotificationDelivery {
+        return Ok(ApprovalNotificationDelivery {
             status: "reserved".to_string(),
             delivered: false,
             channel: "webhook".to_string(),
             webhook_configured: false,
-            approval_id: id,
+            approval_id: approval.id,
             delivered_at,
-        }));
+        });
+    };
+    let approval_group_id = approval
+        .evidence
+        .get("approver_group_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let approval_group = if let Some(group_id) = approval_group_id {
+        state.get_approval_group(group_id).await.ok()
+    } else {
+        None
     };
     let response = tokio::time::timeout(
         Duration::from_secs(10),
@@ -7308,6 +7445,7 @@ async fn deliver_approval(
             .json(&json!({
                 "type": "mandoforge.approval_requested",
                 "approval": approval,
+                "approval_group": approval_group,
                 "delivered_at": delivered_at,
             }))
             .send(),
@@ -7324,21 +7462,21 @@ async fn deliver_approval(
         delivered: true,
         channel: "webhook".to_string(),
         webhook_configured: true,
-        approval_id: id,
+        approval_id: approval.id,
         delivered_at,
     };
     state
         .append_audit_log(new_audit_log(
             Some(approval.session_id),
             "system",
-            Some(id),
+            Some(approval.id),
             "approval.notification_delivered",
             "approval",
-            Some(id),
+            Some(approval.id),
             serde_json::to_value(&delivery)?,
         ))
         .await?;
-    Ok(Json(delivery))
+    Ok(delivery)
 }
 
 async fn authorize_approval_decision(
@@ -7637,10 +7775,45 @@ async fn decide_approval(
 }
 
 fn approval_is_expired(approval: &Approval) -> bool {
+    approval_is_expired_at(approval, Utc::now())
+}
+
+fn approval_is_expired_at(approval: &Approval, now: DateTime<Utc>) -> bool {
     approval.status == "pending"
         && approval
             .expires_at
-            .is_some_and(|expires_at| expires_at <= Utc::now())
+            .is_some_and(|expires_at| expires_at <= now)
+}
+
+fn next_due_escalation_rule(
+    approval: &Approval,
+    rules: &[ApprovalEscalationRule],
+    now: DateTime<Utc>,
+) -> Option<ApprovalEscalationRule> {
+    let previous_rule_id = approval
+        .evidence
+        .get("escalation")
+        .and_then(|value| value.get("rule_id"))
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let previous_order = previous_rule_id.and_then(|rule_id| {
+        rules
+            .iter()
+            .find(|rule| rule.id == rule_id)
+            .map(|rule| rule.order_index)
+    });
+    let age_seconds = now
+        .signed_duration_since(approval.created_at)
+        .num_seconds()
+        .max(0) as i32;
+    rules
+        .iter()
+        .filter(|rule| rule.status == "active")
+        .filter(|rule| rule.risk_level == approval.risk_level)
+        .filter(|rule| previous_order.map_or(true, |order| rule.order_index > order))
+        .filter(|rule| age_seconds >= rule.after_seconds)
+        .min_by_key(|rule| (rule.order_index, rule.created_at))
+        .cloned()
 }
 
 async fn expire_approval_record(state: &AppState, approval_id: Uuid) -> Result<Approval, AppError> {
@@ -12653,6 +12826,206 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "approval.escalated")
+        );
+    }
+
+    #[tokio::test]
+    async fn due_approval_escalation_run_advances_pending_approvals_by_rule_order() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "scheduled approval escalation"}),
+            ),
+        )
+        .await;
+
+        let first_group: ApprovalGroup = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approval-groups")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "primary-risk", "subjects": ["approver-primary"]}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let second_group: ApprovalGroup = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approval-groups")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "secondary-risk", "subjects": ["approver-secondary"]})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let first_rule: ApprovalEscalationRule = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approval-escalation-rules")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "primary-now",
+                        "risk_level": "high",
+                        "group_id": first_group.id,
+                        "order_index": 0,
+                        "after_seconds": 0
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let second_rule: ApprovalEscalationRule = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approval-escalation-rules")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "secondary-now",
+                        "risk_level": "high",
+                        "group_id": second_group.id,
+                        "order_index": 1,
+                        "after_seconds": 0
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/approval.request/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "action": "manual.scheduled_review",
+                        "risk_level": "high",
+                        "reason": "Escalate this approval on a due run."
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+
+        let first_run: ApprovalEscalationDueRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approvals/escalations/run-due")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(first_run.status, "completed");
+        assert_eq!(first_run.escalated_count, 1);
+        assert_eq!(first_run.expired_count, 0);
+        assert_eq!(first_run.notification_deliveries[0].status, "reserved");
+        let approvals: Vec<Approval> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let first_escalated = approvals
+            .iter()
+            .find(|approval| approval.id.to_string() == approval_id)
+            .expect("first escalated approval");
+        assert_eq!(
+            first_escalated.evidence["approver_group_id"],
+            json!(first_group.id)
+        );
+        assert_eq!(
+            first_escalated.evidence["escalation"]["rule_id"],
+            json!(first_rule.id)
+        );
+
+        let second_run: ApprovalEscalationDueRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approvals/escalations/run-due")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(second_run.escalated_count, 1);
+        let approvals: Vec<Approval> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let second_escalated = approvals
+            .iter()
+            .find(|approval| approval.id.to_string() == approval_id)
+            .expect("second escalated approval");
+        assert_eq!(
+            second_escalated.evidence["approver_group_id"],
+            json!(second_group.id)
+        );
+        assert_eq!(
+            second_escalated.evidence["escalation"]["rule_id"],
+            json!(second_rule.id)
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "approval.escalation_due_run")
         );
     }
 
