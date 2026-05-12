@@ -39,6 +39,7 @@ mod store_entities;
 mod store_eval;
 mod store_events;
 mod store_governance;
+mod store_policy_revisions;
 mod store_releases;
 mod store_rows;
 mod store_secret_records;
@@ -562,6 +563,23 @@ struct PolicyTestResult {
     tested_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyRevision {
+    id: Uuid,
+    name: String,
+    body: Value,
+    status: String,
+    created_by: Option<String>,
+    created_at: DateTime<Utc>,
+    activated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatePolicyRevision {
+    name: String,
+    body: Value,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SecretProviderHealth {
     provider_kind: String,
@@ -950,6 +968,14 @@ fn build_router(state: AppState) -> Router {
         .route("/api/policy", get(get_policy))
         .route("/api/policy/simulate", post(simulate_policy))
         .route("/api/policy/test", post(test_policy))
+        .route(
+            "/api/policy/revisions",
+            get(list_policy_revisions).post(create_policy_revision),
+        )
+        .route(
+            "/api/policy/revisions/{id}/activate",
+            post(activate_policy_revision),
+        )
         .route("/api/vault/health", get(get_vault_health))
         .route(
             "/api/vault/secrets",
@@ -2854,6 +2880,101 @@ async fn test_policy(
         ))
         .await?;
     Ok(Json(result))
+}
+
+async fn list_policy_revisions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PolicyRevision>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
+    Ok(Json(state.list_policy_revisions().await?))
+}
+
+async fn create_policy_revision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreatePolicyRevision>,
+) -> Result<Json<PolicyRevision>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "policy".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let input = validate_policy_revision_input(input)?;
+    let revision = state
+        .create_policy_revision(input, principal.subject_id.clone())
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.revision_created",
+            "policy_revision",
+            Some(revision.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": revision.name,
+                "status": revision.status
+            }),
+        ))
+        .await?;
+    Ok(Json(revision))
+}
+
+async fn activate_policy_revision(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRevision>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "policy_revision".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let revision = state.activate_policy_revision(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.revision_activated",
+            "policy_revision",
+            Some(revision.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": revision.name,
+                "status": revision.status,
+                "activated_at": revision.activated_at
+            }),
+        ))
+        .await?;
+    Ok(Json(revision))
+}
+
+fn validate_policy_revision_input(
+    mut input: CreatePolicyRevision,
+) -> Result<CreatePolicyRevision, AppError> {
+    input.name = input.name.trim().to_string();
+    if input.name.is_empty() {
+        return Err(AppError::bad_request("policy revision name is required"));
+    }
+    if !input.body.is_object() {
+        return Err(AppError::bad_request(
+            "policy revision body must be a JSON object",
+        ));
+    }
+    serde_json::from_value::<PolicyConfig>(input.body.clone())
+        .map_err(|error| AppError::bad_request(format!("invalid policy body: {error}")))?;
+    Ok(input)
 }
 
 async fn get_vault_health(
@@ -7274,6 +7395,94 @@ not json
             3
         );
 
+        let policy_revision: PolicyRevision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/revisions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "stage2-test-policy",
+                        "body": {
+                            "blocked_tools": ["secret.read"],
+                            "approval_required": [
+                                {"tool": "shell.exec", "risk": "high"},
+                                {"tool": "file.write", "risk": "medium"}
+                            ],
+                            "allowed_tools": {
+                                "generic-orchestrator-agent": ["file.read", "file.write", "sql.query", "shell.exec"]
+                            },
+                            "sql_policy": {
+                                "max_rows": 500,
+                                "blocked_keywords": ["INSERT", "UPDATE", "DELETE", "DROP"]
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(policy_revision.status, "draft");
+
+        let invalid_policy_revision = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/policy/revisions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "invalid-policy",
+                        "body": {
+                            "approval_required": [{"tool": "shell.exec"}]
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(invalid_policy_revision.0, StatusCode::BAD_REQUEST);
+
+        let active_policy_revision: PolicyRevision = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/policy/revisions/{}/activate",
+                    policy_revision.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(active_policy_revision.status, "active");
+        assert!(active_policy_revision.activated_at.is_some());
+
+        let policy_revisions: Vec<PolicyRevision> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/policy/revisions")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            policy_revisions
+                .iter()
+                .any(|revision| revision.id == policy_revision.id && revision.status == "active")
+        );
+
         let audit_logs: Vec<AuditLog> = request_json(
             app.clone(),
             Request::builder()
@@ -7290,6 +7499,16 @@ not json
                 .any(|log| log.action == "policy.simulated")
         );
         assert!(audit_logs.iter().any(|log| log.action == "policy.tested"));
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "policy.revision_created")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "policy.revision_activated")
+        );
 
         let reserved_secret_health = secret_provider_health_from_lookup(|_| None).await;
         assert_eq!(reserved_secret_health.provider_kind, "reserved");

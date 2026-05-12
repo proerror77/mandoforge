@@ -54,7 +54,7 @@ wait_for_static_ui() {
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
     hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
-    hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy'),
+    hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy') && text.includes('POLICY REVISIONS') && text.includes('Create Policy Revision'),
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),
     hasTenantGovernance: text.includes('Tenant Governance'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),

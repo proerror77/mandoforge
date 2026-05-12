@@ -10,7 +10,7 @@ MandoForge is a Rust-native Generic Agent OS Kernel. It is not a vertical commer
 - Session binding to agent versions with per-version tool allowlist enforcement.
 - Static Session Console UI with event timeline and approval queue.
 - Generic demo data: `platform_events`, `sample_documents`, and `sample_metrics`.
-- YAML governance policy for blocked and approval-required tools.
+- YAML governance policy for blocked and approval-required tools, plus audited Stage 2 policy revision metadata.
 - Codex CLI adapter stub that runs `codex exec` inside a per-session workspace when invoked.
 - Docker Compose and Kubernetes deployment skeleton.
 
@@ -236,6 +236,9 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/policy`
 - `POST /api/policy/simulate`
 - `POST /api/policy/test`
+- `GET /api/policy/revisions`
+- `POST /api/policy/revisions`
+- `POST /api/policy/revisions/:id/activate`
 - `GET /api/vault/secrets`
 - `POST /api/vault/secrets`
 - `POST /api/vault/secrets/:id/rotate`

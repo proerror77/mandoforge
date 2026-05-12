@@ -12,6 +12,7 @@ const state = {
   policy: null,
   policyDecision: null,
   policyTest: null,
+  policyRevisions: [],
   evalDatasets: [],
   evalCases: [],
   evalRuns: [],
@@ -57,6 +58,8 @@ const policyRoot = document.querySelector("#policy-summary");
 const policyForm = document.querySelector("#policy-simulate-form");
 const policyTestForm = document.querySelector("#policy-test-form");
 const policyDecisionRoot = document.querySelector("#policy-decision");
+const policyRevisionForm = document.querySelector("#policy-revision-form");
+const policyRevisionRoot = document.querySelector("#policy-revisions");
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
@@ -98,6 +101,7 @@ secretForm.addEventListener("submit", createSecretRecord);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
 policyForm.addEventListener("submit", simulatePolicy);
 policyTestForm.addEventListener("submit", testPolicy);
+policyRevisionForm.addEventListener("submit", createPolicyRevision);
 evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
 evalRunForm.addEventListener("submit", createEvalRun);
@@ -305,6 +309,26 @@ async function testPolicy(event) {
   renderPolicy();
 }
 
+async function createPolicyRevision(event) {
+  event.preventDefault();
+  const form = new FormData(policyRevisionForm);
+  await api("/api/policy/revisions", {
+    method: "POST",
+    body: JSON.stringify({
+      name: String(form.get("name") || "").trim(),
+      body: parseJsonField(form.get("body"), "Policy body JSON"),
+    }),
+  });
+  state.policyRevisions = await api("/api/policy/revisions");
+  renderPolicy();
+}
+
+async function activatePolicyRevision(id) {
+  await api(`/api/policy/revisions/${id}/activate`, { method: "POST" });
+  state.policyRevisions = await api("/api/policy/revisions");
+  renderPolicy();
+}
+
 async function createEvalDataset(event) {
   event.preventDefault();
   const form = new FormData(evalDatasetForm);
@@ -503,6 +527,7 @@ async function refreshOps() {
     providers,
     secretRecords,
     policy,
+    policyRevisions,
     evalDatasets,
     evalRuns,
     usage,
@@ -514,6 +539,7 @@ async function refreshOps() {
       api("/api/providers"),
       api("/api/vault/secrets"),
       api("/api/policy"),
+      api("/api/policy/revisions"),
       api("/api/eval/datasets"),
       api("/api/eval/runs"),
       api("/api/usage"),
@@ -524,6 +550,7 @@ async function refreshOps() {
   state.providers = providers;
   state.secretRecords = secretRecords;
   state.policy = policy;
+  state.policyRevisions = policyRevisions;
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
   state.usage = usage;
@@ -1002,6 +1029,7 @@ function renderPolicy() {
   if (!state.policy) {
     policyRoot.innerHTML = `<div class="muted">Policy data is not loaded.</div>`;
     policyDecisionRoot.innerHTML = "";
+    policyRevisionRoot.innerHTML = "";
     return;
   }
   const blockedTools = state.policy.blocked_tools || [];
@@ -1035,6 +1063,32 @@ function renderPolicy() {
       </div>
     `;
   }
+  policyRevisionRoot.innerHTML = `
+    <h4>Policy Revisions</h4>
+    ${
+      state.policyRevisions.length
+        ? state.policyRevisions
+            .map(
+              (revision) => `
+                <div class="item">
+                  <strong>${escapeHtml(revision.name)}</strong>
+                  <div class="muted">${escapeHtml(revision.status)} · ${escapeHtml(revision.created_at)}</div>
+                  <pre>${escapeHtml(JSON.stringify(revision.body, null, 2))}</pre>
+                  ${
+                    revision.status === "active"
+                      ? `<span class="badge">Active</span>`
+                      : `<button type="button" data-policy-activate="${escapeHtml(revision.id)}">Activate</button>`
+                  }
+                </div>
+              `,
+            )
+            .join("")
+        : `<div class="muted">No policy revisions yet.</div>`
+    }
+  `;
+  policyRevisionRoot.querySelectorAll("[data-policy-activate]").forEach((button) => {
+    button.addEventListener("click", () => activatePolicyRevision(button.dataset.policyActivate));
+  });
 }
 
 function renderProviders() {

@@ -4,8 +4,9 @@ use sqlx::{Row, postgres::PgRow};
 
 use crate::{
     Agent, AgentRelease, AgentVersion, AppError, Approval, Artifact, AuditLog, EvalCase,
-    EvalDataset, EvalRun, McpServerRecord, Membership, Organization, Project, ProviderAccess,
-    ProviderRecord, SecretRecord, Session, SessionEvent, Team, ToolCall, UsageRollup,
+    EvalDataset, EvalRun, McpServerRecord, Membership, Organization, PolicyRevision, Project,
+    ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent, Team, ToolCall,
+    UsageRollup,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -67,6 +68,18 @@ pub(crate) fn agent_release_from_row(row: PgRow) -> Result<AgentRelease, AppErro
         promoted_by: row.try_get("promoted_by")?,
         promoted_at: row.try_get("promoted_at")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn policy_revision_from_row(row: PgRow) -> Result<PolicyRevision, AppError> {
+    Ok(PolicyRevision {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        body: row.try_get("body")?,
+        status: row.try_get("status")?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+        activated_at: row.try_get("activated_at")?,
     })
 }
 

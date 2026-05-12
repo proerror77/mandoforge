@@ -150,5 +150,6 @@
 - [x] Add static Admin Console panels for usage, providers, eval runs, and governance status.
 - [x] Add static Policy Console for policy inspection and tool-decision simulation.
 - [x] Add static Policy Console batch test controls.
+- [x] Add audited policy revision create/list/activate APIs and static rollout metadata UI.
 - [x] Add static Provider Settings form for creating/updating stored providers with budget and pricing config.
 - [x] Add static Provider Settings fields for base URL and API key env/ref config.

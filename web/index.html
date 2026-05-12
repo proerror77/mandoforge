@@ -197,8 +197,20 @@
                 </label>
                 <button type="submit">Test Policy</button>
               </form>
+              <form id="policy-revision-form" class="stack-form compact-form">
+                <label>
+                  Revision name
+                  <input name="name" required value="draft-policy-rollout" />
+                </label>
+                <label>
+                  Policy body JSON
+                  <textarea name="body" rows="7">{"blocked_tools":["secret.read"],"approval_required":[{"tool":"shell.exec","risk":"high"},{"tool":"file.write","risk":"medium"}],"allowed_tools":{"generic-orchestrator-agent":["file.read","file.write","sql.query","shell.exec","artifact.create"]},"sql_policy":{"max_rows":500,"blocked_keywords":["INSERT","UPDATE","DELETE","DROP","ALTER","CREATE","TRUNCATE","GRANT","REVOKE","COPY","CALL","DO"]}}</textarea>
+                </label>
+                <button type="submit">Create Policy Revision</button>
+              </form>
               <div id="policy-summary" class="detail-panel"></div>
               <div id="policy-decision" class="list"></div>
+              <div id="policy-revisions" class="list"></div>
             </div>
             <div>
               <h3>Providers</h3>
