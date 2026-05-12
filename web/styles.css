@@ -131,6 +131,19 @@ button.reject {
   margin: 6px 0 0;
 }
 
+.compact-form {
+  margin-bottom: 12px;
+}
+
+.compact-form input {
+  min-height: 34px;
+  padding: 7px 9px;
+}
+
+.compact-form button {
+  min-height: 34px;
+}
+
 section + section {
   margin-top: 28px;
 }

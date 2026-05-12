@@ -80,6 +80,29 @@
             </div>
             <div>
               <h3>Providers</h3>
+              <form id="provider-form" class="stack-form compact-form">
+                <label>
+                  Name
+                  <input name="name" required value="governed-mock" />
+                </label>
+                <label>
+                  Type
+                  <input name="provider_type" required value="mock" />
+                </label>
+                <label>
+                  Model
+                  <input name="default_model" value="gpt-5.4-mini" />
+                </label>
+                <label>
+                  Daily request limit
+                  <input name="daily_request_limit" type="number" min="0" value="100" />
+                </label>
+                <label>
+                  Per request cents
+                  <input name="per_request_cents" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <button type="submit">Save Provider</button>
+              </form>
               <div id="providers" class="list"></div>
             </div>
             <div>

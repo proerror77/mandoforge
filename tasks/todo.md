@@ -118,3 +118,4 @@
 - [ ] Add MCP tool discovery import and UI management.
 - [x] Add usage/cost aggregation API for provider requests, tool runtime, approvals, and configured provider pricing.
 - [x] Add static Admin Console panels for usage, providers, eval runs, and governance status.
+- [x] Add static Provider Settings form for creating/updating stored providers with budget and pricing config.

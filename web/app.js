@@ -30,9 +30,11 @@ const evalRunRoot = document.querySelector("#eval-runs");
 const usageRoot = document.querySelector("#usage-summary");
 const governanceRoot = document.querySelector("#governance-status");
 const agentForm = document.querySelector("#agent-form");
+const providerForm = document.querySelector("#provider-form");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
+providerForm.addEventListener("submit", createProvider);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -73,6 +75,26 @@ async function createAgent(event) {
   });
   state.agents = [agent, ...state.agents.filter((existing) => existing.id !== agent.id)];
   renderAgents();
+}
+
+async function createProvider(event) {
+  event.preventDefault();
+  const form = new FormData(providerForm);
+  const dailyRequestLimit = Number(form.get("daily_request_limit") || 0);
+  const perRequestCents = Number(form.get("per_request_cents") || 0);
+  await api("/api/providers", {
+    method: "POST",
+    body: JSON.stringify({
+      name: form.get("name"),
+      provider_type: form.get("provider_type"),
+      default_model: form.get("default_model"),
+      config: {
+        budget: { daily_request_limit: dailyRequestLimit },
+        pricing: { per_request_cents: perRequestCents },
+      },
+    }),
+  });
+  await refreshOps();
 }
 
 async function runDemo() {
