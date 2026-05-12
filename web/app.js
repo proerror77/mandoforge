@@ -372,12 +372,27 @@ function renderProviders() {
             <div class="item">
               <strong>${escapeHtml(provider.name)}</strong>
               <div class="muted">${escapeHtml(provider.provider_type)} · ${escapeHtml(provider.status)}</div>
+              <button class="secondary" data-provider-status="${provider.id}" data-status="active">Activate</button>
+              <button class="secondary reject" data-provider-status="${provider.id}" data-status="disabled">Disable</button>
               <pre>${escapeHtml(JSON.stringify(provider.config, null, 2))}</pre>
             </div>
           `,
         )
         .join("")
     : `<div class="muted">No stored providers</div>`;
+  providerRoot.querySelectorAll("[data-provider-status]").forEach((button) => {
+    button.addEventListener("click", () =>
+      updateProviderStatus(button.dataset.providerStatus, button.dataset.status),
+    );
+  });
+}
+
+async function updateProviderStatus(providerId, status) {
+  await api(`/api/providers/${providerId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+  await refreshOps();
 }
 
 function renderEvalRuns() {

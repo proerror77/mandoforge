@@ -704,7 +704,40 @@ impl AppState {
         Ok(provider)
     }
 
-    pub(crate) async fn active_provider_by_name(
+    pub(crate) async fn update_provider_status(
+        &self,
+        provider_id: Uuid,
+        status: &str,
+    ) -> Result<ProviderRecord, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let provider = store
+                    .providers
+                    .get_mut(&provider_id)
+                    .ok_or_else(|| AppError::not_found("provider not found"))?;
+                provider.status = status.to_string();
+                Ok(provider.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE providers
+                     SET status = $1
+                     WHERE tenant_id = $2 AND id = $3
+                     RETURNING id, provider_type, name, base_url, default_model, config, status, created_at",
+                )
+                .bind(status)
+                .bind(self.tenant_id)
+                .bind(provider_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("provider not found"))?;
+                provider_record_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn provider_by_name(
         &self,
         name: &str,
     ) -> Result<Option<ProviderRecord>, AppError> {
@@ -714,13 +747,13 @@ impl AppState {
                 .await
                 .providers
                 .values()
-                .find(|provider| provider.name == name && provider.status == "active")
+                .find(|provider| provider.name == name)
                 .cloned()),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "SELECT id, provider_type, name, base_url, default_model, config, status, created_at
                      FROM providers
-                     WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
+                     WHERE tenant_id = $1 AND name = $2",
                 )
                 .bind(self.tenant_id)
                 .bind(name)

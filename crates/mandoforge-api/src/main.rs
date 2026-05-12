@@ -9,7 +9,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -427,6 +427,11 @@ struct CreateProviderRecord {
     config: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateProviderStatus {
+    status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct McpServerRecord {
     id: Uuid,
@@ -716,6 +721,7 @@ fn build_router(state: AppState) -> Router {
             post(discover_mcp_server_tools),
         )
         .route("/api/providers", get(list_providers).post(create_provider))
+        .route("/api/providers/{id}/status", patch(update_provider_status))
         .route(
             "/api/eval/datasets",
             get(list_eval_datasets).post(create_eval_dataset),
@@ -1128,7 +1134,13 @@ async fn provider_client_for_session(
 ) -> Result<(String, Box<dyn ProviderClient>), AppError> {
     let session = state.get_session(session_id).await?;
     let agent = state.get_agent(session.agent_id).await?;
-    if let Some(provider) = state.active_provider_by_name(&agent.provider).await? {
+    if let Some(provider) = state.provider_by_name(&agent.provider).await? {
+        if provider.status != "active" {
+            return Err(AppError::forbidden(format!(
+                "provider {} is not active",
+                provider.name
+            )));
+        }
         enforce_provider_budget(state, &provider).await?;
         let provider_type = provider.provider_type.trim().to_ascii_lowercase();
         if matches!(provider_type.as_str(), "mock" | "mock_openai_compatible") {
@@ -2350,6 +2362,27 @@ async fn create_provider(
 ) -> Result<Json<ProviderRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
     Ok(Json(state.create_provider(input).await?))
+}
+
+async fn update_provider_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateProviderStatus>,
+) -> Result<Json<ProviderRecord>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "provider", Some(id)).await?;
+    let status = normalize_provider_status(&input.status)?;
+    Ok(Json(state.update_provider_status(id, &status).await?))
+}
+
+fn normalize_provider_status(status: &str) -> Result<String, AppError> {
+    match status.trim() {
+        "active" => Ok("active".to_string()),
+        "disabled" => Ok("disabled".to_string()),
+        other => Err(AppError::bad_request(format!(
+            "unsupported provider status: {other}"
+        ))),
+    }
 }
 
 async fn list_mcp_servers(
@@ -5250,6 +5283,139 @@ not json
                 .any(|provider| provider.name == "governed-mock")
         );
 
+        let status_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "status-managed-mock",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status_provider.status, "active");
+
+        let status_provider_access: ProviderAccess = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/provider-access", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_name": "status-managed-mock",
+                        "model_allowlist": ["gpt-5.4-mini"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status_provider_access.provider_name, "status-managed-mock");
+
+        let (status, invalid_status_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/providers/{}/status", status_provider.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"status": "paused"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            invalid_status_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unsupported provider status")
+        );
+
+        let disabled_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/providers/{}/status", status_provider.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"status": "disabled"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(disabled_provider.status, "disabled");
+
+        let status_agent: Agent = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "status managed scoped agent",
+                        "kind": "orchestrator",
+                        "team_id": team.id,
+                        "provider": "status-managed-mock",
+                        "model": "gpt-5.4-mini",
+                        "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let disabled_status_session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": status_agent.id, "title": "disabled provider session"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let (status, disabled_run_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", disabled_status_session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            disabled_run_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("provider status-managed-mock is not active")
+        );
+
         let cost_limited_agent: Agent = request_json(
             app.clone(),
             Request::builder()
@@ -5446,6 +5612,48 @@ not json
         .await;
         assert_eq!(rollups.len(), 1);
         assert_eq!(rollups[0].id, rollup.id);
+
+        let active_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/providers/{}/status", status_provider.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(json!({"status": "active"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(active_provider.status, "active");
+
+        let active_status_session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": status_agent.id, "title": "active provider session"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let active_run: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", active_status_session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(active_run.status, SessionStatus::WaitingApproval);
 
         let scoped_agent: Agent = request_json(
             app.clone(),

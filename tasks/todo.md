@@ -111,6 +111,7 @@
 - [x] Add provider access/model allowlist enforcement for team-scoped agent creation.
 - [x] Add provider budgets and runtime provider selection from stored provider rows.
 - [x] Add provider daily cost budget enforcement over a 24-hour window.
+- [x] Add provider active/disabled status management and runtime enforcement.
 - [x] Add eval dataset/case/run schema and a first version-bound eval runner skeleton.
 - [x] Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
 - [x] Add static Eval Dashboard controls for datasets, cases, and runs.
