@@ -1438,12 +1438,12 @@ function renderPolicy() {
                     }
                     ${
                       diff
-                        ? `<pre>${escapeHtml(JSON.stringify(diff.changes, null, 2))}</pre>`
+                        ? renderPolicyDiffSummary(diff)
                         : ""
                     }
                     ${
                       gate && Object.keys(gate).length
-                        ? `<pre>${escapeHtml(JSON.stringify(gate, null, 2))}</pre>`
+                        ? renderPolicyGateSummary(gate, diff)
                         : ""
                     }
                   </div>
@@ -1463,6 +1463,109 @@ function renderPolicy() {
   policyRevisionRoot.querySelectorAll("[data-policy-activate]").forEach((button) => {
     button.addEventListener("click", () => activatePolicyRevision(button.dataset.policyActivate));
   });
+}
+
+function renderPolicyDiffSummary(diff) {
+  const changes = diff?.changes || [];
+  const counts = countPolicyDiffChanges(changes);
+  const rows = changes.length
+    ? changes
+        .map(
+          (change) => `
+            <tr>
+              <td><span class="diff-kind ${escapeHtml(change.kind)}">${escapeHtml(change.kind)}</span></td>
+              <td><code>${escapeHtml(change.path || "$")}</code></td>
+              <td><pre>${escapeHtml(formatDiffValue(change.current, false))}</pre></td>
+              <td><pre>${escapeHtml(formatDiffValue(change.proposed, false))}</pre></td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="4" class="muted">No policy changes detected.</td></tr>`;
+  return `
+    <div class="policy-diff-summary">
+      <div class="metric-grid compact-metrics">
+        <div class="metric"><span>Total Changes</span><strong>${formatInteger(changes.length)}</strong></div>
+        <div class="metric"><span>Added</span><strong>${formatInteger(counts.added)}</strong></div>
+        <div class="metric"><span>Changed</span><strong>${formatInteger(counts.changed)}</strong></div>
+        <div class="metric"><span>Removed</span><strong>${formatInteger(counts.removed)}</strong></div>
+      </div>
+      <table class="diff-table policy-diff-table">
+        <thead>
+          <tr>
+            <th>Change</th>
+            <th>Path</th>
+            <th>Current</th>
+            <th>Proposed</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="muted">Generated ${escapeHtml(diff.generated_at || "n/a")}</div>
+    </div>
+  `;
+}
+
+function renderPolicyGateSummary(gate, loadedDiff) {
+  const cases = gate.cases || [];
+  const passed = cases.filter((testCase) => testCase.passed).length;
+  const failed = cases.length - passed;
+  const diff = loadedDiff || gate.diff;
+  const diffSummary = diff ? countPolicyDiffChanges(diff.changes || []) : null;
+  const rows = cases.length
+    ? cases
+        .map(
+          (testCase) => `
+            <tr>
+              <td><span class="budget-status ${testCase.passed ? "ok" : "critical"}">${escapeHtml(testCase.passed ? "passed" : "failed")}</span></td>
+              <td><code>${escapeHtml(testCase.tool_name)}</code></td>
+              <td>${escapeHtml(testCase.expected_decision)}</td>
+              <td>${escapeHtml(testCase.actual_decision)}</td>
+              <td>${escapeHtml(testCase.reason)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="5" class="muted">No gate cases recorded.</td></tr>`;
+  return `
+    <div class="policy-gate-summary">
+      <div class="metric-grid compact-metrics">
+        <div class="metric"><span>Gate Status</span><strong>${escapeHtml(gate.status || "unknown")}</strong></div>
+        <div class="metric"><span>Rollout</span><strong>${escapeHtml(gate.rollout_percent === null || gate.rollout_percent === undefined ? "n/a" : `${gate.rollout_percent}%`)}</strong></div>
+        <div class="metric"><span>Cases Passed</span><strong>${formatInteger(passed)}/${formatInteger(cases.length)}</strong></div>
+        <div class="metric"><span>Cases Failed</span><strong>${formatInteger(failed)}</strong></div>
+      </div>
+      ${
+        diffSummary
+          ? `<div class="muted">Diff summary: ${formatInteger((diff.changes || []).length)} changes · ${formatInteger(diffSummary.added)} added · ${formatInteger(diffSummary.changed)} changed · ${formatInteger(diffSummary.removed)} removed</div>`
+          : ""
+      }
+      <table class="diff-table policy-gate-table">
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Tool</th>
+            <th>Expected</th>
+            <th>Actual</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="muted">Suite ${escapeHtml(gate.suite_source || "n/a")} · checked ${escapeHtml(gate.checked_at || "n/a")}</div>
+    </div>
+  `;
+}
+
+function countPolicyDiffChanges(changes = []) {
+  return changes.reduce(
+    (counts, change) => {
+      const kind = change.kind || "changed";
+      counts[kind] = (counts[kind] || 0) + 1;
+      return counts;
+    },
+    { added: 0, changed: 0, removed: 0 },
+  );
 }
 
 function renderProviders() {

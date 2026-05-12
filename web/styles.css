@@ -301,6 +301,10 @@ header {
   margin-bottom: 14px;
 }
 
+.compact-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .metric {
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -388,6 +392,23 @@ header {
   color: var(--warn);
 }
 
+.policy-diff-summary,
+.policy-gate-summary {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.policy-diff-table,
+.policy-gate-table {
+  table-layout: fixed;
+}
+
+.policy-diff-table code,
+.policy-gate-table code {
+  overflow-wrap: anywhere;
+}
+
 .budget-status {
   display: inline-block;
   border: 1px solid var(--line);
@@ -446,5 +467,9 @@ header {
 
   .ops-grid {
     grid-template-columns: 1fr;
+  }
+
+  .compact-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

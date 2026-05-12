@@ -159,6 +159,7 @@
 - [x] Add static Policy Console batch test controls.
 - [x] Add audited policy revision create/list/activate APIs and static rollout metadata UI.
 - [x] Add policy revision diff and safety gate before activation.
+- [x] Add table-based policy diff and gate summaries to the static Policy Console.
 - [x] Add configurable policy revision gate suites and rollout percentage metadata.
 - [x] Hot-swap the active runtime policy when a gated revision is activated.
 - [x] Enforce partial policy rollout percentages by deterministic session bucket.
