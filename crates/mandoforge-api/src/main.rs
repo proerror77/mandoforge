@@ -73,6 +73,7 @@ use provider::{
     HarnessContext, MockProviderClient, OpenAiCompatibleProviderClient, ProviderClient,
     ProviderResponse,
 };
+use secrets::secret_provider_from_env;
 #[cfg(test)]
 use shell_runner::docker_shell_args;
 use store_backend::{MemoryStore, StoreBackend};
@@ -157,7 +158,7 @@ struct Session {
     updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SessionStatus {
     Created,
@@ -360,6 +361,30 @@ struct CreateProviderAccess {
     provider_name: String,
     #[serde(default)]
     model_allowlist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderRecord {
+    id: Uuid,
+    provider_type: String,
+    name: String,
+    base_url: Option<String>,
+    default_model: Option<String>,
+    config: Value,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateProviderRecord {
+    provider_type: String,
+    name: String,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    default_model: Option<String>,
+    #[serde(default)]
+    config: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -602,6 +627,7 @@ fn build_router(state: AppState) -> Router {
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
         )
+        .route("/api/providers", get(list_providers).post(create_provider))
         .route(
             "/api/eval/datasets",
             get(list_eval_datasets).post(create_eval_dataset),
@@ -912,16 +938,16 @@ async fn run_provider_harness(
     state: &AppState,
     session_id: Uuid,
     provider: &dyn ProviderClient,
+    provider_label: &str,
 ) -> Result<ProviderResponse, AppError> {
     let context = build_harness_context(state, session_id).await?;
-    let provider_name = provider.name();
     state
         .append_event(
             "agent",
             None,
             session_id,
             "llm.request",
-            json!({"provider": provider_name, "context": context}),
+            json!({"provider": provider_label, "client": provider.name(), "context": context}),
         )
         .await?;
     let response = provider.complete(context).await?;
@@ -931,10 +957,102 @@ async fn run_provider_harness(
             None,
             session_id,
             "llm.response",
-            json!({"provider": provider_name, "tool_calls": &response.tool_calls, "final_message": &response.final_message}),
+            json!({"provider": provider_label, "client": provider.name(), "tool_calls": &response.tool_calls, "final_message": &response.final_message}),
         )
         .await?;
     Ok(response)
+}
+
+async fn provider_client_for_session(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<(String, Box<dyn ProviderClient>), AppError> {
+    let session = state.get_session(session_id).await?;
+    let agent = state.get_agent(session.agent_id).await?;
+    if let Some(provider) = state.active_provider_by_name(&agent.provider).await? {
+        enforce_provider_budget(state, &provider).await?;
+        let provider_type = provider.provider_type.trim().to_ascii_lowercase();
+        if matches!(provider_type.as_str(), "mock" | "mock_openai_compatible") {
+            return Ok((provider.name, Box::new(MockProviderClient)));
+        }
+        if matches!(
+            provider_type.as_str(),
+            "openai_compatible" | "openai-compatible"
+        ) {
+            let base_url = provider.base_url.clone().ok_or_else(|| {
+                AppError::bad_request("stored openai-compatible provider requires base_url")
+            })?;
+            let model = agent
+                .model
+                .trim()
+                .is_empty()
+                .then(|| provider.default_model.clone())
+                .flatten()
+                .unwrap_or(agent.model);
+            let api_key = stored_provider_api_key(&provider).await?;
+            return Ok((
+                provider.name,
+                Box::new(OpenAiCompatibleProviderClient::from_parts(
+                    base_url, api_key, model,
+                )?),
+            ));
+        }
+        return Err(AppError::bad_request(format!(
+            "provider type {} is not supported",
+            provider.provider_type
+        )));
+    }
+    let fallback = provider_client_from_env().await?;
+    Ok((agent.provider, fallback))
+}
+
+async fn stored_provider_api_key(provider: &ProviderRecord) -> Result<String, AppError> {
+    if let Some(env_key) = provider.config.get("api_key_env").and_then(Value::as_str) {
+        let value = std::env::var(env_key).map_err(|_| {
+            AppError::bad_request(format!(
+                "stored provider {} requires env var {env_key}",
+                provider.name
+            ))
+        })?;
+        return Ok(value);
+    }
+    if let Some(value) = provider.config.get("api_key_ref").and_then(Value::as_str) {
+        let secret_provider = secret_provider_from_env()?;
+        return provider::provider_api_key_from_stored_value(value, secret_provider.as_ref()).await;
+    }
+    Err(AppError::bad_request(format!(
+        "stored provider {} requires config.api_key_env or config.api_key_ref",
+        provider.name
+    )))
+}
+
+async fn enforce_provider_budget(
+    state: &AppState,
+    provider: &ProviderRecord,
+) -> Result<(), AppError> {
+    let Some(limit) = provider_daily_request_limit(provider) else {
+        return Ok(());
+    };
+    let since = Utc::now() - chrono::Duration::hours(24);
+    let used = state
+        .provider_request_count_since(&provider.name, since)
+        .await?;
+    if used >= limit {
+        return Err(AppError::forbidden(format!(
+            "provider {} exceeded daily request budget {limit}",
+            provider.name
+        )));
+    }
+    Ok(())
+}
+
+fn provider_daily_request_limit(provider: &ProviderRecord) -> Option<i64> {
+    provider
+        .config
+        .get("budget")
+        .and_then(|budget| budget.get("daily_request_limit"))
+        .and_then(Value::as_i64)
+        .filter(|limit| *limit >= 0)
 }
 
 async fn provider_client_from_env() -> Result<Box<dyn ProviderClient>, AppError> {
@@ -964,8 +1082,9 @@ async fn run_session(
         ))
         .await?;
 
-    let provider = provider_client_from_env().await?;
-    let provider_response = run_provider_harness(&state, id, provider.as_ref()).await?;
+    let (provider_label, provider) = provider_client_for_session(&state, id).await?;
+    let provider_response =
+        run_provider_harness(&state, id, provider.as_ref(), &provider_label).await?;
 
     state
         .append_event(
@@ -1964,6 +2083,23 @@ async fn create_provider_access(
     Ok(Json(state.create_provider_access(id, input).await?))
 }
 
+async fn list_providers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ProviderRecord>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
+    Ok(Json(state.list_providers().await?))
+}
+
+async fn create_provider(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateProviderRecord>,
+) -> Result<Json<ProviderRecord>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
+    Ok(Json(state.create_provider(input).await?))
+}
+
 async fn list_eval_datasets(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2379,8 +2515,9 @@ async fn resume_provider_after_approval(
     state
         .set_session_status(session_id, SessionStatus::Running)
         .await?;
-    let provider = provider_client_from_env().await?;
-    let provider_response = run_provider_harness(state, session_id, provider.as_ref()).await?;
+    let (provider_label, provider) = provider_client_for_session(state, session_id).await?;
+    let provider_response =
+        run_provider_harness(state, session_id, provider.as_ref(), &provider_label).await?;
     state
         .append_event(
             "agent",
@@ -4239,6 +4376,149 @@ not json
         )
         .await;
         assert_eq!(provider_access.team_id, team.id);
+
+        let governed_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "governed-mock",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {"budget": {"daily_request_limit": 1}}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(governed_provider.name, "governed-mock");
+
+        let governed_provider_access: ProviderAccess = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/provider-access", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_name": "governed-mock",
+                        "model_allowlist": ["gpt-5.4-mini"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(governed_provider_access.provider_name, "governed-mock");
+
+        let providers: Vec<ProviderRecord> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/providers")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            providers
+                .iter()
+                .any(|provider| provider.name == "governed-mock")
+        );
+
+        let budget_agent: Agent = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "budget scoped agent",
+                        "kind": "orchestrator",
+                        "team_id": team.id,
+                        "project_id": project.id,
+                        "provider": "governed-mock",
+                        "model": "gpt-5.4-mini",
+                        "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let budget_session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": budget_agent.id, "title": "budget session"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let budget_run: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", budget_session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(budget_run.status, SessionStatus::WaitingApproval);
+
+        let second_budget_session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": budget_agent.id, "title": "budget session over limit"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let (status, budget_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", second_budget_session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            budget_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("exceeded daily request budget")
+        );
 
         let scoped_agent: Agent = request_json(
             app.clone(),

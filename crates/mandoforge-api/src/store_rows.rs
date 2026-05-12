@@ -4,7 +4,8 @@ use sqlx::{Row, postgres::PgRow};
 
 use crate::{
     Agent, AgentVersion, AppError, Approval, Artifact, AuditLog, EvalCase, EvalDataset, EvalRun,
-    Membership, Organization, Project, ProviderAccess, Session, SessionEvent, Team, ToolCall,
+    Membership, Organization, Project, ProviderAccess, ProviderRecord, Session, SessionEvent, Team,
+    ToolCall,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -181,6 +182,19 @@ pub(crate) fn provider_access_from_row(row: PgRow) -> Result<ProviderAccess, App
         team_id: row.try_get("team_id")?,
         provider_name: row.try_get("provider_name")?,
         model_allowlist: serde_json::from_value(model_allowlist).unwrap_or_default(),
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn provider_record_from_row(row: PgRow) -> Result<ProviderRecord, AppError> {
+    Ok(ProviderRecord {
+        id: row.try_get("id")?,
+        provider_type: row.try_get("provider_type")?,
+        name: row.try_get("name")?,
+        base_url: row.try_get("base_url")?,
+        default_model: row.try_get("default_model")?,
+        config: row.try_get("config")?,
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })

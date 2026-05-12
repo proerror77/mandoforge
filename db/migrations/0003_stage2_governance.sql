@@ -89,6 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_memberships_org ON memberships(tenant_id, organiz
 CREATE INDEX IF NOT EXISTS idx_memberships_team ON memberships(tenant_id, team_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_project ON memberships(tenant_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_provider_access_team ON provider_access(tenant_id, team_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_providers_tenant_name ON providers(tenant_id, name);
 CREATE INDEX IF NOT EXISTS idx_eval_cases_dataset ON eval_cases(tenant_id, dataset_id);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_dataset ON eval_runs(tenant_id, dataset_id);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_agent ON eval_runs(tenant_id, agent_id);

@@ -96,6 +96,30 @@ impl ProviderClient for MockProviderClient {
 }
 
 impl OpenAiCompatibleProviderClient {
+    pub(crate) fn from_parts(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self, AppError> {
+        let base_url = base_url.into().trim().trim_end_matches('/').to_string();
+        let api_key = api_key.into();
+        let model = model.into();
+        if base_url.is_empty() || api_key.trim().is_empty() || model.trim().is_empty() {
+            return Err(AppError::bad_request(
+                "openai-compatible provider requires base_url, api key, and model",
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()?;
+        Ok(Self {
+            base_url,
+            api_key,
+            model: model.trim().to_string(),
+            client,
+        })
+    }
+
     pub(crate) async fn from_env() -> Result<Option<Self>, AppError> {
         let secret_provider = secret_provider_from_env()?;
         Self::from_lookup_with_secret_provider(
@@ -128,15 +152,7 @@ impl OpenAiCompatibleProviderClient {
             .unwrap_or_else(|| "gpt-5.4-mini".to_string())
             .trim()
             .to_string();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()?;
-        Ok(Some(Self {
-            base_url,
-            api_key,
-            model,
-            client,
-        }))
+        Ok(Some(Self::from_parts(base_url, api_key, model)?))
     }
 }
 
@@ -152,6 +168,20 @@ where
         return Ok(value.to_string());
     };
     let config = SecretProviderConfig::from_lookup(lookup)?;
+    let secret = secret_provider.read_secret(&config, &secret_ref).await?;
+    Ok(secret.expose_for_provider_use().to_string())
+}
+
+pub(crate) async fn provider_api_key_from_stored_value(
+    value: &str,
+    secret_provider: &dyn SecretProvider,
+) -> Result<String, AppError> {
+    let Some(secret_ref) = provider_api_key_secret_ref(value.trim())? else {
+        return Err(AppError::bad_request(
+            "stored provider API key must use a vault:path#key reference",
+        ));
+    };
+    let config = SecretProviderConfig::from_env()?;
     let secret = secret_provider.read_secret(&config, &secret_ref).await?;
     Ok(secret.expose_for_provider_use().to_string())
 }

@@ -5,11 +5,12 @@ use uuid::Uuid;
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{
     membership_from_row, organization_from_row, project_from_row, provider_access_from_row,
-    team_from_row,
+    provider_record_from_row, team_from_row,
 };
 use crate::{
     AppError, AppState, CreateMembership, CreateOrganization, CreateProject, CreateProviderAccess,
-    CreateTeam, Membership, Organization, Project, ProviderAccess, Role, Team,
+    CreateProviderRecord, CreateTeam, Membership, Organization, Project, ProviderAccess,
+    ProviderRecord, Role, Team,
 };
 
 impl AppState {
@@ -619,6 +620,158 @@ impl AppState {
             Err(AppError::forbidden(format!(
                 "team is not allowed to use model {model} for provider {provider_name}"
             )))
+        }
+    }
+
+    pub(crate) async fn list_providers(&self) -> Result<Vec<ProviderRecord>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut providers: Vec<_> =
+                    inner.read().await.providers.values().cloned().collect();
+                providers.sort_by_key(|provider| provider.created_at);
+                providers.reverse();
+                Ok(providers)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, provider_type, name, base_url, default_model, config, status, created_at
+                     FROM providers
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(provider_record_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_provider(
+        &self,
+        input: CreateProviderRecord,
+    ) -> Result<ProviderRecord, AppError> {
+        let mut provider = ProviderRecord {
+            id: Uuid::new_v4(),
+            provider_type: input.provider_type,
+            name: input.name,
+            base_url: input.base_url,
+            default_model: input.default_model,
+            config: input.config,
+            status: "active".to_string(),
+            created_at: Utc::now(),
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                if let Some(existing_id) = store
+                    .providers
+                    .iter()
+                    .find_map(|(id, existing)| (existing.name == provider.name).then_some(*id))
+                {
+                    provider.id = existing_id;
+                    store.providers.insert(existing_id, provider.clone());
+                } else {
+                    store.providers.insert(provider.id, provider.clone());
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "INSERT INTO providers (id, tenant_id, provider_type, name, base_url, default_model, config, status, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (tenant_id, name)
+                     DO UPDATE SET provider_type = EXCLUDED.provider_type,
+                                   base_url = EXCLUDED.base_url,
+                                   default_model = EXCLUDED.default_model,
+                                   config = EXCLUDED.config,
+                                   status = EXCLUDED.status
+                     RETURNING id, provider_type, name, base_url, default_model, config, status, created_at",
+                )
+                .bind(provider.id)
+                .bind(self.tenant_id)
+                .bind(&provider.provider_type)
+                .bind(&provider.name)
+                .bind(&provider.base_url)
+                .bind(&provider.default_model)
+                .bind(&provider.config)
+                .bind(&provider.status)
+                .bind(provider.created_at)
+                .fetch_one(pool)
+                .await?;
+                return provider_record_from_row(row);
+            }
+        }
+        Ok(provider)
+    }
+
+    pub(crate) async fn active_provider_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<ProviderRecord>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => Ok(inner
+                .read()
+                .await
+                .providers
+                .values()
+                .find(|provider| provider.name == name && provider.status == "active")
+                .cloned()),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, provider_type, name, base_url, default_model, config, status, created_at
+                     FROM providers
+                     WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
+                )
+                .bind(self.tenant_id)
+                .bind(name)
+                .fetch_optional(pool)
+                .await?;
+                row.map(provider_record_from_row).transpose()
+            }
+        }
+    }
+
+    pub(crate) async fn provider_request_count_since(
+        &self,
+        provider_name: &str,
+        since: chrono::DateTime<Utc>,
+    ) -> Result<i64, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let count = inner
+                    .read()
+                    .await
+                    .events
+                    .values()
+                    .flatten()
+                    .filter(|event| {
+                        event.event_type == "llm.request"
+                            && event.created_at >= since
+                            && event
+                                .payload
+                                .get("provider")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(provider_name)
+                    })
+                    .count();
+                Ok(count as i64)
+            }
+            StoreBackend::Postgres(pool) => {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*)
+                     FROM session_events
+                     WHERE tenant_id = $1
+                       AND event_type = 'llm.request'
+                       AND payload->>'provider' = $2
+                       AND created_at >= $3",
+                )
+                .bind(self.tenant_id)
+                .bind(provider_name)
+                .bind(since)
+                .fetch_one(pool)
+                .await?;
+                Ok(count)
+            }
         }
     }
 }

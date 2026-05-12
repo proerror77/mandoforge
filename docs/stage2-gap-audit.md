@@ -8,7 +8,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 | --- | --- | --- |
 | Multi-tenancy org/team/project | Single default tenant remains the runtime scope, but `organizations`, `teams`, `projects`, and `memberships` tables plus Admin-only hierarchy APIs are implemented. Team- and project-scoped agents and their sessions now enforce membership access for non-admin principals, and agent/session list APIs hide scoped resources outside the caller's memberships. | Full org/team/project UI and production tenant lifecycle are not implemented. |
 | RBAC | Role-based authorizer guards read, write, run, tool, approval, execution job, audit, and governance admin paths. `admin`, `operator`, `approver`, and `viewer` are recognized. If role headers are absent for a subject, roles are derived from persisted memberships. Scoped agent/session/tool/approval/job paths enforce team/project membership for non-admin principals. | Production policy administration is not implemented. |
-| Provider governance | OpenAI-compatible provider transport exists; API keys can be direct env values or Vault references. Team-level `provider_access` rows and model allowlist enforcement are implemented for team-scoped agent creation. | Provider budgets, provider settings UI, and runtime provider selection from stored provider rows are not implemented. |
+| Provider governance | OpenAI-compatible provider transport exists; API keys can be direct env values or Vault references. Admin provider registry APIs are implemented, team-level `provider_access` rows and model allowlist enforcement are implemented for team-scoped agent creation, and session runs now resolve active stored provider rows before falling back to env/mock. Stored provider configs can enforce a daily request budget. | Provider settings UI, richer provider status management, and price/cost budget aggregation are not implemented. |
 | Vault | Reserved provider and Vault KV v2 HTTP client boundary exist. | Production secret storage, secret CRUD, rotation, and scoped secret references are not implemented. |
 | Worker queue | Postgres/in-memory execution queue, worker binary, lease claims, and reclaim boundary exist; Redis command/client boundary is reserved. | Live Redis/NATS backend and separate broker worker handoff are not enabled. |
 | Approval v2 | Approve/reject exists; modify now updates pending tool args, records `approval.modified`, and preserves the approval for later approve/reject. | Comments are stored in `decision_payload`; expiry, delegated approvers, and parameter diff UI are not implemented. |
@@ -21,7 +21,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 ## Next Stage 2 Slices
 
-1. Add provider budgets and runtime provider selection from stored provider rows.
-2. Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
-3. Add rich OTel spans/metrics for session run, provider call, tool execution, approval, and worker queue paths.
-4. Add MCP server registry, tool discovery import, per-team MCP config, and UI management.
+1. Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
+2. Add rich OTel spans/metrics for session run, provider call, tool execution, approval, and worker queue paths.
+3. Add MCP server registry, tool discovery import, per-team MCP config, and UI management.
+4. Add provider settings UI and price/cost budget aggregation.

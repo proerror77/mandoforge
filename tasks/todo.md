@@ -108,7 +108,7 @@
 - [x] Filter agent/session list APIs by principal membership scope.
 - [x] Add project-level permissions instead of only team-level inheritance.
 - [x] Add provider access/model allowlist enforcement for team-scoped agent creation.
-- [ ] Add provider budgets and runtime provider selection from stored provider rows.
+- [x] Add provider budgets and runtime provider selection from stored provider rows.
 - [x] Add eval dataset/case/run schema and a first version-bound eval runner skeleton.
 - [ ] Add real eval graders for policy, tool selection, SQL safety, sandbox recovery, and final answer quality.
 - [x] Wire OTel export into append-only session event paths.
