@@ -214,6 +214,7 @@ pub(crate) fn organization_from_row(row: PgRow) -> Result<Organization, AppError
         name: row.try_get("name")?,
         slug: row.try_get("slug")?,
         created_at: row.try_get("created_at")?,
+        archived_at: row.try_get("archived_at")?,
     })
 }
 
@@ -224,6 +225,7 @@ pub(crate) fn team_from_row(row: PgRow) -> Result<Team, AppError> {
         name: row.try_get("name")?,
         slug: row.try_get("slug")?,
         created_at: row.try_get("created_at")?,
+        archived_at: row.try_get("archived_at")?,
     })
 }
 
@@ -234,6 +236,7 @@ pub(crate) fn project_from_row(row: PgRow) -> Result<Project, AppError> {
         name: row.try_get("name")?,
         slug: row.try_get("slug")?,
         created_at: row.try_get("created_at")?,
+        archived_at: row.try_get("archived_at")?,
     })
 }
 

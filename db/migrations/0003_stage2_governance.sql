@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS organizations (
     name TEXT NOT NULL,
     slug TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archived_at TIMESTAMPTZ,
     UNIQUE(tenant_id, slug)
 );
 
@@ -14,6 +15,7 @@ CREATE TABLE IF NOT EXISTS teams (
     name TEXT NOT NULL,
     slug TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archived_at TIMESTAMPTZ,
     UNIQUE(organization_id, slug)
 );
 
@@ -24,6 +26,7 @@ CREATE TABLE IF NOT EXISTS projects (
     name TEXT NOT NULL,
     slug TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archived_at TIMESTAMPTZ,
     UNIQUE(team_id, slug)
 );
 
@@ -107,3 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_mcp_servers_team ON mcp_servers(tenant_id, team_i
 CREATE INDEX IF NOT EXISTS idx_eval_cases_dataset ON eval_cases(tenant_id, dataset_id);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_dataset ON eval_runs(tenant_id, dataset_id);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_agent ON eval_runs(tenant_id, agent_id);
+
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;

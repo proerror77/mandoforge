@@ -26,7 +26,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, name, slug, created_at
+                    "SELECT id, name, slug, created_at, archived_at
                      FROM organizations
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
@@ -48,6 +48,7 @@ impl AppState {
             name: input.name,
             slug: input.slug,
             created_at: Utc::now(),
+            archived_at: None,
         };
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -91,7 +92,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, organization_id, name, slug, created_at
+                    "SELECT id, organization_id, name, slug, created_at, archived_at
                      FROM teams
                      WHERE tenant_id = $1 AND organization_id = $2
                      ORDER BY created_at DESC",
@@ -117,6 +118,7 @@ impl AppState {
             name: input.name,
             slug: input.slug,
             created_at: Utc::now(),
+            archived_at: None,
         };
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -157,7 +159,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, team_id, name, slug, created_at
+                    "SELECT id, team_id, name, slug, created_at, archived_at
                      FROM projects
                      WHERE tenant_id = $1 AND team_id = $2
                      ORDER BY created_at DESC",
@@ -183,6 +185,7 @@ impl AppState {
             name: input.name,
             slug: input.slug,
             created_at: Utc::now(),
+            archived_at: None,
         };
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -208,6 +211,99 @@ impl AppState {
             }
         }
         Ok(project)
+    }
+
+    pub(crate) async fn archive_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Organization, AppError> {
+        let archived_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let organization = store
+                    .organizations
+                    .get_mut(&organization_id)
+                    .ok_or_else(|| AppError::not_found("organization not found"))?;
+                organization.archived_at = Some(archived_at);
+                Ok(organization.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE organizations
+                     SET archived_at = COALESCE(archived_at, $1)
+                     WHERE tenant_id = $2 AND id = $3
+                     RETURNING id, name, slug, created_at, archived_at",
+                )
+                .bind(archived_at)
+                .bind(self.tenant_id)
+                .bind(organization_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("organization not found"))?;
+                organization_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn archive_team(&self, team_id: Uuid) -> Result<Team, AppError> {
+        let archived_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let team = store
+                    .teams
+                    .get_mut(&team_id)
+                    .ok_or_else(|| AppError::not_found("team not found"))?;
+                team.archived_at = Some(archived_at);
+                Ok(team.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE teams
+                     SET archived_at = COALESCE(archived_at, $1)
+                     WHERE tenant_id = $2 AND id = $3
+                     RETURNING id, organization_id, name, slug, created_at, archived_at",
+                )
+                .bind(archived_at)
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("team not found"))?;
+                team_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn archive_project(&self, project_id: Uuid) -> Result<Project, AppError> {
+        let archived_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let project = store
+                    .projects
+                    .get_mut(&project_id)
+                    .ok_or_else(|| AppError::not_found("project not found"))?;
+                project.archived_at = Some(archived_at);
+                Ok(project.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE projects
+                     SET archived_at = COALESCE(archived_at, $1)
+                     WHERE tenant_id = $2 AND id = $3
+                     RETURNING id, team_id, name, slug, created_at, archived_at",
+                )
+                .bind(archived_at)
+                .bind(self.tenant_id)
+                .bind(project_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("project not found"))?;
+                project_from_row(row)
+            }
+        }
     }
 
     pub(crate) async fn list_memberships(
@@ -347,6 +443,14 @@ impl AppState {
                 let Some(team) = store.teams.get(&team_id) else {
                     return Ok(false);
                 };
+                if team.archived_at.is_some()
+                    || store
+                        .organizations
+                        .get(&team.organization_id)
+                        .is_none_or(|organization| organization.archived_at.is_some())
+                {
+                    return Ok(false);
+                }
                 Ok(store.memberships.values().any(|membership| {
                     membership.user_id == subject_id
                         && ((membership.team_id == Some(team_id)
@@ -361,7 +465,8 @@ impl AppState {
                     "SELECT EXISTS(
                         SELECT 1
                         FROM memberships m
-                        JOIN teams t ON t.id = $3 AND t.tenant_id = $1
+                        JOIN teams t ON t.id = $3 AND t.tenant_id = $1 AND t.archived_at IS NULL
+                        JOIN organizations o ON o.id = t.organization_id AND o.tenant_id = $1 AND o.archived_at IS NULL
                         WHERE m.tenant_id = $1
                           AND m.user_id = $2
                           AND (
@@ -391,9 +496,20 @@ impl AppState {
                 let Some(project) = store.projects.get(&project_id) else {
                     return Ok(false);
                 };
+                if project.archived_at.is_some() {
+                    return Ok(false);
+                }
                 let Some(team) = store.teams.get(&project.team_id) else {
                     return Ok(false);
                 };
+                if team.archived_at.is_some()
+                    || store
+                        .organizations
+                        .get(&team.organization_id)
+                        .is_none_or(|organization| organization.archived_at.is_some())
+                {
+                    return Ok(false);
+                }
                 Ok(store.memberships.values().any(|membership| {
                     membership.user_id == subject_id
                         && (membership.project_id == Some(project_id)
@@ -409,8 +525,9 @@ impl AppState {
                     "SELECT EXISTS(
                         SELECT 1
                         FROM memberships m
-                        JOIN projects p ON p.id = $3 AND p.tenant_id = $1
-                        JOIN teams t ON t.id = p.team_id AND t.tenant_id = $1
+                        JOIN projects p ON p.id = $3 AND p.tenant_id = $1 AND p.archived_at IS NULL
+                        JOIN teams t ON t.id = p.team_id AND t.tenant_id = $1 AND t.archived_at IS NULL
+                        JOIN organizations o ON o.id = t.organization_id AND o.tenant_id = $1 AND o.archived_at IS NULL
                         WHERE m.tenant_id = $1
                           AND m.user_id = $2
                           AND (
@@ -437,16 +554,17 @@ impl AppState {
                     .read()
                     .await
                     .organizations
-                    .contains_key(&organization_id)
+                    .get(&organization_id)
+                    .is_some_and(|organization| organization.archived_at.is_none())
                 {
                     Ok(())
                 } else {
-                    Err(AppError::not_found("organization not found"))
+                    Err(AppError::not_found("active organization not found"))
                 }
             }
             StoreBackend::Postgres(pool) => {
                 let exists: Option<i32> = sqlx::query_scalar(
-                    "SELECT 1 FROM organizations WHERE tenant_id = $1 AND id = $2",
+                    "SELECT 1 FROM organizations WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL",
                 )
                 .bind(self.tenant_id)
                 .bind(organization_id)
@@ -454,7 +572,7 @@ impl AppState {
                 .await?;
                 exists
                     .map(|_| ())
-                    .ok_or_else(|| AppError::not_found("organization not found"))
+                    .ok_or_else(|| AppError::not_found("active organization not found"))
             }
         }
     }
@@ -462,22 +580,37 @@ impl AppState {
     async fn ensure_team_exists(&self, team_id: Uuid) -> Result<(), AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
-                if inner.read().await.teams.contains_key(&team_id) {
+                let store = inner.read().await;
+                let active = store.teams.get(&team_id).is_some_and(|team| {
+                    team.archived_at.is_none()
+                        && store
+                            .organizations
+                            .get(&team.organization_id)
+                            .is_some_and(|organization| organization.archived_at.is_none())
+                });
+                if active {
                     Ok(())
                 } else {
-                    Err(AppError::not_found("team not found"))
+                    Err(AppError::not_found("active team not found"))
                 }
             }
             StoreBackend::Postgres(pool) => {
-                let exists: Option<i32> =
-                    sqlx::query_scalar("SELECT 1 FROM teams WHERE tenant_id = $1 AND id = $2")
-                        .bind(self.tenant_id)
-                        .bind(team_id)
-                        .fetch_optional(pool)
-                        .await?;
+                let exists: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1
+                         FROM teams t
+                         JOIN organizations o ON o.id = t.organization_id AND o.tenant_id = $1
+                         WHERE t.tenant_id = $1
+                           AND t.id = $2
+                           AND t.archived_at IS NULL
+                           AND o.archived_at IS NULL",
+                )
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .fetch_optional(pool)
+                .await?;
                 exists
                     .map(|_| ())
-                    .ok_or_else(|| AppError::not_found("team not found"))
+                    .ok_or_else(|| AppError::not_found("active team not found"))
             }
         }
     }
@@ -489,12 +622,18 @@ impl AppState {
     ) -> Result<(), AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
-                let belongs = inner
-                    .read()
-                    .await
-                    .projects
-                    .get(&project_id)
-                    .is_some_and(|project| project.team_id == team_id);
+                let store = inner.read().await;
+                let belongs = store.projects.get(&project_id).is_some_and(|project| {
+                    project.team_id == team_id
+                        && project.archived_at.is_none()
+                        && store.teams.get(&project.team_id).is_some_and(|team| {
+                            team.archived_at.is_none()
+                                && store
+                                    .organizations
+                                    .get(&team.organization_id)
+                                    .is_some_and(|organization| organization.archived_at.is_none())
+                        })
+                });
                 if belongs {
                     Ok(())
                 } else {
@@ -503,7 +642,16 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let exists: Option<i32> = sqlx::query_scalar(
-                    "SELECT 1 FROM projects WHERE tenant_id = $1 AND id = $2 AND team_id = $3",
+                    "SELECT 1
+                     FROM projects p
+                     JOIN teams t ON t.id = p.team_id AND t.tenant_id = $1
+                     JOIN organizations o ON o.id = t.organization_id AND o.tenant_id = $1
+                     WHERE p.tenant_id = $1
+                       AND p.id = $2
+                       AND p.team_id = $3
+                       AND p.archived_at IS NULL
+                       AND t.archived_at IS NULL
+                       AND o.archived_at IS NULL",
                 )
                 .bind(self.tenant_id)
                 .bind(project_id)

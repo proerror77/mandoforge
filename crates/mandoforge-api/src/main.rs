@@ -626,6 +626,8 @@ struct Organization {
     name: String,
     slug: String,
     created_at: DateTime<Utc>,
+    #[serde(default)]
+    archived_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -641,6 +643,8 @@ struct Team {
     name: String,
     slug: String,
     created_at: DateTime<Utc>,
+    #[serde(default)]
+    archived_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -656,6 +660,8 @@ struct Project {
     name: String,
     slug: String,
     created_at: DateTime<Utc>,
+    #[serde(default)]
+    archived_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1250,6 +1256,10 @@ fn build_router(state: AppState) -> Router {
             get(list_organizations).post(create_organization),
         )
         .route(
+            "/api/organizations/{id}/archive",
+            post(archive_organization),
+        )
+        .route(
             "/api/organizations/{id}/teams",
             get(list_teams).post(create_team),
         )
@@ -1261,6 +1271,8 @@ fn build_router(state: AppState) -> Router {
             "/api/teams/{id}/projects",
             get(list_projects).post(create_project),
         )
+        .route("/api/teams/{id}/archive", post(archive_team))
+        .route("/api/projects/{id}/archive", post(archive_project))
         .route(
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
@@ -3174,6 +3186,35 @@ async fn create_organization(
     Ok(Json(state.create_organization(input).await?))
 }
 
+async fn archive_organization(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Organization>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let organization = state.archive_organization(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.archived",
+            "organization",
+            Some(id),
+            json!({"subject": principal.subject_id, "archived_at": organization.archived_at}),
+        ))
+        .await?;
+    Ok(Json(organization))
+}
+
 async fn list_teams(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -3224,6 +3265,64 @@ async fn create_project(
 ) -> Result<Json<Project>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     Ok(Json(state.create_project(id, input).await?))
+}
+
+async fn archive_team(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Team>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let team = state.archive_team(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "team.archived",
+            "team",
+            Some(id),
+            json!({"subject": principal.subject_id, "archived_at": team.archived_at}),
+        ))
+        .await?;
+    Ok(Json(team))
+}
+
+async fn archive_project(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Project>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "project".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let project = state.archive_project(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "project.archived",
+            "project",
+            Some(id),
+            json!({"subject": principal.subject_id, "archived_at": project.archived_at}),
+        ))
+        .await?;
+    Ok(Json(project))
 }
 
 async fn list_memberships(
@@ -7594,6 +7693,7 @@ not json
         assert!(names.contains(&"0011_cost_alert_routes.sql"));
         assert!(names.contains(&"0012_codex_app_server_runs.sql"));
         assert!(names.contains(&"0013_execution_job_retries.sql"));
+        assert!(names.contains(&"0014_tenant_lifecycle_archive.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -7602,6 +7702,277 @@ not json
 
     async fn test_app() -> Router {
         test_app_with_worker(Arc::new(InlineExecutionWorker)).await
+    }
+
+    #[tokio::test]
+    async fn admin_can_archive_tenant_lifecycle_scopes() {
+        let app = test_app().await;
+
+        let organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/organizations")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Archive Org", "slug": "archive-org"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/organizations/{}/teams", organization.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Archive Team", "slug": "archive-team"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let project: Project = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/projects", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Archive Project", "slug": "archive-project"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let archived_project: Project = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/archive", project.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(archived_project.archived_at.is_some());
+
+        let (status, archived_project_membership_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/memberships",
+                    organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "user_id": "archived-project-viewer",
+                        "team_id": team.id,
+                        "project_id": project.id,
+                        "role": "viewer"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            archived_project_membership_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("project not found")
+        );
+
+        let archived_team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/archive", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(archived_team.archived_at.is_some());
+
+        let (status, archived_team_project_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/projects", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Blocked Project", "slug": "blocked-project"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            archived_team_project_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("active team not found")
+        );
+
+        let second_organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/organizations")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Archive Parent Org", "slug": "archive-parent-org"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let second_team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/teams",
+                    second_organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Child Team", "slug": "child-team"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let archived_organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/archive",
+                    second_organization.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(archived_organization.archived_at.is_some());
+
+        let (status, archived_org_team_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/teams",
+                    second_organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Blocked Team", "slug": "blocked-team"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            archived_org_team_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("active organization not found")
+        );
+
+        let (status, archived_org_project_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/projects", second_team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Blocked Child Project", "slug": "blocked-child-project"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            archived_org_project_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("active team not found")
+        );
+
+        let (status, archived_org_membership_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/memberships",
+                    second_organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"user_id": "blocked-member", "team_id": second_team.id, "role": "viewer"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            archived_org_membership_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("active organization not found")
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "organization.archived")
+        );
+        assert!(audit_logs.iter().any(|log| log.action == "team.archived"));
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "project.archived")
+        );
     }
 
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {

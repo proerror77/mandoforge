@@ -272,6 +272,28 @@ async function createMembership(event) {
   await refreshOps();
 }
 
+async function archiveOrganization(organizationId) {
+  await api(`/api/organizations/${organizationId}/archive`, { method: "POST" });
+  if (state.selectedOrganizationId === organizationId) {
+    state.selectedOrganizationId = "";
+    state.selectedTeamId = "";
+  }
+  await refreshOps();
+}
+
+async function archiveTeam(teamId) {
+  await api(`/api/teams/${teamId}/archive`, { method: "POST" });
+  if (state.selectedTeamId === teamId) {
+    state.selectedTeamId = "";
+  }
+  await refreshOps();
+}
+
+async function archiveProject(projectId) {
+  await api(`/api/projects/${projectId}/archive`, { method: "POST" });
+  await refreshOps();
+}
+
 async function createApprovalGroup(event) {
   event.preventDefault();
   const form = new FormData(approvalGroupForm);
@@ -1188,10 +1210,17 @@ function renderTenantGovernance() {
     ? state.organizations
         .map(
           (organization) => `
-            <button class="item-button${organization.id === state.selectedOrganizationId ? " selected" : ""}" data-organization="${organization.id}">
-              <strong>${escapeHtml(organization.name)}</strong>
-              <span>${escapeHtml(organization.slug)} · ${escapeHtml(organization.id)}</span>
-            </button>
+            <div class="item">
+              <button class="item-button${organization.id === state.selectedOrganizationId ? " selected" : ""}" data-organization="${organization.id}">
+                <strong>${escapeHtml(organization.name)}</strong>
+                <span>${escapeHtml(organization.slug)} · ${escapeHtml(organization.id)} · ${escapeHtml(organization.archived_at ? "archived" : "active")}</span>
+              </button>
+              ${
+                organization.archived_at
+                  ? ""
+                  : `<button type="button" class="secondary" data-archive-organization="${escapeHtml(organization.id)}">Archive Organization</button>`
+              }
+            </div>
           `,
         )
         .join("")
@@ -1203,16 +1232,26 @@ function renderTenantGovernance() {
       await refreshOps();
     });
   });
+  organizationRoot.querySelectorAll("[data-archive-organization]").forEach((button) => {
+    button.addEventListener("click", () => archiveOrganization(button.dataset.archiveOrganization));
+  });
 
   teamRoot.innerHTML = state.selectedOrganizationId
     ? state.teams.length
       ? state.teams
           .map(
             (team) => `
-              <button class="item-button${team.id === state.selectedTeamId ? " selected" : ""}" data-team="${team.id}">
-                <strong>${escapeHtml(team.name)}</strong>
-                <span>${escapeHtml(team.slug)} · ${escapeHtml(team.id)}</span>
-              </button>
+              <div class="item">
+                <button class="item-button${team.id === state.selectedTeamId ? " selected" : ""}" data-team="${team.id}">
+                  <strong>${escapeHtml(team.name)}</strong>
+                  <span>${escapeHtml(team.slug)} · ${escapeHtml(team.id)} · ${escapeHtml(team.archived_at ? "archived" : "active")}</span>
+                </button>
+                ${
+                  team.archived_at
+                    ? ""
+                    : `<button type="button" class="secondary" data-archive-team="${escapeHtml(team.id)}">Archive Team</button>`
+                }
+              </div>
             `,
           )
           .join("")
@@ -1224,6 +1263,9 @@ function renderTenantGovernance() {
       await refreshOps();
     });
   });
+  teamRoot.querySelectorAll("[data-archive-team]").forEach((button) => {
+    button.addEventListener("click", () => archiveTeam(button.dataset.archiveTeam));
+  });
 
   projectRoot.innerHTML = state.selectedTeamId
     ? state.projects.length
@@ -1232,13 +1274,21 @@ function renderTenantGovernance() {
             (project) => `
               <div class="item">
                 <strong>${escapeHtml(project.name)}</strong>
-                <div class="muted">${escapeHtml(project.slug)} · ${escapeHtml(project.id)}</div>
+                <div class="muted">${escapeHtml(project.slug)} · ${escapeHtml(project.id)} · ${escapeHtml(project.archived_at ? "archived" : "active")}</div>
+                ${
+                  project.archived_at
+                    ? ""
+                    : `<button type="button" class="secondary" data-archive-project="${escapeHtml(project.id)}">Archive Project</button>`
+                }
               </div>
             `,
           )
           .join("")
       : `<div class="muted">No projects for selected team</div>`
     : `<div class="muted">Select a team to manage projects</div>`;
+  projectRoot.querySelectorAll("[data-archive-project]").forEach((button) => {
+    button.addEventListener("click", () => archiveProject(button.dataset.archiveProject));
+  });
 
   membershipRoot.innerHTML = state.selectedOrganizationId
     ? state.memberships.length
