@@ -1031,6 +1031,10 @@ struct CreateProviderRecord {
 #[derive(Debug, Deserialize)]
 struct UpdateProviderStatus {
     status: String,
+    #[serde(default)]
+    emergency: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6074,6 +6078,23 @@ async fn update_provider_status(
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
     let status = normalize_provider_status(&input.status)?;
+    if !input.emergency {
+        return Err(AppError::bad_request(
+            "direct provider status changes require emergency=true; use status approval for normal changes",
+        ));
+    }
+    let reason = optional_trimmed(input.reason.as_deref()).ok_or_else(|| {
+        AppError::bad_request("direct provider status changes require an emergency reason")
+    })?;
+    let previous = provider_by_id(&state, id).await?;
+    let policy_decision = json!({
+        "decision": "allowed",
+        "gate": "provider_lifecycle_emergency",
+        "emergency": true,
+        "reason": reason,
+        "previous_status": previous.status,
+        "requested_status": status,
+    });
     let provider = state.update_provider_status(id, &status).await?;
     state
         .append_audit_log(new_audit_log(
@@ -6086,7 +6107,8 @@ async fn update_provider_status(
             json!({
                 "subject": principal.subject_id,
                 "provider_name": provider.name,
-                "status": provider.status
+                "status": provider.status,
+                "policy_decision": policy_decision
             }),
         ))
         .await?;
@@ -12370,7 +12392,14 @@ not json
                 .header("content-type", "application/json")
                 .header("x-mandoforge-subject", "admin-1")
                 .header("x-mandoforge-roles", "admin")
-                .body(Body::from(json!({"status": "archived"}).to_string()))
+                .body(Body::from(
+                    json!({
+                        "status": "archived",
+                        "emergency": true,
+                        "reason": "Archive provider during lifecycle test"
+                    })
+                    .to_string(),
+                ))
                 .expect("valid request"),
         )
         .await;
@@ -12438,6 +12467,8 @@ not json
             log.action == "provider.status_updated"
                 && log.details["provider_name"] == "archive-lifecycle-mock"
                 && log.details["status"] == "archived"
+                && log.details["policy_decision"]["gate"] == "provider_lifecycle_emergency"
+                && log.details["policy_decision"]["emergency"] == true
         }));
     }
 
@@ -15175,7 +15206,14 @@ not json
                 .header("content-type", "application/json")
                 .header("x-mandoforge-subject", "admin-1")
                 .header("x-mandoforge-roles", "admin")
-                .body(Body::from(json!({"status": "active"}).to_string()))
+                .body(Body::from(
+                    json!({
+                        "status": "active",
+                        "emergency": true,
+                        "reason": "Reactivate provider during lifecycle test"
+                    })
+                    .to_string(),
+                ))
                 .expect("valid request"),
         )
         .await;
@@ -18005,7 +18043,7 @@ not json
                 .contains("unsupported provider status")
         );
 
-        let disabled_provider: ProviderRecord = request_json(
+        let (status, missing_gate_error) = request_value(
             app.clone(),
             Request::builder()
                 .method("PATCH")
@@ -18014,6 +18052,33 @@ not json
                 .header("x-mandoforge-subject", "admin-1")
                 .header("x-mandoforge-roles", "admin")
                 .body(Body::from(json!({"status": "disabled"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            missing_gate_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("emergency=true")
+        );
+
+        let disabled_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/providers/{}/status", status_provider.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "status": "disabled",
+                        "emergency": true,
+                        "reason": "Disable provider during lifecycle test"
+                    })
+                    .to_string(),
+                ))
                 .expect("valid request"),
         )
         .await;
@@ -18508,7 +18573,14 @@ not json
                 .header("content-type", "application/json")
                 .header("x-mandoforge-subject", "admin-1")
                 .header("x-mandoforge-roles", "admin")
-                .body(Body::from(json!({"status": "active"}).to_string()))
+                .body(Body::from(
+                    json!({
+                        "status": "active",
+                        "emergency": true,
+                        "reason": "Reactivate budget provider during lifecycle test"
+                    })
+                    .to_string(),
+                ))
                 .expect("valid request"),
         )
         .await;

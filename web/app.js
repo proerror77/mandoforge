@@ -2502,7 +2502,11 @@ function renderProviders() {
 async function updateProviderStatus(providerId, status) {
   await api(`/api/providers/${providerId}/status`, {
     method: "PATCH",
-    body: JSON.stringify({ status }),
+    body: JSON.stringify({
+      status,
+      emergency: true,
+      reason: `Emergency provider ${status} from static console`,
+    }),
   });
   await refreshOps();
 }
