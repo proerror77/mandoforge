@@ -154,6 +154,7 @@
 - [x] Add audited cost alert acknowledgement route and static UI action.
 - [x] Add audited cost alert routing rules with webhook delivery and reserved Slack/email channels.
 - [x] Add live Slack incoming-webhook delivery for cost alert routes.
+- [x] Add env-gated email relay delivery for cost alert routes.
 - [x] Add Actionbook CLI static UI smoke verification as the browser fallback.
 - [x] Add static Admin Console panels for usage, providers, eval runs, and governance status.
 - [x] Add static Policy Console for policy inspection and tool-decision simulation.

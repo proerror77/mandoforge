@@ -119,6 +119,7 @@ struct AppState {
     eval_judge_config: Option<EvalJudgeConfig>,
     eval_judge_client: Arc<dyn EvalJudgeClient>,
     cost_alert_webhook_url: Option<String>,
+    cost_alert_email_relay_url: Option<String>,
     approval_webhook_url: Option<String>,
     #[allow(dead_code)]
     workspace_root: PathBuf,
@@ -1072,6 +1073,7 @@ async fn main() -> Result<()> {
         eval_judge_config: eval_judge_config_from_env()?,
         eval_judge_client: eval_judge_client_from_env()?,
         cost_alert_webhook_url: cost_alert_webhook_url_from_env(),
+        cost_alert_email_relay_url: cost_alert_email_relay_url_from_env(),
         approval_webhook_url: approval_webhook_url_from_env(),
         workspace_root,
         tenant_id,
@@ -1422,6 +1424,13 @@ fn eval_judge_client_from_env() -> Result<Arc<dyn EvalJudgeClient>> {
 
 fn cost_alert_webhook_url_from_env() -> Option<String> {
     std::env::var("MANDOFORGE_COST_ALERT_WEBHOOK_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn cost_alert_email_relay_url_from_env() -> Option<String> {
+    std::env::var("MANDOFORGE_COST_ALERT_EMAIL_RELAY_URL")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -5115,17 +5124,6 @@ async fn deliver_cost_alert_route(
             target: route.target.clone(),
         });
     }
-    if route.channel == "email" {
-        return Ok(CostAlertRouteDelivery {
-            route_id: Some(route.id),
-            route_name: route.name.clone(),
-            channel: route.channel.clone(),
-            status: "reserved".to_string(),
-            delivered: false,
-            matched_alert_count: matched_alerts.len(),
-            target: route.target.clone(),
-        });
-    }
     let webhook_url = match route.channel.as_str() {
         "webhook" => route
             .target
@@ -5136,6 +5134,20 @@ async fn deliver_cost_alert_route(
             .target
             .as_ref()
             .ok_or_else(|| AppError::bad_request("slack cost alert route requires a target"))?,
+        "email" => {
+            let Some(relay_url) = state.cost_alert_email_relay_url.as_ref() else {
+                return Ok(CostAlertRouteDelivery {
+                    route_id: Some(route.id),
+                    route_name: route.name.clone(),
+                    channel: route.channel.clone(),
+                    status: "reserved".to_string(),
+                    delivered: false,
+                    matched_alert_count: matched_alerts.len(),
+                    target: route.target.clone(),
+                });
+            };
+            relay_url
+        }
         other => {
             return Ok(CostAlertRouteDelivery {
                 route_id: Some(route.id),
@@ -5150,6 +5162,7 @@ async fn deliver_cost_alert_route(
     };
     let payload = match route.channel.as_str() {
         "slack" => slack_cost_alert_payload(route, &matched_alerts, delivered_at),
+        "email" => email_cost_alert_payload(route, &matched_alerts, delivered_at)?,
         _ => json!({
             "type": "mandoforge.cost_alerts",
             "route_id": route.id,
@@ -5224,6 +5237,46 @@ fn slack_cost_alert_payload(
             }
         ]
     })
+}
+
+fn email_cost_alert_payload(
+    route: &CostAlertRoute,
+    alerts: &[&CostAlert],
+    delivered_at: DateTime<Utc>,
+) -> Result<Value, AppError> {
+    let Some(to) = route.target.as_ref() else {
+        return Err(AppError::bad_request(
+            "email cost alert route requires a recipient target",
+        ));
+    };
+    let subject = format!(
+        "MandoForge cost alert: {} {} alerts",
+        alerts.len(),
+        route.severity_filter
+    );
+    let body = alerts
+        .iter()
+        .map(|alert| {
+            format!(
+                "{} [{}]: {}\n{}",
+                alert.provider_name,
+                alert.severity,
+                alert.message,
+                alert.messages.join("\n")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok(json!({
+        "type": "mandoforge.cost_alert_email",
+        "to": to,
+        "subject": subject,
+        "text": body,
+        "route_id": route.id,
+        "route_name": route.name,
+        "severity_filter": route.severity_filter,
+        "delivered_at": delivered_at,
+    }))
 }
 
 fn severity_rank(severity: &str) -> i32 {
@@ -6980,6 +7033,7 @@ not json
             eval_judge_config: None,
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -7049,6 +7103,7 @@ not json
             eval_judge_config: None,
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
             approval_webhook_url: Some(approval_webhook_url),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -7238,6 +7293,22 @@ not json
         Json(json!({"ok": true}))
     }
 
+    async fn mock_email_relay(Json(payload): Json<Value>) -> Json<Value> {
+        assert_eq!(payload["type"], "mandoforge.cost_alert_email");
+        assert_eq!(payload["to"], "ops@example.com");
+        assert!(
+            payload["subject"]
+                .as_str()
+                .is_some_and(|subject| subject.contains("MandoForge cost alert"))
+        );
+        assert!(
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
+        );
+        Json(json!({"queued": true}))
+    }
+
     async fn mock_approval_webhook(Json(payload): Json<Value>) -> Json<Value> {
         assert_eq!(payload["type"], "mandoforge.approval_requested");
         assert!(payload["approval"]["id"].as_str().is_some());
@@ -7275,6 +7346,7 @@ not json
             eval_judge_config: None,
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -7360,6 +7432,7 @@ not json
             eval_judge_config: None,
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -7604,6 +7677,7 @@ not json
             eval_judge_config: None,
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -7729,7 +7803,8 @@ not json
         let addr = listener.local_addr().expect("local addr");
         let webhook = Router::new()
             .route("/alerts", post(mock_cost_alert_webhook))
-            .route("/slack", post(mock_slack_cost_alert_webhook));
+            .route("/slack", post(mock_slack_cost_alert_webhook))
+            .route("/email", post(mock_email_relay));
         let server = tokio::spawn(async move {
             axum::serve(listener, webhook)
                 .await
@@ -7753,6 +7828,7 @@ not json
             eval_judge_config: None,
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: Some(format!("http://{addr}/alerts")),
+            cost_alert_email_relay_url: Some(format!("http://{addr}/email")),
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
@@ -7885,6 +7961,26 @@ not json
                 .expect("valid request"),
         )
         .await;
+        let email_route: CostAlertRoute = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/usage/alert-routes")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "critical-email",
+                        "channel": "email",
+                        "target": "ops@example.com",
+                        "severity_filter": "critical"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
         let routes: Vec<CostAlertRoute> = request_json(
             app.clone(),
             Request::builder()
@@ -7897,6 +7993,7 @@ not json
         .await;
         assert!(routes.iter().any(|route| route.id == webhook_route.id));
         assert!(routes.iter().any(|route| route.id == slack_route.id));
+        assert!(routes.iter().any(|route| route.id == email_route.id));
 
         let delivered: CostAlertDelivery = request_json(
             app.clone(),
@@ -7920,6 +8017,11 @@ not json
         );
         assert!(delivered.route_deliveries.iter().any(|delivery| {
             delivery.route_id == Some(slack_route.id)
+                && delivery.delivered
+                && delivery.status == "delivered"
+        }));
+        assert!(delivered.route_deliveries.iter().any(|delivery| {
+            delivery.route_id == Some(email_route.id)
                 && delivery.delivered
                 && delivery.status == "delivered"
         }));
@@ -7994,6 +8096,7 @@ not json
             eval_judge_config: None,
             eval_judge_client: Arc::new(ReservedEvalJudgeClient),
             cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
