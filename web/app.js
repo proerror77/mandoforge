@@ -9,6 +9,7 @@ const state = {
   providerSummary: null,
   providerPolicyGate: null,
   providerPolicyGateRuns: null,
+  providerDeploymentValidation: null,
   providerProductionRolloutRun: null,
   providerHealth: {},
   vaultHealth: null,
@@ -190,6 +191,7 @@ const approvalNotificationRunsRoot = document.querySelector("#approval-notificat
 const providerForm = document.querySelector("#provider-form");
 const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
 const runProviderPolicyGateButton = document.querySelector("#run-provider-policy-gate");
+const validateProviderDeploymentButton = document.querySelector("#validate-provider-deployment");
 const runProviderProductionRolloutButton = document.querySelector("#run-provider-production-rollout");
 const secretForm = document.querySelector("#secret-form");
 const evalJudgeProfileForm = document.querySelector("#eval-judge-profile-form");
@@ -242,6 +244,7 @@ runApprovalNotificationsButton.addEventListener("click", runApprovalNotification
 providerForm.addEventListener("submit", createProvider);
 providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
 runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
+validateProviderDeploymentButton.addEventListener("click", validateProviderDeployment);
 runProviderProductionRolloutButton.addEventListener("click", runProviderProductionRollout);
 secretForm.addEventListener("submit", createSecretRecord);
 evalJudgeProfileForm.addEventListener("submit", createEvalJudgeProfile);
@@ -619,6 +622,17 @@ async function runProviderPolicyGate() {
   });
   state.providerPolicyGate = result.report;
   state.providerPolicyGateRuns = await api("/api/providers/policy-gate/runs");
+  renderProviders();
+}
+
+async function validateProviderDeployment() {
+  state.providerDeploymentValidation = await api("/api/providers/deployment/validate", {
+    method: "POST",
+  });
+  state.providerSummary = await api("/api/providers/summary");
+  state.providerHealth = Object.fromEntries(
+    (state.providerDeploymentValidation.results || []).map((health) => [health.provider_id, health]),
+  );
   renderProviders();
 }
 
@@ -3755,6 +3769,8 @@ function renderProviders() {
   const attentionItems = summary?.attention_items || [];
   const policyGate = state.providerPolicyGate;
   const policyGateRuns = state.providerPolicyGateRuns;
+  const providerDeploymentValidation = state.providerDeploymentValidation;
+  const deploymentReadiness = summary?.deployment_readiness || {};
   const productionRolloutRun = state.providerProductionRolloutRun;
   const policyGateChecks = policyGate?.checks || [];
   const policyGateRunAttention = policyGateRuns?.attention_items || [];
@@ -3903,6 +3919,22 @@ function renderProviders() {
       }
     </div>
   `;
+  const deploymentValidationHtml = `
+    <div class="detail-panel">
+      <h4>Deployment Validation</h4>
+      <dl>
+        <dt>Readiness</dt>
+        <dd>${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · validated ${deploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${formatInteger(deploymentReadiness.healthy_count || 0)}/${formatInteger(deploymentReadiness.provider_count || 0)} · latest ${escapeHtml(deploymentReadiness.latest_validation_at || "none")}</dd>
+        <dt>Message</dt>
+        <dd>${escapeHtml(deploymentReadiness.message || "provider deployment validation is not reported")}</dd>
+      </dl>
+      ${
+        providerDeploymentValidation
+          ? `<pre>${escapeHtml(JSON.stringify(providerDeploymentValidation, null, 2))}</pre>`
+          : `<div class="muted">No provider deployment validation run in this console session.</div>`
+      }
+    </div>
+  `;
   const summaryHtml = summary
     ? `
       <div class="detail-panel">
@@ -3996,7 +4028,7 @@ function renderProviders() {
         .join("")
     : `<div class="muted">No stored providers</div>`;
   providerRoot.innerHTML =
-    policyGateHtml + policyGateRunsHtml + productionRolloutHtml + summaryHtml + providerListHtml;
+    policyGateHtml + policyGateRunsHtml + deploymentValidationHtml + productionRolloutHtml + summaryHtml + providerListHtml;
   providerRoot.querySelectorAll("[data-provider-status]").forEach((button) => {
     button.addEventListener("click", () =>
       updateProviderStatus(button.dataset.providerStatus, button.dataset.status),

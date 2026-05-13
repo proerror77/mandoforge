@@ -2324,6 +2324,7 @@ struct ProviderGovernanceSummary {
     budgeted_provider_count: usize,
     active_provider_count: usize,
     inactive_provider_count: usize,
+    deployment_readiness: ProviderDeploymentReadiness,
     attention_items: Vec<ProviderGovernanceAttentionItem>,
     generated_at: DateTime<Utc>,
 }
@@ -2334,6 +2335,31 @@ struct ProviderGovernanceAttentionItem {
     provider_name: String,
     kind: String,
     severity: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProviderDeploymentValidationRun {
+    status: String,
+    provider_count: usize,
+    healthy_count: usize,
+    unhealthy_count: usize,
+    results: Vec<ProviderHealth>,
+    ran_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderDeploymentReadiness {
+    status: String,
+    production_blocked: bool,
+    latest_validation_at: Option<DateTime<Utc>>,
+    latest_validation_age_hours: Option<i64>,
+    latest_validation_status: Option<String>,
+    provider_count: usize,
+    healthy_count: usize,
+    unhealthy_count: usize,
+    deployment_validated: bool,
+    blocking_reasons: Vec<String>,
     message: String,
 }
 
@@ -3387,6 +3413,10 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/summary", get(get_provider_summary))
+        .route(
+            "/api/providers/deployment/validate",
+            post(validate_provider_deployment),
+        )
         .route("/api/providers/policy-gate", get(get_provider_policy_gate))
         .route(
             "/api/providers/policy-gate/run",
@@ -7256,6 +7286,65 @@ async fn get_provider_summary(
     )))
 }
 
+async fn validate_provider_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderDeploymentValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "providers".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+
+    let providers = state.list_providers().await?;
+    let active_providers = providers
+        .into_iter()
+        .filter(|provider| provider.status == "active")
+        .collect::<Vec<_>>();
+    let mut results = Vec::with_capacity(active_providers.len());
+    for provider in &active_providers {
+        results.push(provider_health(provider).await);
+    }
+    let healthy_count = results.iter().filter(|health| health.healthy).count();
+    let unhealthy_count = results.len().saturating_sub(healthy_count);
+    let status = if !results.is_empty() && unhealthy_count == 0 {
+        "healthy"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    let audit_log = state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "provider.deployment_validation_run",
+            "providers",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "provider_count": results.len(),
+                "healthy_count": healthy_count,
+                "unhealthy_count": unhealthy_count,
+                "provider_names": results.iter().map(|health| health.name.clone()).collect::<Vec<_>>(),
+            }),
+        ))
+        .await?;
+    Ok(Json(ProviderDeploymentValidationRun {
+        status,
+        provider_count: results.len(),
+        healthy_count,
+        unhealthy_count,
+        results,
+        ran_at: audit_log.created_at,
+    }))
+}
+
 async fn get_provider_policy_gate(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -7576,6 +7665,20 @@ fn build_provider_governance_summary(
                 && log.details["policy_decision"]["gate"] == "provider_lifecycle_emergency"
         })
         .count();
+    let deployment_readiness = build_provider_deployment_readiness(audit_logs, Utc::now());
+    if deployment_readiness.production_blocked {
+        attention_items.push(ProviderGovernanceAttentionItem {
+            provider_id: Uuid::nil(),
+            provider_name: "providers".to_string(),
+            kind: "provider_deployment_validation_blocked".to_string(),
+            severity: if deployment_readiness.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: deployment_readiness.message.clone(),
+        });
+    }
 
     ProviderGovernanceSummary {
         provider_count: providers.len(),
@@ -7590,8 +7693,84 @@ fn build_provider_governance_summary(
         budgeted_provider_count,
         active_provider_count,
         inactive_provider_count,
+        deployment_readiness,
         attention_items,
         generated_at: Utc::now(),
+    }
+}
+
+fn build_provider_deployment_readiness(
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> ProviderDeploymentReadiness {
+    let latest_validation = audit_logs
+        .iter()
+        .filter(|log| log.action == "provider.deployment_validation_run")
+        .max_by_key(|log| log.created_at);
+    let latest_validation_at = latest_validation.map(|log| log.created_at);
+    let latest_validation_age_hours =
+        latest_validation_at.map(|created_at| (generated_at - created_at).num_hours());
+    let latest_validation_status = latest_validation
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let provider_count = latest_validation
+        .and_then(|log| log.details.get("provider_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let healthy_count = latest_validation
+        .and_then(|log| log.details.get("healthy_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let unhealthy_count = latest_validation
+        .and_then(|log| log.details.get("unhealthy_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let mut blocking_reasons = Vec::new();
+
+    if latest_validation.is_none() {
+        blocking_reasons.push("provider deployment validation has not run".to_string());
+    }
+    if latest_validation.is_some() && provider_count == 0 {
+        blocking_reasons
+            .push("provider deployment validation covered no active providers".to_string());
+    }
+    if unhealthy_count > 0 {
+        blocking_reasons
+            .push("provider deployment validation found unhealthy providers".to_string());
+    }
+    if latest_validation_age_hours.is_some_and(|hours| hours >= 24) {
+        blocking_reasons.push("provider deployment validation evidence is stale".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Provider deployment validation is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Provider deployment has a recent healthy validation run".to_string()
+    };
+
+    ProviderDeploymentReadiness {
+        status,
+        production_blocked,
+        latest_validation_at,
+        latest_validation_age_hours,
+        latest_validation_status,
+        provider_count,
+        healthy_count,
+        unhealthy_count,
+        deployment_validated: !production_blocked,
+        blocking_reasons,
+        message,
     }
 }
 
@@ -25799,6 +25978,22 @@ not json
         )
         .await;
 
+        let deployment_validation: ProviderDeploymentValidationRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/deployment/validate")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(deployment_validation.status, "healthy");
+        assert_eq!(deployment_validation.provider_count, 1);
+        assert_eq!(deployment_validation.healthy_count, 1);
+        assert_eq!(deployment_validation.unhealthy_count, 0);
+
         let summary: ProviderGovernanceSummary = request_json(
             app.clone(),
             Request::builder()
@@ -25820,6 +26015,11 @@ not json
         assert_eq!(summary.budgeted_provider_count, 1);
         assert_eq!(summary.active_provider_count, 1);
         assert_eq!(summary.inactive_provider_count, 1);
+        assert_eq!(summary.deployment_readiness.status, "ready");
+        assert!(!summary.deployment_readiness.production_blocked);
+        assert!(summary.deployment_readiness.deployment_validated);
+        assert_eq!(summary.deployment_readiness.provider_count, 1);
+        assert_eq!(summary.deployment_readiness.unhealthy_count, 0);
         assert!(summary.attention_items.iter().any(|item| {
             item.provider_name == "summary-budgeted-mock" && item.kind == "pending_status_approval"
         }));
@@ -25943,7 +26143,7 @@ not json
         );
 
         let gate_runs: ProviderPolicyGateRunSummary = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/providers/policy-gate/runs")
                 .header("x-mandoforge-subject", "admin-1")
@@ -25972,6 +26172,22 @@ not json
         );
         assert!(gate_runs.attention_items.iter().any(|item| {
             item.kind == "production_provider_gate_blocked" && item.severity == "critical"
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider.deployment_validation_run"
+                && log.details["healthy_count"] == 1
+                && log.details["unhealthy_count"] == 0
         }));
     }
 
