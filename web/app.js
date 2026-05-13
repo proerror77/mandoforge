@@ -517,6 +517,13 @@ async function createApprovalNotificationChannelPolicy(event) {
   await refreshOps();
 }
 
+async function archiveApprovalNotificationChannelPolicy(id) {
+  await api(`/api/approvals/notification-channel-policies/${id}/archive`, {
+    method: "POST",
+  });
+  await refreshOps();
+}
+
 async function runDueApprovalEscalations() {
   state.approvalEscalationDueRun = await api("/api/approvals/escalations/run-due", {
     method: "POST",
@@ -3851,6 +3858,7 @@ function renderApprovalNotificationRouting() {
                 <th>Retry</th>
                 <th>Target Env</th>
                 <th>Status</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -3865,6 +3873,11 @@ function renderApprovalNotificationRouting() {
                       <td>${formatInteger(policy.max_attempts)} attempts · ${formatInteger(policy.backoff_seconds)}s</td>
                       <td>${escapeHtml(policy.target_env || "default env boundary")}</td>
                       <td>${escapeHtml(policy.status)}</td>
+                      <td>${
+                        policy.status === "active"
+                          ? `<button type="button" class="secondary" data-archive-approval-notification-policy="${escapeHtml(policy.id)}">Archive</button>`
+                          : `<span class="muted">No action</span>`
+                      }</td>
                     </tr>
                   `,
                 )
@@ -3903,6 +3916,15 @@ function renderApprovalNotificationRouting() {
         : `<div class="muted">No approval notification routing attention items.</div>`
     }
   `;
+  approvalNotificationRoutingRoot
+    .querySelectorAll("[data-archive-approval-notification-policy]")
+    .forEach((button) => {
+      button.addEventListener("click", () =>
+        archiveApprovalNotificationChannelPolicy(
+          button.dataset.archiveApprovalNotificationPolicy,
+        ),
+      );
+    });
 }
 
 function renderApprovalNotificationRuns() {
