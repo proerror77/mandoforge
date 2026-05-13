@@ -14320,6 +14320,34 @@ async fn rollback_mcp_server_rollout(
             "MCP server last rollout is not rollbackable",
         ));
     }
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = mcp_server_rollout_rollback_controller_required(&lookup);
+    let controller_configured = mcp_server_rollout_rollback_controller_configured(&lookup);
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": "controller_not_configured"
+    });
+    if controller_required && !controller_configured {
+        return Err(AppError::bad_request(
+            "MCP rollout rollback controller is required but not configured",
+        ));
+    }
+    if controller_configured {
+        controller_execution = execute_mcp_server_rollout_rollback_controller(
+            &lookup,
+            &principal.subject_id,
+            Utc::now(),
+            &server,
+            &last_rollout,
+        )
+        .await?;
+        if controller_execution.get("status").and_then(Value::as_str) != Some("rolled_back") {
+            return Err(AppError::bad_request(
+                "MCP rollout rollback controller did not confirm rollback",
+            ));
+        }
+    }
     let snapshot = last_rollout
         .get("previous_snapshot")
         .cloned()
@@ -14333,6 +14361,9 @@ async fn rollback_mcp_server_rollout(
     last_rollout["status"] = json!("rolled_back");
     last_rollout["rolled_back_by"] = json!(principal.subject_id.clone());
     last_rollout["rolled_back_at"] = json!(Utc::now());
+    last_rollout["rollback_controller_required"] = json!(controller_required);
+    last_rollout["rollback_controller_configured"] = json!(controller_configured);
+    last_rollout["rollback_controller_execution"] = controller_execution.clone();
     let mut config_map = config.as_object().cloned().unwrap_or_default();
     config_map.insert("last_rollout".to_string(), last_rollout.clone());
     let target_status = snapshot
@@ -14378,6 +14409,9 @@ async fn rollback_mcp_server_rollout(
                 "team_id": team_id,
                 "name": updated.name,
                 "rollout": last_rollout,
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
             }),
         ))
         .await?;
@@ -14637,6 +14671,29 @@ where
         .unwrap_or(false)
 }
 
+fn mcp_server_rollout_rollback_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn mcp_server_rollout_rollback_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
 async fn execute_mcp_server_rollout_controller<F>(
     lookup: &F,
     team_id: Uuid,
@@ -14699,6 +14756,83 @@ where
         "http_status": http_status.as_u16(),
         "provider_status": controller_status,
         "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
+}
+
+async fn execute_mcp_server_rollout_rollback_controller<F>(
+    lookup: &F,
+    subject: &str,
+    requested_at: DateTime<Utc>,
+    server: &McpServerRecord,
+    rollout: &Value,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_MCP_ROLLOUT_ROLLBACK_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.mcp_connector_rollout_rollback",
+        "subject": subject,
+        "team_id": server.team_id,
+        "server_id": server.id,
+        "server_name": server.name.clone(),
+        "transport": server.transport.clone(),
+        "status": server.status.clone(),
+        "tool_allowlist": server.tool_allowlist.clone(),
+        "rollout": {
+            "id": rollout.get("id"),
+            "status": rollout.get("status"),
+            "requested_by": rollout.get("requested_by"),
+            "applied_by": rollout.get("applied_by"),
+            "applied_at": rollout.get("applied_at"),
+            "candidate": rollout.get("candidate"),
+            "previous_snapshot": rollout.get("previous_snapshot"),
+        },
+        "requested_at": requested_at,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "MCP rollout rollback controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("rolled_back");
+    let rolled_back = matches!(
+        controller_status,
+        "rolled_back" | "recovered" | "success" | "ok" | "applied"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if rolled_back { "rolled_back" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "rollback_id": body.get("rollback_id").and_then(Value::as_str),
         "message": body.get("message").and_then(Value::as_str),
         "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
     }))
@@ -31721,6 +31855,106 @@ not json
     }
 
     #[tokio::test]
+    async fn mcp_rollout_rollback_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mcp rollback listener");
+        let controller_addr = listener.local_addr().expect("mcp rollback addr");
+        let controller = Router::new()
+            .route("/mcp-rollback", post(mock_mcp_rollout_rollback_controller))
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock mcp rollback controller");
+        });
+        let now = Utc::now();
+        let server = McpServerRecord {
+            id: Uuid::new_v4(),
+            team_id: Uuid::new_v4(),
+            name: "docs".to_string(),
+            transport: "http".to_string(),
+            config: json!({"secret_refs": ["vault:mcp/docs#token"]}),
+            tool_allowlist: vec!["search".to_string()],
+            status: "active".to_string(),
+            created_at: now,
+        };
+        let rollout_id = Uuid::new_v4();
+        let rollout = json!({
+            "id": rollout_id,
+            "status": "applied",
+            "requested_by": "admin-1",
+            "applied_by": "admin-1",
+            "applied_at": now,
+            "candidate": {
+                "transport": "http",
+                "status": "disabled",
+                "tool_allowlist": ["search"],
+                "config": {"secret_refs": ["vault:mcp/docs#token"]}
+            },
+            "previous_snapshot": {
+                "transport": "http",
+                "status": "active",
+                "tool_allowlist": ["search"],
+                "config": {"secret_refs": ["vault:mcp/docs#token"]}
+            }
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/mcp-rollback"))
+            }
+            "MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_TOKEN" => {
+                Some("mcp-rollback-token".to_string())
+            }
+            _ => None,
+        };
+
+        let execution = execute_mcp_server_rollout_rollback_controller(
+            &lookup, "admin-1", now, &server, &rollout,
+        )
+        .await
+        .expect("mcp rollback controller");
+
+        assert_eq!(execution["status"], "rolled_back");
+        assert_eq!(execution["rollback_id"], "mcp-rollback-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.mcp_connector_rollout_rollback"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["server_id"], server.id.to_string());
+        assert_eq!(payloads[0]["rollout"]["id"], rollout_id.to_string());
+        assert_eq!(payloads[0]["rollout"]["status"], "applied");
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn mcp_rollout_rollback_controller_required_flag_is_fail_closed() {
+        let missing = |key: &str| match key {
+            "MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_REQUIRED" => Some("true".to_string()),
+            _ => None,
+        };
+        assert!(mcp_server_rollout_rollback_controller_required(&missing));
+        assert!(!mcp_server_rollout_rollback_controller_configured(&missing));
+
+        let configured = |key: &str| match key {
+            "MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_REQUIRED" => Some("true".to_string()),
+            "MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL" => {
+                Some("https://controller.example/mcp-rollback".to_string())
+            }
+            _ => None,
+        };
+        assert!(mcp_server_rollout_rollback_controller_required(&configured));
+        assert!(mcp_server_rollout_rollback_controller_configured(
+            &configured
+        ));
+    }
+
+    #[tokio::test]
     async fn mcp_deployment_controller_executes_external_boundary() {
         let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -32702,6 +32936,30 @@ not json
             "steps": [
                 {"name": "health", "status": "passed"},
                 {"name": "allowlist", "status": "passed"}
+            ]
+        }))
+    }
+
+    async fn mock_mcp_rollout_rollback_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer mcp-rollback-token")
+        );
+        assert_eq!(payload["type"], "mandoforge.mcp_connector_rollout_rollback");
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "rolled_back",
+            "rollback_id": "mcp-rollback-1",
+            "message": "MCP rollout rollback restored previous connector snapshot",
+            "steps": [
+                {"name": "restore-config", "status": "rolled_back"},
+                {"name": "verify-health", "status": "passed"}
             ]
         }))
     }

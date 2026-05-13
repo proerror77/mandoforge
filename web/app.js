@@ -1411,7 +1411,7 @@ async function applyMcpRollout(serverId, rolloutId) {
 
 async function rollbackMcpRollout(serverId, rolloutId) {
   if (!state.mcpTeamId) return;
-  await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/rollouts/${rolloutId}/rollback`, {
+  state.mcpRollback = await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/rollouts/${rolloutId}/rollback`, {
     method: "POST",
   });
   await loadMcpServers();
@@ -5032,6 +5032,7 @@ function renderMcpServers() {
               <div class="muted">Tools: ${escapeHtml(server.tool_allowlist.join(", ") || "none")}</div>
               <div class="muted">Secret refs: ${escapeHtml((server.config?.secret_refs || []).join(", ") || "none")}</div>
               <div class="muted">Rollout: ${escapeHtml(pendingRollout ? `pending ${pendingRollout.id}` : lastRollout ? `${lastRollout.status} ${lastRollout.id}` : "none")}</div>
+              ${lastRollout?.rollback_controller_execution ? `<div class="muted">Rollback controller: ${escapeHtml(lastRollout.rollback_controller_execution.status || "unknown")} · ${escapeHtml(lastRollout.rollback_controller_execution.rollback_id || "no rollback id")}</div>` : ""}
               <button class="secondary" data-edit-mcp="${server.id}">Edit Config</button>
               <button class="secondary" data-rollout-mcp="${server.id}">Request Rollout</button>
               ${pendingRollout ? `<button class="secondary" data-apply-mcp-rollout="${server.id}" data-rollout-id="${escapeHtml(pendingRollout.id)}">Apply Rollout</button>` : ""}
