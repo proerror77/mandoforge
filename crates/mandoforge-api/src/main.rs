@@ -2740,6 +2740,7 @@ struct McpServerRolloutRunSummary {
     latest_run: Option<McpServerRolloutRunRecord>,
     recent_runs: Vec<McpServerRolloutRunRecord>,
     production_ops: McpServerRolloutProductionOpsReadiness,
+    production_orchestration: McpServerRolloutProductionOrchestrationReadiness,
     attention_items: Vec<McpServerRolloutRunAttentionItem>,
 }
 
@@ -2753,6 +2754,20 @@ struct McpServerRolloutProductionOpsReadiness {
     due_pending_count: usize,
     expired_pending_count: usize,
     failed_preflight_count: usize,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerRolloutProductionOrchestrationReadiness {
+    status: String,
+    production_blocked: bool,
+    scheduler_supervision_fresh: bool,
+    latest_run_status: Option<String>,
+    pending_clear: bool,
+    failed_preflight_clear: bool,
+    failed_runs_clear: bool,
+    manual_apply_required_count: usize,
+    blocking_reasons: Vec<String>,
     message: String,
 }
 
@@ -11956,6 +11971,12 @@ fn build_mcp_server_rollout_run_summary(
     }
     let production_ops =
         build_mcp_server_rollout_production_ops(latest_run.as_ref(), rollout_summary, generated_at);
+    let production_orchestration = build_mcp_server_rollout_production_orchestration(
+        latest_run.as_ref(),
+        rollout_summary,
+        failed_run_count,
+        generated_at,
+    );
     if production_ops.production_blocked {
         attention_items.push(McpServerRolloutRunAttentionItem {
             kind: "mcp_rollout_production_blocked".to_string(),
@@ -11965,6 +11986,17 @@ fn build_mcp_server_rollout_run_summary(
                 "warning".to_string()
             },
             message: production_ops.message.clone(),
+        });
+    }
+    if production_orchestration.production_blocked {
+        attention_items.push(McpServerRolloutRunAttentionItem {
+            kind: "mcp_rollout_orchestration_blocked".to_string(),
+            severity: if production_orchestration.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: production_orchestration.message.clone(),
         });
     }
     recent_runs.truncate(10);
@@ -11977,6 +12009,7 @@ fn build_mcp_server_rollout_run_summary(
         latest_run,
         recent_runs,
         production_ops,
+        production_orchestration,
         attention_items,
     }
 }
@@ -12049,6 +12082,70 @@ fn build_mcp_server_rollout_production_ops(
         due_pending_count: rollout_summary.due_pending_count,
         expired_pending_count: rollout_summary.expired_pending_count,
         failed_preflight_count: rollout_summary.failed_preflight_count,
+        message,
+    }
+}
+
+fn build_mcp_server_rollout_production_orchestration(
+    latest_run: Option<&McpServerRolloutRunRecord>,
+    rollout_summary: &McpServerRolloutSummary,
+    failed_run_count: usize,
+    generated_at: DateTime<Utc>,
+) -> McpServerRolloutProductionOrchestrationReadiness {
+    let scheduler_supervision_fresh =
+        latest_run.is_some_and(|run| (generated_at - run.ran_at).num_hours() < 6);
+    let pending_clear = rollout_summary.pending_rollout_count == 0
+        && rollout_summary.due_pending_count == 0
+        && rollout_summary.expired_pending_count == 0;
+    let failed_preflight_clear = rollout_summary.failed_preflight_count == 0;
+    let failed_runs_clear = failed_run_count == 0;
+    let manual_apply_required_count = rollout_summary.manual_pending_count;
+    let mut blocking_reasons = Vec::new();
+
+    if !scheduler_supervision_fresh {
+        blocking_reasons.push("fresh scheduler due-run supervision is missing".to_string());
+    }
+    if !pending_clear {
+        blocking_reasons.push("pending, due, or expired connector rollouts remain".to_string());
+    }
+    if manual_apply_required_count > 0 {
+        blocking_reasons.push("manual connector rollout apply steps remain".to_string());
+    }
+    if !failed_preflight_clear {
+        blocking_reasons.push("connector rollout preflight failures remain".to_string());
+    }
+    if !failed_runs_clear {
+        blocking_reasons
+            .push("failed connector rollout due-run history requires review".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let latest_run_status = latest_run.map(|run| run.status.clone());
+    let message = if production_blocked {
+        format!(
+            "MCP connector production orchestration is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "MCP connector production orchestration has fresh scheduler supervision, no pending rollout work, no failed preflight, and no failed due-run history".to_string()
+    };
+
+    McpServerRolloutProductionOrchestrationReadiness {
+        status,
+        production_blocked,
+        scheduler_supervision_fresh,
+        latest_run_status,
+        pending_clear,
+        failed_preflight_clear,
+        failed_runs_clear,
+        manual_apply_required_count,
+        blocking_reasons,
         message,
     }
 }
@@ -28030,6 +28127,22 @@ not json
         assert_eq!(rollout_runs.production_ops.status, "ready");
         assert!(!rollout_runs.production_ops.production_blocked);
         assert_eq!(rollout_runs.production_ops.pending_rollout_count, 0);
+        assert_eq!(rollout_runs.production_orchestration.status, "ready");
+        assert!(!rollout_runs.production_orchestration.production_blocked);
+        assert!(
+            rollout_runs
+                .production_orchestration
+                .scheduler_supervision_fresh
+        );
+        assert!(rollout_runs.production_orchestration.pending_clear);
+        assert!(rollout_runs.production_orchestration.failed_preflight_clear);
+        assert!(rollout_runs.production_orchestration.failed_runs_clear);
+        assert_eq!(
+            rollout_runs
+                .production_orchestration
+                .manual_apply_required_count,
+            0
+        );
         assert_eq!(
             rollout_runs
                 .latest_run
