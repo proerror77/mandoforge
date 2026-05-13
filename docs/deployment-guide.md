@@ -126,3 +126,22 @@ Before shared-cluster use:
 - Add NetworkPolicy before enabling shell, Codex, HTTP, or MCP workers.
 - Replace `emptyDir` workspaces with durable artifact storage.
 - Split sandbox and Codex execution into separate worker Deployments.
+
+## Stage 2 Production Evidence
+
+Stage 2 governed-runtime completion is gated by production evidence, not by local demos alone. After deploying the API and configuring the Stage 2 controller/provider targets, collect readiness evidence with:
+
+```bash
+ALLOW_BLOCKED=1 BASE_URL=http://127.0.0.1:8787 ./scripts/stage2-production-evidence-gate.sh
+```
+
+To execute the bounded controller-backed validation endpoints:
+
+```bash
+RUN_STAGE2_PRODUCTION_VALIDATIONS=1 \
+MANDOFORGE_STAGE2_TEAM_ID=<team_uuid> \
+BASE_URL=http://127.0.0.1:8787 \
+./scripts/stage2-production-evidence-gate.sh
+```
+
+This gate remains fail-closed until `/api/stage2/readiness` reports no open completion gaps. See `docs/stage2-production-evidence-gate.md` for the optional flags that enable higher-impact KMS rotation, Remote Computer sidecar recovery, and finance close/reconciliation checks.

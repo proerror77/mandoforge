@@ -309,6 +309,9 @@ Current verified path:
 - `kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out`
 - `./scripts/stage1-final-gate.sh`
 - `RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh`
+- `ALLOW_BLOCKED=1 ./scripts/stage2-production-evidence-gate.sh` for read-only Stage 2 readiness inventory against a running API.
+
+Stage 2 completion requires more than this local path. Use `RUN_STAGE2_PRODUCTION_VALIDATIONS=1 ./scripts/stage2-production-evidence-gate.sh` against a real deployment target after configuring the external controller URLs, provider/KMS/notification/collector targets, durable worker queue, Remote Computer state filesystem, and optional `MANDOFORGE_STAGE2_TEAM_ID` for MCP rollout evidence. The gate exits non-zero while `GET /api/stage2/readiness` reports open completion gaps.
 
 After the actionbook smoke, verify that the self-started API and CDP listeners were cleaned up:
 
