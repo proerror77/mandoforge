@@ -242,8 +242,9 @@ Current worker boundary:
 
 - Keep the runtime bound to one configured tenant ID until cross-tenant request routing is implemented. Incoming `x-mandoforge-tenant-id` headers must match that runtime tenant and fail closed otherwise.
 - Keep org/team/project membership enforcement as the application-layer scope boundary for Stage 2 team pilots.
-- Keep `GET /api/tenant-isolation/readiness` as the operator gate for this boundary. It reports runtime tenant mode, header fail-closed status, scoped resource counts, tenant-scoped table coverage, and the current lack of Postgres Row Level Security.
-- Add Postgres RLS policies and tenant context tests before claiming production cross-tenant isolation.
+- Keep `GET /api/tenant-isolation/readiness` as the operator gate for this boundary. It reports runtime tenant mode, header fail-closed status, scoped resource counts, tenant-scoped table coverage, and Postgres Row Level Security migration/runtime state.
+- `db/migrations/0024_tenant_rls_policies.sql` enables and forces RLS for tracked tenant-scoped tables, including an indirect `agent_versions` policy through `agents`. Postgres connections set `mandoforge.tenant_id` to the configured runtime tenant before use.
+- Keep runtime tenant switching and cross-tenant RLS tests as production blockers before claiming full production multi-tenant serving.
 
 ## Vault Boundary
 

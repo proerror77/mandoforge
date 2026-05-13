@@ -2313,11 +2313,12 @@ function renderTenantIsolationReadiness() {
     </div>
     <div class="item">
       <strong>TABLE COVERAGE</strong>
-      <div class="muted">${formatInteger(tableCoverage.length)} tenant-scoped tables tracked · RLS required ${rls.required_for_production ? "yes" : "no"} · enabled ${rls.enabled ? "yes" : "no"}</div>
+      <div class="muted">${formatInteger(tableCoverage.length)} tenant-scoped tables tracked · RLS required ${rls.required_for_production ? "yes" : "no"} · enabled ${rls.enabled ? "yes" : "no"} · forced ${rls.forced ? "yes" : "no"}</div>
+      <div class="muted">Migration asset ${rls.migration_asset_present ? "present" : "missing"} · tenant context ${rls.tenant_context_configured ? "configured" : "missing"} · enabled tables ${formatInteger(rls.enabled_table_count || 0)}/${formatInteger(rls.tracked_table_count || tableCoverage.length)} · forced tables ${formatInteger(rls.forced_table_count || 0)}/${formatInteger(rls.tracked_table_count || tableCoverage.length)}</div>
       <div class="muted">${escapeHtml(
         tableCoverage
           .slice(0, 10)
-          .map((table) => `${table.table}:${table.store_filters_tenant ? "tenant-filtered" : "missing"}`)
+          .map((table) => `${table.table}:${table.rls_forced ? "forced-rls" : table.rls_enabled ? "rls" : table.store_filters_tenant ? "tenant-filtered" : "missing"}`)
           .join(", ") || "none",
       )}</div>
     </div>

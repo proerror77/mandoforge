@@ -20,7 +20,7 @@ use axum::{
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{Executor, PgPool, postgres::PgPoolOptions};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -1772,12 +1772,19 @@ struct TenantIsolationTableCoverage {
     store_filters_tenant: bool,
     rls_required_for_production: bool,
     rls_enabled: bool,
+    rls_forced: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TenantIsolationRlsReadiness {
     required_for_production: bool,
     enabled: bool,
+    forced: bool,
+    migration_asset_present: bool,
+    tenant_context_configured: bool,
+    enabled_table_count: usize,
+    forced_table_count: usize,
+    tracked_table_count: usize,
     status: String,
 }
 
@@ -2609,8 +2616,16 @@ async fn main() -> Result<()> {
     let tenant_id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid");
     let store = match std::env::var("DATABASE_URL") {
         Ok(database_url) if !database_url.trim().is_empty() => {
+            let tenant_setting = format!("SET mandoforge.tenant_id = '{}'", tenant_id);
             let pool = PgPoolOptions::new()
                 .max_connections(8)
+                .after_connect(move |conn, _meta| {
+                    let tenant_setting = tenant_setting.clone();
+                    Box::pin(async move {
+                        conn.execute(tenant_setting.as_str()).await?;
+                        Ok(())
+                    })
+                })
                 .connect(&database_url)
                 .await
                 .context("failed to connect to Postgres")?;
@@ -5657,12 +5672,31 @@ async fn build_tenant_isolation_readiness(
         }
     }
 
+    let rls_probe = probe_tenant_rls(state).await?;
+    let table_coverage = tenant_isolation_table_coverage(&rls_probe.table_states);
     let rls = TenantIsolationRlsReadiness {
         required_for_production: true,
-        enabled: false,
-        status: "not_configured".to_string(),
+        enabled: rls_probe.enabled_table_count == rls_probe.tracked_table_count
+            && rls_probe.tracked_table_count > 0,
+        forced: rls_probe.forced_table_count == rls_probe.tracked_table_count
+            && rls_probe.tracked_table_count > 0,
+        migration_asset_present: rls_probe.migration_asset_present,
+        tenant_context_configured: rls_probe.tenant_context_configured,
+        enabled_table_count: rls_probe.enabled_table_count,
+        forced_table_count: rls_probe.forced_table_count,
+        tracked_table_count: rls_probe.tracked_table_count,
+        status: if rls_probe.enabled_table_count == rls_probe.tracked_table_count
+            && rls_probe.forced_table_count == rls_probe.tracked_table_count
+            && rls_probe.tenant_context_configured
+            && rls_probe.tracked_table_count > 0
+        {
+            "configured".to_string()
+        } else if rls_probe.migration_asset_present {
+            "migration_ready".to_string()
+        } else {
+            "not_configured".to_string()
+        },
     };
-    let table_coverage = tenant_isolation_table_coverage();
     let header_fail_closed = true;
     let membership_scope_enforced = true;
     let mut attention_items = Vec::new();
@@ -5671,16 +5705,20 @@ async fn build_tenant_isolation_readiness(
         severity: "warning".to_string(),
         message: "runtime currently binds every request to one configured tenant_id; cross-tenant serving is intentionally disabled".to_string(),
     });
-    attention_items.push(TenantIsolationAttentionItem {
-        kind: "postgres_rls_missing".to_string(),
-        severity: "warning".to_string(),
-        message: "tenant-scoped store queries filter tenant_id, but Postgres Row Level Security is not enabled yet".to_string(),
-    });
+    if !rls.enabled || !rls.forced || !rls.tenant_context_configured {
+        attention_items.push(TenantIsolationAttentionItem {
+            kind: "postgres_rls_incomplete".to_string(),
+            severity: "warning".to_string(),
+            message: "tenant-scoped store queries filter tenant_id; Postgres RLS is now tracked by migration/readiness but is not fully enabled, forced, and tenant-context configured for every tracked table".to_string(),
+        });
+    }
 
     let runbook_actions = vec![
         "keep x-mandoforge-tenant-id fail-closed until runtime tenant switching is implemented"
             .to_string(),
-        "add Postgres RLS policies and tenant-context tests before production multi-tenant serving"
+        "apply and verify db/migrations/0024_tenant_rls_policies.sql in Postgres-backed environments"
+            .to_string(),
+        "keep mandoforge.tenant_id configured on every database connection before production multi-tenant serving"
             .to_string(),
         "run cross-tenant access tests for agents, sessions, tools, approvals, jobs, audit, and governance resources"
             .to_string(),
@@ -5718,8 +5756,78 @@ async fn build_tenant_isolation_readiness(
     })
 }
 
-fn tenant_isolation_table_coverage() -> Vec<TenantIsolationTableCoverage> {
-    [
+#[derive(Debug, Clone)]
+struct TenantRlsProbe {
+    migration_asset_present: bool,
+    tenant_context_configured: bool,
+    enabled_table_count: usize,
+    forced_table_count: usize,
+    tracked_table_count: usize,
+    table_states: HashMap<String, (bool, bool)>,
+}
+
+async fn probe_tenant_rls(state: &AppState) -> Result<TenantRlsProbe, AppError> {
+    let tracked_tables = tenant_isolation_tracked_tables();
+    let tracked_table_count = tracked_tables.len();
+    let migration_asset_present =
+        include_str!("../../../db/migrations/0024_tenant_rls_policies.sql")
+            .contains("mandoforge_current_tenant_id");
+    let StoreBackend::Postgres(pool) = &state.store else {
+        return Ok(TenantRlsProbe {
+            migration_asset_present,
+            tenant_context_configured: false,
+            enabled_table_count: 0,
+            forced_table_count: 0,
+            tracked_table_count,
+            table_states: HashMap::new(),
+        });
+    };
+    let table_names: Vec<String> = tracked_tables
+        .iter()
+        .map(|table| (*table).to_string())
+        .collect();
+    let rows: Vec<(String, bool, bool)> = sqlx::query_as(
+        "SELECT c.relname::text, c.relrowsecurity, c.relforcerowsecurity
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relkind = 'r'
+           AND c.relname = ANY($1)",
+    )
+    .bind(&table_names)
+    .fetch_all(pool)
+    .await?;
+    let mut table_states = HashMap::new();
+    for (table, enabled, forced) in rows {
+        table_states.insert(table, (enabled, forced));
+    }
+    let enabled_table_count = tracked_tables
+        .iter()
+        .filter(|table| table_states.get(**table).is_some_and(|state| state.0))
+        .count();
+    let forced_table_count = tracked_tables
+        .iter()
+        .filter(|table| table_states.get(**table).is_some_and(|state| state.1))
+        .count();
+    let tenant_context_configured: bool =
+        sqlx::query_scalar("SELECT NULLIF(current_setting('mandoforge.tenant_id', true), '') = $1")
+            .bind(state.tenant_id.to_string())
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
+    Ok(TenantRlsProbe {
+        migration_asset_present,
+        tenant_context_configured,
+        enabled_table_count,
+        forced_table_count,
+        tracked_table_count,
+        table_states,
+    })
+}
+
+fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
+    vec![
+        "tenants",
         "agents",
         "agent_versions",
         "sessions",
@@ -5729,6 +5837,8 @@ fn tenant_isolation_table_coverage() -> Vec<TenantIsolationTableCoverage> {
         "audit_logs",
         "artifacts",
         "providers",
+        "tool_definitions",
+        "workspaces",
         "secret_records",
         "execution_jobs",
         "organizations",
@@ -5736,22 +5846,40 @@ fn tenant_isolation_table_coverage() -> Vec<TenantIsolationTableCoverage> {
         "projects",
         "memberships",
         "tenant_invitations",
+        "provider_access",
         "remote_computers",
         "remote_computer_leases",
+        "remote_computer_session_attachments",
+        "remote_computer_job_assignments",
         "mcp_servers",
         "eval_datasets",
+        "eval_cases",
         "eval_runs",
         "usage_rollups",
+        "agent_releases",
+        "policy_revisions",
+        "approval_groups",
+        "approval_escalation_rules",
+        "cost_alert_routes",
+        "codex_app_server_runs",
+        "approval_notification_channel_policies",
     ]
-    .into_iter()
-    .map(|table| TenantIsolationTableCoverage {
-        table: table.to_string(),
-        tenant_id_required: true,
-        store_filters_tenant: true,
-        rls_required_for_production: true,
-        rls_enabled: false,
-    })
-    .collect()
+}
+
+fn tenant_isolation_table_coverage(
+    rls_table_states: &HashMap<String, (bool, bool)>,
+) -> Vec<TenantIsolationTableCoverage> {
+    tenant_isolation_tracked_tables()
+        .into_iter()
+        .map(|table| TenantIsolationTableCoverage {
+            table: table.to_string(),
+            tenant_id_required: table != "agent_versions",
+            store_filters_tenant: true,
+            rls_required_for_production: true,
+            rls_enabled: rls_table_states.get(table).is_some_and(|state| state.0),
+            rls_forced: rls_table_states.get(table).is_some_and(|state| state.1),
+        })
+        .collect()
 }
 
 async fn create_organization(
@@ -19186,6 +19314,7 @@ not json
         assert!(names.contains(&"0021_remote_computer_job_assignments.sql"));
         assert!(names.contains(&"0022_approval_notification_channel_policies.sql"));
         assert!(names.contains(&"0023_approval_notification_retries.sql"));
+        assert!(names.contains(&"0024_tenant_rls_policies.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -24788,8 +24917,11 @@ not json
         assert_eq!(readiness.runtime_tenant_mode, "single_runtime_tenant");
         assert!(readiness.header_fail_closed);
         assert!(readiness.membership_scope_enforced);
-        assert_eq!(readiness.rls.status, "not_configured");
+        assert_eq!(readiness.rls.status, "migration_ready");
         assert!(!readiness.rls.enabled);
+        assert!(!readiness.rls.forced);
+        assert!(readiness.rls.migration_asset_present);
+        assert!(!readiness.rls.tenant_context_configured);
         assert!(
             readiness
                 .table_coverage
@@ -24800,7 +24932,7 @@ not json
             readiness
                 .attention_items
                 .iter()
-                .any(|item| item.kind == "postgres_rls_missing")
+                .any(|item| item.kind == "postgres_rls_incomplete")
         );
     }
 
