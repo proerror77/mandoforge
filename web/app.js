@@ -43,6 +43,7 @@ const state = {
   mcpRolloutRuns: null,
   executionJobs: [],
   workerReadiness: null,
+  workerLoadValidationRun: null,
   remoteComputerReadiness: null,
   remoteComputerRunnerReadiness: null,
   remoteComputers: [],
@@ -145,6 +146,7 @@ const runDueAgentReleasesButton = document.querySelector("#run-due-agent-release
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
 const workerReadinessRoot = document.querySelector("#worker-readiness");
+const runWorkerLoadValidationButton = document.querySelector("#run-worker-load-validation");
 const remoteComputerReadinessRoot = document.querySelector("#remote-computer-readiness");
 const remoteArtifactDiscoveryForm = document.querySelector("#remote-artifact-discovery-form");
 const remoteStateLockForm = document.querySelector("#remote-state-lock-form");
@@ -252,6 +254,7 @@ runDueMcpHealthButton.addEventListener("click", runDueMcpHealth);
 runDueMcpRolloutsButton.addEventListener("click", runDueMcpRollouts);
 loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
+runWorkerLoadValidationButton.addEventListener("click", runWorkerLoadValidation);
 remoteArtifactDiscoveryForm.addEventListener("submit", discoverRemoteArtifacts);
 remoteStateLockForm.addEventListener("submit", acquireRemoteStateLock);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
@@ -1353,6 +1356,13 @@ async function refreshExecutionJobs() {
   renderExecutionJobs();
 }
 
+async function runWorkerLoadValidation() {
+  state.workerLoadValidationRun = await api("/api/execution-jobs/worker-load-validation/run", {
+    method: "POST",
+  });
+  await refreshExecutionJobs();
+}
+
 async function runExecutionJob(jobId) {
   await api(`/api/execution-jobs/${jobId}/run`, { method: "POST" });
   await refreshExecutionJobs();
@@ -1893,6 +1903,8 @@ function renderWorkerReadiness() {
   const workerMode = report.worker_mode || {};
   const k8s = report.k8s || {};
   const autoscaling = report.autoscaling || {};
+  const loadValidation = report.load_validation || {};
+  const loadValidationRun = state.workerLoadValidationRun;
   const attentionItems = report.attention_items || [];
   const runbookActions = report.runbook_actions || [];
   workerReadinessRoot.innerHTML = `
@@ -1933,6 +1945,17 @@ function renderWorkerReadiness() {
       <div class="muted">Resources: requests ${k8s.resources_requests_configured ? "configured" : "missing"} · limits ${k8s.resources_limits_configured ? "configured" : "missing"} · token automount ${k8s.automount_service_account_token_disabled ? "disabled" : "enabled/unknown"}</div>
       <div class="muted">AUTOSCALING SKELETON: ${escapeHtml(autoscaling.validation_status || "unknown")} · min ${formatOptionalInteger(autoscaling.configured_min_replicas)} · max ${formatOptionalInteger(autoscaling.configured_max_replicas)}</div>
       <div class="muted">Targets: ${escapeHtml((autoscaling.scale_target_refs || []).join(", ") || "none")}</div>
+    </div>
+    <div class="item">
+      <strong>WORKER LOAD VALIDATION</strong>
+      <div class="muted">${escapeHtml(loadValidation.status || "unknown")} · latest ${escapeHtml(loadValidation.latest_run_status || "none")} · isolated pool ${loadValidation.isolated_worker_pool_configured ? "configured" : "missing"} · load validated ${loadValidation.load_validated ? "yes" : "no"}</div>
+      <div class="muted">${escapeHtml(loadValidation.message || "Load validation has not been reported")}</div>
+      <div class="muted">Required: ${escapeHtml(loadValidation.required_profile || "not reported")}</div>
+      ${
+        loadValidationRun
+          ? `<pre>${escapeHtml(JSON.stringify(loadValidationRun, null, 2))}</pre>`
+          : `<div class="muted">No worker load validation run in this console session</div>`
+      }
     </div>
     <div class="item">
       <strong>ATTENTION ITEMS</strong>

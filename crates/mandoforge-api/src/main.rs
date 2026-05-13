@@ -1219,8 +1219,32 @@ struct WorkerReadinessReport {
     lease_summary: WorkerLeaseSummary,
     k8s: WorkerK8sReadiness,
     autoscaling: WorkerAutoscalingReadiness,
+    load_validation: WorkerLoadValidationEvidence,
     attention_items: Vec<WorkerReadinessAttentionItem>,
     runbook_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerLoadValidationEvidence {
+    status: String,
+    latest_run_at: Option<DateTime<Utc>>,
+    latest_run_status: Option<String>,
+    load_validated: bool,
+    isolated_worker_pool_configured: bool,
+    required_profile: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerLoadValidationRun {
+    status: String,
+    checked_at: DateTime<Utc>,
+    queue_backend: String,
+    worker_mode: String,
+    autoscaling_status: String,
+    load_validated: bool,
+    isolated_worker_pool_configured: bool,
+    actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3247,6 +3271,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/execution-jobs/worker-readiness",
             get(get_worker_readiness),
+        )
+        .route(
+            "/api/execution-jobs/worker-load-validation/run",
+            post(run_worker_load_validation),
         )
         .route(
             "/api/remote-computers/readiness",
@@ -17059,6 +17087,21 @@ async fn get_worker_readiness(
     Ok(Json(build_worker_readiness(&state).await?))
 }
 
+async fn run_worker_load_validation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<WorkerLoadValidationRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "worker_load_validation",
+        None,
+    )
+    .await?;
+    Ok(Json(execute_worker_load_validation(&state).await?))
+}
+
 async fn get_remote_computer_readiness(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -18394,6 +18437,7 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
         "deploy/k8s/worker-keda.yaml",
         "deploy/k8s/keda.yaml",
     ]);
+    let load_validation = worker_load_validation_evidence(state).await?;
     let mut attention_items = Vec::new();
     if worker_mode.api_inline_execution {
         attention_items.push(WorkerReadinessAttentionItem {
@@ -18484,6 +18528,13 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
             message: "worker KEDA queue-depth scaling is configured, but production load validation and isolation policy remain required".to_string(),
         });
     }
+    if !load_validation.load_validated {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_load_validation_missing".to_string(),
+            severity: "warning".to_string(),
+            message: load_validation.message.clone(),
+        });
+    }
 
     let mut runbook_actions = Vec::new();
     if worker_mode.api_inline_execution {
@@ -18519,6 +18570,12 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
     } else if autoscaling.validation_status == "queue_depth_configured" {
         runbook_actions.push(
             "run a production-like queue pressure test against worker KEDA scaling before declaring autoscaling validated"
+                .to_string(),
+        );
+    }
+    if !load_validation.load_validated {
+        runbook_actions.push(
+            "run POST /api/execution-jobs/worker-load-validation/run after a queue pressure test and isolated worker-pool check; keep Stage 2 production pilot blocked until it reports validated"
                 .to_string(),
         );
     }
@@ -18562,8 +18619,127 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
         lease_summary,
         k8s,
         autoscaling,
+        load_validation,
         attention_items,
         runbook_actions,
+    })
+}
+
+async fn execute_worker_load_validation(
+    state: &AppState,
+) -> Result<WorkerLoadValidationRun, AppError> {
+    let checked_at = Utc::now();
+    let queue_backend = worker_queue_backend_readiness(state.execution_queue.backend_kind());
+    let worker_mode = state.execution_worker.mode().to_string();
+    let k8s = worker_k8s_readiness_from_manifests();
+    let autoscaling = worker_autoscaling_readiness_from_manifests(&[
+        "deploy/k8s/worker-hpa.yaml",
+        "deploy/k8s/worker-keda.yaml",
+        "deploy/k8s/keda.yaml",
+    ]);
+    let load_validated = env_bool("MANDOFORGE_WORKER_LOAD_VALIDATED");
+    let isolated_worker_pool_configured = env_bool("MANDOFORGE_WORKER_ISOLATED_POOL");
+    let mut actions = Vec::new();
+    if !queue_backend.durable {
+        actions.push("configure_durable_worker_queue".to_string());
+    }
+    if k8s.hardening_status != "hardened" {
+        actions.push("harden_worker_pod_manifest".to_string());
+    }
+    if autoscaling.validation_status != "queue_depth_configured" {
+        actions.push("configure_queue_depth_autoscaling".to_string());
+    }
+    if !isolated_worker_pool_configured {
+        actions.push("configure_isolated_worker_pool".to_string());
+    }
+    if !load_validated {
+        actions.push("run_queue_pressure_load_validation".to_string());
+    }
+    let status = if actions.is_empty() {
+        "validated"
+    } else {
+        "attention"
+    }
+    .to_string();
+    let run = WorkerLoadValidationRun {
+        status,
+        checked_at,
+        queue_backend: queue_backend.kind,
+        worker_mode,
+        autoscaling_status: autoscaling.validation_status,
+        load_validated,
+        isolated_worker_pool_configured,
+        actions,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "worker.load_validation_run",
+            "execution_worker",
+            None,
+            json!({
+                "status": run.status,
+                "queue_backend": run.queue_backend,
+                "worker_mode": run.worker_mode,
+                "autoscaling_status": run.autoscaling_status,
+                "load_validated": run.load_validated,
+                "isolated_worker_pool_configured": run.isolated_worker_pool_configured,
+                "actions": run.actions,
+                "checked_at": run.checked_at,
+            }),
+        ))
+        .await?;
+    Ok(run)
+}
+
+async fn worker_load_validation_evidence(
+    state: &AppState,
+) -> Result<WorkerLoadValidationEvidence, AppError> {
+    let latest_run = state
+        .list_audit_logs(None)
+        .await?
+        .into_iter()
+        .filter(|log| log.action == "worker.load_validation_run")
+        .max_by_key(|log| log.created_at);
+    let latest_run_status = latest_run
+        .as_ref()
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let load_validated = latest_run_status.as_deref() == Some("validated");
+    let isolated_worker_pool_configured = latest_run
+        .as_ref()
+        .and_then(|log| log.details.get("isolated_worker_pool_configured"))
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| env_bool("MANDOFORGE_WORKER_ISOLATED_POOL"));
+    let status = if load_validated {
+        "validated"
+    } else if latest_run.is_some() {
+        "attention"
+    } else {
+        "not_run"
+    }
+    .to_string();
+    let message = if load_validated {
+        "worker load validation has a latest validated audit run".to_string()
+    } else if latest_run.is_some() {
+        "latest worker load validation run did not prove production load and worker-pool isolation"
+            .to_string()
+    } else {
+        "worker load validation has not been run; manifests alone do not prove autoscaling under production-like queue pressure".to_string()
+    };
+    Ok(WorkerLoadValidationEvidence {
+        status,
+        latest_run_at: latest_run.as_ref().map(|log| log.created_at),
+        latest_run_status,
+        load_validated,
+        isolated_worker_pool_configured,
+        required_profile:
+            "durable queue + hardened worker Pod + queue-depth autoscaling + isolated worker pool + production-like load test"
+                .to_string(),
+        message,
     })
 }
 
@@ -32054,12 +32230,68 @@ not json
                 .iter()
                 .any(|item| item.kind == "worker_autoscaling_load_validation_missing")
         );
+        assert_eq!(worker_readiness.load_validation.status, "not_run");
+        assert!(!worker_readiness.load_validation.load_validated);
+        assert!(
+            worker_readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "worker_load_validation_missing")
+        );
         assert!(
             worker_readiness
                 .runbook_actions
                 .iter()
                 .any(|action| action.contains("mandoforge-worker"))
         );
+        let worker_load_validation: WorkerLoadValidationRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/execution-jobs/worker-load-validation/run")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(worker_load_validation.status, "attention");
+        assert!(
+            worker_load_validation
+                .actions
+                .iter()
+                .any(|action| action == "run_queue_pressure_load_validation")
+        );
+        let worker_readiness_after_load_run: WorkerReadinessReport = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs/worker-readiness")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            worker_readiness_after_load_run
+                .load_validation
+                .latest_run_status
+                .as_deref(),
+            Some("attention")
+        );
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "worker.load_validation_run" && log.details["status"] == "attention"
+        }));
 
         let remote_computer_readiness: RemoteComputerReadinessReport = request_json(
             app.clone(),
