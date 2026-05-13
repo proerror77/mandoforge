@@ -17400,7 +17400,7 @@ async fn build_remote_computer_execution_transport_readiness(
             "persist stdout/stderr/status capture into tool results".to_string(),
             "workspace artifact sync from Pod to Artifact Store".to_string(),
             "session event replay for Pod execution output".to_string(),
-            "timeout and cancellation propagation".to_string(),
+            "cancellation propagation".to_string(),
         ],
         message:
             "Remote Computer runner has a gated Kubernetes exec WebSocket client boundary, but approved tools still execute on the existing worker path"

@@ -3,12 +3,15 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
 use uuid::Uuid;
+
+const DEFAULT_KUBERNETES_EXEC_TIMEOUT_SECONDS: u64 = 120;
+const MAX_KUBERNETES_EXEC_CAPTURE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RemoteComputerRunnerConfig {
@@ -616,6 +619,8 @@ struct KubernetesExecResult {
     handshake_status_code: u16,
     stdout: String,
     stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
     status: Option<Value>,
 }
 
@@ -625,6 +630,8 @@ impl KubernetesExecResult {
             "handshake_status_code": self.handshake_status_code,
             "stdout": self.stdout,
             "stderr": self.stderr,
+            "stdout_truncated": self.stdout_truncated,
+            "stderr_truncated": self.stderr_truncated,
             "status": self.status
         })
     }
@@ -634,6 +641,21 @@ async fn call_kubernetes_exec(
     config: &RemoteComputerRunnerConfig,
     pod_name: &str,
     command: &str,
+) -> Result<KubernetesExecResult, String> {
+    call_kubernetes_exec_with_timeout(
+        config,
+        pod_name,
+        command,
+        Duration::from_secs(kubernetes_exec_timeout_seconds()),
+    )
+    .await
+}
+
+async fn call_kubernetes_exec_with_timeout(
+    config: &RemoteComputerRunnerConfig,
+    pod_name: &str,
+    command: &str,
+    timeout: Duration,
 ) -> Result<KubernetesExecResult, String> {
     let api_url = config
         .kube_api_url
@@ -669,16 +691,30 @@ async fn call_kubernetes_exec(
     let handshake_status_code = response.status().as_u16();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    let mut stdout_truncated = false;
+    let mut stderr_truncated = false;
     let mut status = None;
-    while let Some(message) = socket.next().await {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = socket.close(None).await;
+            return Err("Kubernetes exec WebSocket timed out".to_string());
+        }
+        let Some(message) = tokio::time::timeout(deadline - now, socket.next())
+            .await
+            .map_err(|_| "Kubernetes exec WebSocket timed out".to_string())?
+        else {
+            break;
+        };
         let message = message.map_err(|err| format!("Kubernetes exec WebSocket error: {err}"))?;
         match message {
             Message::Binary(frame) if !frame.is_empty() => {
                 let channel = frame[0];
                 let payload = &frame[1..];
                 match channel {
-                    1 => stdout.extend_from_slice(payload),
-                    2 => stderr.extend_from_slice(payload),
+                    1 => append_bounded_exec_output(&mut stdout, payload, &mut stdout_truncated),
+                    2 => append_bounded_exec_output(&mut stderr, payload, &mut stderr_truncated),
                     3 => {
                         status = serde_json::from_slice(payload).ok();
                         break;
@@ -686,7 +722,9 @@ async fn call_kubernetes_exec(
                     _ => {}
                 }
             }
-            Message::Text(text) => stdout.extend_from_slice(text.as_bytes()),
+            Message::Text(text) => {
+                append_bounded_exec_output(&mut stdout, text.as_bytes(), &mut stdout_truncated);
+            }
             Message::Close(_) => break,
             _ => {}
         }
@@ -696,8 +734,31 @@ async fn call_kubernetes_exec(
         handshake_status_code,
         stdout: String::from_utf8_lossy(&stdout).to_string(),
         stderr: String::from_utf8_lossy(&stderr).to_string(),
+        stdout_truncated,
+        stderr_truncated,
         status,
     })
+}
+
+fn append_bounded_exec_output(target: &mut Vec<u8>, payload: &[u8], truncated: &mut bool) {
+    let remaining = MAX_KUBERNETES_EXEC_CAPTURE_BYTES.saturating_sub(target.len());
+    if remaining == 0 {
+        *truncated = true;
+        return;
+    }
+    let take = remaining.min(payload.len());
+    target.extend_from_slice(&payload[..take]);
+    if take < payload.len() {
+        *truncated = true;
+    }
+}
+
+fn kubernetes_exec_timeout_seconds() -> u64 {
+    std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXEC_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_KUBERNETES_EXEC_TIMEOUT_SECONDS)
 }
 
 fn kubernetes_exec_websocket_url(
@@ -1185,7 +1246,91 @@ mod tests {
         let exec_result = response.exec_result.expect("exec result");
         assert_eq!(exec_result["stdout"], "hello from pod\n");
         assert_eq!(exec_result["stderr"], "pod warning\n");
+        assert_eq!(exec_result["stdout_truncated"], false);
+        assert_eq!(exec_result["stderr_truncated"], false);
         assert_eq!(exec_result["status"]["status"], "Success");
+
+        server.await.expect("server task");
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[test]
+    fn kubernetes_exec_output_capture_is_bounded() {
+        let mut output = Vec::new();
+        let mut truncated = false;
+        append_bounded_exec_output(
+            &mut output,
+            &vec![b'a'; MAX_KUBERNETES_EXEC_CAPTURE_BYTES + 16],
+            &mut truncated,
+        );
+        assert_eq!(output.len(), MAX_KUBERNETES_EXEC_CAPTURE_BYTES);
+        assert!(truncated);
+
+        append_bounded_exec_output(&mut output, b"ignored", &mut truncated);
+        assert_eq!(output.len(), MAX_KUBERNETES_EXEC_CAPTURE_BYTES);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn kubernetes_runner_live_exec_times_out_without_status_frame() {
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        tokio::fs::write(&token_path, "test-token")
+            .await
+            .expect("write token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept exec websocket");
+            let mut websocket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        "v4.channel.k8s.io".parse().expect("protocol header"),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("accept websocket");
+            let mut stdout_frame = vec![1];
+            stdout_frame.extend_from_slice(b"partial output");
+            websocket
+                .send(Message::Binary(stdout_frame))
+                .await
+                .expect("send stdout");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let _ = websocket.close(None).await;
+        });
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+        let result = call_kubernetes_exec_with_timeout(
+            &config,
+            "agent-remote-computer-test",
+            "sleep 30",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(
+            result.expect_err("expected timeout"),
+            "Kubernetes exec WebSocket timed out"
+        );
 
         server.await.expect("server task");
         let _ = tokio::fs::remove_file(token_path).await;

@@ -676,10 +676,16 @@ async fn execute_approved_remote_computer_shell(
         "status": status,
         "stdout": stdout.text,
         "stdout_bytes": stdout.original_bytes,
-        "stdout_truncated": stdout.truncated,
+        "stdout_truncated": stdout.truncated || exec_result
+            .get("stdout_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         "stderr": stderr.text,
         "stderr_bytes": stderr.original_bytes,
-        "stderr_truncated": stderr.truncated,
+        "stderr_truncated": stderr.truncated || exec_result
+            .get("stderr_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     });
     state
         .append_event(
