@@ -1330,6 +1330,7 @@ struct RemoteComputerReadinessReport {
     autoscaling: RemoteComputerAutoscalingReadiness,
     warm_pool: RemoteComputerWarmPoolReadiness,
     artifact_discovery_sidecar: RemoteComputerManifestReadiness,
+    sidecar_supervision: RemoteComputerSidecarSupervisionReadiness,
     runner: RemoteComputerRunnerReadiness,
     execution_transport: RemoteComputerExecutionTransportReadiness,
     event_types: Vec<String>,
@@ -1381,6 +1382,17 @@ struct RemoteComputerWarmPoolReadiness {
     manifest_present: bool,
     manifest_path: String,
     status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerSidecarSupervisionReadiness {
+    status: String,
+    heartbeat_count: usize,
+    active_remote_computer_count: usize,
+    missing_heartbeat_count: usize,
+    stale_heartbeat_count: usize,
+    stale_after_seconds: i64,
+    latest_observed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17814,6 +17826,9 @@ async fn build_remote_computer_readiness(
         "deploy/k8s/remote-computer-artifact-discovery-sidecar.yaml",
         "artifact_discovery_sidecar",
     );
+    let sidecar_supervision =
+        build_remote_computer_sidecar_supervision(state, artifact_discovery_sidecar.present)
+            .await?;
     let runner = build_remote_computer_runner_readiness();
     let execution_transport = build_remote_computer_execution_transport_readiness(state).await?;
 
@@ -17905,6 +17920,19 @@ async fn build_remote_computer_readiness(
             "warning",
             "remote computer Pods need an artifact discovery sidecar before continuous artifact sync can be piloted",
         ));
+    } else if sidecar_supervision.missing_heartbeat_count > 0 {
+        attention_items.push(remote_computer_attention(
+            "artifact_discovery_sidecar_heartbeat_missing",
+            "warning",
+            "one or more active remote computers have no artifact-discovery sidecar heartbeat",
+        ));
+    }
+    if sidecar_supervision.stale_heartbeat_count > 0 {
+        attention_items.push(remote_computer_attention(
+            "artifact_discovery_sidecar_heartbeat_stale",
+            "warning",
+            "one or more artifact-discovery sidecar heartbeats are older than the configured stale threshold",
+        ));
     }
     if !runner.configured {
         attention_items.push(remote_computer_attention(
@@ -17948,7 +17976,7 @@ async fn build_remote_computer_readiness(
     }
     if artifact_discovery_sidecar.present {
         runbook_actions.push(
-            "keep MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED=false until session_id and remote_computer_id injection are wired for leased Pods"
+            "monitor /api/remote-computers/sidecars/heartbeats and treat stale or missing artifact-discovery heartbeats as Remote Computer pilot blockers"
                 .to_string(),
         );
     }
@@ -18002,6 +18030,7 @@ async fn build_remote_computer_readiness(
         autoscaling,
         warm_pool,
         artifact_discovery_sidecar,
+        sidecar_supervision,
         runner,
         execution_transport,
         event_types,
@@ -18059,6 +18088,72 @@ async fn build_remote_computer_execution_transport_readiness(
         message:
             "Remote Computer runner can route assigned file.write, shell.exec, and codex.exec jobs through gated Kubernetes Pod exec, propagate cancellation through Pod deletion, accept push-based artifact sync, and discover artifacts from a shared Remote Computer workspace"
                 .to_string(),
+    })
+}
+
+async fn build_remote_computer_sidecar_supervision(
+    state: &AppState,
+    sidecar_manifest_present: bool,
+) -> Result<RemoteComputerSidecarSupervisionReadiness, AppError> {
+    let active_remote_computers: Vec<_> = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .filter(|computer| matches!(computer.status.as_str(), "available" | "leased" | "running"))
+        .collect();
+    let heartbeats = state.list_remote_computer_sidecar_heartbeats().await?;
+    let stale_after_seconds = env_i64("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_STALE_AFTER_SECONDS")
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(180);
+    let now = Utc::now();
+    let mut latest_by_remote: HashMap<Uuid, RemoteComputerSidecarHeartbeat> = HashMap::new();
+    for heartbeat in heartbeats.iter().filter(|heartbeat| {
+        heartbeat.sidecar_name == "artifact-discovery" && heartbeat.status != "disabled"
+    }) {
+        latest_by_remote
+            .entry(heartbeat.remote_computer_id)
+            .and_modify(|existing| {
+                if heartbeat.observed_at > existing.observed_at {
+                    *existing = heartbeat.clone();
+                }
+            })
+            .or_insert_with(|| heartbeat.clone());
+    }
+    let missing_heartbeat_count = active_remote_computers
+        .iter()
+        .filter(|computer| !latest_by_remote.contains_key(&computer.id))
+        .count();
+    let stale_heartbeat_count = active_remote_computers
+        .iter()
+        .filter_map(|computer| latest_by_remote.get(&computer.id))
+        .filter(|heartbeat| {
+            now.signed_duration_since(heartbeat.observed_at)
+                .num_seconds()
+                > stale_after_seconds
+        })
+        .count();
+    let latest_observed_at = latest_by_remote
+        .values()
+        .map(|heartbeat| heartbeat.observed_at)
+        .max();
+    let status = if !sidecar_manifest_present {
+        "manifest_missing"
+    } else if missing_heartbeat_count > 0 || stale_heartbeat_count > 0 {
+        "attention"
+    } else if !latest_by_remote.is_empty() {
+        "observed"
+    } else {
+        "not_observed"
+    }
+    .to_string();
+    Ok(RemoteComputerSidecarSupervisionReadiness {
+        status,
+        heartbeat_count: heartbeats.len(),
+        active_remote_computer_count: active_remote_computers.len(),
+        missing_heartbeat_count,
+        stale_heartbeat_count,
+        stale_after_seconds,
+        latest_observed_at,
     })
 }
 
@@ -21022,6 +21117,89 @@ not json
             log.action == "remote_computer.sidecar_heartbeat"
                 && log.resource_id == Some(heartbeat.id)
         }));
+    }
+
+    #[tokio::test]
+    async fn remote_computer_readiness_flags_missing_and_stale_sidecar_heartbeats() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let computer = state
+            .create_remote_computer(CreateRemoteComputer {
+                name: "sidecar-supervision-remote-computer".to_string(),
+                profile: Some("workspace-write".to_string()),
+                namespace: None,
+                pod_name: Some("agent-remote-computer-supervision".to_string()),
+                workspace_path: None,
+                state_mount_path: None,
+                metadata: None,
+            })
+            .await
+            .expect("create remote computer");
+
+        let readiness_without_heartbeat = build_remote_computer_readiness(&state)
+            .await
+            .expect("readiness without heartbeat");
+        assert_eq!(
+            readiness_without_heartbeat.sidecar_supervision.status,
+            "attention"
+        );
+        assert_eq!(
+            readiness_without_heartbeat
+                .sidecar_supervision
+                .missing_heartbeat_count,
+            1
+        );
+        assert!(
+            readiness_without_heartbeat
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "artifact_discovery_sidecar_heartbeat_missing")
+        );
+
+        let heartbeat = state
+            .record_remote_computer_sidecar_heartbeat(CreateRemoteComputerSidecarHeartbeat {
+                remote_computer_id: computer.id,
+                session_id: None,
+                assignment_id: None,
+                sidecar_name: Some("artifact-discovery".to_string()),
+                status: Some("enabled".to_string()),
+                metadata: None,
+            })
+            .await
+            .expect("record heartbeat");
+        if let StoreBackend::Memory(inner) = &state.store {
+            let mut store = inner.write().await;
+            let stored = store
+                .remote_computer_sidecar_heartbeats
+                .get_mut(&heartbeat.id)
+                .expect("stored heartbeat");
+            stored.observed_at = Utc::now() - ChronoDuration::seconds(600);
+        }
+
+        let readiness_with_stale_heartbeat = build_remote_computer_readiness(&state)
+            .await
+            .expect("readiness with stale heartbeat");
+        assert_eq!(
+            readiness_with_stale_heartbeat.sidecar_supervision.status,
+            "attention"
+        );
+        assert_eq!(
+            readiness_with_stale_heartbeat
+                .sidecar_supervision
+                .missing_heartbeat_count,
+            0
+        );
+        assert_eq!(
+            readiness_with_stale_heartbeat
+                .sidecar_supervision
+                .stale_heartbeat_count,
+            1
+        );
+        assert!(
+            readiness_with_stale_heartbeat
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "artifact_discovery_sidecar_heartbeat_stale")
+        );
     }
 
     #[tokio::test]
@@ -31810,6 +31988,16 @@ not json
         assert_eq!(
             remote_computer_readiness.artifact_discovery_sidecar.status,
             "artifact_discovery_sidecar"
+        );
+        assert_eq!(
+            remote_computer_readiness.sidecar_supervision.status,
+            "not_observed"
+        );
+        assert_eq!(
+            remote_computer_readiness
+                .sidecar_supervision
+                .missing_heartbeat_count,
+            0
         );
         assert!(
             remote_computer_readiness

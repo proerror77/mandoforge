@@ -1971,6 +1971,7 @@ function renderRemoteComputerReadiness() {
   const autoscaling = report.autoscaling || {};
   const warmPool = report.warm_pool || {};
   const artifactDiscoverySidecar = report.artifact_discovery_sidecar || {};
+  const sidecarSupervision = report.sidecar_supervision || {};
   const runner = state.remoteComputerRunnerReadiness || report.runner || {};
   const executionTransport = report.execution_transport || {};
   const attentionItems = report.attention_items || [];
@@ -2122,6 +2123,8 @@ function renderRemoteComputerReadiness() {
     <div class="item">
       <strong>REMOTE COMPUTER SIDECAR HEARTBEATS</strong>
       <div class="muted">Artifact discovery sidecars post heartbeat events so operators can distinguish manifest presence from live sidecar activity.</div>
+      <div class="muted">Supervision: ${escapeHtml(sidecarSupervision.status || "unknown")} · active computers ${formatInteger(sidecarSupervision.active_remote_computer_count || 0)} · total heartbeats ${formatInteger(sidecarSupervision.heartbeat_count || 0)} · missing ${formatInteger(sidecarSupervision.missing_heartbeat_count || 0)} · stale ${formatInteger(sidecarSupervision.stale_heartbeat_count || 0)} · stale after ${formatInteger(sidecarSupervision.stale_after_seconds || 0)}s</div>
+      <div class="muted">Latest observed: ${escapeHtml(sidecarSupervision.latest_observed_at || "none")}</div>
       ${
         sidecarHeartbeatRows.length
           ? sidecarHeartbeatRows
