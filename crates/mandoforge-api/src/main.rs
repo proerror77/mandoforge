@@ -2871,6 +2871,9 @@ struct McpServerDeploymentValidationRun {
     healthy_count: usize,
     unhealthy_count: usize,
     results: Vec<McpServerHealth>,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
     checked_at: DateTime<Utc>,
     status: String,
 }
@@ -2993,6 +2996,12 @@ struct McpServerDeploymentReadiness {
     server_count: usize,
     healthy_count: usize,
     unhealthy_count: usize,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
+    controller_execution_count: usize,
+    controller_failed_count: usize,
     deployment_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
@@ -13144,18 +13153,73 @@ async fn validate_mcp_server_deployment(
     }
     let healthy_count = results.iter().filter(|health| health.healthy).count();
     let unhealthy_count = results.len().saturating_sub(healthy_count);
-    let status = if !results.is_empty() && unhealthy_count == 0 {
-        "healthy"
-    } else {
-        "blocked"
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = mcp_server_deployment_controller_required(&lookup);
+    let controller_configured = mcp_server_deployment_controller_configured(&lookup);
+    let mut healthy = !results.is_empty() && unhealthy_count == 0;
+    let mut issues = Vec::new();
+    if results.is_empty() {
+        issues.push("MCP connector deployment validation covered no connectors");
     }
-    .to_string();
+    if unhealthy_count > 0 {
+        issues.push("MCP connector deployment validation found unhealthy connectors");
+    }
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "mcp_health_not_ready"
+        } else {
+            "controller_not_configured"
+        }
+    });
+    if healthy && controller_configured {
+        match execute_mcp_server_deployment_controller(
+            &lookup,
+            team_id,
+            &principal.subject_id,
+            checked_at,
+            &results,
+        )
+        .await
+        {
+            Ok(execution) => {
+                let controller_status = execution
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed")
+                    .to_string();
+                controller_execution = execution;
+                if controller_status != "validated" {
+                    healthy = false;
+                    issues.push("MCP connector deployment controller did not validate");
+                }
+            }
+            Err(error) => {
+                healthy = false;
+                issues.push("MCP connector deployment controller failed");
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    }
+    if healthy && controller_required && !controller_configured {
+        healthy = false;
+        issues.push("MCP connector deployment controller is required but not configured");
+    }
+    let status = if healthy { "healthy" } else { "blocked" }.to_string();
     let run = McpServerDeploymentValidationRun {
         team_id,
         server_count: results.len(),
         healthy_count,
         unhealthy_count,
         results,
+        controller_required,
+        controller_configured,
+        controller_execution,
         checked_at,
         status,
     };
@@ -13174,6 +13238,10 @@ async fn validate_mcp_server_deployment(
                 "healthy_count": run.healthy_count,
                 "unhealthy_count": run.unhealthy_count,
                 "status": run.status,
+                "controller_required": run.controller_required,
+                "controller_configured": run.controller_configured,
+                "controller_execution": run.controller_execution,
+                "issues": issues,
             }),
         ))
         .await?;
@@ -13820,8 +13888,14 @@ fn build_mcp_server_rollout_run_summary(
         failed_run_count,
         generated_at,
     );
-    let deployment_readiness =
-        build_mcp_server_deployment_readiness(team_id, audit_logs, generated_at);
+    let lookup = |key: &str| std::env::var(key).ok();
+    let deployment_readiness = build_mcp_server_deployment_readiness(
+        team_id,
+        audit_logs,
+        generated_at,
+        mcp_server_deployment_controller_required(&lookup),
+        mcp_server_deployment_controller_configured(&lookup),
+    );
     if production_ops.production_blocked {
         attention_items.push(McpServerRolloutRunAttentionItem {
             kind: "mcp_rollout_production_blocked".to_string(),
@@ -14011,6 +14085,8 @@ fn build_mcp_server_deployment_readiness(
     team_id: Uuid,
     audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
 ) -> McpServerDeploymentReadiness {
     let latest_validation = audit_logs
         .iter()
@@ -14023,6 +14099,35 @@ fn build_mcp_server_deployment_readiness(
                 == Some(team_id)
         })
         .max_by_key(|log| log.created_at);
+    let controller_validation_logs = audit_logs
+        .iter()
+        .filter(|log| log.action == "mcp.server_deployment_validation_run")
+        .filter(|log| {
+            log.details
+                .get("team_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                == Some(team_id)
+        })
+        .filter(|log| {
+            log.details
+                .get("controller_execution")
+                .and_then(|execution| execution.get("attempted"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    let controller_execution_count = controller_validation_logs.len();
+    let controller_failed_count = controller_validation_logs
+        .iter()
+        .filter(|log| {
+            log.details
+                .get("controller_execution")
+                .and_then(|execution| execution.get("status"))
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "validated")
+        })
+        .count();
     let latest_validation_at = latest_validation.map(|log| log.created_at);
     let latest_validation_age_hours =
         latest_validation_at.map(|created_at| (generated_at - created_at).num_hours());
@@ -14042,6 +14147,12 @@ fn build_mcp_server_deployment_readiness(
         .and_then(|log| log.details.get("unhealthy_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
+    let latest_controller_status = latest_validation
+        .and_then(|log| log.details.get("controller_execution"))
+        .and_then(|execution| execution.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
 
     if latest_validation.is_none() {
@@ -14057,6 +14168,15 @@ fn build_mcp_server_deployment_readiness(
     }
     if latest_validation_age_hours.is_some_and(|hours| hours >= 24) {
         blocking_reasons.push("MCP connector deployment validation evidence is stale".to_string());
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons
+            .push("MCP connector deployment controller is required but not configured".to_string());
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons.push(
+            "MCP connector deployment controller evidence is missing or not validated".to_string(),
+        );
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -14084,10 +14204,118 @@ fn build_mcp_server_deployment_readiness(
         server_count,
         healthy_count,
         unhealthy_count,
+        controller_required,
+        controller_configured,
+        latest_controller_status,
+        latest_controller_validated,
+        controller_execution_count,
+        controller_failed_count,
         deployment_validated: !production_blocked,
         blocking_reasons,
         message,
     }
+}
+
+fn mcp_server_deployment_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn mcp_server_deployment_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_mcp_server_deployment_controller<F>(
+    lookup: &F,
+    team_id: Uuid,
+    subject: &str,
+    checked_at: DateTime<Utc>,
+    results: &[McpServerHealth],
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_MCP_DEPLOYMENT_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let connectors = results
+        .iter()
+        .map(|health| {
+            json!({
+                "server_id": health.server_id,
+                "name": health.name,
+                "status": health.status,
+                "healthy": health.healthy,
+                "issues": health.issues,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = json!({
+        "type": "mandoforge.mcp_connector_deployment",
+        "team_id": team_id,
+        "subject": subject,
+        "checked_at": checked_at,
+        "server_count": results.len(),
+        "healthy_count": results.iter().filter(|health| health.healthy).count(),
+        "unhealthy_count": results.iter().filter(|health| !health.healthy).count(),
+        "connectors": connectors,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "MCP connector deployment controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(
+        controller_status,
+        "validated" | "deployed" | "healthy" | "success" | "ok"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 fn mcp_server_rollout_run_from_audit_log(log: &AuditLog) -> Option<McpServerRolloutRunRecord> {
@@ -30158,6 +30386,150 @@ not json
         assert!(unchanged.config.get("pending_rollout").is_some());
     }
 
+    #[tokio::test]
+    async fn mcp_deployment_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mcp deployment listener");
+        let controller_addr = listener.local_addr().expect("mcp deployment addr");
+        let controller = Router::new()
+            .route("/mcp-deployment", post(mock_mcp_deployment_controller))
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock mcp deployment controller");
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/mcp-deployment"))
+            }
+            "MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_TOKEN" => {
+                Some("mcp-deployment-token".to_string())
+            }
+            _ => None,
+        };
+        let team_id = Uuid::new_v4();
+        let server_id = Uuid::new_v4();
+        let results = vec![McpServerHealth {
+            server_id,
+            team_id,
+            name: "docs".to_string(),
+            status: "healthy".to_string(),
+            healthy: true,
+            issues: vec![],
+            checks: json!({"gateway_reachable": true}),
+            checked_at: Utc::now(),
+        }];
+
+        let execution = execute_mcp_server_deployment_controller(
+            &lookup,
+            team_id,
+            "admin-1",
+            Utc::now(),
+            &results,
+        )
+        .await
+        .expect("mcp deployment controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(execution["deployment_id"], "mcp-deployment-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.mcp_connector_deployment");
+        assert_eq!(payloads[0]["team_id"], team_id.to_string());
+        assert_eq!(
+            payloads[0]["connectors"][0]["server_id"],
+            server_id.to_string()
+        );
+        assert!(payloads[0]["connectors"][0]["checks"].is_null());
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn mcp_deployment_readiness_requires_controller_when_configured() {
+        let team_id = Uuid::new_v4();
+        let generated_at = Utc::now();
+        let missing =
+            build_mcp_server_deployment_readiness(team_id, &[], generated_at, true, false);
+        assert_eq!(missing.status, "blocked");
+        assert!(missing.production_blocked);
+        assert!(missing.controller_required);
+        assert!(!missing.controller_configured);
+        assert!(missing.blocking_reasons.iter().any(|reason| {
+            reason == "MCP connector deployment controller is required but not configured"
+        }));
+
+        let without_controller = build_mcp_server_deployment_readiness(
+            team_id,
+            &[new_audit_log(
+                None,
+                "user",
+                None,
+                "mcp.server_deployment_validation_run",
+                "team",
+                Some(team_id),
+                json!({
+                    "team_id": team_id,
+                    "status": "healthy",
+                    "server_count": 1,
+                    "healthy_count": 1,
+                    "unhealthy_count": 0,
+                    "controller_required": true,
+                    "controller_configured": true,
+                    "controller_execution": {
+                        "attempted": false,
+                        "status": "skipped",
+                        "reason": "controller_not_configured"
+                    }
+                }),
+            )],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(without_controller.status, "blocked");
+        assert!(without_controller.production_blocked);
+        assert!(!without_controller.latest_controller_validated);
+
+        let ready = build_mcp_server_deployment_readiness(
+            team_id,
+            &[new_audit_log(
+                None,
+                "user",
+                None,
+                "mcp.server_deployment_validation_run",
+                "team",
+                Some(team_id),
+                json!({
+                    "team_id": team_id,
+                    "status": "healthy",
+                    "server_count": 1,
+                    "healthy_count": 1,
+                    "unhealthy_count": 0,
+                    "controller_required": true,
+                    "controller_configured": true,
+                    "controller_execution": {
+                        "attempted": true,
+                        "status": "validated",
+                        "deployment_id": "mcp-deployment-1"
+                    }
+                }),
+            )],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+        assert!(ready.latest_controller_validated);
+        assert_eq!(ready.controller_execution_count, 1);
+        assert_eq!(ready.controller_failed_count, 0);
+    }
+
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {
         let state = test_state_with_worker(execution_worker);
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -30949,6 +31321,30 @@ not json
             "steps": [
                 {"name": "health", "status": "passed"},
                 {"name": "turn-control", "status": "passed"}
+            ]
+        }))
+    }
+
+    async fn mock_mcp_deployment_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer mcp-deployment-token")
+        );
+        assert_eq!(payload["type"], "mandoforge.mcp_connector_deployment");
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "deployment_id": "mcp-deployment-1",
+            "message": "MCP connector deployment controller validated connectors",
+            "steps": [
+                {"name": "health", "status": "passed"},
+                {"name": "allowlist", "status": "passed"}
             ]
         }))
     }
@@ -33237,6 +33633,12 @@ not json
         assert_eq!(deployment_validation.server_count, 1);
         assert_eq!(deployment_validation.healthy_count, 1);
         assert_eq!(deployment_validation.unhealthy_count, 0);
+        assert!(!deployment_validation.controller_required);
+        assert!(!deployment_validation.controller_configured);
+        assert_eq!(
+            deployment_validation.controller_execution["status"],
+            "skipped"
+        );
 
         let rollout_runs: McpServerRolloutRunSummary = request_json(
             app.clone(),
@@ -33276,6 +33678,8 @@ not json
         assert!(rollout_runs.deployment_readiness.deployment_validated);
         assert_eq!(rollout_runs.deployment_readiness.server_count, 1);
         assert_eq!(rollout_runs.deployment_readiness.unhealthy_count, 0);
+        assert!(!rollout_runs.deployment_readiness.controller_required);
+        assert!(!rollout_runs.deployment_readiness.controller_configured);
         assert_eq!(
             rollout_runs
                 .latest_run
