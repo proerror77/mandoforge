@@ -1959,6 +1959,7 @@ function renderCodexAppServer() {
       <div class="muted">Production ops: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · stale candidates ${formatInteger(productionOps.stale_candidate_count || 0)} · failed turns ${formatInteger(productionOps.failed_turn_count || 0)} · latest supervision ${escapeHtml(productionOps.latest_stale_poll_at || "none")}</div>
       <div class="muted">${escapeHtml(productionOps.message || "Codex App Server production ops are not reported")}</div>
       <div class="muted">Deployment validation: ${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · validated ${deploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${deploymentReadiness.latest_validation_healthy ? "yes" : "no"} · latest ${escapeHtml(deploymentReadiness.latest_validation_at || "none")}</div>
+      <div class="muted">Deployment controller: required ${deploymentReadiness.controller_required ? "yes" : "no"} · configured ${deploymentReadiness.controller_configured ? "yes" : "no"} · latest ${escapeHtml(deploymentReadiness.latest_controller_status || "none")} · executions ${formatInteger(deploymentReadiness.controller_execution_count || 0)} · failed ${formatInteger(deploymentReadiness.controller_failed_count || 0)}</div>
       <div class="muted">${escapeHtml(deploymentReadiness.message || "Codex App Server deployment validation is not reported")}</div>
       ${
         controlAttention.length

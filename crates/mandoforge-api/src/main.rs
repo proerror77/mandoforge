@@ -1084,6 +1084,12 @@ struct CodexAppServerDeploymentReadiness {
     latest_validation_age_hours: Option<i64>,
     latest_validation_status: Option<String>,
     latest_validation_healthy: bool,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
+    controller_execution_count: usize,
+    controller_failed_count: usize,
     blocking_reasons: Vec<String>,
     message: String,
 }
@@ -10055,12 +10061,60 @@ async fn validate_codex_app_server_deployment(
     let mut healthy = false;
     let mut timeout_seconds = None;
     let configured = state.codex_app_server_config.is_some();
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = codex_app_server_deployment_controller_required(&lookup);
+    let controller_configured = codex_app_server_deployment_controller_configured(&lookup);
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "app_server_health_not_ready"
+        } else {
+            "controller_not_configured"
+        }
+    });
 
     if let Some(config) = state.codex_app_server_config.as_ref() {
         timeout_seconds = Some(config.timeout_seconds);
         match state.codex_app_server_client.health_check(config).await {
             Ok(()) => {
                 healthy = true;
+                if controller_configured {
+                    match execute_codex_app_server_deployment_controller(
+                        &lookup,
+                        &principal.subject_id,
+                        checked_at,
+                        config,
+                    )
+                    .await
+                    {
+                        Ok(execution) => {
+                            let controller_status = execution
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("failed")
+                                .to_string();
+                            controller_execution = execution;
+                            if controller_status != "validated" {
+                                healthy = false;
+                                issues.push(
+                                    "Codex App Server deployment controller did not validate"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            healthy = false;
+                            issues
+                                .push("Codex App Server deployment controller failed".to_string());
+                            controller_execution = json!({
+                                "attempted": true,
+                                "status": "failed",
+                                "error": error.message
+                            });
+                        }
+                    }
+                }
             }
             Err(error) => {
                 issues.push(error.message);
@@ -10072,6 +10126,12 @@ async fn validate_codex_app_server_deployment(
                 .to_string(),
         );
     }
+    if healthy && controller_required && !controller_configured {
+        healthy = false;
+        issues.push(
+            "Codex App Server deployment controller is required but not configured".to_string(),
+        );
+    }
 
     let status = if healthy { "healthy" } else { "blocked" };
     let result = json!({
@@ -10080,6 +10140,9 @@ async fn validate_codex_app_server_deployment(
         "configured": configured,
         "endpoint_configured": configured,
         "timeout_seconds": timeout_seconds,
+        "controller_required": controller_required,
+        "controller_configured": controller_configured,
+        "controller_execution": controller_execution,
         "issues": issues,
         "subject": principal.subject_id,
         "checked_at": checked_at,
@@ -10736,8 +10799,14 @@ fn build_codex_app_server_control_plane_summary(
         audit_logs,
         generated_at,
     );
-    let deployment_readiness =
-        build_codex_app_server_deployment_readiness(config.is_some(), audit_logs, generated_at);
+    let lookup = |key: &str| std::env::var(key).ok();
+    let deployment_readiness = build_codex_app_server_deployment_readiness(
+        config.is_some(),
+        audit_logs,
+        generated_at,
+        codex_app_server_deployment_controller_required(&lookup),
+        codex_app_server_deployment_controller_configured(&lookup),
+    );
     if production_ops.production_blocked {
         attention_items.push(CodexAppServerControlPlaneAttentionItem {
             kind: "production_ops_blocked".to_string(),
@@ -10897,11 +10966,36 @@ fn build_codex_app_server_deployment_readiness(
     configured: bool,
     audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
 ) -> CodexAppServerDeploymentReadiness {
     let latest_validation = audit_logs
         .iter()
         .filter(|log| log.action == "codex_app_server.deployment_validation")
         .max_by_key(|log| log.created_at);
+    let controller_validation_logs = audit_logs
+        .iter()
+        .filter(|log| {
+            log.action == "codex_app_server.deployment_validation"
+                && log
+                    .details
+                    .get("controller_execution")
+                    .and_then(|execution| execution.get("attempted"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    let controller_execution_count = controller_validation_logs.len();
+    let controller_failed_count = controller_validation_logs
+        .iter()
+        .filter(|log| {
+            log.details
+                .get("controller_execution")
+                .and_then(|execution| execution.get("status"))
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "validated")
+        })
+        .count();
     let latest_validation_at = latest_validation.map(|log| log.created_at);
     let latest_validation_age_hours =
         latest_validation_at.map(|created_at| (generated_at - created_at).num_hours());
@@ -10913,6 +11007,12 @@ fn build_codex_app_server_deployment_readiness(
         .and_then(|log| log.details.get("healthy"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let latest_controller_status = latest_validation
+        .and_then(|log| log.details.get("controller_execution"))
+        .and_then(|execution| execution.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
 
     if !configured {
@@ -10926,6 +11026,17 @@ fn build_codex_app_server_deployment_readiness(
     }
     if latest_validation_age_hours.is_some_and(|hours| hours >= 24) {
         blocking_reasons.push("deployment validation evidence is stale".to_string());
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons.push(
+            "Codex App Server deployment controller is required but not configured".to_string(),
+        );
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons.push(
+            "Codex App Server deployment controller evidence is missing or not validated"
+                .to_string(),
+        );
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -10954,9 +11065,106 @@ fn build_codex_app_server_deployment_readiness(
         latest_validation_age_hours,
         latest_validation_status,
         latest_validation_healthy,
+        controller_required,
+        controller_configured,
+        latest_controller_status,
+        latest_controller_validated,
+        controller_execution_count,
+        controller_failed_count,
         blocking_reasons,
         message,
     }
+}
+
+fn codex_app_server_deployment_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn codex_app_server_deployment_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_codex_app_server_deployment_controller<F>(
+    lookup: &F,
+    subject: &str,
+    checked_at: DateTime<Utc>,
+    config: &CodexAppServerConfig,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL is required",
+            )
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.codex_app_server_deployment",
+        "subject": subject,
+        "checked_at": checked_at,
+        "app_server": {
+            "endpoint_configured": true,
+            "timeout_seconds": config.timeout_seconds,
+            "endpoint": config.endpoint.as_str(),
+        }
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "Codex App Server deployment controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(
+        controller_status,
+        "validated" | "deployed" | "healthy" | "success" | "ok"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 fn build_codex_app_server_trace_detail(
@@ -25844,6 +26052,144 @@ not json
         assert_eq!(ready.status, "ready");
     }
 
+    #[tokio::test]
+    async fn codex_app_server_deployment_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("codex app server deployment listener");
+        let controller_addr = listener.local_addr().expect("codex deployment addr");
+        let controller = Router::new()
+            .route(
+                "/codex-app-server-deployment",
+                post(mock_codex_app_server_deployment_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock codex app server deployment controller");
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL" => Some(format!(
+                "http://{controller_addr}/codex-app-server-deployment"
+            )),
+            "MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_TOKEN" => {
+                Some("codex-deployment-token".to_string())
+            }
+            _ => None,
+        };
+        let config = CodexAppServerConfig {
+            endpoint: "http://codex-app-server.test".to_string(),
+            timeout_seconds: 7,
+        };
+
+        let execution =
+            execute_codex_app_server_deployment_controller(&lookup, "admin-1", Utc::now(), &config)
+                .await
+                .expect("codex deployment controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(execution["deployment_id"], "codex-app-server-deployment-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.codex_app_server_deployment"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["app_server"]["timeout_seconds"], 7);
+        assert_eq!(
+            payloads[0]["app_server"]["endpoint"],
+            "http://codex-app-server.test"
+        );
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn codex_app_server_deployment_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let missing =
+            build_codex_app_server_deployment_readiness(true, &[], generated_at, true, false);
+        assert_eq!(missing.status, "blocked");
+        assert!(missing.production_blocked);
+        assert!(missing.controller_required);
+        assert!(!missing.controller_configured);
+        assert!(missing.blocking_reasons.iter().any(|reason| {
+            reason == "Codex App Server deployment controller is required but not configured"
+        }));
+
+        let without_controller = build_codex_app_server_deployment_readiness(
+            true,
+            &[new_audit_log(
+                None,
+                "user",
+                None,
+                "codex_app_server.deployment_validation",
+                "codex_app_server",
+                None,
+                json!({
+                    "status": "healthy",
+                    "healthy": true,
+                    "configured": true,
+                    "endpoint_configured": true,
+                    "timeout_seconds": 5,
+                    "controller_required": true,
+                    "controller_configured": true,
+                    "controller_execution": {
+                        "attempted": false,
+                        "status": "skipped",
+                        "reason": "controller_not_configured"
+                    },
+                    "issues": []
+                }),
+            )],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(without_controller.status, "blocked");
+        assert!(without_controller.production_blocked);
+        assert!(!without_controller.latest_controller_validated);
+
+        let ready = build_codex_app_server_deployment_readiness(
+            true,
+            &[new_audit_log(
+                None,
+                "user",
+                None,
+                "codex_app_server.deployment_validation",
+                "codex_app_server",
+                None,
+                json!({
+                    "status": "healthy",
+                    "healthy": true,
+                    "configured": true,
+                    "endpoint_configured": true,
+                    "timeout_seconds": 5,
+                    "controller_required": true,
+                    "controller_configured": true,
+                    "controller_execution": {
+                        "attempted": true,
+                        "status": "validated",
+                        "deployment_id": "codex-app-server-deployment-1"
+                    },
+                    "issues": []
+                }),
+            )],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+        assert!(ready.latest_controller_validated);
+        assert_eq!(ready.controller_execution_count, 1);
+        assert_eq!(ready.controller_failed_count, 0);
+    }
+
     #[test]
     fn truncates_execution_output_on_utf8_boundary() {
         let output = truncate_output("abc你好", 4);
@@ -30583,6 +30929,30 @@ not json
         }))
     }
 
+    async fn mock_codex_app_server_deployment_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer codex-deployment-token")
+        );
+        assert_eq!(payload["type"], "mandoforge.codex_app_server_deployment");
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "deployment_id": "codex-app-server-deployment-1",
+            "message": "Codex App Server deployment controller validated control plane",
+            "steps": [
+                {"name": "health", "status": "passed"},
+                {"name": "turn-control", "status": "passed"}
+            ]
+        }))
+    }
+
     async fn mock_agent_release_controller(
         State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
         headers: HeaderMap,
@@ -31320,6 +31690,12 @@ not json
         assert_eq!(deployment_validation["status"], "healthy");
         assert_eq!(deployment_validation["healthy"], true);
         assert_eq!(deployment_validation["configured"], true);
+        assert_eq!(deployment_validation["controller_required"], false);
+        assert_eq!(deployment_validation["controller_configured"], false);
+        assert_eq!(
+            deployment_validation["controller_execution"]["status"],
+            "skipped"
+        );
 
         let thread: CodexThreadResponse = request_json(
             app.clone(),
@@ -31479,6 +31855,8 @@ not json
         assert_eq!(control_summary.deployment_readiness.status, "ready");
         assert!(!control_summary.deployment_readiness.production_blocked);
         assert!(control_summary.deployment_readiness.deployment_validated);
+        assert!(!control_summary.deployment_readiness.controller_required);
+        assert!(!control_summary.deployment_readiness.controller_configured);
         assert!(control_summary.attention_items.iter().any(|item| {
             item.kind == "failed_trace" && item.turn_id.as_deref() == Some("turn-1")
         }));
