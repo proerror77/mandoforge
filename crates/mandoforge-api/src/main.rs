@@ -16540,8 +16540,8 @@ async fn dry_run_remote_computer_runner(
             remote_computer_id,
             json!({
                 "config": config,
-                "response": &response,
-                "execution_enabled": false
+                "response": remote_computer_runner_response_for_audit(&response),
+                "execution_enabled": response.execution_enabled
             }),
         ))
         .await?;
@@ -16576,12 +16576,35 @@ async fn mutate_remote_computer_runner(
             remote_computer_id,
             json!({
                 "config": config,
-                "response": &response,
-                "execution_enabled": false
+                "response": remote_computer_runner_response_for_audit(&response),
+                "execution_enabled": response.execution_enabled
             }),
         ))
         .await?;
     Ok(Json(response))
+}
+
+fn remote_computer_runner_response_for_audit(
+    response: &RemoteComputerRunnerDryRunResponse,
+) -> Value {
+    let mut value = json!(response);
+    if let Some(exec_result) = response.exec_result.as_ref() {
+        value["exec_result"] = json!({
+            "captured": true,
+            "stdout_chars": exec_result
+                .get("stdout")
+                .and_then(|value| value.as_str())
+                .map(|value| value.chars().count())
+                .unwrap_or(0),
+            "stderr_chars": exec_result
+                .get("stderr")
+                .and_then(|value| value.as_str())
+                .map(|value| value.chars().count())
+                .unwrap_or(0),
+            "status": exec_result.get("status").cloned().unwrap_or(Value::Null)
+        });
+    }
+    value
 }
 
 async fn list_remote_computers(
@@ -17351,7 +17374,7 @@ async fn build_remote_computer_execution_transport_readiness(
     let requested_execution_enabled = env_bool("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
     let execution_enabled = false;
     let status = if mode == "kubernetes" && requested_execution_enabled {
-        "blocked_not_implemented"
+        "client_boundary_ready_not_integrated"
     } else if mode == "kubernetes" {
         "blocked"
     } else {
@@ -17367,18 +17390,19 @@ async fn build_remote_computer_execution_transport_readiness(
         active_assignment_count,
         supported_operations: vec![
             "plan_pod_exec_intent".to_string(),
+            "runner_live_exec_websocket".to_string(),
             "audit_handoff".to_string(),
             "fail_closed".to_string(),
         ],
         required_implementation: vec![
-            "Kubernetes exec streaming subprotocol".to_string(),
-            "stdout/stderr/status capture into tool results".to_string(),
+            "bind Kubernetes exec WebSocket client to approved execution jobs".to_string(),
+            "persist stdout/stderr/status capture into tool results".to_string(),
             "workspace artifact sync from Pod to Artifact Store".to_string(),
             "session event replay for Pod execution output".to_string(),
             "timeout and cancellation propagation".to_string(),
         ],
         message:
-            "Remote Computer execution transport is control-plane-only; no approved tool is executed inside a Kubernetes Pod yet"
+            "Remote Computer runner has a gated Kubernetes exec WebSocket client boundary, but approved tools still execute on the existing worker path"
                 .to_string(),
     })
 }
@@ -30376,7 +30400,7 @@ not json
                 .execution_transport
                 .required_implementation
                 .iter()
-                .any(|item| item.contains("Kubernetes exec streaming"))
+                .any(|item| item.contains("Kubernetes exec WebSocket client"))
         );
         assert!(
             remote_computer_readiness
