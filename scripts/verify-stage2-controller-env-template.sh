@@ -3,6 +3,7 @@ set -euo pipefail
 
 template="deploy/stage2-evidence/stage2-production-controllers.env.example"
 job_manifest="deploy/stage2-evidence/stage2-evidence-gate-job.yaml"
+secret_manifest="deploy/stage2-evidence/stage2-controller-env-secret.example.yaml"
 api_source="crates/mandoforge-api/src/main.rs"
 
 required_template_vars=(
@@ -120,9 +121,18 @@ if [[ ! -f "$template" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$secret_manifest" ]]; then
+  echo "missing Stage 2 controller Secret example: $secret_manifest" >&2
+  exit 1
+fi
+
 for var in "${required_template_vars[@]}"; do
   if ! grep -q "^${var}=" "$template"; then
     echo "Stage 2 controller env template is missing $var" >&2
+    exit 1
+  fi
+  if ! grep -q "^  ${var}:" "$secret_manifest"; then
+    echo "Stage 2 controller Secret example is missing $var" >&2
     exit 1
   fi
 done
@@ -140,6 +150,12 @@ done < <(grep -Eho 'MANDOFORGE_[A-Z0-9_]*(CONTROLLER|KMS)[A-Z0-9_]*' "$api_sourc
 if grep -E '(_TOKEN|_KEY_ID|MANDOFORGE_STAGE2_TEAM_ID)=.+' "$template" >/dev/null; then
   echo "Stage 2 controller env template must not contain real token, key, or team id values" >&2
   grep -nE '(_TOKEN|_KEY_ID|MANDOFORGE_STAGE2_TEAM_ID)=.+' "$template" >&2
+  exit 1
+fi
+
+if grep -E '(_TOKEN|_KEY_ID|MANDOFORGE_STAGE2_TEAM_ID): "[^"]+"' "$secret_manifest" >/dev/null; then
+  echo "Stage 2 controller Secret example must not contain real token, key, or team id values" >&2
+  grep -nE '(_TOKEN|_KEY_ID|MANDOFORGE_STAGE2_TEAM_ID): "[^"]+"' "$secret_manifest" >&2
   exit 1
 fi
 
