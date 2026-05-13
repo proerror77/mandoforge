@@ -41,6 +41,7 @@ bash -n scripts/verify-codex-exec-adapter.sh
 bash -n scripts/execution-worker-loop.sh
 bash -n scripts/verify-execution-worker-loop.sh
 bash -n scripts/verify-external-provider.sh
+bash -n scripts/stage2-production-evidence-gate.sh
 
 prepare_fake_codex() {
   FAKE_CODEX_DIR="$(mktemp -d -t mandoforge-fake-codex.XXXXXX)"
