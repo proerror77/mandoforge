@@ -2132,6 +2132,7 @@ struct UsageFinanceOperationsSummary {
     last_finance_export: Option<UsageFinanceOperationAudit>,
     last_alert_delivery: Option<UsageFinanceOperationAudit>,
     last_alert_acknowledgement: Option<UsageFinanceOperationAudit>,
+    last_accounting_reconciliation: Option<UsageFinanceOperationAudit>,
     production_close: UsageFinanceProductionCloseReadiness,
     runbook_actions: Vec<String>,
     attention_items: Vec<UsageFinanceAttentionItem>,
@@ -2151,6 +2152,10 @@ struct UsageFinanceProductionCloseReadiness {
     close_controller_configured: bool,
     latest_close_controller_status: Option<String>,
     latest_close_controller_closed: bool,
+    reconciliation_controller_required: bool,
+    reconciliation_controller_configured: bool,
+    latest_reconciliation_status: Option<String>,
+    latest_reconciliation_reconciled: bool,
     blocking_reasons: Vec<String>,
     message: String,
 }
@@ -2167,6 +2172,8 @@ struct UsageFinanceOperationsRun {
     finance_export_delivery: Option<UsageFinanceExportDelivery>,
     close_controller_configured: bool,
     close_controller_execution: Value,
+    reconciliation_controller_configured: bool,
+    reconciliation_controller_execution: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3770,6 +3777,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/usage/finance-operations/run",
             post(run_usage_finance_operations),
+        )
+        .route(
+            "/api/usage/finance-operations/reconcile",
+            post(run_usage_finance_reconciliation),
         )
         .route("/api/usage/export.csv", get(export_usage_csv))
         .route("/api/usage/export/deliver", post(deliver_usage_export))
@@ -16565,6 +16576,61 @@ async fn run_usage_finance_operations(
     ))
 }
 
+async fn run_usage_finance_reconciliation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "usage_finance_operations".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let ran_at = Utc::now();
+    let before = build_usage_finance_operations_summary(&state).await?;
+    let execution = execute_usage_finance_reconciliation_controller(
+        &|key| std::env::var(key).ok(),
+        Some(principal.subject_id.as_str()),
+        ran_at,
+        &before,
+    )
+    .await?;
+    let status = execution
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed")
+        .to_string();
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "usage.finance_reconciliation_run",
+            "usage_finance_operations",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "reconciliation_controller_configured": true,
+                "reconciliation_controller_execution": execution,
+                "before_status": before.status,
+                "before_production_close_status": before.production_close.status,
+                "ran_at": ran_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": status,
+        "ran_at": ran_at,
+        "before": before,
+        "reconciliation_controller_configured": true,
+        "reconciliation_controller_execution": execution,
+    })))
+}
+
 async fn build_usage_finance_dashboard_summary(
     state: &AppState,
 ) -> Result<UsageFinanceDashboardSummary, AppError> {
@@ -16635,6 +16701,8 @@ where
     let mut cost_alert_delivery = None;
     let mut finance_export_delivery = None;
     let close_controller_configured = usage_finance_close_controller_configured(&lookup);
+    let reconciliation_controller_configured =
+        usage_finance_reconciliation_controller_configured(&lookup);
 
     if before.rollup_status != "fresh" {
         let period_end = ran_at;
@@ -16712,6 +16780,15 @@ where
             }
         }
     }
+    let reconciliation_controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if reconciliation_controller_configured {
+            "use_reconcile_endpoint_for_accounting_system_validation"
+        } else {
+            "reconciliation_controller_not_configured"
+        }
+    });
     let run = UsageFinanceOperationsRun {
         status: if actions.is_empty() {
             "no_action".to_string()
@@ -16733,6 +16810,8 @@ where
         finance_export_delivery,
         close_controller_configured,
         close_controller_execution,
+        reconciliation_controller_configured,
+        reconciliation_controller_execution,
     };
     state
         .append_audit_log(new_audit_log(
@@ -16751,6 +16830,8 @@ where
                 "finance_export_delivery_status": run.finance_export_delivery.as_ref().map(|delivery| delivery.status.clone()),
                 "close_controller_configured": run.close_controller_configured,
                 "close_controller_execution": run.close_controller_execution,
+                "reconciliation_controller_configured": run.reconciliation_controller_configured,
+                "reconciliation_controller_execution": run.reconciliation_controller_execution,
                 "before_status": run.before.status,
                 "after_status": run.after.status,
                 "ran_at": run.ran_at,
@@ -16774,6 +16855,29 @@ where
     F: Fn(&str) -> Option<String>,
 {
     lookup("MANDOFORGE_FINANCE_CLOSE_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn usage_finance_reconciliation_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn usage_finance_reconciliation_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_REQUIRED")
         .map(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -16855,6 +16959,80 @@ where
         "close_id": body.get("close_id").and_then(Value::as_str),
         "message": body.get("message").and_then(Value::as_str),
         "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
+}
+
+async fn execute_usage_finance_reconciliation_controller<F>(
+    lookup: &F,
+    subject: Option<&str>,
+    ran_at: DateTime<Utc>,
+    summary: &UsageFinanceOperationsSummary,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_FINANCE_RECONCILIATION_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.finance_reconciliation",
+        "subject": subject,
+        "ran_at": ran_at,
+        "summary": {
+            "status": summary.status,
+            "readiness_score": summary.readiness_score,
+            "open_alert_count": summary.open_alert_count,
+            "unacknowledged_alert_count": summary.unacknowledged_alert_count,
+            "rollup_status": summary.rollup_status,
+            "export_status": summary.export_status,
+            "alert_delivery_status": summary.alert_delivery_status,
+            "last_finance_export": summary.last_finance_export,
+            "last_alert_delivery": summary.last_alert_delivery,
+            "last_alert_acknowledgement": summary.last_alert_acknowledgement,
+            "production_close": summary.production_close,
+        },
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "finance reconciliation controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("reconciled");
+    let reconciled = matches!(
+        controller_status,
+        "reconciled" | "success" | "ok" | "validated"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if reconciled { "reconciled" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "reconciliation_id": body.get("reconciliation_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "checks": body.get("checks").cloned().unwrap_or_else(|| json!([])),
     }))
 }
 
@@ -17017,6 +17195,8 @@ fn build_usage_finance_operations_summary_from_parts(
     let last_alert_delivery = latest_usage_finance_audit(audit_logs, "usage.cost_alerts_delivered");
     let last_alert_acknowledgement =
         latest_usage_finance_audit(audit_logs, "usage.alert_acknowledged");
+    let last_accounting_reconciliation =
+        latest_usage_finance_audit(audit_logs, "usage.finance_reconciliation_run");
     let mut attention_items = dashboard.attention_items.clone();
     let mut runbook_actions = dashboard.recommendations.clone();
 
@@ -17109,6 +17289,8 @@ fn build_usage_finance_operations_summary_from_parts(
         generated_at,
         usage_finance_close_controller_required(&|key| std::env::var(key).ok()),
         usage_finance_close_controller_configured(&|key| std::env::var(key).ok()),
+        usage_finance_reconciliation_controller_required(&|key| std::env::var(key).ok()),
+        usage_finance_reconciliation_controller_configured(&|key| std::env::var(key).ok()),
     );
     if production_close.production_blocked {
         attention_items.push(UsageFinanceAttentionItem {
@@ -17156,6 +17338,7 @@ fn build_usage_finance_operations_summary_from_parts(
         last_finance_export,
         last_alert_delivery,
         last_alert_acknowledgement,
+        last_accounting_reconciliation,
         production_close,
         runbook_actions,
         attention_items,
@@ -17173,6 +17356,8 @@ fn build_usage_finance_production_close_readiness(
     generated_at: DateTime<Utc>,
     close_controller_required: bool,
     close_controller_configured: bool,
+    reconciliation_controller_required: bool,
+    reconciliation_controller_configured: bool,
 ) -> UsageFinanceProductionCloseReadiness {
     let acknowledgement_cutoff = generated_at - chrono::Duration::hours(24);
     let critical_alerts_acknowledged = alerts
@@ -17212,6 +17397,20 @@ fn build_usage_finance_production_close_readiness(
         .as_deref()
         .map(|status| status == "closed")
         .unwrap_or(false);
+    let latest_reconciliation_status = audit_logs
+        .iter()
+        .filter(|log| log.action == "usage.finance_reconciliation_run")
+        .max_by_key(|log| log.created_at)
+        .and_then(|log| {
+            log.details["reconciliation_controller_execution"]["status"]
+                .as_str()
+                .or_else(|| log.details["status"].as_str())
+        })
+        .map(str::to_string);
+    let latest_reconciliation_reconciled = latest_reconciliation_status
+        .as_deref()
+        .map(|status| status == "reconciled")
+        .unwrap_or(false);
     let rollup_fresh = rollup_status == "fresh";
     let mut blocking_reasons = Vec::new();
 
@@ -17240,6 +17439,15 @@ fn build_usage_finance_production_close_readiness(
     if close_controller_required && !latest_close_controller_closed {
         blocking_reasons.push("finance close controller has no recent closed evidence".to_string());
     }
+    if reconciliation_controller_required && !reconciliation_controller_configured {
+        blocking_reasons
+            .push("finance reconciliation controller is required but not configured".to_string());
+    }
+    if reconciliation_controller_required && !latest_reconciliation_reconciled {
+        blocking_reasons.push(
+            "finance reconciliation controller has no recent reconciled evidence".to_string(),
+        );
+    }
 
     let production_blocked = !blocking_reasons.is_empty();
     let status = if production_blocked {
@@ -17254,7 +17462,7 @@ fn build_usage_finance_production_close_readiness(
             blocking_reasons.join("; ")
         )
     } else {
-        "Finance production close has fresh rollup, recent export evidence, delivered alerts, and acknowledged critical alerts".to_string()
+        "Finance production close has fresh rollup, recent export evidence, delivered alerts, acknowledged critical alerts, and required reconciliation evidence".to_string()
     };
 
     UsageFinanceProductionCloseReadiness {
@@ -17270,6 +17478,10 @@ fn build_usage_finance_production_close_readiness(
         close_controller_configured,
         latest_close_controller_status,
         latest_close_controller_closed,
+        reconciliation_controller_required,
+        reconciliation_controller_configured,
+        latest_reconciliation_status,
+        latest_reconciliation_reconciled,
         blocking_reasons,
         message,
     }
@@ -26701,6 +26913,62 @@ not json
         controller_server.abort();
     }
 
+    #[tokio::test]
+    async fn finance_reconciliation_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("finance reconciliation listener");
+        let controller_addr = listener.local_addr().expect("finance reconciliation addr");
+        let controller = Router::new()
+            .route(
+                "/finance-reconciliation",
+                post(mock_finance_reconciliation_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock finance reconciliation controller");
+        });
+        let generated_at = Utc::now();
+        let summary = ready_finance_operations_summary(generated_at, "ready");
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/finance-reconciliation"))
+            }
+            "MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_TOKEN" => {
+                Some("finance-reconcile-token".to_string())
+            }
+            _ => None,
+        };
+
+        let execution = execute_usage_finance_reconciliation_controller(
+            &lookup,
+            Some("admin-1"),
+            generated_at,
+            &summary,
+        )
+        .await
+        .expect("finance reconciliation controller");
+
+        assert_eq!(execution["status"], "reconciled");
+        assert_eq!(execution["reconciliation_id"], "finance-reconciliation-1");
+        assert_eq!(execution["checks"].as_array().expect("checks").len(), 3);
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.finance_reconciliation");
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(
+            payloads[0]["summary"]["production_close"]["status"],
+            "ready"
+        );
+        assert!(payloads[0]["csv"].is_null());
+        assert!(payloads[0]["secret"].is_null());
+
+        controller_server.abort();
+    }
+
     #[test]
     fn finance_production_close_readiness_requires_controller_when_configured() {
         let generated_at = Utc::now();
@@ -26754,6 +27022,8 @@ not json
             generated_at,
             true,
             false,
+            false,
+            false,
         );
         assert_eq!(missing_controller.status, "blocked");
         assert!(missing_controller.production_blocked);
@@ -26792,6 +27062,8 @@ not json
             generated_at,
             true,
             true,
+            false,
+            false,
         );
         assert_eq!(ready.status, "ready");
         assert!(!ready.production_blocked);
@@ -26799,6 +27071,107 @@ not json
         assert_eq!(
             ready.latest_close_controller_status.as_deref(),
             Some("closed")
+        );
+    }
+
+    #[test]
+    fn finance_production_close_readiness_requires_reconciliation_when_configured() {
+        let generated_at = Utc::now();
+        let dashboard = UsageFinanceDashboardSummary {
+            generated_at,
+            current_cost_cents: 0.0,
+            current_total_tokens: 0,
+            current_tool_calls: 0,
+            comparison_basis: "current".to_string(),
+            budget_pressure_status: "normal".to_string(),
+            budget_pressure_count: 0,
+            critical_budget_count: 0,
+            warning_budget_count: 0,
+            alert_count: 0,
+            critical_alert_count: 0,
+            warning_alert_count: 0,
+            alert_route_count: 1,
+            active_alert_route_count: 1,
+            rollup_count: 1,
+            latest_rollup_at: Some(generated_at),
+            latest_rollup_age_hours: Some(0),
+            finance_export_target_configured: true,
+            finance_export_schedule_enabled: true,
+            forecast_7d_cost_cents: Some(0.0),
+            forecast_30d_cost_cents: Some(0.0),
+            top_provider_by_cost: None,
+            recommendations: vec![],
+            attention_items: vec![],
+        };
+        let export = UsageFinanceOperationAudit {
+            action: "usage.finance_export_delivered".to_string(),
+            status: "delivered".to_string(),
+            subject: Some("admin-1".to_string()),
+            created_at: generated_at,
+        };
+        let delivery = UsageFinanceOperationAudit {
+            action: "usage.cost_alerts_delivered".to_string(),
+            status: "delivered".to_string(),
+            subject: Some("admin-1".to_string()),
+            created_at: generated_at,
+        };
+
+        let missing_controller = build_usage_finance_production_close_readiness(
+            &dashboard,
+            &[],
+            &[],
+            "fresh",
+            "no_alerts",
+            Some(&export),
+            Some(&delivery),
+            generated_at,
+            false,
+            false,
+            true,
+            false,
+        );
+        assert_eq!(missing_controller.status, "blocked");
+        assert!(missing_controller.blocking_reasons.iter().any(|reason| {
+            reason == "finance reconciliation controller is required but not configured"
+        }));
+
+        let reconciled_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "usage.finance_reconciliation_run",
+            "usage_finance_operations",
+            None,
+            json!({
+                "status": "reconciled",
+                "reconciliation_controller_configured": true,
+                "reconciliation_controller_execution": {
+                    "attempted": true,
+                    "status": "reconciled",
+                    "reconciliation_id": "finance-reconciliation-1"
+                }
+            }),
+        );
+        let ready = build_usage_finance_production_close_readiness(
+            &dashboard,
+            &[],
+            &[reconciled_audit],
+            "fresh",
+            "no_alerts",
+            Some(&export),
+            Some(&delivery),
+            generated_at,
+            false,
+            false,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert!(ready.latest_reconciliation_reconciled);
+        assert_eq!(
+            ready.latest_reconciliation_status.as_deref(),
+            Some("reconciled")
         );
     }
 
@@ -27077,6 +27450,7 @@ not json
                 subject: Some("admin-1".to_string()),
                 created_at: generated_at,
             }),
+            last_accounting_reconciliation: None,
             production_close: UsageFinanceProductionCloseReadiness {
                 status: "ready".to_string(),
                 production_blocked: false,
@@ -27090,6 +27464,10 @@ not json
                 close_controller_configured: false,
                 latest_close_controller_status: None,
                 latest_close_controller_closed: false,
+                reconciliation_controller_required: false,
+                reconciliation_controller_configured: false,
+                latest_reconciliation_status: None,
+                latest_reconciliation_reconciled: false,
                 blocking_reasons: vec![],
                 message: "ready".to_string(),
             },
@@ -33080,6 +33458,30 @@ not json
                 {"name": "rollup", "status": "verified"},
                 {"name": "export", "status": "delivered"},
                 {"name": "alerts", "status": "acknowledged"}
+            ]
+        }))
+    }
+
+    async fn mock_finance_reconciliation_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer finance-reconcile-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "reconciled",
+            "reconciliation_id": "finance-reconciliation-1",
+            "message": "accounting system reconciliation accepted",
+            "checks": [
+                {"name": "rollup_totals", "status": "matched"},
+                {"name": "export_delivery", "status": "matched"},
+                {"name": "alert_acknowledgement", "status": "matched"}
             ]
         }))
     }

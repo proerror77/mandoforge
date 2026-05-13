@@ -68,6 +68,7 @@ const state = {
   observabilityRemediationPlan: null,
   observabilityRemediation: null,
   usageFinanceOperationsRun: null,
+  usageFinanceReconciliationRun: null,
   schedulerSummary: null,
   schedulerDuePlan: null,
   schedulerDueRun: null,
@@ -216,6 +217,7 @@ const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jo
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 const deliverCostAlertsButton = document.querySelector("#deliver-cost-alerts");
 const runFinanceOperationsButton = document.querySelector("#run-finance-operations");
+const runFinanceReconciliationButton = document.querySelector("#run-finance-reconciliation");
 const exportUsageCsvButton = document.querySelector("#export-usage-csv");
 const deliverUsageExportButton = document.querySelector("#deliver-usage-export");
 const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
@@ -284,6 +286,7 @@ remoteStateLockForm.addEventListener("submit", acquireRemoteStateLock);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
 runFinanceOperationsButton.addEventListener("click", runFinanceOperations);
+runFinanceReconciliationButton.addEventListener("click", runFinanceReconciliation);
 exportUsageCsvButton.addEventListener("click", exportUsageCsv);
 deliverUsageExportButton.addEventListener("click", deliverUsageExport);
 validateObservabilityCollectorButton.addEventListener("click", validateObservabilityCollector);
@@ -999,6 +1002,13 @@ async function deliverCostAlerts() {
 
 async function runFinanceOperations() {
   state.usageFinanceOperationsRun = await api("/api/usage/finance-operations/run", {
+    method: "POST",
+  });
+  await refreshOps();
+}
+
+async function runFinanceReconciliation() {
+  state.usageFinanceReconciliationRun = await api("/api/usage/finance-operations/reconcile", {
     method: "POST",
   });
   await refreshOps();
@@ -3111,6 +3121,7 @@ function renderUsage() {
   const financeSummary = state.usageFinanceSummary;
   const financeOperations = state.usageFinanceOperations;
   const financeOperationsRun = state.usageFinanceOperationsRun;
+  const financeReconciliationRun = state.usageFinanceReconciliationRun;
   const financeAttention = financeSummary?.attention_items || [];
   const financeOperationsAttention = financeOperations?.attention_items || [];
   const financeProductionClose = financeOperations?.production_close || {};
@@ -3133,6 +3144,7 @@ function renderUsage() {
               <div class="metric"><span>Export</span><strong>${escapeHtml(financeOperations.export_status || "unknown")}</strong></div>
               <div class="metric"><span>Alert Delivery</span><strong>${escapeHtml(financeOperations.alert_delivery_status || "unknown")}</strong></div>
               <div class="metric"><span>Prod Close</span><strong>${escapeHtml(financeProductionClose.status || "unknown")}</strong></div>
+              <div class="metric"><span>Reconcile</span><strong>${escapeHtml(financeProductionClose.latest_reconciliation_status || "none")}</strong></div>
               <div class="metric"><span>Routes</span><strong>${formatInteger(financeOperations.active_alert_route_count)}</strong></div>
             </div>
             <dl>
@@ -3142,8 +3154,12 @@ function renderUsage() {
               <dd>rollup ${financeProductionClose.rollup_fresh ? "fresh" : "not fresh"} · export target ${financeProductionClose.export_target_configured ? "ready" : "missing"} · export recent ${financeProductionClose.export_recent ? "yes" : "no"} · alerts delivered ${financeProductionClose.alert_delivery_ready ? "yes" : "no"} · critical ack ${financeProductionClose.critical_alerts_acknowledged ? "yes" : "no"} · controller ${financeProductionClose.close_controller_configured ? "configured" : "missing"}</dd>
               <dt>Close controller</dt>
               <dd>required ${financeProductionClose.close_controller_required ? "yes" : "no"} · status ${escapeHtml(financeProductionClose.latest_close_controller_status || "none")} · closed ${financeProductionClose.latest_close_controller_closed ? "yes" : "no"}</dd>
+              <dt>Accounting reconciliation</dt>
+              <dd>required ${financeProductionClose.reconciliation_controller_required ? "yes" : "no"} · controller ${financeProductionClose.reconciliation_controller_configured ? "configured" : "missing"} · status ${escapeHtml(financeProductionClose.latest_reconciliation_status || "none")} · reconciled ${financeProductionClose.latest_reconciliation_reconciled ? "yes" : "no"}</dd>
               <dt>Last finance export</dt>
               <dd>${renderFinanceOperationAudit(financeOperations.last_finance_export)}</dd>
+              <dt>Last accounting reconciliation</dt>
+              <dd>${renderFinanceOperationAudit(financeOperations.last_accounting_reconciliation)}</dd>
               <dt>Last alert delivery</dt>
               <dd>${renderFinanceOperationAudit(financeOperations.last_alert_delivery)}</dd>
               <dt>Last alert acknowledgement</dt>
@@ -3191,6 +3207,16 @@ function renderUsage() {
             <div class="muted">Before ${escapeHtml(financeOperationsRun.before?.status || "unknown")} → after ${escapeHtml(financeOperationsRun.after?.status || "unknown")}</div>
             <div class="muted">Rollup ${escapeHtml(financeOperationsRun.rollup_created ? "created" : "not created")} · alerts ${escapeHtml(financeOperationsRun.cost_alert_delivery?.status || "not run")} · export ${escapeHtml(financeOperationsRun.finance_export_delivery?.status || "not run")}</div>
             <div class="muted">Close controller ${escapeHtml(financeOperationsRun.close_controller_configured ? "configured" : "not configured")} · ${escapeHtml(financeOperationsRun.close_controller_execution?.status || "skipped")}</div>
+            <div class="muted">Reconciliation controller ${escapeHtml(financeOperationsRun.reconciliation_controller_configured ? "configured" : "not configured")} · ${escapeHtml(financeOperationsRun.reconciliation_controller_execution?.status || "skipped")}</div>
+          </div>`
+        : ""
+    }
+    ${
+      financeReconciliationRun
+        ? `<div class="item">
+            <strong>Finance reconciliation: ${escapeHtml(financeReconciliationRun.status)}</strong>
+            <div class="muted">${escapeHtml(financeReconciliationRun.ran_at)} · before ${escapeHtml(financeReconciliationRun.before?.status || "unknown")}</div>
+            <div class="muted">Controller ${escapeHtml(financeReconciliationRun.reconciliation_controller_configured ? "configured" : "not configured")} · ${escapeHtml(financeReconciliationRun.reconciliation_controller_execution?.status || "skipped")}</div>
           </div>`
         : ""
     }
