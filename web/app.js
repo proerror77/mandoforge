@@ -3012,6 +3012,8 @@ function renderObservability() {
                 {
                   before: remediation.before,
                   after: remediation.after,
+                  controller_configured: remediation.controller_configured,
+                  controller_execution: remediation.controller_execution,
                   approval_escalation_run: remediation.approval_escalation_run,
                   codex_app_server_stale_polls: remediation.codex_app_server_stale_polls,
                 },

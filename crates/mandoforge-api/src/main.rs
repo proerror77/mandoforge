@@ -1292,6 +1292,8 @@ struct ObservabilityRemediationRun {
     after: ObservabilityBackpressure,
     approval_escalation_run: Option<ApprovalEscalationDueRun>,
     codex_app_server_stale_polls: Option<CodexAppServerStalePollRun>,
+    controller_configured: bool,
+    controller_execution: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16583,9 +16585,23 @@ async fn run_observability_remediation(
     headers: HeaderMap,
 ) -> Result<Json<ObservabilityRemediationRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
+    Ok(Json(
+        execute_observability_remediation_with_lookup(&state, |key| std::env::var(key).ok())
+            .await?,
+    ))
+}
+
+async fn execute_observability_remediation_with_lookup<F>(
+    state: &AppState,
+    lookup: F,
+) -> Result<ObservabilityRemediationRun, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let before_summary = build_observability_summary(&state).await?;
     let before = before_summary.backpressure;
     let mut actions = Vec::new();
+    let controller_configured = observability_remediation_controller_configured(&lookup);
     let approval_escalation_run = if before.pending_approvals > 0 {
         actions.push("approval_escalation_due_run".to_string());
         Some(execute_due_approval_escalations(&state).await?)
@@ -16611,9 +16627,51 @@ async fn run_observability_remediation(
         actions.push("manual_failure_triage_required".to_string());
     }
     let after_summary = build_observability_summary(&state).await?;
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "no_remediation_actions"
+        } else {
+            "controller_not_configured"
+        }
+    });
+    if controller_configured && !actions.is_empty() {
+        match execute_observability_remediation_controller(
+            &lookup,
+            &before,
+            &after_summary.backpressure,
+            &actions,
+        )
+        .await
+        {
+            Ok(execution) => {
+                let execution_status = execution
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed")
+                    .to_string();
+                controller_execution = execution;
+                actions.push("observability_remediation_controller_executed".to_string());
+                if execution_status != "remediated" {
+                    actions.push("observability_remediation_controller_attention".to_string());
+                }
+            }
+            Err(error) => {
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+                actions.push("observability_remediation_controller_failed".to_string());
+            }
+        }
+    }
     let run = ObservabilityRemediationRun {
         status: if actions.is_empty() {
             "no_action".to_string()
+        } else if controller_execution.get("status").and_then(Value::as_str) == Some("failed") {
+            "attention".to_string()
         } else {
             "completed".to_string()
         },
@@ -16623,6 +16681,8 @@ async fn run_observability_remediation(
         after: after_summary.backpressure,
         approval_escalation_run,
         codex_app_server_stale_polls: Some(codex_app_server_stale_polls),
+        controller_configured,
+        controller_execution,
     };
     state
         .append_audit_log(new_audit_log(
@@ -16635,7 +16695,78 @@ async fn run_observability_remediation(
             serde_json::to_value(&run)?,
         ))
         .await?;
-    Ok(Json(run))
+    Ok(run)
+}
+
+fn observability_remediation_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_observability_remediation_controller<F>(
+    lookup: &F,
+    before: &ObservabilityBackpressure,
+    after: &ObservabilityBackpressure,
+    actions: &[String],
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_OBSERVABILITY_REMEDIATION_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.observability_remediation",
+        "actions": actions,
+        "before": before,
+        "after": after,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "observability remediation controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("remediated");
+    let remediated = matches!(
+        controller_status,
+        "remediated" | "success" | "ok" | "validated"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if remediated { "remediated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "remediation_id": body.get("remediation_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 async fn build_observability_collector_readiness(
@@ -24088,6 +24219,83 @@ not json
         controller_server.abort();
     }
 
+    #[tokio::test]
+    async fn observability_remediation_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("observability remediation listener");
+        let controller_addr = listener
+            .local_addr()
+            .expect("observability remediation addr");
+        let controller = Router::new()
+            .route(
+                "/observability-remediation",
+                post(mock_observability_remediation_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock observability remediation controller");
+        });
+        let before = ObservabilityBackpressure {
+            status: "attention".to_string(),
+            queued_jobs: 2,
+            running_jobs: 1,
+            failed_jobs: 0,
+            retryable_jobs: 1,
+            pending_approvals: 3,
+            waiting_approval_sessions: 1,
+            failed_sessions: 0,
+            failed_tool_calls: 0,
+            oldest_queued_job_age_seconds: Some(420),
+        };
+        let after = ObservabilityBackpressure {
+            status: "healthy".to_string(),
+            queued_jobs: 0,
+            running_jobs: 1,
+            failed_jobs: 0,
+            retryable_jobs: 0,
+            pending_approvals: 0,
+            waiting_approval_sessions: 0,
+            failed_sessions: 0,
+            failed_tool_calls: 0,
+            oldest_queued_job_age_seconds: None,
+        };
+        let actions = vec![
+            "approval_escalation_due_run".to_string(),
+            "worker_drain_required".to_string(),
+        ];
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_URL" => Some(format!(
+                "http://{controller_addr}/observability-remediation"
+            )),
+            "MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_TOKEN" => {
+                Some("remediation-token".to_string())
+            }
+            _ => None,
+        };
+
+        let execution =
+            execute_observability_remediation_controller(&lookup, &before, &after, &actions)
+                .await
+                .expect("observability remediation controller");
+
+        assert_eq!(execution["status"], "remediated");
+        assert_eq!(execution["remediation_id"], "observability-remediation-1");
+        assert_eq!(execution["steps"].as_array().expect("steps").len(), 2);
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.observability_remediation");
+        assert_eq!(payloads[0]["actions"][0], "approval_escalation_due_run");
+        assert_eq!(payloads[0]["actions"][1], "worker_drain_required");
+        assert_eq!(payloads[0]["before"]["pending_approvals"], 3);
+        assert_eq!(payloads[0]["after"]["pending_approvals"], 0);
+
+        controller_server.abort();
+    }
+
     fn ready_finance_operations_summary(
         generated_at: DateTime<Utc>,
         status: &str,
@@ -28795,6 +29003,29 @@ not json
                 {"name": "rollup", "status": "verified"},
                 {"name": "export", "status": "delivered"},
                 {"name": "alerts", "status": "acknowledged"}
+            ]
+        }))
+    }
+
+    async fn mock_observability_remediation_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer remediation-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "remediated",
+            "remediation_id": "observability-remediation-1",
+            "message": "remediation controller accepted backpressure actions",
+            "steps": [
+                {"name": "approval-escalation", "status": "processed"},
+                {"name": "worker-drain", "status": "queued"}
             ]
         }))
     }
