@@ -209,6 +209,7 @@ const exportUsageCsvButton = document.querySelector("#export-usage-csv");
 const deliverUsageExportButton = document.querySelector("#deliver-usage-export");
 const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
 const checkCodexHealthButton = document.querySelector("#check-codex-health");
+const validateCodexDeploymentButton = document.querySelector("#validate-codex-deployment");
 const loadCodexRunsButton = document.querySelector("#load-codex-runs");
 const pollStaleCodexRunsButton = document.querySelector("#poll-stale-codex-runs");
 const codexThreadForm = document.querySelector("#codex-thread-form");
@@ -273,6 +274,7 @@ runObservabilityRemediationButton.addEventListener("click", runObservabilityReme
 runSchedulerDueButton.addEventListener("click", runSchedulerDueTasks);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
 checkCodexHealthButton.addEventListener("click", checkCodexAppServerHealth);
+validateCodexDeploymentButton.addEventListener("click", validateCodexDeployment);
 loadCodexRunsButton.addEventListener("click", loadCodexAppServerRuns);
 pollStaleCodexRunsButton.addEventListener("click", pollStaleCodexRuns);
 codexThreadForm.addEventListener("submit", createCodexThread);
@@ -1021,6 +1023,15 @@ async function checkCodexAppServerHealth() {
   });
 }
 
+async function validateCodexDeployment() {
+  await captureCodexAppServer("deploymentValidation", async () => {
+    state.codexAppServer.deploymentValidation = await api("/api/codex-app-server/deployment/validate", {
+      method: "POST",
+    });
+    state.codexAppServer.controlSummary = await api("/api/codex-app-server/control-plane/summary");
+  });
+}
+
 async function loadCodexAppServerRuns() {
   await captureCodexAppServer("runs", async () => {
     const [runs, traces, controlSummary] = await Promise.all([
@@ -1723,6 +1734,7 @@ function renderCodexAppServer() {
   const runSummary = summarizeCodexRuns(codex.runs || []);
   const responseCards = [
     ["Health", codex.health],
+    ["Deployment Validation", codex.deploymentValidation],
     ["Thread", codex.thread],
     ["Turn", codex.turn],
     ["Command", codex.command],
@@ -1762,6 +1774,7 @@ function renderCodexAppServer() {
   const traceSummary = codex.traces;
   const controlSummary = codex.controlSummary;
   const productionOps = controlSummary?.production_ops || {};
+  const deploymentReadiness = controlSummary?.deployment_readiness || {};
   const controlAttention = controlSummary?.attention_items || [];
   const traceRows = (traceSummary?.traces || [])
     .slice(0, 8)
@@ -1834,6 +1847,8 @@ function renderCodexAppServer() {
       <div class="muted">Configured: ${escapeHtml(controlSummary.configured ? "yes" : "no")} · timeout ${escapeHtml(controlSummary.timeout_seconds ?? "n/a")}s · latest ${escapeHtml(controlSummary.latest_seen_at || "none")}</div>
       <div class="muted">Production ops: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · stale candidates ${formatInteger(productionOps.stale_candidate_count || 0)} · failed turns ${formatInteger(productionOps.failed_turn_count || 0)} · latest supervision ${escapeHtml(productionOps.latest_stale_poll_at || "none")}</div>
       <div class="muted">${escapeHtml(productionOps.message || "Codex App Server production ops are not reported")}</div>
+      <div class="muted">Deployment validation: ${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · validated ${deploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${deploymentReadiness.latest_validation_healthy ? "yes" : "no"} · latest ${escapeHtml(deploymentReadiness.latest_validation_at || "none")}</div>
+      <div class="muted">${escapeHtml(deploymentReadiness.message || "Codex App Server deployment validation is not reported")}</div>
       ${
         controlAttention.length
           ? `<table class="usage-table">

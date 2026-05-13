@@ -989,6 +989,7 @@ struct CodexAppServerControlPlaneSummary {
     by_status: HashMap<String, usize>,
     by_operation: HashMap<String, usize>,
     production_ops: CodexAppServerProductionOpsReadiness,
+    deployment_readiness: CodexAppServerDeploymentReadiness,
     attention_items: Vec<CodexAppServerControlPlaneAttentionItem>,
 }
 
@@ -1005,6 +1006,21 @@ struct CodexAppServerProductionOpsReadiness {
     latest_stale_poll_age_hours: Option<i64>,
     latest_stale_poll_candidate_count: usize,
     latest_stale_poll_failed_count: usize,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerDeploymentReadiness {
+    status: String,
+    production_blocked: bool,
+    configured: bool,
+    endpoint_configured: bool,
+    deployment_validated: bool,
+    latest_validation_at: Option<DateTime<Utc>>,
+    latest_validation_age_hours: Option<i64>,
+    latest_validation_status: Option<String>,
+    latest_validation_healthy: bool,
+    blocking_reasons: Vec<String>,
     message: String,
 }
 
@@ -3389,6 +3405,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/codex-app-server/health",
             get(get_codex_app_server_health),
+        )
+        .route(
+            "/api/codex-app-server/deployment/validate",
+            post(validate_codex_app_server_deployment),
         )
         .route(
             "/api/codex-app-server/runs",
@@ -8914,6 +8934,67 @@ async fn get_codex_app_server_health(
     }
 }
 
+async fn validate_codex_app_server_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "codex_app_server".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let checked_at = Utc::now();
+    let mut issues = Vec::new();
+    let mut healthy = false;
+    let mut timeout_seconds = None;
+    let configured = state.codex_app_server_config.is_some();
+
+    if let Some(config) = state.codex_app_server_config.as_ref() {
+        timeout_seconds = Some(config.timeout_seconds);
+        match state.codex_app_server_client.health_check(config).await {
+            Ok(()) => {
+                healthy = true;
+            }
+            Err(error) => {
+                issues.push(error.message);
+            }
+        }
+    } else {
+        issues.push(
+            "Codex App Server is disabled until MANDOFORGE_CODEX_APP_SERVER_URL is configured"
+                .to_string(),
+        );
+    }
+
+    let status = if healthy { "healthy" } else { "blocked" };
+    let result = json!({
+        "status": status,
+        "healthy": healthy,
+        "configured": configured,
+        "endpoint_configured": configured,
+        "timeout_seconds": timeout_seconds,
+        "issues": issues,
+        "subject": principal.subject_id,
+        "checked_at": checked_at,
+    });
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "codex_app_server.deployment_validation",
+            "codex_app_server",
+            None,
+            result.clone(),
+        ))
+        .await?;
+    Ok(Json(result))
+}
+
 async fn create_codex_thread(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9532,6 +9613,8 @@ fn build_codex_app_server_control_plane_summary(
         audit_logs,
         generated_at,
     );
+    let deployment_readiness =
+        build_codex_app_server_deployment_readiness(config.is_some(), audit_logs, generated_at);
     if production_ops.production_blocked {
         attention_items.push(CodexAppServerControlPlaneAttentionItem {
             kind: "production_ops_blocked".to_string(),
@@ -9541,6 +9624,19 @@ fn build_codex_app_server_control_plane_summary(
                 "warning".to_string()
             },
             message: production_ops.message.clone(),
+            trace_key: None,
+            turn_id: None,
+        });
+    }
+    if deployment_readiness.production_blocked {
+        attention_items.push(CodexAppServerControlPlaneAttentionItem {
+            kind: "deployment_validation_blocked".to_string(),
+            severity: if deployment_readiness.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: deployment_readiness.message.clone(),
             trace_key: None,
             turn_id: None,
         });
@@ -9575,6 +9671,7 @@ fn build_codex_app_server_control_plane_summary(
         by_status: trace_summary.by_status,
         by_operation: trace_summary.by_operation,
         production_ops,
+        deployment_readiness,
         attention_items,
     }
 }
@@ -9669,6 +9766,72 @@ fn build_codex_app_server_production_ops_readiness(
         latest_stale_poll_age_hours,
         latest_stale_poll_candidate_count,
         latest_stale_poll_failed_count,
+        message,
+    }
+}
+
+fn build_codex_app_server_deployment_readiness(
+    configured: bool,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> CodexAppServerDeploymentReadiness {
+    let latest_validation = audit_logs
+        .iter()
+        .filter(|log| log.action == "codex_app_server.deployment_validation")
+        .max_by_key(|log| log.created_at);
+    let latest_validation_at = latest_validation.map(|log| log.created_at);
+    let latest_validation_age_hours =
+        latest_validation_at.map(|created_at| (generated_at - created_at).num_hours());
+    let latest_validation_status = latest_validation
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_validation_healthy = latest_validation
+        .and_then(|log| log.details.get("healthy"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut blocking_reasons = Vec::new();
+
+    if !configured {
+        blocking_reasons.push("Codex App Server endpoint is not configured".to_string());
+    }
+    if latest_validation.is_none() {
+        blocking_reasons.push("deployment validation has not run".to_string());
+    }
+    if latest_validation.is_some() && !latest_validation_healthy {
+        blocking_reasons.push("latest deployment validation was not healthy".to_string());
+    }
+    if latest_validation_age_hours.is_some_and(|hours| hours >= 24) {
+        blocking_reasons.push("deployment validation evidence is stale".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Codex App Server deployment validation is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Codex App Server deployment has a recent healthy validation run".to_string()
+    };
+
+    CodexAppServerDeploymentReadiness {
+        status,
+        production_blocked,
+        configured,
+        endpoint_configured: configured,
+        deployment_validated: latest_validation_healthy && !production_blocked,
+        latest_validation_at,
+        latest_validation_age_hours,
+        latest_validation_status,
+        latest_validation_healthy,
+        blocking_reasons,
         message,
     }
 }
@@ -22189,24 +22352,51 @@ not json
                 .message
                 .contains("stale-turn supervision has run")
         );
+        assert_eq!(without_supervision.deployment_readiness.status, "blocked");
+        assert!(
+            without_supervision
+                .deployment_readiness
+                .message
+                .contains("deployment validation has not run")
+        );
 
-        let audit_logs = vec![AuditLog {
-            id: Uuid::new_v4(),
-            session_id: None,
-            actor_type: "system".to_string(),
-            actor_id: None,
-            action: "codex_app_server.stale_poll_due_run".to_string(),
-            resource_type: "codex_app_server".to_string(),
-            resource_id: None,
-            details: json!({
-                "candidate_count": 0,
-                "polled_count": 0,
-                "terminal_count": 0,
-                "skipped_count": 0,
-                "failed_count": 0
-            }),
-            created_at: base_time + chrono::Duration::minutes(1),
-        }];
+        let audit_logs = vec![
+            AuditLog {
+                id: Uuid::new_v4(),
+                session_id: None,
+                actor_type: "system".to_string(),
+                actor_id: None,
+                action: "codex_app_server.stale_poll_due_run".to_string(),
+                resource_type: "codex_app_server".to_string(),
+                resource_id: None,
+                details: json!({
+                    "candidate_count": 0,
+                    "polled_count": 0,
+                    "terminal_count": 0,
+                    "skipped_count": 0,
+                    "failed_count": 0
+                }),
+                created_at: base_time + chrono::Duration::minutes(1),
+            },
+            AuditLog {
+                id: Uuid::new_v4(),
+                session_id: None,
+                actor_type: "user".to_string(),
+                actor_id: Some(Uuid::new_v4()),
+                action: "codex_app_server.deployment_validation".to_string(),
+                resource_type: "codex_app_server".to_string(),
+                resource_id: None,
+                details: json!({
+                    "status": "healthy",
+                    "healthy": true,
+                    "configured": true,
+                    "endpoint_configured": true,
+                    "timeout_seconds": 5,
+                    "issues": []
+                }),
+                created_at: base_time + chrono::Duration::minutes(2),
+            },
+        ];
         let ready = build_codex_app_server_control_plane_summary(
             Some(&config),
             &runs,
@@ -22217,6 +22407,10 @@ not json
         assert!(!ready.production_ops.production_blocked);
         assert_eq!(ready.production_ops.latest_stale_poll_failed_count, 0);
         assert_eq!(ready.production_ops.latest_stale_poll_candidate_count, 0);
+        assert_eq!(ready.deployment_readiness.status, "ready");
+        assert!(!ready.deployment_readiness.production_blocked);
+        assert!(ready.deployment_readiness.deployment_validated);
+        assert!(ready.deployment_readiness.latest_validation_healthy);
         assert_eq!(ready.status, "ready");
     }
 
@@ -26697,6 +26891,21 @@ not json
         .await;
         assert_eq!(health["status"], "healthy");
 
+        let deployment_validation: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/codex-app-server/deployment/validate")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(deployment_validation["status"], "healthy");
+        assert_eq!(deployment_validation["healthy"], true);
+        assert_eq!(deployment_validation["configured"], true);
+
         let thread: CodexThreadResponse = request_json(
             app.clone(),
             Request::builder()
@@ -26852,6 +27061,9 @@ not json
         assert_eq!(control_summary.failed_turn_count, 1);
         assert_eq!(control_summary.stale_candidate_count, 0);
         assert_eq!(control_summary.pollable_turn_count, 0);
+        assert_eq!(control_summary.deployment_readiness.status, "ready");
+        assert!(!control_summary.deployment_readiness.production_blocked);
+        assert!(control_summary.deployment_readiness.deployment_validated);
         assert!(control_summary.attention_items.iter().any(|item| {
             item.kind == "failed_trace" && item.turn_id.as_deref() == Some("turn-1")
         }));
@@ -26947,10 +27159,14 @@ not json
         assert!(global_audit_logs.iter().any(|log| {
             log.action == "codex_app_server.stale_poll_due_run" && log.details["polled_count"] == 1
         }));
+        assert!(global_audit_logs.iter().any(|log| {
+            log.action == "codex_app_server.deployment_validation" && log.details["healthy"] == true
+        }));
 
         assert_eq!(
             codex_client.calls.lock().await.as_slice(),
             [
+                "health",
                 "health",
                 "thread",
                 "turn:thread-1",
