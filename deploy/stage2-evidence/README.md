@@ -48,6 +48,7 @@ kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestri
 kubectl wait --for=condition=complete job/mandoforge-stage2-production-evidence-gate -n agent-os --timeout=30m
 kubectl logs job/mandoforge-stage2-production-evidence-gate -n agent-os
 scripts/archive-stage2-production-evidence.sh .mandoforge/stage2-production-evidence-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
+scripts/verify-stage2-evidence-archive.sh .mandoforge/stage2-production-evidence-YYYYMMDDTHHMMSSZ.tar.gz
 ```
 
 For a real run, create `/secure/path/stage2-production-controllers.env` from the same keys but with production controller URLs, tokens, team id, and KMS settings supplied outside git. The render script refuses `example.com` placeholders and empty token/key/team values by default. The strict Job sets `ALLOW_BLOCKED=0` through that Secret and fails closed if required controller evidence is missing, stale, or unhealthy. Keep the `mandoforge-stage2-production-evidence` PVC until the evidence directory has been archived with the release record, including the generated `.sha256` checksum and `.manifest.txt` release manifest.

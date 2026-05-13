@@ -40,6 +40,7 @@ ALLOW_BLOCKED=1 BASE_URL=http://127.0.0.1:8792 EVIDENCE_DIR=.mandoforge/stage2-p
 ./scripts/verify-static-ui-actionbook.sh
 ./scripts/verify-stage2-controller-env-template.sh
 ./scripts/verify-stage2-evidence-k8s-manifests.sh
+./scripts/verify-stage2-evidence-archive.sh --self-test
 ./scripts/verify-remote-computer-k8s-manifests.sh
 MANDOFORGE_K8S_NAMESPACE=agent-os ./scripts/archive-stage2-production-evidence.sh .mandoforge/stage2-production-evidence-YYYYMMDDTHHMMSSZ.tar.gz
 ALLOW_STAGE2_CONTROLLER_PLACEHOLDERS=1 ./scripts/render-stage2-controller-secret.sh deploy/stage2-evidence/stage2-production-controllers.env.example >/tmp/mandoforge-stage2-controller-secret-render.yaml
@@ -63,7 +64,7 @@ Stage 2 controller env template verifier ok; Stage 2 evidence K8s manifest verif
 kustomize deploy/k8s rendered 659 lines; kustomize deploy/stage2-evidence rendered 85 lines; kustomize deploy/stage2-production-evidence rendered 82 lines; kustomize deploy rendered 790 lines
 Strict production controller Secret render fails closed on placeholders by default and renders the reviewed env contract when `ALLOW_STAGE2_CONTROLLER_PLACEHOLDERS=1` is set for template verification
 Strict production evidence bundle includes persistent evidence PVC and production evidence Job with `/evidence` backed by `mandoforge-stage2-production-evidence`; the real controller Secret is rendered separately from the production env file
-Production evidence PVC now has a standard read-only archive helper that streams a local tar.gz for release records after the strict Job completes and writes `.sha256` plus `.manifest.txt` verification sidecars
+Production evidence PVC now has a standard read-only archive helper that streams a local tar.gz for release records after the strict Job completes and writes `.sha256` plus `.manifest.txt` verification sidecars; `scripts/verify-stage2-evidence-archive.sh --self-test` validates the archive verification path
 Remote Computer pilot bundle now binds the Pod-mounted `mandoforge-remote-computer-state` PVC to the JuiceFS PV through `remote-computer-state-juicefs-pvc-patch.yaml` instead of rendering only a separate reference PVC
 GitHub Actions run 25830961757 passed the expanded CI gate on commit 3f77b5969fcfa439110980da652f132a86e829a4: fmt, check, test, node syntax, Stage 1/2 script syntax, controller env verifier, Stage 2 evidence K8s verifier, Remote Computer K8s verifier, K8s/evidence overlay render, and strict production evidence bundle render
 ports 8791 and 9324 had no residual listeners after Actionbook verification
