@@ -5200,6 +5200,19 @@ async fn principal_from_request(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Principal, AppError> {
+    let requested_tenant_id = header_value(headers, "x-mandoforge-tenant-id")
+        .map(|value| {
+            Uuid::parse_str(value.trim())
+                .map_err(|_| AppError::bad_request("x-mandoforge-tenant-id must be a valid UUID"))
+        })
+        .transpose()?;
+    if let Some(requested_tenant_id) = requested_tenant_id {
+        if requested_tenant_id != state.tenant_id {
+            return Err(AppError::forbidden(
+                "x-mandoforge-tenant-id does not match this runtime tenant",
+            ));
+        }
+    }
     let explicit_subject = header_value(headers, "x-mandoforge-subject");
     let subject_id = explicit_subject.unwrap_or("demo-operator").to_string();
     let roles = if let Some(value) = header_value(headers, "x-mandoforge-roles") {
@@ -5214,7 +5227,7 @@ async fn principal_from_request(
     }
 
     Ok(Principal {
-        tenant_id: state.tenant_id,
+        tenant_id: requested_tenant_id.unwrap_or(state.tenant_id),
         subject_id,
         roles,
     })
@@ -24265,6 +24278,49 @@ not json
         )
         .await;
 
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn request_tenant_header_must_match_runtime_tenant() {
+        let app = test_app().await;
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .header(
+                    "x-mandoforge-tenant-id",
+                    "00000000-0000-4000-8000-000000000099",
+                )
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not match this runtime tenant")
+        );
+
+        let (status, _) = request_value(
+            app,
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .header(
+                    "x-mandoforge-tenant-id",
+                    "00000000-0000-4000-8000-000000000001",
+                )
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
     }
 
