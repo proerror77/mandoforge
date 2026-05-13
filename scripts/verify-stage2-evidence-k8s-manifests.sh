@@ -95,4 +95,14 @@ if ! grep -q "readOnly: true" "$archive_script"; then
   exit 1
 fi
 
+if ! grep -q "archive_sha256" "$archive_script"; then
+  echo "Stage 2 production evidence archive script must write checksum metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "manifest_file=" "$archive_script"; then
+  echo "Stage 2 production evidence archive script must write a release manifest" >&2
+  exit 1
+fi
+
 echo "stage2 evidence k8s manifests ok"

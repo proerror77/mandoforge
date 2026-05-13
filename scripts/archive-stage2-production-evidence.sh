@@ -12,6 +12,30 @@ if ! command -v kubectl >/dev/null 2>&1; then
   exit 1
 fi
 
+sha256_file="${archive_path}.sha256"
+manifest_file="${archive_path}.manifest.txt"
+created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+current_context="$(kubectl config current-context 2>/dev/null || true)"
+
+archive_size() {
+  if stat -c%s "$archive_path" >/dev/null 2>&1; then
+    stat -c%s "$archive_path"
+  else
+    stat -f%z "$archive_path"
+  fi
+}
+
+archive_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$archive_path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$archive_path" | awk '{print $1}'
+  else
+    echo "sha256sum or shasum is required to checksum the Stage 2 evidence archive" >&2
+    exit 1
+  fi
+}
+
 mkdir -p "$(dirname "$archive_path")"
 
 cleanup() {
@@ -78,4 +102,24 @@ if [[ ! -s "$archive_path" ]]; then
   exit 1
 fi
 
+archive_sha="$(archive_sha256)"
+archive_bytes="$(archive_size)"
+
+printf '%s  %s\n' "$archive_sha" "$archive_path" >"$sha256_file"
+
+{
+  echo "created_at=$created_at"
+  echo "kube_context=${current_context:-<unknown>}"
+  echo "namespace=$namespace"
+  echo "pvc=$pvc_name"
+  echo "archive_pod=$pod_name"
+  echo "archive_image=$image"
+  echo "archive_path=$archive_path"
+  echo "archive_bytes=$archive_bytes"
+  echo "archive_sha256=$archive_sha"
+  echo "sha256_file=$sha256_file"
+} >"$manifest_file"
+
 echo "Stage 2 production evidence archived to $archive_path" >&2
+echo "Stage 2 production evidence checksum written to $sha256_file" >&2
+echo "Stage 2 production evidence manifest written to $manifest_file" >&2
