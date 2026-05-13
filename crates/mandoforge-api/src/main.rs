@@ -2592,6 +2592,12 @@ struct RunProviderProductionRollout {
     provider_ids: Vec<Uuid>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RunProviderProductionRollback {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProviderProductionRolloutRun {
     id: Uuid,
@@ -2601,6 +2607,21 @@ struct ProviderProductionRolloutRun {
     provider_count: usize,
     provider_ids: Vec<Uuid>,
     enforcement: ProviderPolicyGateEnforcement,
+    controller_configured: bool,
+    controller_execution: Value,
+    message: String,
+    ran_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderProductionRollbackRun {
+    id: Uuid,
+    status: String,
+    environment: String,
+    reason: Option<String>,
+    provider_count: usize,
+    provider_ids: Vec<Uuid>,
+    source_rollout_id: Option<Uuid>,
     controller_configured: bool,
     controller_execution: Value,
     message: String,
@@ -3613,6 +3634,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/providers/production-rollout/run",
             post(run_provider_production_rollout),
+        )
+        .route(
+            "/api/providers/production-rollout/rollback",
+            post(run_provider_production_rollback),
         )
         .route("/api/providers/{id}/status", patch(update_provider_status))
         .route(
@@ -8430,6 +8455,31 @@ async fn run_provider_production_rollout(
     ))
 }
 
+async fn run_provider_production_rollback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RunProviderProductionRollback>,
+) -> Result<Json<ProviderProductionRollbackRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "providers".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(
+        execute_provider_production_rollback_with_lookup(
+            &state,
+            principal.subject_id,
+            input,
+            |key| std::env::var(key).ok(),
+        )
+        .await?,
+    ))
+}
+
 async fn execute_provider_production_rollout_with_lookup<F>(
     state: &AppState,
     subject_id: String,
@@ -8594,11 +8644,183 @@ where
     })
 }
 
+async fn execute_provider_production_rollback_with_lookup<F>(
+    state: &AppState,
+    subject_id: String,
+    input: RunProviderProductionRollback,
+    lookup: F,
+) -> Result<ProviderProductionRollbackRun, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let reason = optional_trimmed(input.reason.as_deref());
+    let generated_at = Utc::now();
+    let audit_logs = state.list_audit_logs(None).await?;
+    let latest_rollout = audit_logs
+        .iter()
+        .filter(|log| {
+            log.action == "provider.production_rollout_applied"
+                && log.details.get("status").and_then(Value::as_str) == Some("applied")
+        })
+        .max_by_key(|log| log.created_at);
+    let mut status = "rolled_back".to_string();
+    let mut message = "provider production rollout rollback completed".to_string();
+    let mut environment = "production".to_string();
+    let mut provider_ids = Vec::new();
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": "blocked_before_controller_execution"
+    });
+    let controller_configured = provider_rollout_rollback_controller_configured(&lookup);
+
+    if let Some(rollout) = latest_rollout {
+        environment = rollout
+            .details
+            .get("environment")
+            .and_then(Value::as_str)
+            .unwrap_or("production")
+            .to_string();
+        provider_ids = rollout
+            .details
+            .get("provider_ids")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(|value| Uuid::parse_str(value).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+    }
+
+    if latest_rollout.is_none() {
+        status = "blocked".to_string();
+        message =
+            "provider production rollback is blocked because no applied rollout evidence exists"
+                .to_string();
+        controller_execution = json!({
+            "attempted": false,
+            "status": "skipped",
+            "reason": "missing_applied_rollout"
+        });
+    } else if provider_ids.is_empty() {
+        status = "blocked".to_string();
+        message =
+            "provider production rollback is blocked because latest rollout has no provider ids"
+                .to_string();
+        controller_execution = json!({
+            "attempted": false,
+            "status": "skipped",
+            "reason": "missing_provider_ids"
+        });
+    } else if !controller_configured {
+        status = "blocked".to_string();
+        message =
+            "provider production rollback is blocked because MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL is not configured"
+                .to_string();
+        controller_execution = json!({
+            "attempted": false,
+            "status": "skipped",
+            "reason": "controller_not_configured"
+        });
+    } else if let Some(rollout) = latest_rollout {
+        match execute_provider_rollout_rollback_controller(
+            &lookup,
+            &environment,
+            reason.as_deref(),
+            &provider_ids,
+            rollout,
+            generated_at,
+        )
+        .await
+        {
+            Ok(execution) => {
+                controller_execution = execution.clone();
+                let controller_status = execution
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("blocked");
+                if controller_status == "rolled_back" {
+                    message =
+                        "provider production rollout rollback confirmed by external controller"
+                            .to_string();
+                } else {
+                    status = "blocked".to_string();
+                    message = "provider production rollback controller did not confirm rollback"
+                        .to_string();
+                }
+            }
+            Err(error) => {
+                status = "blocked".to_string();
+                message = "provider production rollback controller failed".to_string();
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    }
+
+    let action = if status == "blocked" {
+        "provider.production_rollout_rollback_blocked"
+    } else {
+        "provider.production_rollout_rolled_back"
+    };
+    let source_rollout_id = latest_rollout.map(|log| log.id);
+    let audit_log = state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            action,
+            "providers",
+            None,
+            json!({
+                "subject": subject_id,
+                "status": status,
+                "environment": environment,
+                "reason": reason,
+                "provider_ids": provider_ids,
+                "provider_count": provider_ids.len(),
+                "source_rollout_id": source_rollout_id,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+                "message": message,
+            }),
+        ))
+        .await?;
+    Ok(ProviderProductionRollbackRun {
+        id: audit_log.id,
+        status,
+        environment,
+        reason,
+        provider_count: provider_ids.len(),
+        provider_ids,
+        source_rollout_id,
+        controller_configured,
+        controller_execution,
+        message,
+        ran_at: audit_log.created_at,
+    })
+}
+
 fn provider_rollout_controller_configured<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
     lookup("MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn provider_rollout_rollback_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
 }
@@ -8683,6 +8905,80 @@ where
         "http_status": http_status.as_u16(),
         "provider_status": provider_status,
         "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
+}
+
+async fn execute_provider_rollout_rollback_controller<F>(
+    lookup: &F,
+    environment: &str,
+    reason: Option<&str>,
+    provider_ids: &[Uuid],
+    source_rollout: &AuditLog,
+    requested_at: DateTime<Utc>,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.provider_production_rollout_rollback",
+        "environment": environment,
+        "reason": reason,
+        "provider_ids": provider_ids,
+        "source_rollout": {
+            "id": source_rollout.id,
+            "ran_at": source_rollout.created_at,
+            "status": source_rollout.details.get("status").and_then(Value::as_str),
+            "provider_count": source_rollout.details.get("provider_count").and_then(Value::as_u64),
+            "latest_gate_run_id": source_rollout.details.get("latest_gate_run_id"),
+            "latest_gate_provider_count": source_rollout.details.get("latest_gate_provider_count"),
+            "controller_execution": source_rollout.details.get("controller_execution"),
+        },
+        "requested_at": requested_at,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "provider rollout rollback controller failed with status {http_status}"
+        )));
+    }
+    let provider_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("rolled_back");
+    let rolled_back = matches!(
+        provider_status,
+        "rolled_back" | "recovered" | "success" | "ok" | "applied"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if rolled_back { "rolled_back" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": provider_status,
+        "rollback_id": body.get("rollback_id").and_then(Value::as_str),
         "message": body.get("message").and_then(Value::as_str),
         "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
     }))
@@ -30755,6 +31051,156 @@ not json
     }
 
     #[tokio::test]
+    async fn provider_production_rollback_executes_external_controller() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let provider = state
+            .create_provider(CreateProviderRecord {
+                provider_type: "mock".to_string(),
+                name: "rollback-provider".to_string(),
+                base_url: None,
+                default_model: Some("gpt-5.4-mini".to_string()),
+                config: json!({"budget": {"daily_request_limit": 10}}),
+            })
+            .await
+            .expect("create provider");
+        let gate_run = execute_provider_policy_gate(&state, Some("admin-1".to_string()), "user")
+            .await
+            .expect("policy gate run");
+        assert_eq!(gate_run.run.status, "passed");
+
+        let rollout_payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let rollout_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("rollout listener");
+        let rollout_addr = rollout_listener.local_addr().expect("rollout addr");
+        let rollout_controller = Router::new()
+            .route("/provider-rollout", post(mock_provider_rollout_controller))
+            .with_state(rollout_payloads.clone());
+        let rollout_server = tokio::spawn(async move {
+            axum::serve(rollout_listener, rollout_controller)
+                .await
+                .expect("mock provider rollout controller");
+        });
+        let rollout_lookup = |key: &str| match key {
+            "MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL" => {
+                Some(format!("http://{rollout_addr}/provider-rollout"))
+            }
+            "MANDOFORGE_PROVIDER_ROLLOUT_TOKEN" => Some("rollout-token".to_string()),
+            _ => None,
+        };
+        let rollout = execute_provider_production_rollout_with_lookup(
+            &state,
+            "admin-1".to_string(),
+            RunProviderProductionRollout {
+                environment: Some("production".to_string()),
+                reason: Some("rollback source rollout".to_string()),
+                provider_ids: vec![provider.id],
+            },
+            rollout_lookup,
+        )
+        .await
+        .expect("provider production rollout");
+        assert_eq!(rollout.status, "applied");
+
+        let rollback_payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let rollback_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("rollback listener");
+        let rollback_addr = rollback_listener.local_addr().expect("rollback addr");
+        let rollback_controller = Router::new()
+            .route(
+                "/provider-rollback",
+                post(mock_provider_rollout_rollback_controller),
+            )
+            .with_state(rollback_payloads.clone());
+        let rollback_server = tokio::spawn(async move {
+            axum::serve(rollback_listener, rollback_controller)
+                .await
+                .expect("mock provider rollback controller");
+        });
+        let rollback_lookup = |key: &str| match key {
+            "MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL" => {
+                Some(format!("http://{rollback_addr}/provider-rollback"))
+            }
+            "MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_TOKEN" => {
+                Some("provider-rollback-token".to_string())
+            }
+            _ => None,
+        };
+
+        let rollback = execute_provider_production_rollback_with_lookup(
+            &state,
+            "admin-1".to_string(),
+            RunProviderProductionRollback {
+                reason: Some("external rollback controller test".to_string()),
+            },
+            rollback_lookup,
+        )
+        .await
+        .expect("provider production rollback");
+
+        assert_eq!(rollback.status, "rolled_back");
+        assert_eq!(rollback.provider_count, 1);
+        assert_eq!(rollback.provider_ids, vec![provider.id]);
+        assert_eq!(rollback.controller_execution["status"], "rolled_back");
+        assert_eq!(
+            rollback.controller_execution["rollback_id"],
+            "provider-rollback-1"
+        );
+        assert_eq!(rollback.source_rollout_id, Some(rollout.id));
+
+        let payloads = rollback_payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.provider_production_rollout_rollback"
+        );
+        assert_eq!(payloads[0]["environment"], "production");
+        assert_eq!(payloads[0]["provider_ids"][0], provider.id.to_string());
+        assert_eq!(payloads[0]["source_rollout"]["id"], rollout.id.to_string());
+        assert_eq!(
+            payloads[0]["source_rollout"]["controller_execution"]["status"],
+            "applied"
+        );
+
+        let audit_logs = state.list_audit_logs(None).await.expect("audit logs");
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider.production_rollout_rolled_back"
+                && log.details["status"] == "rolled_back"
+                && log.details["source_rollout_id"] == rollout.id.to_string()
+                && log.details["controller_execution"]["status"] == "rolled_back"
+        }));
+
+        rollout_server.abort();
+        rollback_server.abort();
+    }
+
+    #[tokio::test]
+    async fn provider_production_rollback_blocks_without_applied_rollout() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let lookup = |_key: &str| None;
+
+        let rollback = execute_provider_production_rollback_with_lookup(
+            &state,
+            "admin-1".to_string(),
+            RunProviderProductionRollback {
+                reason: Some("no rollout exists".to_string()),
+            },
+            lookup,
+        )
+        .await
+        .expect("provider rollback run");
+
+        assert_eq!(rollback.status, "blocked");
+        assert_eq!(rollback.provider_count, 0);
+        assert_eq!(
+            rollback.controller_execution["reason"],
+            "missing_applied_rollout"
+        );
+        assert!(rollback.message.contains("no applied rollout evidence"));
+    }
+
+    #[tokio::test]
     async fn agent_release_controller_executes_external_rollout_boundary() {
         let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -32161,6 +32607,29 @@ not json
                 {"name": "preflight", "status": "passed"},
                 {"name": "apply", "status": "applied"},
                 {"name": "verify", "status": "passed"}
+            ]
+        }))
+    }
+
+    async fn mock_provider_rollout_rollback_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer provider-rollback-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "rolled_back",
+            "rollback_id": "provider-rollback-1",
+            "message": "provider rollout rollback accepted",
+            "steps": [
+                {"name": "restore-provider-config", "status": "rolled_back"},
+                {"name": "verify-provider-policy", "status": "passed"}
             ]
         }))
     }

@@ -196,6 +196,9 @@ const providerStatusApprovalForm = document.querySelector("#provider-status-appr
 const runProviderPolicyGateButton = document.querySelector("#run-provider-policy-gate");
 const validateProviderDeploymentButton = document.querySelector("#validate-provider-deployment");
 const runProviderProductionRolloutButton = document.querySelector("#run-provider-production-rollout");
+const rollbackProviderProductionRolloutButton = document.querySelector(
+  "#rollback-provider-production-rollout",
+);
 const secretForm = document.querySelector("#secret-form");
 const evalJudgeProfileForm = document.querySelector("#eval-judge-profile-form");
 const evalDatasetForm = document.querySelector("#eval-dataset-form");
@@ -250,6 +253,7 @@ providerStatusApprovalForm.addEventListener("submit", requestProviderStatusAppro
 runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
 validateProviderDeploymentButton.addEventListener("click", validateProviderDeployment);
 runProviderProductionRolloutButton.addEventListener("click", runProviderProductionRollout);
+rollbackProviderProductionRolloutButton.addEventListener("click", rollbackProviderProductionRollout);
 secretForm.addEventListener("submit", createSecretRecord);
 evalJudgeProfileForm.addEventListener("submit", createEvalJudgeProfile);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
@@ -647,6 +651,17 @@ async function runProviderProductionRollout() {
     body: JSON.stringify({
       environment: "production",
       reason: "Static console production rollout gate check",
+    }),
+  });
+  state.providerPolicyGateRuns = await api("/api/providers/policy-gate/runs");
+  renderProviders();
+}
+
+async function rollbackProviderProductionRollout() {
+  state.providerProductionRollbackRun = await api("/api/providers/production-rollout/rollback", {
+    method: "POST",
+    body: JSON.stringify({
+      reason: "Static console production rollback gate check",
     }),
   });
   state.providerPolicyGateRuns = await api("/api/providers/policy-gate/runs");
@@ -3884,6 +3899,7 @@ function renderProviders() {
   const providerDeploymentValidation = state.providerDeploymentValidation;
   const deploymentReadiness = summary?.deployment_readiness || {};
   const productionRolloutRun = state.providerProductionRolloutRun;
+  const productionRollbackRun = state.providerProductionRollbackRun;
   const policyGateChecks = policyGate?.checks || [];
   const policyGateRunAttention = policyGateRuns?.attention_items || [];
   const policyGateHtml = policyGate
@@ -4031,6 +4047,15 @@ function renderProviders() {
               <dd>${escapeHtml(productionRolloutRun.ran_at || "not recorded")}</dd>
             </dl>`
           : `<div class="muted">No production rollout run in this console session.</div>`
+      }
+      ${
+        productionRollbackRun
+          ? `<div class="nested-item">
+              <strong>Production rollback</strong>
+              <div class="muted">${escapeHtml(productionRollbackRun.status)} · providers ${formatInteger(productionRollbackRun.provider_count || 0)} · source ${escapeHtml(productionRollbackRun.source_rollout_id || "none")}</div>
+              <div class="muted">Controller ${escapeHtml(productionRollbackRun.controller_configured ? "configured" : "missing")} · ${escapeHtml(productionRollbackRun.controller_execution?.status || "unknown")} · ${escapeHtml(productionRollbackRun.message || "not reported")}</div>
+            </div>`
+          : `<div class="muted">No production rollback run in this console session.</div>`
       }
     </div>
   `;
