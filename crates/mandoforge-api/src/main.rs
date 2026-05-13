@@ -312,6 +312,7 @@ struct AgentReleaseAutomationRunSummary {
     latest_run: Option<AgentReleaseAutomationRunRecord>,
     recent_runs: Vec<AgentReleaseAutomationRunRecord>,
     production_ops: AgentReleaseProductionOpsReadiness,
+    production_orchestration: AgentReleaseProductionOrchestrationReadiness,
     attention_items: Vec<AgentReleaseAutomationRunAttentionItem>,
 }
 
@@ -326,6 +327,21 @@ struct AgentReleaseProductionOpsReadiness {
     stale_pending_count: usize,
     latest_run_status: Option<String>,
     latest_run_age_hours: Option<i64>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReleaseProductionOrchestrationReadiness {
+    status: String,
+    production_blocked: bool,
+    automation_supervision_fresh: bool,
+    latest_run_status: Option<String>,
+    pending_clear: bool,
+    expired_clear: bool,
+    stale_clear: bool,
+    skipped_automation_clear: bool,
+    manual_approval_clear: bool,
+    blocking_reasons: Vec<String>,
     message: String,
 }
 
@@ -4369,6 +4385,11 @@ fn build_agent_release_automation_run_summary(
         rollout_summary,
         generated_at,
     );
+    let production_orchestration = build_agent_release_production_orchestration_readiness(
+        latest_run.as_ref(),
+        rollout_summary,
+        generated_at,
+    );
     if production_ops.production_blocked {
         attention_items.push(AgentReleaseAutomationRunAttentionItem {
             kind: "release_production_ops_blocked".to_string(),
@@ -4380,6 +4401,17 @@ fn build_agent_release_automation_run_summary(
             message: production_ops.message.clone(),
         });
     }
+    if production_orchestration.production_blocked {
+        attention_items.push(AgentReleaseAutomationRunAttentionItem {
+            kind: "release_production_orchestration_blocked".to_string(),
+            severity: if production_orchestration.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: production_orchestration.message.clone(),
+        });
+    }
     recent_runs.truncate(10);
     AgentReleaseAutomationRunSummary {
         generated_at,
@@ -4389,6 +4421,7 @@ fn build_agent_release_automation_run_summary(
         latest_run,
         recent_runs,
         production_ops,
+        production_orchestration,
         attention_items,
     }
 }
@@ -4458,6 +4491,73 @@ fn build_agent_release_production_ops_readiness(
         stale_pending_count: rollout_summary.stale_pending_count,
         latest_run_status,
         latest_run_age_hours,
+        message,
+    }
+}
+
+fn build_agent_release_production_orchestration_readiness(
+    latest_run: Option<&AgentReleaseAutomationRunRecord>,
+    rollout_summary: &AgentReleaseRolloutSummary,
+    generated_at: DateTime<Utc>,
+) -> AgentReleaseProductionOrchestrationReadiness {
+    let automation_supervision_fresh =
+        latest_run.is_some_and(|run| (generated_at - run.ran_at).num_hours() < 6);
+    let pending_clear = rollout_summary.pending_count == 0
+        && rollout_summary.auto_pending_count == 0
+        && rollout_summary.manual_pending_count == 0;
+    let expired_clear = rollout_summary.expired_pending_count == 0;
+    let stale_clear = rollout_summary.stale_pending_count == 0;
+    let skipped_automation_clear = latest_run.is_some_and(|run| run.skipped_count == 0);
+    let manual_approval_clear = rollout_summary.manual_pending_count == 0;
+    let mut blocking_reasons = Vec::new();
+
+    if !automation_supervision_fresh {
+        blocking_reasons.push("fresh release automation supervision is missing".to_string());
+    }
+    if !pending_clear {
+        blocking_reasons.push("pending production release requests remain".to_string());
+    }
+    if !expired_clear {
+        blocking_reasons.push("expired production release requests remain".to_string());
+    }
+    if !stale_clear {
+        blocking_reasons.push("stale production release requests remain".to_string());
+    }
+    if !skipped_automation_clear {
+        blocking_reasons.push("latest release automation skipped eligible work".to_string());
+    }
+    if !manual_approval_clear {
+        blocking_reasons.push("manual release approval steps remain".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let latest_run_status = latest_run.map(|run| run.status.clone());
+    let message = if production_blocked {
+        format!(
+            "Agent release production orchestration is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Agent release production orchestration has fresh automation supervision, no pending releases, no stale or expired requests, and no skipped automation".to_string()
+    };
+
+    AgentReleaseProductionOrchestrationReadiness {
+        status,
+        production_blocked,
+        automation_supervision_fresh,
+        latest_run_status,
+        pending_clear,
+        expired_clear,
+        stale_clear,
+        skipped_automation_clear,
+        manual_approval_clear,
+        blocking_reasons,
         message,
     }
 }
@@ -33564,6 +33664,26 @@ not json
         assert_eq!(
             automation_runs.production_ops.latest_run_status.as_deref(),
             Some("processed")
+        );
+        assert_eq!(automation_runs.production_orchestration.status, "ready");
+        assert!(!automation_runs.production_orchestration.production_blocked);
+        assert!(
+            automation_runs
+                .production_orchestration
+                .automation_supervision_fresh
+        );
+        assert!(automation_runs.production_orchestration.pending_clear);
+        assert!(automation_runs.production_orchestration.expired_clear);
+        assert!(automation_runs.production_orchestration.stale_clear);
+        assert!(
+            automation_runs
+                .production_orchestration
+                .skipped_automation_clear
+        );
+        assert!(
+            automation_runs
+                .production_orchestration
+                .manual_approval_clear
         );
 
         let releases: Vec<AgentRelease> = request_json(

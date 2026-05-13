@@ -4554,6 +4554,8 @@ function renderAgentReleaseAutomationRuns(runs) {
       <div class="muted">Runs ${formatInteger(runs.run_count)} · processed ${formatInteger(runs.processed_run_count)} · skipped ${formatInteger(runs.skipped_run_count)}</div>
       <div class="muted">Production rollout: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · pending ${formatInteger(productionOps.pending_count || 0)} · auto ${formatInteger(productionOps.auto_pending_count || 0)} · manual ${formatInteger(productionOps.manual_pending_count || 0)}</div>
       <div class="muted">${escapeHtml(productionOps.message || "Release production ops are not reported")}</div>
+      <div class="muted">Production orchestration: ${escapeHtml(productionOrchestration.status || "unknown")} · supervision fresh ${productionOrchestration.automation_supervision_fresh ? "yes" : "no"} · pending clear ${productionOrchestration.pending_clear ? "yes" : "no"} · skipped clear ${productionOrchestration.skipped_automation_clear ? "yes" : "no"} · manual clear ${productionOrchestration.manual_approval_clear ? "yes" : "no"}</div>
+      <div class="muted">${escapeHtml(productionOrchestration.message || "Release production orchestration is not reported")}</div>
       ${
         recentRuns.length
           ? `<table class="usage-table">
