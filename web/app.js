@@ -4501,10 +4501,13 @@ function renderAgentReleaseAutomationRuns(runs) {
   }
   const recentRuns = runs.recent_runs || [];
   const attentionItems = runs.attention_items || [];
+  const productionOps = runs.production_ops || {};
   return `
     <div class="nested-item">
       <strong>RELEASE AUTOMATION RUNS</strong>
       <div class="muted">Runs ${formatInteger(runs.run_count)} · processed ${formatInteger(runs.processed_run_count)} · skipped ${formatInteger(runs.skipped_run_count)}</div>
+      <div class="muted">Production rollout: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · pending ${formatInteger(productionOps.pending_count || 0)} · auto ${formatInteger(productionOps.auto_pending_count || 0)} · manual ${formatInteger(productionOps.manual_pending_count || 0)}</div>
+      <div class="muted">${escapeHtml(productionOps.message || "Release production ops are not reported")}</div>
       ${
         recentRuns.length
           ? `<table class="usage-table">

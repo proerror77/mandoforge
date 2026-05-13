@@ -311,7 +311,22 @@ struct AgentReleaseAutomationRunSummary {
     skipped_run_count: usize,
     latest_run: Option<AgentReleaseAutomationRunRecord>,
     recent_runs: Vec<AgentReleaseAutomationRunRecord>,
+    production_ops: AgentReleaseProductionOpsReadiness,
     attention_items: Vec<AgentReleaseAutomationRunAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReleaseProductionOpsReadiness {
+    status: String,
+    production_blocked: bool,
+    pending_count: usize,
+    auto_pending_count: usize,
+    manual_pending_count: usize,
+    expired_pending_count: usize,
+    stale_pending_count: usize,
+    latest_run_status: Option<String>,
+    latest_run_age_hours: Option<i64>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3977,8 +3992,11 @@ async fn get_agent_release_automation_runs(
 ) -> Result<Json<AgentReleaseAutomationRunSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "agent_release", None).await?;
     let audit_logs = state.list_audit_logs(None).await?;
+    let rollout_summary =
+        build_agent_release_rollout_summary(state.list_all_agent_releases().await?, Utc::now());
     Ok(Json(build_agent_release_automation_run_summary(
         &audit_logs,
+        &rollout_summary,
         Utc::now(),
     )))
 }
@@ -4196,6 +4214,7 @@ fn agent_release_automation_run_status(run: &AgentReleaseAutomationRun) -> Strin
 
 fn build_agent_release_automation_run_summary(
     audit_logs: &[AuditLog],
+    rollout_summary: &AgentReleaseRolloutSummary,
     generated_at: DateTime<Utc>,
 ) -> AgentReleaseAutomationRunSummary {
     let mut recent_runs: Vec<_> = audit_logs
@@ -4241,6 +4260,22 @@ fn build_agent_release_automation_run_summary(
         }
         _ => {}
     }
+    let production_ops = build_agent_release_production_ops_readiness(
+        latest_run.as_ref(),
+        rollout_summary,
+        generated_at,
+    );
+    if production_ops.production_blocked {
+        attention_items.push(AgentReleaseAutomationRunAttentionItem {
+            kind: "release_production_ops_blocked".to_string(),
+            severity: if production_ops.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: production_ops.message.clone(),
+        });
+    }
     recent_runs.truncate(10);
     AgentReleaseAutomationRunSummary {
         generated_at,
@@ -4249,7 +4284,77 @@ fn build_agent_release_automation_run_summary(
         skipped_run_count,
         latest_run,
         recent_runs,
+        production_ops,
         attention_items,
+    }
+}
+
+fn build_agent_release_production_ops_readiness(
+    latest_run: Option<&AgentReleaseAutomationRunRecord>,
+    rollout_summary: &AgentReleaseRolloutSummary,
+    generated_at: DateTime<Utc>,
+) -> AgentReleaseProductionOpsReadiness {
+    let latest_run_age_hours = latest_run.map(|run| (generated_at - run.ran_at).num_hours());
+    let latest_run_status = latest_run.map(|run| run.status.clone());
+    let (status, production_blocked, message) = if rollout_summary.expired_pending_count > 0 {
+        (
+            "blocked",
+            true,
+            "Agent release production rollout is blocked by expired pending release request(s)"
+                .to_string(),
+        )
+    } else if rollout_summary.stale_pending_count > 0 {
+        (
+            "blocked",
+            true,
+            "Agent release production rollout is blocked by stale pending release request(s)"
+                .to_string(),
+        )
+    } else {
+        match latest_run {
+            None => (
+                "blocked",
+                true,
+                "Agent release production rollout is blocked until release automation supervision has run"
+                    .to_string(),
+            ),
+            Some(run) if (generated_at - run.ran_at).num_hours() >= 24 => (
+                "stale",
+                true,
+                "Agent release production rollout is blocked until release automation supervision is refreshed"
+                    .to_string(),
+            ),
+            Some(run) if run.status == "skipped" && rollout_summary.auto_pending_count > 0 => (
+                "blocked",
+                true,
+                "Agent release production rollout is blocked because automation skipped auto-pending release request(s)"
+                    .to_string(),
+            ),
+            Some(_) if rollout_summary.pending_count > 0 => (
+                "attention",
+                true,
+                "Agent release production rollout is blocked while release request(s) remain pending"
+                    .to_string(),
+            ),
+            Some(_) => (
+                "ready",
+                false,
+                "Agent release automation supervision is fresh and no pending production release requests remain"
+                    .to_string(),
+            ),
+        }
+    };
+    AgentReleaseProductionOpsReadiness {
+        status: status.to_string(),
+        production_blocked,
+        pending_count: rollout_summary.pending_count,
+        auto_pending_count: rollout_summary.auto_pending_count,
+        manual_pending_count: rollout_summary.manual_pending_count,
+        expired_pending_count: rollout_summary.expired_pending_count,
+        stale_pending_count: rollout_summary.stale_pending_count,
+        latest_run_status,
+        latest_run_age_hours,
+        message,
     }
 }
 
@@ -32668,6 +32773,13 @@ not json
                 .expect("latest automation run")
                 .promoted_count,
             1
+        );
+        assert_eq!(automation_runs.production_ops.status, "ready");
+        assert!(!automation_runs.production_ops.production_blocked);
+        assert_eq!(automation_runs.production_ops.pending_count, 0);
+        assert_eq!(
+            automation_runs.production_ops.latest_run_status.as_deref(),
+            Some("processed")
         );
 
         let releases: Vec<AgentRelease> = request_json(
