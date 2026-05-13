@@ -26,6 +26,7 @@ jobs:
       - run: bash -n scripts/stage1-final-gate.sh
       - run: bash -n scripts/stage2-production-evidence-gate.sh
       - run: bash -n scripts/observability-collector-evidence-gate.sh
+      - run: bash -n scripts/remote-computer-evidence-gate.sh
       - run: bash -n scripts/archive-stage2-production-evidence.sh
       - run: bash -n scripts/verify-stage2-evidence-archive.sh
       - run: bash -n scripts/render-stage2-controller-secret.sh

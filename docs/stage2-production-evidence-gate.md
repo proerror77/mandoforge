@@ -33,6 +33,15 @@ RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 \
 
 That gate collects `GET /api/observability`, `GET /api/observability/collector-readiness`, `POST /api/observability/collector/deployment/validate`, `POST /api/observability/collector/cluster/validate`, and optional remediation evidence into `.mandoforge/observability-collector-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/observability-collector-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower Remote Computer substrate proof, run:
+
+```bash
+RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 \
+./scripts/remote-computer-evidence-gate.sh
+```
+
+That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.

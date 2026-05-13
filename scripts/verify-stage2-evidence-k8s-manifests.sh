@@ -12,9 +12,11 @@ manifests=(
   deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml
   deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml
   deploy/stage2-evidence/observability-collector-evidence-job.example.yaml
+  deploy/stage2-evidence/remote-computer-evidence-job.example.yaml
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
+remote_computer_script="scripts/remote-computer-evidence-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -30,6 +32,11 @@ fi
 
 if [[ ! -x "$observability_script" ]]; then
   echo "missing executable observability collector evidence script: $observability_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$remote_computer_script" ]]; then
+  echo "missing executable Remote Computer evidence script: $remote_computer_script" >&2
   exit 1
 fi
 
@@ -59,6 +66,11 @@ fi
 
 if ! grep -q "name: mandoforge-observability-collector-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the observability collector evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-remote-computer-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the Remote Computer evidence Job" >&2
   exit 1
 fi
 
@@ -109,6 +121,26 @@ fi
 
 if ! grep -q "/api/observability/collector/cluster/validate" "$observability_script"; then
   echo "Observability collector evidence script must validate cluster rollout" >&2
+  exit 1
+fi
+
+if ! grep -q "remote-computer-evidence-gate.sh" deploy/stage2-evidence/remote-computer-evidence-job.example.yaml; then
+  echo "Remote Computer evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/remote-computer-evidence-job.example.yaml; then
+  echo "Remote Computer evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/remote-computers/state-sync/validate" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must validate production state sync" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/remote-computers/sidecars/recovery/run" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must capture sidecar recovery evidence" >&2
   exit 1
 fi
 
