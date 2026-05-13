@@ -817,6 +817,18 @@ struct RemoteComputerArtifactSyncRequest {
     artifacts: Vec<CodexArtifactInput>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct RemoteComputerArtifactDiscoverRequest {
+    session_id: Uuid,
+    remote_computer_id: Uuid,
+    #[serde(default)]
+    assignment_id: Option<Uuid>,
+    #[serde(default = "default_remote_computer_artifact_dir")]
+    artifact_dir: String,
+    #[serde(default = "default_remote_computer_artifact_discovery_limit")]
+    max_files: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RemoteComputerArtifactSyncResponse {
     session_id: Uuid,
@@ -3161,6 +3173,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/artifacts/sync",
             post(sync_remote_computer_artifacts),
+        )
+        .route(
+            "/api/remote-computers/artifacts/discover",
+            post(discover_remote_computer_artifacts),
         )
         .route(
             "/api/remote-computers/runner/readiness",
@@ -8901,6 +8917,150 @@ async fn sync_remote_computer_artifacts(
     }))
 }
 
+async fn discover_remote_computer_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RemoteComputerArtifactDiscoverRequest>,
+) -> Result<Json<RemoteComputerArtifactSyncResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ExecutionJobsRun,
+        "remote_computer",
+        Some(input.remote_computer_id),
+    )
+    .await?;
+    if input.max_files == 0 || input.max_files > 50 {
+        return Err(AppError::bad_request(
+            "Remote Computer artifact discovery accepts between 1 and 50 files per request",
+        ));
+    }
+    state.get_session(input.session_id).await?;
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == input.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    if let Some(assignment_id) = input.assignment_id {
+        let assignment = state
+            .list_remote_computer_job_assignments()
+            .await?
+            .into_iter()
+            .find(|assignment| assignment.id == assignment_id)
+            .ok_or_else(|| AppError::not_found("Remote computer job assignment not found"))?;
+        if assignment.remote_computer_id != input.remote_computer_id
+            || assignment.session_id != input.session_id
+        {
+            return Err(AppError::bad_request(
+                "Remote Computer artifact discovery assignment does not match session or remote computer",
+            ));
+        }
+    }
+
+    let artifact_dir = normalize_remote_computer_artifact_dir(&input.artifact_dir)?;
+    let workspace_path = PathBuf::from(&remote_computer.workspace_path);
+    let discovery_root = workspace_path.join(&artifact_dir);
+    let root_metadata = tokio::fs::metadata(&discovery_root)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                AppError::not_found("Remote Computer artifact discovery directory not found")
+            } else {
+                AppError::from(error)
+            }
+        })?;
+    if !root_metadata.is_dir() {
+        return Err(AppError::bad_request(
+            "Remote Computer artifact discovery path must be a directory",
+        ));
+    }
+
+    let discovered_files =
+        discover_artifact_files(&discovery_root, input.max_files, 1_048_576).await?;
+    if discovered_files.is_empty() {
+        return Err(AppError::bad_request(
+            "Remote Computer artifact discovery found no files",
+        ));
+    }
+
+    let mut artifacts = Vec::with_capacity(discovered_files.len());
+    for discovered in discovered_files {
+        let relative_path = discovered
+            .path
+            .strip_prefix(&workspace_path)
+            .unwrap_or(&discovered.path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let name = discovered
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("artifact")
+            .to_string();
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            artifact_type: artifact_type_from_path(&discovered.path),
+            name,
+            path: Some(relative_path.clone()),
+            content: json!({
+                "text": discovered.content,
+                "bytes": discovered.bytes,
+                "source": "remote_computer_artifact_discovery",
+            }),
+            created_at: Utc::now(),
+        };
+        let artifact = state.insert_artifact(artifact).await?;
+        state
+            .append_event(
+                "worker",
+                Some(artifact.id),
+                input.session_id,
+                "artifact.created",
+                json!({
+                    "artifact_id": artifact.id,
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "source": "remote_computer_artifact_discovery",
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": input.assignment_id,
+                    "workspace_path": remote_computer.workspace_path,
+                    "artifact_dir": artifact_dir,
+                }),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "worker",
+                Some(artifact.id),
+                "remote_computer.artifact_discovered",
+                "artifact",
+                Some(artifact.id),
+                json!({
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": input.assignment_id,
+                    "artifact_dir": artifact_dir,
+                }),
+            ))
+            .await?;
+        artifacts.push(artifact);
+    }
+
+    Ok(Json(RemoteComputerArtifactSyncResponse {
+        session_id: input.session_id,
+        remote_computer_id: input.remote_computer_id,
+        assignment_id: input.assignment_id,
+        artifact_count: artifacts.len(),
+        artifacts,
+    }))
+}
+
 fn normalize_codex_artifact_path(path: Option<&str>) -> Result<Option<String>, AppError> {
     let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
         return Ok(None);
@@ -8911,6 +9071,97 @@ fn normalize_codex_artifact_path(path: Option<&str>) -> Result<Option<String>, A
         ));
     }
     Ok(Some(path.to_string()))
+}
+
+fn normalize_remote_computer_artifact_dir(path: &str) -> Result<String, AppError> {
+    let path = path.trim();
+    let path = if path.is_empty() { "artifacts" } else { path };
+    if path.starts_with('/') || path.split('/').any(|segment| segment == "..") {
+        return Err(AppError::bad_request(
+            "Remote Computer artifact discovery path must be relative and stay inside the workspace",
+        ));
+    }
+    Ok(path.to_string())
+}
+
+struct DiscoveredArtifactFile {
+    path: PathBuf,
+    bytes: u64,
+    content: String,
+}
+
+async fn discover_artifact_files(
+    root: &PathBuf,
+    max_files: usize,
+    max_file_bytes: u64,
+) -> Result<Vec<DiscoveredArtifactFile>, AppError> {
+    let mut files = Vec::new();
+    let mut directories = vec![root.clone()];
+    let mut visited_directories = 0_usize;
+    while let Some(directory) = directories.pop() {
+        visited_directories += 1;
+        if visited_directories > 1000 {
+            return Err(AppError::bad_request(
+                "Remote Computer artifact discovery exceeded directory traversal limit",
+            ));
+        }
+        let mut read_dir = tokio::fs::read_dir(&directory).await?;
+        let mut entries = Vec::new();
+        while let Some(entry) = read_dir.next_entry().await? {
+            entries.push(entry.path());
+        }
+        entries.sort();
+        for entry_path in entries.into_iter().rev() {
+            let metadata = tokio::fs::symlink_metadata(&entry_path).await?;
+            if metadata.is_dir() {
+                directories.push(entry_path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            if metadata.len() > max_file_bytes {
+                return Err(AppError::bad_request(format!(
+                    "Remote Computer artifact {} exceeds 1 MiB discovery limit",
+                    entry_path.display()
+                )));
+            }
+            let bytes = tokio::fs::read(&entry_path).await?;
+            let content = match String::from_utf8(bytes) {
+                Ok(content) => content,
+                Err(error) => String::from_utf8_lossy(error.as_bytes()).to_string(),
+            };
+            files.push(DiscoveredArtifactFile {
+                path: entry_path,
+                bytes: metadata.len(),
+                content,
+            });
+            if files.len() >= max_files {
+                return Ok(files);
+            }
+        }
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+fn artifact_type_from_path(path: &PathBuf) -> String {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "md" | "markdown" => "markdown",
+        "json" => "json",
+        "sql" => "sql",
+        "csv" => "csv",
+        "log" => "log",
+        "py" | "sh" | "rs" | "ts" | "tsx" | "js" | "jsx" => "script",
+        _ => "file",
+    }
+    .to_string()
 }
 
 fn codex_app_server_config(state: &AppState) -> Result<&CodexAppServerConfig, AppError> {
@@ -17343,6 +17594,7 @@ async fn build_remote_computer_readiness(
         "remote_computer.execution_transport_planned".to_string(),
         "remote_computer.execution_transport_completed".to_string(),
         "remote_computer.runner_dry_run".to_string(),
+        "remote_computer.artifact_discovered".to_string(),
         "remote_computer.detached".to_string(),
         "remote_computer.attachment_reclaimed".to_string(),
         "remote_computer.lease_reclaimed".to_string(),
@@ -17453,7 +17705,7 @@ async fn build_remote_computer_readiness(
             .to_string(),
     );
     runbook_actions.push(
-        "attach sessions to remote computer leases only as controlled pilot state until general Pod workspace artifact sync is implemented"
+        "use /api/remote-computers/artifacts/discover for shared-workspace artifact scans, and keep sidecar-driven continuous discovery as a production hardening task"
             .to_string(),
     );
     runbook_actions.push(
@@ -17540,14 +17792,15 @@ async fn build_remote_computer_execution_transport_readiness(
             "assigned_codex_exec".to_string(),
             "cancel_assigned_pod_exec".to_string(),
             "push_remote_artifacts_to_artifact_store".to_string(),
+            "discover_remote_artifacts_from_shared_workspace".to_string(),
             "audit_handoff".to_string(),
             "fail_closed".to_string(),
         ],
         required_implementation: vec![
-            "automatic artifact discovery sidecar for Pod filesystem sync".to_string(),
+            "automatic artifact discovery sidecar for continuous Pod filesystem sync".to_string(),
         ],
         message:
-            "Remote Computer runner can route assigned file.write, shell.exec, and codex.exec jobs through gated Kubernetes Pod exec, propagate cancellation through Pod deletion, and accept push-based artifact sync from Remote Computer workers"
+            "Remote Computer runner can route assigned file.write, shell.exec, and codex.exec jobs through gated Kubernetes Pod exec, propagate cancellation through Pod deletion, accept push-based artifact sync, and discover artifacts from a shared Remote Computer workspace"
                 .to_string(),
     })
 }
@@ -18621,6 +18874,14 @@ fn default_secret_scope_type() -> String {
 
 fn default_artifact_type() -> String {
     "json".to_string()
+}
+
+fn default_remote_computer_artifact_dir() -> String {
+    "artifacts".to_string()
+}
+
+fn default_remote_computer_artifact_discovery_limit() -> usize {
+    50
 }
 
 fn default_cost_alert_severity_filter() -> String {
@@ -20096,6 +20357,129 @@ not json
             log.action == "remote_computer.artifact_synced"
                 && log.details["remote_computer_id"] == json!(computer.id)
         }));
+    }
+
+    #[tokio::test]
+    async fn remote_computer_artifact_discovery_scans_workspace_artifacts() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "remote artifact discovery"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let workspace_path =
+            test_workspace_root().join(format!("remote-discovery-{}", Uuid::new_v4()));
+        let artifacts_path = workspace_path.join("artifacts").join("reports");
+        tokio::fs::create_dir_all(&artifacts_path)
+            .await
+            .expect("create artifact directory");
+        tokio::fs::write(artifacts_path.join("diagnostics.md"), "# Diagnostics\n")
+            .await
+            .expect("write artifact");
+
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "artifact-discovery-remote-computer",
+                        "profile": "workspace-write",
+                        "pod_name": "agent-remote-computer-discovery",
+                        "workspace_path": workspace_path
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let discovered: RemoteComputerArtifactSyncResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/artifacts/discover")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "remote_computer_id": computer.id,
+                        "artifact_dir": "artifacts",
+                        "max_files": 10
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(discovered.artifact_count, 1);
+        assert_eq!(discovered.artifacts[0].name, "diagnostics.md");
+        assert_eq!(discovered.artifacts[0].artifact_type, "markdown");
+        assert_eq!(
+            discovered.artifacts[0].path.as_deref(),
+            Some("artifacts/reports/diagnostics.md")
+        );
+        assert_eq!(
+            discovered.artifacts[0].content["source"],
+            json!("remote_computer_artifact_discovery")
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "artifact.created"
+                && event.payload["source"] == json!("remote_computer_artifact_discovery")
+                && event.payload["remote_computer_id"] == json!(computer.id)
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "remote_computer.artifact_discovered"
+                && log.details["remote_computer_id"] == json!(computer.id)
+        }));
+
+        let _ = tokio::fs::remove_dir_all(&workspace_path).await;
     }
 
     #[tokio::test]
