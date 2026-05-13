@@ -808,6 +808,24 @@ struct CodexArtifactSyncResponse {
     artifacts: Vec<Artifact>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct RemoteComputerArtifactSyncRequest {
+    session_id: Uuid,
+    remote_computer_id: Uuid,
+    #[serde(default)]
+    assignment_id: Option<Uuid>,
+    artifacts: Vec<CodexArtifactInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerArtifactSyncResponse {
+    session_id: Uuid,
+    remote_computer_id: Uuid,
+    assignment_id: Option<Uuid>,
+    artifact_count: usize,
+    artifacts: Vec<Artifact>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexAppServerRun {
     id: Uuid,
@@ -3139,6 +3157,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/readiness",
             get(get_remote_computer_readiness),
+        )
+        .route(
+            "/api/remote-computers/artifacts/sync",
+            post(sync_remote_computer_artifacts),
         )
         .route(
             "/api/remote-computers/runner/readiness",
@@ -8761,6 +8783,119 @@ async fn sync_codex_artifacts(
         session_id: input.session_id,
         turn_id: input.turn_id,
         command_id: input.command_id,
+        artifact_count: artifacts.len(),
+        artifacts,
+    }))
+}
+
+async fn sync_remote_computer_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RemoteComputerArtifactSyncRequest>,
+) -> Result<Json<RemoteComputerArtifactSyncResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ExecutionJobsRun,
+        "remote_computer",
+        Some(input.remote_computer_id),
+    )
+    .await?;
+    if input.artifacts.is_empty() {
+        return Err(AppError::bad_request("at least one artifact is required"));
+    }
+    if input.artifacts.len() > 50 {
+        return Err(AppError::bad_request(
+            "Remote Computer artifact sync accepts at most 50 artifacts per request",
+        ));
+    }
+    state.get_session(input.session_id).await?;
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == input.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    if let Some(assignment_id) = input.assignment_id {
+        let assignment = state
+            .list_remote_computer_job_assignments()
+            .await?
+            .into_iter()
+            .find(|assignment| assignment.id == assignment_id)
+            .ok_or_else(|| AppError::not_found("Remote computer job assignment not found"))?;
+        if assignment.remote_computer_id != input.remote_computer_id
+            || assignment.session_id != input.session_id
+        {
+            return Err(AppError::bad_request(
+                "Remote Computer artifact sync assignment does not match session or remote computer",
+            ));
+        }
+    }
+
+    let mut artifacts = Vec::with_capacity(input.artifacts.len());
+    for artifact_input in input.artifacts {
+        let name = artifact_input.name.trim();
+        if name.is_empty() {
+            return Err(AppError::bad_request("artifact name is required"));
+        }
+        let artifact_type = artifact_input.artifact_type.trim();
+        if artifact_type.is_empty() {
+            return Err(AppError::bad_request("artifact_type is required"));
+        }
+        let path = normalize_codex_artifact_path(artifact_input.path.as_deref())?;
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            artifact_type: artifact_type.to_string(),
+            name: name.to_string(),
+            path,
+            content: artifact_input.content,
+            created_at: Utc::now(),
+        };
+        let artifact = state.insert_artifact(artifact).await?;
+        state
+            .append_event(
+                "worker",
+                Some(artifact.id),
+                input.session_id,
+                "artifact.created",
+                json!({
+                    "artifact_id": artifact.id,
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "source": "remote_computer",
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": input.assignment_id,
+                    "workspace_path": remote_computer.workspace_path,
+                    "metadata": artifact_input.metadata,
+                }),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "worker",
+                Some(artifact.id),
+                "remote_computer.artifact_synced",
+                "artifact",
+                Some(artifact.id),
+                json!({
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": input.assignment_id,
+                }),
+            ))
+            .await?;
+        artifacts.push(artifact);
+    }
+
+    Ok(Json(RemoteComputerArtifactSyncResponse {
+        session_id: input.session_id,
+        remote_computer_id: input.remote_computer_id,
+        assignment_id: input.assignment_id,
         artifact_count: artifacts.len(),
         artifacts,
     }))
@@ -17403,14 +17538,15 @@ async fn build_remote_computer_execution_transport_readiness(
             "assigned_shell_exec".to_string(),
             "assigned_codex_exec".to_string(),
             "cancel_assigned_pod_exec".to_string(),
+            "push_remote_artifacts_to_artifact_store".to_string(),
             "audit_handoff".to_string(),
             "fail_closed".to_string(),
         ],
         required_implementation: vec![
-            "general workspace artifact sync from Pod filesystem to Artifact Store".to_string(),
+            "automatic artifact discovery sidecar for Pod filesystem sync".to_string(),
         ],
         message:
-            "Remote Computer runner can route assigned file.write, shell.exec, and codex.exec jobs through gated Kubernetes Pod exec and propagate cancellation through Pod deletion, while general artifact sync remains on the existing worker path"
+            "Remote Computer runner can route assigned file.write, shell.exec, and codex.exec jobs through gated Kubernetes Pod exec, propagate cancellation through Pod deletion, and accept push-based artifact sync from Remote Computer workers"
                 .to_string(),
     })
 }
@@ -19853,6 +19989,112 @@ not json
                 .iter()
                 .any(|log| log.action == "remote_computer.released")
         );
+    }
+
+    #[tokio::test]
+    async fn remote_computer_artifact_sync_records_artifacts_events_and_audit() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "remote artifact sync"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "artifact-sync-remote-computer",
+                        "profile": "workspace-write",
+                        "pod_name": "agent-remote-computer-artifacts"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let synced: RemoteComputerArtifactSyncResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/artifacts/sync")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "remote_computer_id": computer.id,
+                        "artifacts": [{
+                            "name": "diagnostics.md",
+                            "artifact_type": "markdown",
+                            "path": "artifacts/diagnostics.md",
+                            "content": {"markdown": "# Diagnostics"},
+                            "metadata": {"source_path": "/workspace/artifacts/diagnostics.md"}
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(synced.artifact_count, 1);
+        assert_eq!(synced.remote_computer_id, computer.id);
+        assert_eq!(synced.artifacts[0].name, "diagnostics.md");
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "artifact.created"
+                && event.payload["source"] == json!("remote_computer")
+                && event.payload["remote_computer_id"] == json!(computer.id)
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "remote_computer.artifact_synced"
+                && log.details["remote_computer_id"] == json!(computer.id)
+        }));
     }
 
     #[tokio::test]
@@ -30669,7 +30911,7 @@ not json
                 .execution_transport
                 .required_implementation
                 .iter()
-                .any(|item| item.contains("general workspace artifact sync"))
+                .any(|item| item.contains("automatic artifact discovery"))
         );
         assert!(
             remote_computer_readiness
