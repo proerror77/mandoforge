@@ -5,11 +5,12 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
-    Agent, AgentRelease, AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup, Artifact,
-    AuditLog, CodexAppServerRun, CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord,
-    Membership, Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord,
-    RemoteComputer, RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
-    SecretRecord, Session, SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup,
+    Agent, AgentRelease, AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup,
+    ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun, CostAlertRoute,
+    EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization, PolicyRevision,
+    Project, ProviderAccess, ProviderRecord, RemoteComputer, RemoteComputerAttachment,
+    RemoteComputerJobAssignment, RemoteComputerLease, SecretRecord, Session, SessionEvent, Team,
+    TenantInvitation, ToolCall, UsageRollup,
 };
 
 #[derive(Default)]
@@ -24,6 +25,8 @@ pub(crate) struct MemoryStore {
     pub(crate) approvals: HashMap<Uuid, Approval>,
     pub(crate) approval_groups: HashMap<Uuid, ApprovalGroup>,
     pub(crate) approval_escalation_rules: HashMap<Uuid, ApprovalEscalationRule>,
+    pub(crate) approval_notification_channel_policies:
+        HashMap<Uuid, ApprovalNotificationChannelPolicy>,
     pub(crate) artifacts: HashMap<Uuid, Artifact>,
     pub(crate) tool_calls: HashMap<Uuid, ToolCall>,
     pub(crate) audit_logs: HashMap<Uuid, AuditLog>,

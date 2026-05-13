@@ -305,6 +305,25 @@
               </form>
               <button type="button" class="secondary form-inline-action" id="run-due-approval-escalations">Run Due Escalations</button>
               <button type="button" class="secondary form-inline-action" id="run-approval-notifications">Run Notifications</button>
+              <form id="approval-notification-channel-policy-form" class="stack-form compact-form">
+                <label>
+                  Policy name
+                  <input name="name" required value="default-webhook-policy" />
+                </label>
+                <label>
+                  Channel
+                  <input name="channel" value="webhook" />
+                </label>
+                <label>
+                  Target env
+                  <input name="target_env" placeholder="Optional env var; endpoint value is not persisted" />
+                </label>
+                <label>
+                  Risk filter
+                  <input name="risk_filter" value="all" />
+                </label>
+                <button type="submit">Create Notification Policy</button>
+              </form>
               <div id="approval-notification-routing" class="list"></div>
               <div id="approval-notification-runs" class="list"></div>
               <div id="approval-governance" class="list"></div>

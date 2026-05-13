@@ -78,6 +78,7 @@ const state = {
   approvalNotificationRouting: null,
   approvalNotificationRuns: null,
   approvalNotificationRun: null,
+  approvalNotificationChannelPolicies: [],
   approvalEscalationDueRun: null,
   approvalGroups: [],
   approvalEscalationRules: [],
@@ -163,6 +164,9 @@ const membershipForm = document.querySelector("#membership-form");
 const tenantInvitationForm = document.querySelector("#tenant-invitation-form");
 const approvalGroupForm = document.querySelector("#approval-group-form");
 const approvalEscalationRuleForm = document.querySelector("#approval-escalation-rule-form");
+const approvalNotificationChannelPolicyForm = document.querySelector(
+  "#approval-notification-channel-policy-form",
+);
 const runDueApprovalEscalationsButton = document.querySelector("#run-due-approval-escalations");
 const runApprovalNotificationsButton = document.querySelector("#run-approval-notifications");
 const approvalGovernanceRoot = document.querySelector("#approval-governance");
@@ -211,6 +215,10 @@ membershipForm.addEventListener("submit", createMembership);
 tenantInvitationForm.addEventListener("submit", createTenantInvitation);
 approvalGroupForm.addEventListener("submit", createApprovalGroup);
 approvalEscalationRuleForm.addEventListener("submit", createApprovalEscalationRule);
+approvalNotificationChannelPolicyForm.addEventListener(
+  "submit",
+  createApprovalNotificationChannelPolicy,
+);
 runDueApprovalEscalationsButton.addEventListener("click", runDueApprovalEscalations);
 runApprovalNotificationsButton.addEventListener("click", runApprovalNotifications);
 providerForm.addEventListener("submit", createProvider);
@@ -487,6 +495,21 @@ async function createApprovalEscalationRule(event) {
       group_id: String(form.get("group_id") || "").trim(),
       order_index: 0,
       after_seconds: 0,
+    }),
+  });
+  await refreshOps();
+}
+
+async function createApprovalNotificationChannelPolicy(event) {
+  event.preventDefault();
+  const form = new FormData(approvalNotificationChannelPolicyForm);
+  await api("/api/approvals/notification-channel-policies", {
+    method: "POST",
+    body: JSON.stringify({
+      name: String(form.get("name") || "").trim(),
+      channel: String(form.get("channel") || "").trim(),
+      target_env: String(form.get("target_env") || "").trim() || null,
+      risk_filter: String(form.get("risk_filter") || "").trim() || "all",
     }),
   });
   await refreshOps();
@@ -1375,6 +1398,7 @@ async function refreshOps() {
     remoteComputerJobAssignments,
     approvalGroups,
     approvalEscalationRules,
+    approvalNotificationChannelPolicies,
     approvalNotificationRouting,
     approvalNotificationRuns,
   ] =
@@ -1413,6 +1437,7 @@ async function refreshOps() {
       api("/api/remote-computer-job-assignments"),
       api("/api/approval-groups"),
       api("/api/approval-escalation-rules"),
+      api("/api/approvals/notification-channel-policies"),
       api("/api/approvals/notification-routing/summary"),
       api("/api/approvals/notifications/runs"),
     ]);
@@ -1450,6 +1475,7 @@ async function refreshOps() {
   state.remoteComputerJobAssignments = remoteComputerJobAssignments;
   state.approvalGroups = approvalGroups;
   state.approvalEscalationRules = approvalEscalationRules;
+  state.approvalNotificationChannelPolicies = approvalNotificationChannelPolicies;
   state.approvalNotificationRouting = approvalNotificationRouting;
   state.approvalNotificationRuns = approvalNotificationRuns;
   await refreshAgentReleases(false);
@@ -3801,6 +3827,7 @@ function renderApprovalNotificationRouting() {
     <div class="metric-grid">
       <div class="metric"><span>Routing</span><strong>${escapeHtml(routing.status)}</strong></div>
       <div class="metric"><span>Channels</span><strong>${formatInteger(routing.channel_count)}</strong></div>
+      <div class="metric"><span>Policies</span><strong>${formatInteger(routing.active_policy_count)} / ${formatInteger(routing.persisted_policy_count)}</strong></div>
       <div class="metric"><span>Pending</span><strong>${formatInteger(routing.pending_approval_count)}</strong></div>
       <div class="metric"><span>Routable</span><strong>${formatInteger(routing.routable_pending_count)}</strong></div>
       <div class="metric"><span>Unroutable</span><strong>${formatInteger(routing.unroutable_pending_count)}</strong></div>
@@ -3811,6 +3838,37 @@ function renderApprovalNotificationRouting() {
       <div class="muted">webhook ${escapeHtml(routing.webhook_configured ? "configured" : "missing")} · slack ${escapeHtml(routing.slack_configured ? "configured" : "missing")} · email relay ${escapeHtml(routing.email_relay_configured ? "configured" : "missing")}</div>
       <div class="muted">${formatInteger(routing.delegated_pending_count)} delegated pending · ${formatInteger(routing.group_pending_count)} group-routed pending · ${formatInteger(routing.escalation_rule_count)} escalation rules</div>
     </div>
+    ${
+      (routing.channel_policies || []).length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Policy</th>
+                <th>Channel</th>
+                <th>Risk</th>
+                <th>Target Env</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(routing.channel_policies || [])
+                .slice(0, 8)
+                .map(
+                  (policy) => `
+                    <tr>
+                      <td>${escapeHtml(policy.name)}</td>
+                      <td>${escapeHtml(policy.channel)}</td>
+                      <td>${escapeHtml(policy.risk_filter)}</td>
+                      <td>${escapeHtml(policy.target_env || "default env boundary")}</td>
+                      <td>${escapeHtml(policy.status)}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : `<div class="muted">No persisted approval notification channel policies.</div>`
+    }
     ${
       attentionItems.length
         ? `<table class="usage-table">

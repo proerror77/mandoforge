@@ -4,9 +4,10 @@ use sqlx::{Row, postgres::PgRow};
 
 use crate::{
     Agent, AgentRelease, AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
-    Artifact, AuditLog, CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord,
-    Membership, Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord,
-    SecretRecord, Session, SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup,
+    ApprovalNotificationChannelPolicy, Artifact, AuditLog, CostAlertRoute, EvalCase, EvalDataset,
+    EvalRun, McpServerRecord, Membership, Organization, PolicyRevision, Project, ProviderAccess,
+    ProviderRecord, SecretRecord, Session, SessionEvent, Team, TenantInvitation, ToolCall,
+    UsageRollup,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -181,6 +182,20 @@ pub(crate) fn approval_escalation_rule_from_row(
         group_id: row.try_get("group_id")?,
         order_index: row.try_get("order_index")?,
         after_seconds: row.try_get("after_seconds")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn approval_notification_channel_policy_from_row(
+    row: PgRow,
+) -> Result<ApprovalNotificationChannelPolicy, AppError> {
+    Ok(ApprovalNotificationChannelPolicy {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        channel: row.try_get("channel")?,
+        target_env: row.try_get("target_env")?,
+        risk_filter: row.try_get("risk_filter")?,
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })

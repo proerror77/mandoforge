@@ -44,6 +44,7 @@ mod remote_computer_runner;
 mod secrets;
 mod shell_runner;
 mod store_approval_groups;
+mod store_approval_notification_channels;
 mod store_approvals;
 mod store_artifacts;
 mod store_audit;
@@ -534,6 +535,8 @@ struct ApprovalNotificationDelivery {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ApprovalNotificationChannelDelivery {
     channel: String,
+    policy_id: Option<Uuid>,
+    policy_name: Option<String>,
     status: String,
     delivered: bool,
     target_configured: bool,
@@ -599,6 +602,9 @@ struct ApprovalNotificationRoutingSummary {
     slack_configured: bool,
     email_relay_configured: bool,
     channel_count: usize,
+    persisted_policy_count: usize,
+    active_policy_count: usize,
+    channel_policies: Vec<ApprovalNotificationChannelPolicy>,
     pending_approval_count: usize,
     delegated_pending_count: usize,
     group_pending_count: usize,
@@ -615,6 +621,27 @@ struct ApprovalNotificationRoutingAttention {
     severity: String,
     message: String,
     approval_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationChannelPolicy {
+    id: Uuid,
+    name: String,
+    channel: String,
+    target_env: Option<String>,
+    risk_filter: String,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateApprovalNotificationChannelPolicy {
+    name: String,
+    channel: String,
+    #[serde(default)]
+    target_env: Option<String>,
+    #[serde(default = "default_approval_notification_risk_filter")]
+    risk_filter: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2927,6 +2954,15 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/approvals/notifications/runs",
             get(get_approval_notification_delivery_runs),
+        )
+        .route(
+            "/api/approvals/notification-channel-policies",
+            get(list_approval_notification_channel_policies)
+                .post(create_approval_notification_channel_policy),
+        )
+        .route(
+            "/api/approvals/notification-channel-policies/{id}/archive",
+            post(archive_approval_notification_channel_policy),
         )
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
@@ -14276,6 +14312,41 @@ fn validate_approval_escalation_rule_input(
     Ok(input)
 }
 
+fn default_approval_notification_risk_filter() -> String {
+    "all".to_string()
+}
+
+fn validate_approval_notification_channel_policy_input(
+    mut input: CreateApprovalNotificationChannelPolicy,
+) -> Result<CreateApprovalNotificationChannelPolicy, AppError> {
+    input.name = input.name.trim().to_string();
+    input.channel = input.channel.trim().to_string();
+    input.target_env = input.target_env.and_then(|target_env| {
+        let trimmed = target_env.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    input.risk_filter = input.risk_filter.trim().to_string();
+    if input.name.is_empty() {
+        return Err(AppError::bad_request(
+            "approval notification channel policy name is required",
+        ));
+    }
+    if !matches!(input.channel.as_str(), "webhook" | "slack" | "email_relay") {
+        return Err(AppError::bad_request(
+            "approval notification channel policy channel must be webhook, slack, or email_relay",
+        ));
+    }
+    if !matches!(
+        input.risk_filter.as_str(),
+        "all" | "low" | "medium" | "high" | "critical"
+    ) {
+        return Err(AppError::bad_request(
+            "approval notification channel policy risk_filter must be all, low, medium, high, or critical",
+        ));
+    }
+    Ok(input)
+}
+
 fn validate_cost_alert_route_input(
     mut input: CreateCostAlertRoute,
 ) -> Result<CreateCostAlertRoute, AppError> {
@@ -14789,6 +14860,101 @@ async fn get_approval_notification_delivery_runs(
     )))
 }
 
+async fn list_approval_notification_channel_policies(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ApprovalNotificationChannelPolicy>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "approval_notification_channel_policies",
+        None,
+    )
+    .await?;
+    Ok(Json(
+        state.list_approval_notification_channel_policies().await?,
+    ))
+}
+
+async fn create_approval_notification_channel_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateApprovalNotificationChannelPolicy>,
+) -> Result<Json<ApprovalNotificationChannelPolicy>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "approval_notification_channel_policies".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let policy = state
+        .create_approval_notification_channel_policy(
+            validate_approval_notification_channel_policy_input(input)?,
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "approval.notification_channel_policy_created",
+            "approval_notification_channel_policy",
+            Some(policy.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": policy.name,
+                "channel": policy.channel,
+                "target_env": policy.target_env,
+                "risk_filter": policy.risk_filter,
+                "status": policy.status,
+            }),
+        ))
+        .await?;
+    Ok(Json(policy))
+}
+
+async fn archive_approval_notification_channel_policy(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ApprovalNotificationChannelPolicy>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "approval_notification_channel_policy".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let policy = state
+        .archive_approval_notification_channel_policy(id)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "approval.notification_channel_policy_archived",
+            "approval_notification_channel_policy",
+            Some(policy.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": policy.name,
+                "channel": policy.channel,
+                "target_env": policy.target_env,
+                "risk_filter": policy.risk_filter,
+                "status": policy.status,
+            }),
+        ))
+        .await?;
+    Ok(Json(policy))
+}
+
 async fn get_approval_notification_routing_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -14806,6 +14972,7 @@ async fn get_approval_notification_routing_summary(
             state.list_approvals().await?,
             state.list_approval_groups().await?,
             state.list_approval_escalation_rules().await?,
+            state.list_approval_notification_channel_policies().await?,
             state.approval_webhook_url.is_some(),
             approval_slack_webhook_url_from_env().is_some(),
             approval_email_relay_url_from_env().is_some(),
@@ -15012,15 +15179,36 @@ async fn build_approval_notification_routing_summary(
     approvals: Vec<Approval>,
     approval_groups: Vec<ApprovalGroup>,
     escalation_rules: Vec<ApprovalEscalationRule>,
+    channel_policies: Vec<ApprovalNotificationChannelPolicy>,
     webhook_configured: bool,
     slack_configured: bool,
     email_relay_configured: bool,
 ) -> ApprovalNotificationRoutingSummary {
     let generated_at = Utc::now();
-    let channel_count = [webhook_configured, slack_configured, email_relay_configured]
-        .into_iter()
-        .filter(|configured| *configured)
-        .count();
+    let active_channel_policies: Vec<_> = channel_policies
+        .iter()
+        .filter(|policy| policy.status == "active")
+        .collect();
+    let configured_env_channel_count =
+        [webhook_configured, slack_configured, email_relay_configured]
+            .into_iter()
+            .filter(|configured| *configured)
+            .count();
+    let channel_count = if active_channel_policies.is_empty() {
+        configured_env_channel_count
+    } else {
+        active_channel_policies
+            .iter()
+            .filter(|policy| {
+                approval_notification_policy_has_target(
+                    policy,
+                    webhook_configured,
+                    slack_configured,
+                    email_relay_configured,
+                )
+            })
+            .count()
+    };
     let group_by_id: HashMap<Uuid, ApprovalGroup> = approval_groups
         .iter()
         .cloned()
@@ -15036,6 +15224,16 @@ async fn build_approval_notification_routing_summary(
     let mut unroutable_pending_count = 0;
     let mut attention_items = Vec::new();
 
+    if active_channel_policies.is_empty() {
+        attention_items.push(ApprovalNotificationRoutingAttention {
+            kind: "missing_persisted_channel_policy".to_string(),
+            severity: "warning".to_string(),
+            message:
+                "no persisted approval notification channel policy is configured; env fallback is reserved"
+                    .to_string(),
+            approval_id: None,
+        });
+    }
     if channel_count == 0 {
         attention_items.push(ApprovalNotificationRoutingAttention {
             kind: "missing_channel".to_string(),
@@ -15070,20 +15268,32 @@ async fn build_approval_notification_routing_summary(
             group_pending_count += 1;
         }
         let targets = approval_notification_targets(approval, group);
-        if channel_count > 0 && !targets.is_empty() {
+        let channel_ready = approval_notification_channel_ready_for_approval(
+            approval,
+            &active_channel_policies,
+            webhook_configured,
+            slack_configured,
+            email_relay_configured,
+        );
+        if channel_ready && !targets.is_empty() {
             routable_pending_count += 1;
         } else {
             unroutable_pending_count += 1;
             attention_items.push(ApprovalNotificationRoutingAttention {
                 kind: if targets.is_empty() {
                     "missing_target"
-                } else {
+                } else if active_channel_policies.is_empty() {
                     "missing_channel"
+                } else {
+                    "missing_matching_channel_policy"
                 }
                 .to_string(),
                 severity: "critical".to_string(),
                 message: if targets.is_empty() {
                     "pending approval has no delegated approver or approval group targets"
+                        .to_string()
+                } else if !active_channel_policies.is_empty() {
+                    "pending approval has targets but no active matching notification channel policy"
                         .to_string()
                 } else {
                     "pending approval has targets but no configured notification channel"
@@ -15113,6 +15323,9 @@ async fn build_approval_notification_routing_summary(
         slack_configured,
         email_relay_configured,
         channel_count,
+        persisted_policy_count: channel_policies.len(),
+        active_policy_count: active_channel_policies.len(),
+        channel_policies,
         pending_approval_count: pending.len(),
         delegated_pending_count,
         group_pending_count,
@@ -15152,7 +15365,7 @@ async fn deliver_approval_notification(
             delivered_at,
         });
     }
-    let channel_configs = approval_notification_channel_configs(state);
+    let channel_configs = approval_notification_channel_configs(state, approval).await?;
     if channel_configs.is_empty() {
         return Ok(ApprovalNotificationDelivery {
             status: "reserved".to_string(),
@@ -15220,33 +15433,124 @@ async fn deliver_approval_notification(
 }
 
 struct ApprovalNotificationChannelConfig {
-    channel: &'static str,
-    url: String,
+    channel: String,
+    policy_id: Option<Uuid>,
+    policy_name: Option<String>,
+    url: Option<String>,
 }
 
-fn approval_notification_channel_configs(
+async fn approval_notification_channel_configs(
     state: &AppState,
-) -> Vec<ApprovalNotificationChannelConfig> {
+    approval: &Approval,
+) -> Result<Vec<ApprovalNotificationChannelConfig>, AppError> {
+    let active_policies: Vec<_> = state
+        .list_approval_notification_channel_policies()
+        .await?
+        .into_iter()
+        .filter(|policy| policy.status == "active")
+        .collect();
+    if !active_policies.is_empty() {
+        return Ok(active_policies
+            .into_iter()
+            .filter(|policy| approval_notification_policy_matches(policy, approval))
+            .map(|policy| ApprovalNotificationChannelConfig {
+                channel: policy.channel.clone(),
+                policy_id: Some(policy.id),
+                policy_name: Some(policy.name.clone()),
+                url: approval_notification_policy_url(state, &policy),
+            })
+            .collect());
+    }
     let mut configs = Vec::new();
     if let Some(url) = state.approval_webhook_url.clone() {
         configs.push(ApprovalNotificationChannelConfig {
-            channel: "webhook",
-            url,
+            channel: "webhook".to_string(),
+            policy_id: None,
+            policy_name: None,
+            url: Some(url),
         });
     }
     if let Some(url) = approval_slack_webhook_url_from_env() {
         configs.push(ApprovalNotificationChannelConfig {
-            channel: "slack",
-            url,
+            channel: "slack".to_string(),
+            policy_id: None,
+            policy_name: None,
+            url: Some(url),
         });
     }
     if let Some(url) = approval_email_relay_url_from_env() {
         configs.push(ApprovalNotificationChannelConfig {
-            channel: "email_relay",
-            url,
+            channel: "email_relay".to_string(),
+            policy_id: None,
+            policy_name: None,
+            url: Some(url),
         });
     }
-    configs
+    Ok(configs)
+}
+
+fn approval_notification_policy_has_target(
+    policy: &ApprovalNotificationChannelPolicy,
+    webhook_configured: bool,
+    slack_configured: bool,
+    email_relay_configured: bool,
+) -> bool {
+    if let Some(target_env) = policy.target_env.as_ref() {
+        return std::env::var(target_env)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+    }
+    match policy.channel.as_str() {
+        "webhook" => webhook_configured,
+        "slack" => slack_configured,
+        "email_relay" => email_relay_configured,
+        _ => false,
+    }
+}
+
+fn approval_notification_channel_ready_for_approval(
+    approval: &Approval,
+    active_channel_policies: &[&ApprovalNotificationChannelPolicy],
+    webhook_configured: bool,
+    slack_configured: bool,
+    email_relay_configured: bool,
+) -> bool {
+    if active_channel_policies.is_empty() {
+        return webhook_configured || slack_configured || email_relay_configured;
+    }
+    active_channel_policies.iter().any(|policy| {
+        approval_notification_policy_matches(policy, approval)
+            && approval_notification_policy_has_target(
+                policy,
+                webhook_configured,
+                slack_configured,
+                email_relay_configured,
+            )
+    })
+}
+
+fn approval_notification_policy_url(
+    state: &AppState,
+    policy: &ApprovalNotificationChannelPolicy,
+) -> Option<String> {
+    if let Some(target_env) = policy.target_env.as_ref() {
+        return std::env::var(target_env)
+            .ok()
+            .and_then(|value| (!value.trim().is_empty()).then(|| value));
+    }
+    match policy.channel.as_str() {
+        "webhook" => state.approval_webhook_url.clone(),
+        "slack" => approval_slack_webhook_url_from_env(),
+        "email_relay" => approval_email_relay_url_from_env(),
+        _ => None,
+    }
+}
+
+fn approval_notification_policy_matches(
+    policy: &ApprovalNotificationChannelPolicy,
+    approval: &Approval,
+) -> bool {
+    policy.risk_filter == "all" || policy.risk_filter == approval.risk_level
 }
 
 async fn deliver_approval_notification_channel(
@@ -15256,7 +15560,17 @@ async fn deliver_approval_notification_channel(
     target_subjects: &[String],
     delivered_at: DateTime<Utc>,
 ) -> Result<ApprovalNotificationChannelDelivery, AppError> {
-    let payload = match config.channel {
+    let Some(url) = config.url.as_ref() else {
+        return Ok(ApprovalNotificationChannelDelivery {
+            channel: config.channel.clone(),
+            policy_id: config.policy_id,
+            policy_name: config.policy_name.clone(),
+            status: "reserved".to_string(),
+            delivered: false,
+            target_configured: false,
+        });
+    };
+    let payload = match config.channel.as_str() {
         "slack" => slack_approval_notification_payload(
             approval,
             approval_group,
@@ -15280,10 +15594,7 @@ async fn deliver_approval_notification_channel(
     };
     let response = tokio::time::timeout(
         Duration::from_secs(10),
-        reqwest::Client::new()
-            .post(&config.url)
-            .json(&payload)
-            .send(),
+        reqwest::Client::new().post(url).json(&payload).send(),
     )
     .await??;
     if !response.status().is_success() {
@@ -15295,6 +15606,8 @@ async fn deliver_approval_notification_channel(
     }
     Ok(ApprovalNotificationChannelDelivery {
         channel: config.channel.to_string(),
+        policy_id: config.policy_id,
+        policy_name: config.policy_name.clone(),
         status: "delivered".to_string(),
         delivered: true,
         target_configured: true,
@@ -18135,6 +18448,7 @@ not json
         assert!(names.contains(&"0019_remote_computers.sql"));
         assert!(names.contains(&"0020_remote_computer_attachments.sql"));
         assert!(names.contains(&"0021_remote_computer_job_assignments.sql"));
+        assert!(names.contains(&"0022_approval_notification_channel_policies.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -23105,6 +23419,24 @@ not json
             .expect("valid request")
     }
 
+    fn json_request_with_headers(
+        method: &str,
+        uri: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder
+            .body(Body::from(body.to_string()))
+            .expect("valid request")
+    }
+
     #[tokio::test]
     async fn generic_runtime_diagnostics_replay_api_flow() {
         let app = test_app().await;
@@ -24290,6 +24622,150 @@ not json
                 .any(|log| log.action == "approval.notification_delivery_run")
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn approval_notification_channel_policy_is_persisted_and_fail_closed_without_endpoint() {
+        let app = test_app().await;
+        let policy: ApprovalNotificationChannelPolicy = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/approvals/notification-channel-policies",
+                json!({
+                    "name": "high-risk-webhook-policy",
+                    "channel": "webhook",
+                    "risk_filter": "high",
+                    "target_env": "MANDOFORGE_TEST_APPROVAL_WEBHOOK_URL"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(policy.status, "active");
+        assert_eq!(policy.channel, "webhook");
+
+        let policies: Vec<ApprovalNotificationChannelPolicy> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals/notification-channel-policies")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(policies.len(), 1);
+
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "approval policy"}),
+            ),
+        )
+        .await;
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/approval.request/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "action": "manual.policy_review",
+                        "risk_level": "high",
+                        "reason": "Policy routed approval.",
+                        "approver_subject": "approver-1"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+
+        let summary: ApprovalNotificationRoutingSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals/notification-routing/summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(summary.persisted_policy_count, 1);
+        assert_eq!(summary.active_policy_count, 1);
+        assert_eq!(summary.channel_count, 0);
+        assert_eq!(summary.status, "action_required");
+
+        let delivery: ApprovalNotificationDelivery = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/deliver"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(delivery.status, "reserved");
+        assert!(!delivery.delivered);
+        assert_eq!(delivery.channel_deliveries.len(), 1);
+        assert_eq!(delivery.channel_deliveries[0].policy_id, Some(policy.id));
+        assert!(!delivery.channel_deliveries[0].target_configured);
+
+        let archived: ApprovalNotificationChannelPolicy = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/approvals/notification-channel-policies/{}/archive",
+                    policy.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(archived.status, "archived");
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "approval.notification_channel_policy_created"
+                && log.details.get("target_url").is_none()
+        }));
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "approval.notification_channel_policy_archived")
+        );
     }
 
     #[tokio::test]
