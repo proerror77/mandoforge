@@ -13,10 +13,12 @@ manifests=(
   deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml
   deploy/stage2-evidence/observability-collector-evidence-job.example.yaml
   deploy/stage2-evidence/remote-computer-evidence-job.example.yaml
+  deploy/stage2-evidence/provider-governance-evidence-job.example.yaml
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
 remote_computer_script="scripts/remote-computer-evidence-gate.sh"
+provider_script="scripts/provider-governance-evidence-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -37,6 +39,11 @@ fi
 
 if [[ ! -x "$remote_computer_script" ]]; then
   echo "missing executable Remote Computer evidence script: $remote_computer_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$provider_script" ]]; then
+  echo "missing provider governance evidence script: $provider_script" >&2
   exit 1
 fi
 
@@ -71,6 +78,11 @@ fi
 
 if ! grep -q "name: mandoforge-remote-computer-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the Remote Computer evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-provider-governance-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the provider governance evidence Job" >&2
   exit 1
 fi
 
@@ -141,6 +153,26 @@ fi
 
 if ! grep -q "/api/remote-computers/sidecars/recovery/run" "$remote_computer_script"; then
   echo "Remote Computer evidence script must capture sidecar recovery evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "provider-governance-evidence-gate.sh" deploy/stage2-evidence/provider-governance-evidence-job.example.yaml; then
+  echo "Provider governance evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/provider-governance-evidence-job.example.yaml; then
+  echo "Provider governance evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/providers/deployment/validate" "$provider_script"; then
+  echo "Provider governance evidence script must validate provider deployment" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/providers/production-rollout/run" "$provider_script"; then
+  echo "Provider governance evidence script must capture provider rollout evidence" >&2
   exit 1
 fi
 

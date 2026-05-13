@@ -42,6 +42,15 @@ RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 \
 
 That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower provider governance proof, run:
+
+```bash
+RUN_STAGE2_PROVIDER_ROLLOUT=1 \
+./scripts/provider-governance-evidence-gate.sh
+```
+
+That gate collects provider governance summary, provider policy gate report/history, deployment validation, and optional production rollout/rollback evidence into `.mandoforge/provider-governance-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/provider-governance-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.
