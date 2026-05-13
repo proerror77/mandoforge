@@ -1926,6 +1926,7 @@ function renderWorkerReadiness() {
   const k8s = report.k8s || {};
   const autoscaling = report.autoscaling || {};
   const loadValidation = report.load_validation || {};
+  const productionOps = report.production_ops || {};
   const loadValidationRun = state.workerLoadValidationRun;
   const attentionItems = report.attention_items || [];
   const runbookActions = report.runbook_actions || [];
@@ -1947,6 +1948,15 @@ function renderWorkerReadiness() {
         <span>Worker Mode</span>
         <strong>${escapeHtml(workerMode.mode || "unknown")}</strong>
       </div>
+      <div class="metric">
+        <span>Prod Ops</span>
+        <strong>${escapeHtml(productionOps.status || "unknown")}</strong>
+      </div>
+    </div>
+    <div class="item">
+      <strong>PRODUCTION OPS GATE</strong>
+      <div class="muted">${escapeHtml(productionOps.message || "worker production ops gate is not reported")}</div>
+      <div class="muted">durable queue ${productionOps.durable_queue ? "yes" : "no"} · queue worker ${productionOps.queue_worker_mode ? "yes" : "no"} · hardened Pod ${productionOps.hardened_worker_pod ? "yes" : "no"} · queue-depth autoscaling ${productionOps.queue_depth_autoscaling ? "yes" : "no"} · isolated pool ${productionOps.isolated_worker_pool_configured ? "yes" : "no"} · load validated ${productionOps.load_validated ? "yes" : "no"}</div>
     </div>
     <div class="item">
       <strong>QUEUE DURABILITY</strong>

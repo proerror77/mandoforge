@@ -1277,8 +1277,25 @@ struct WorkerReadinessReport {
     k8s: WorkerK8sReadiness,
     autoscaling: WorkerAutoscalingReadiness,
     load_validation: WorkerLoadValidationEvidence,
+    production_ops: WorkerProductionOpsReadiness,
     attention_items: Vec<WorkerReadinessAttentionItem>,
     runbook_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerProductionOpsReadiness {
+    status: String,
+    production_blocked: bool,
+    durable_queue: bool,
+    queue_worker_mode: bool,
+    hardened_worker_pod: bool,
+    queue_depth_autoscaling: bool,
+    load_validated: bool,
+    isolated_worker_pool_configured: bool,
+    no_failed_jobs: bool,
+    no_stale_leases: bool,
+    blocking_reasons: Vec<String>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19852,6 +19869,15 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
         "deploy/k8s/keda.yaml",
     ]);
     let load_validation = worker_load_validation_evidence(state).await?;
+    let production_ops = build_worker_production_ops_readiness(
+        &queue_backend,
+        &worker_mode,
+        &k8s,
+        &autoscaling,
+        &load_validation,
+        failed_jobs,
+        stale_leases,
+    );
     let mut attention_items = Vec::new();
     if worker_mode.api_inline_execution {
         attention_items.push(WorkerReadinessAttentionItem {
@@ -19949,6 +19975,13 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
             message: load_validation.message.clone(),
         });
     }
+    if production_ops.production_blocked {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_production_ops_blocked".to_string(),
+            severity: "critical".to_string(),
+            message: production_ops.message.clone(),
+        });
+    }
 
     let mut runbook_actions = Vec::new();
     if worker_mode.api_inline_execution {
@@ -19993,6 +20026,9 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
                 .to_string(),
         );
     }
+    if production_ops.production_blocked {
+        runbook_actions.push("resolve_worker_production_ops_gate".to_string());
+    }
     if queue_backend.kind == "nats" && !queue_backend.jetstream_enabled {
         runbook_actions.push(
             "replace Core NATS handoff with JetStream before claiming durable NATS queues"
@@ -20034,9 +20070,84 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
         k8s,
         autoscaling,
         load_validation,
+        production_ops,
         attention_items,
         runbook_actions,
     })
+}
+
+fn build_worker_production_ops_readiness(
+    queue_backend: &WorkerQueueBackendReadiness,
+    worker_mode: &WorkerModeReadiness,
+    k8s: &WorkerK8sReadiness,
+    autoscaling: &WorkerAutoscalingReadiness,
+    load_validation: &WorkerLoadValidationEvidence,
+    failed_jobs: usize,
+    stale_leases: usize,
+) -> WorkerProductionOpsReadiness {
+    let durable_queue = queue_backend.durable;
+    let queue_worker_mode = worker_mode.mode == "queue";
+    let hardened_worker_pod = k8s.hardening_status == "hardened";
+    let queue_depth_autoscaling = autoscaling.validation_status == "queue_depth_configured";
+    let no_failed_jobs = failed_jobs == 0;
+    let no_stale_leases = stale_leases == 0;
+    let mut blocking_reasons = Vec::new();
+
+    if !durable_queue {
+        blocking_reasons.push("execution queue is not durable".to_string());
+    }
+    if !queue_worker_mode {
+        blocking_reasons.push("runtime is not using queue-backed worker mode".to_string());
+    }
+    if !hardened_worker_pod {
+        blocking_reasons.push("worker Pod hardening is incomplete".to_string());
+    }
+    if !queue_depth_autoscaling {
+        blocking_reasons.push("queue-depth autoscaling is not configured".to_string());
+    }
+    if !load_validation.load_validated {
+        blocking_reasons.push("production-like worker load validation has not passed".to_string());
+    }
+    if !load_validation.isolated_worker_pool_configured {
+        blocking_reasons.push("isolated worker pool is not configured".to_string());
+    }
+    if !no_failed_jobs {
+        blocking_reasons.push("failed execution jobs require triage".to_string());
+    }
+    if !no_stale_leases {
+        blocking_reasons.push("stale worker leases require reclaim".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Worker production ops are blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Worker production ops have a durable queue, queue worker mode, hardened Pod, queue-depth autoscaling, isolated pool, and validated load evidence".to_string()
+    };
+
+    WorkerProductionOpsReadiness {
+        status,
+        production_blocked,
+        durable_queue,
+        queue_worker_mode,
+        hardened_worker_pod,
+        queue_depth_autoscaling,
+        load_validated: load_validation.load_validated,
+        isolated_worker_pool_configured: load_validation.isolated_worker_pool_configured,
+        no_failed_jobs,
+        no_stale_leases,
+        blocking_reasons,
+        message,
+    }
 }
 
 async fn execute_worker_load_validation(
@@ -34006,7 +34117,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(worker_readiness.status, "attention");
+        assert_eq!(worker_readiness.status, "critical");
         assert_eq!(worker_readiness.worker_mode.mode, "queue");
         assert_eq!(worker_readiness.queue_backend.kind, "memory");
         assert_eq!(worker_readiness.job_summary.queued_jobs, 1);
@@ -34091,12 +34202,29 @@ not json
         );
         assert_eq!(worker_readiness.load_validation.status, "not_run");
         assert!(!worker_readiness.load_validation.load_validated);
+        assert_eq!(worker_readiness.production_ops.status, "blocked");
+        assert!(worker_readiness.production_ops.production_blocked);
+        assert!(!worker_readiness.production_ops.durable_queue);
+        assert!(worker_readiness.production_ops.queue_worker_mode);
+        assert!(worker_readiness.production_ops.hardened_worker_pod);
+        assert!(worker_readiness.production_ops.queue_depth_autoscaling);
+        assert!(!worker_readiness.production_ops.load_validated);
+        assert!(
+            !worker_readiness
+                .production_ops
+                .isolated_worker_pool_configured
+        );
+        assert!(worker_readiness.production_ops.no_failed_jobs);
+        assert!(worker_readiness.production_ops.no_stale_leases);
         assert!(
             worker_readiness
                 .attention_items
                 .iter()
                 .any(|item| item.kind == "worker_load_validation_missing")
         );
+        assert!(worker_readiness.attention_items.iter().any(|item| {
+            item.kind == "worker_production_ops_blocked" && item.severity == "critical"
+        }));
         assert!(
             worker_readiness
                 .runbook_actions
