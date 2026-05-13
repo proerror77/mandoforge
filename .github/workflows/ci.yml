@@ -25,6 +25,7 @@ jobs:
       - run: node --check web/app.js
       - run: bash -n scripts/stage1-final-gate.sh
       - run: bash -n scripts/stage2-production-evidence-gate.sh
+      - run: bash -n scripts/archive-stage2-production-evidence.sh
       - run: bash -n scripts/render-stage2-controller-secret.sh
       - run: bash -n scripts/verify-stage2-controller-env-template.sh
       - run: bash -n scripts/verify-stage2-evidence-k8s-manifests.sh

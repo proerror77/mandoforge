@@ -12,6 +12,7 @@ manifests=(
   deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml
   deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml
 )
+archive_script="scripts/archive-stage2-production-evidence.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -19,6 +20,11 @@ for manifest in "${manifests[@]}"; do
     exit 1
   fi
 done
+
+if [[ ! -x "$archive_script" ]]; then
+  echo "missing executable Stage 2 production evidence archive script: $archive_script" >&2
+  exit 1
+fi
 
 kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out
 kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone \
@@ -76,6 +82,16 @@ fi
 
 if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml; then
   echo "Stage 2 production evidence Job example does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_STAGE2_EVIDENCE_PVC:-mandoforge-stage2-production-evidence" "$archive_script"; then
+  echo "Stage 2 production evidence archive script does not default to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "readOnly: true" "$archive_script"; then
+  echo "Stage 2 production evidence archive script must mount the evidence PVC read-only" >&2
   exit 1
 fi
 
