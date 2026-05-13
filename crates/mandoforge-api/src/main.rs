@@ -1465,6 +1465,7 @@ struct ObservabilityCollectorReadiness {
     signal_paths: Vec<ObservabilityCollectorSignalPath>,
     production_ops: ObservabilityCollectorProductionOpsReadiness,
     deployment_readiness: ObservabilityCollectorDeploymentReadiness,
+    cluster_rollout: ObservabilityCollectorClusterRolloutReadiness,
     remediation_supervision: ObservabilityRemediationSupervisionReadiness,
     attention_items: Vec<ObservabilityCollectorAttentionItem>,
 }
@@ -1497,6 +1498,31 @@ struct ObservabilityCollectorDeploymentReadiness {
     latest_controller_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityCollectorClusterRolloutReadiness {
+    status: String,
+    production_blocked: bool,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_rollout_at: Option<DateTime<Utc>>,
+    latest_rollout_status: Option<String>,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
+    deployment_validated: bool,
+    blocking_reasons: Vec<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityCollectorClusterRolloutValidationRun {
+    status: String,
+    checked_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
+    issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3949,6 +3975,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/observability/collector/deployment/validate",
             post(validate_observability_collector_deployment),
+        )
+        .route(
+            "/api/observability/collector/cluster/validate",
+            post(validate_observability_collector_cluster_rollout),
         )
         .route(
             "/api/observability/remediation/plan",
@@ -20167,6 +20197,125 @@ async fn validate_observability_collector_deployment(
     Ok(Json(result))
 }
 
+async fn validate_observability_collector_cluster_rollout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ObservabilityCollectorClusterRolloutValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "observability".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let checked_at = Utc::now();
+    let lookup = |key: &str| std::env::var(key).ok();
+    let audit_logs = state.list_audit_logs(None).await?;
+    let deployment_readiness = build_observability_collector_deployment_readiness(
+        state.observability_config.is_enabled(),
+        state.observability_config.otlp_endpoint.is_some(),
+        observability_collector_deployment_controller_required(&lookup),
+        observability_collector_deployment_controller_configured(&lookup),
+        &audit_logs,
+        checked_at,
+    );
+    let controller_required = observability_collector_cluster_controller_required(&lookup);
+    let controller_configured = observability_collector_cluster_controller_configured(&lookup);
+    let mut issues = Vec::new();
+    if !deployment_readiness.deployment_validated {
+        issues.push("collector deployment validation is not ready".to_string());
+    }
+    if controller_required && !controller_configured {
+        issues.push(
+            "collector cluster rollout controller is required but not configured".to_string(),
+        );
+    }
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            if deployment_readiness.deployment_validated {
+                "controller_not_required"
+            } else {
+                "collector_deployment_not_ready"
+            }
+        } else {
+            "controller_not_configured"
+        }
+    });
+    if controller_configured && deployment_readiness.deployment_validated {
+        match execute_observability_collector_cluster_controller(
+            &lookup,
+            &principal.subject_id,
+            checked_at,
+            &state.observability_config,
+            &deployment_readiness,
+        )
+        .await
+        {
+            Ok(execution) => {
+                if execution.get("status").and_then(Value::as_str) != Some("validated") {
+                    issues
+                        .push("collector cluster rollout controller did not validate".to_string());
+                }
+                controller_execution = execution;
+            }
+            Err(error) => {
+                issues.push("collector cluster rollout controller failed".to_string());
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    }
+    if controller_required
+        && controller_execution.get("status").and_then(Value::as_str) != Some("validated")
+    {
+        issues.push(
+            "collector cluster rollout controller evidence is missing or not validated".to_string(),
+        );
+    }
+    dedupe_strings(&mut issues);
+    let status = if issues.is_empty() {
+        "validated"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "observability.collector_cluster_rollout_validation",
+            "observability",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+                "deployment_validated": deployment_readiness.deployment_validated,
+                "issues": issues,
+                "checked_at": checked_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(ObservabilityCollectorClusterRolloutValidationRun {
+        status,
+        checked_at,
+        controller_required,
+        controller_configured,
+        controller_execution,
+        issues,
+    }))
+}
+
 fn observability_collector_deployment_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
@@ -20268,6 +20417,100 @@ where
         "http_status": http_status.as_u16(),
         "provider_status": controller_status,
         "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
+}
+
+fn observability_collector_cluster_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn observability_collector_cluster_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_observability_collector_cluster_controller<F>(
+    lookup: &F,
+    subject: &str,
+    checked_at: DateTime<Utc>,
+    config: &ObservabilityConfig,
+    deployment_readiness: &ObservabilityCollectorDeploymentReadiness,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_URL is required",
+            )
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.observability_collector_cluster_rollout",
+        "subject": subject,
+        "checked_at": checked_at,
+        "service_name": config.service_name,
+        "otlp_enabled": config.is_enabled(),
+        "otlp_endpoint_configured": config.otlp_endpoint.is_some(),
+        "sample_ratio": config.sample_ratio,
+        "deployment_readiness": {
+            "status": deployment_readiness.status,
+            "deployment_validated": deployment_readiness.deployment_validated,
+            "latest_validation_status": deployment_readiness.latest_validation_status,
+            "latest_controller_status": deployment_readiness.latest_controller_status,
+        },
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "collector cluster rollout controller failed with status {http_status}"
+        )));
+    }
+    let provider_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": provider_status,
+        "cluster_rollout_id": body.get("cluster_rollout_id").and_then(Value::as_str),
         "message": body.get("message").and_then(Value::as_str),
         "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
     }))
@@ -20681,6 +20924,13 @@ async fn build_observability_collector_readiness(
         &audit_logs,
         generated_at,
     );
+    let cluster_rollout = build_observability_collector_cluster_rollout_readiness(
+        &deployment_readiness,
+        &audit_logs,
+        generated_at,
+        observability_collector_cluster_controller_required(&|key| std::env::var(key).ok()),
+        observability_collector_cluster_controller_configured(&|key| std::env::var(key).ok()),
+    );
     let remediation_supervision = build_observability_remediation_supervision_readiness(
         observability_remediation_controller_required(&|key| std::env::var(key).ok()),
         observability_remediation_controller_configured(&|key| std::env::var(key).ok()),
@@ -20716,6 +20966,13 @@ async fn build_observability_collector_readiness(
             message: remediation_supervision.message.clone(),
         });
     }
+    if cluster_rollout.production_blocked {
+        attention_items.push(ObservabilityCollectorAttentionItem {
+            kind: "collector_cluster_rollout_blocked".to_string(),
+            severity: "critical".to_string(),
+            message: cluster_rollout.message.clone(),
+        });
+    }
     let status = if attention_items
         .iter()
         .any(|item| item.severity == "critical")
@@ -20739,6 +20996,7 @@ async fn build_observability_collector_readiness(
         signal_paths,
         production_ops,
         deployment_readiness,
+        cluster_rollout,
         remediation_supervision,
         attention_items,
     }
@@ -20916,6 +21174,91 @@ fn build_observability_collector_deployment_readiness(
         latest_validation_healthy,
         latest_controller_status,
         latest_controller_validated,
+        blocking_reasons,
+        message,
+    }
+}
+
+fn build_observability_collector_cluster_rollout_readiness(
+    deployment_readiness: &ObservabilityCollectorDeploymentReadiness,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
+) -> ObservabilityCollectorClusterRolloutReadiness {
+    let latest_rollout = audit_logs
+        .iter()
+        .filter(|log| log.action == "observability.collector_cluster_rollout_validation")
+        .max_by_key(|log| log.created_at);
+    let latest_rollout_at = latest_rollout.map(|log| log.created_at);
+    let latest_rollout_status = latest_rollout
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_status = latest_rollout
+        .and_then(|log| log.details.get("controller_execution"))
+        .and_then(|execution| execution.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
+    let mut blocking_reasons = Vec::new();
+    if !deployment_readiness.deployment_validated {
+        blocking_reasons.push("collector deployment validation is not ready".to_string());
+    }
+    if latest_rollout.is_none() {
+        blocking_reasons.push("collector cluster rollout validation has not run".to_string());
+    }
+    if latest_rollout_at.is_some_and(|created_at| (generated_at - created_at).num_hours() >= 24) {
+        blocking_reasons.push("collector cluster rollout validation evidence is stale".to_string());
+    }
+    if latest_rollout_status.as_deref() != Some("validated") {
+        blocking_reasons
+            .push("latest collector cluster rollout validation was not validated".to_string());
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons.push(
+            "collector cluster rollout controller is required but not configured".to_string(),
+        );
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons.push(
+            "collector cluster rollout controller evidence is missing or not validated".to_string(),
+        );
+    }
+    let production_blocked = controller_required && !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else if blocking_reasons.is_empty() {
+        "ready"
+    } else {
+        "optional"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Observability collector cluster rollout is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else if blocking_reasons.is_empty() && controller_required {
+        "Observability collector cluster rollout has validated deployment and recent cluster-controller evidence".to_string()
+    } else if blocking_reasons.is_empty() {
+        "Observability collector cluster rollout has recent validation evidence".to_string()
+    } else {
+        format!(
+            "Observability collector cluster rollout is optional until required: {}",
+            blocking_reasons.join("; ")
+        )
+    };
+    ObservabilityCollectorClusterRolloutReadiness {
+        status,
+        production_blocked,
+        controller_required,
+        controller_configured,
+        latest_rollout_at,
+        latest_rollout_status,
+        latest_controller_status,
+        latest_controller_validated,
+        deployment_validated: deployment_readiness.deployment_validated,
         blocking_reasons,
         message,
     }
@@ -29465,6 +29808,96 @@ not json
         controller_server.abort();
     }
 
+    #[tokio::test]
+    async fn observability_collector_cluster_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("collector cluster listener");
+        let controller_addr = listener.local_addr().expect("collector cluster addr");
+        let controller = Router::new()
+            .route(
+                "/collector-cluster",
+                post(mock_observability_collector_cluster_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock collector cluster controller");
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/collector-cluster"))
+            }
+            "MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_TOKEN" => {
+                Some("collector-cluster-token".to_string())
+            }
+            _ => None,
+        };
+        let config = ObservabilityConfig {
+            service_name: "mandoforge-api-test".to_string(),
+            otlp_endpoint: Some("http://otel-collector:4318".to_string()),
+            sample_ratio: 1.0,
+        };
+        let audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "observability.collector_deployment_validation",
+            "observability",
+            None,
+            json!({
+                "status": "healthy",
+                "healthy": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "deployment_id": "collector-deployment-1"
+                }
+            }),
+        );
+        let deployment_readiness = build_observability_collector_deployment_readiness(
+            true,
+            true,
+            false,
+            false,
+            &[audit],
+            Utc::now(),
+        );
+
+        let execution = execute_observability_collector_cluster_controller(
+            &lookup,
+            "admin-1",
+            Utc::now(),
+            &config,
+            &deployment_readiness,
+        )
+        .await
+        .expect("collector cluster controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(
+            execution["cluster_rollout_id"],
+            "collector-cluster-rollout-1"
+        );
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.observability_collector_cluster_rollout"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["service_name"], "mandoforge-api-test");
+        assert_eq!(payloads[0]["otlp_enabled"], true);
+        assert_eq!(
+            payloads[0]["deployment_readiness"]["deployment_validated"],
+            true
+        );
+
+        controller_server.abort();
+    }
+
     #[test]
     fn observability_remediation_supervision_blocks_when_required_without_controller_evidence() {
         let generated_at = Utc::now();
@@ -29568,6 +30001,81 @@ not json
         assert!(ready.deployment_validated);
         assert!(ready.latest_controller_validated);
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+    }
+
+    #[test]
+    fn observability_collector_cluster_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let deployment_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "observability.collector_deployment_validation",
+            "observability",
+            None,
+            json!({
+                "status": "healthy",
+                "healthy": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "deployment_id": "collector-deployment-1"
+                }
+            }),
+        );
+        let deployment_readiness = build_observability_collector_deployment_readiness(
+            true,
+            true,
+            false,
+            false,
+            &[deployment_audit],
+            generated_at,
+        );
+
+        let missing_controller = build_observability_collector_cluster_rollout_readiness(
+            &deployment_readiness,
+            &[],
+            generated_at,
+            true,
+            false,
+        );
+        assert_eq!(missing_controller.status, "blocked");
+        assert!(missing_controller.production_blocked);
+        assert!(missing_controller.blocking_reasons.iter().any(|reason| {
+            reason == "collector cluster rollout controller is required but not configured"
+        }));
+
+        let rollout_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "observability.collector_cluster_rollout_validation",
+            "observability",
+            None,
+            json!({
+                "status": "validated",
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "cluster_rollout_id": "collector-cluster-rollout-1"
+                },
+                "deployment_validated": true
+            }),
+        );
+        let ready = build_observability_collector_cluster_rollout_readiness(
+            &deployment_readiness,
+            &[rollout_audit],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert!(ready.latest_controller_validated);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+        assert!(ready.deployment_validated);
     }
 
     fn ready_finance_operations_summary(
@@ -36448,6 +36956,29 @@ not json
             "steps": [
                 {"name": "collector-health", "status": "checked"},
                 {"name": "signal-paths", "status": "validated"}
+            ]
+        }))
+    }
+
+    async fn mock_observability_collector_cluster_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer collector-cluster-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "cluster_rollout_id": "collector-cluster-rollout-1",
+            "message": "collector cluster controller validated rollout in target cluster",
+            "steps": [
+                {"name": "k8s-rollout-status", "status": "validated"},
+                {"name": "collector-pod-health", "status": "validated"}
             ]
         }))
     }

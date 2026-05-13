@@ -170,6 +170,7 @@ const remoteStateLockForm = document.querySelector("#remote-state-lock-form");
 const usageRoot = document.querySelector("#usage-summary");
 const observabilityRoot = document.querySelector("#observability-summary");
 const validateObservabilityCollectorButton = document.querySelector("#validate-observability-collector");
+const validateObservabilityCollectorClusterButton = document.querySelector("#validate-observability-collector-cluster");
 const runObservabilityRemediationButton = document.querySelector("#run-observability-remediation");
 const runSchedulerDueButton = document.querySelector("#run-scheduler-due");
 const usageRollupRoot = document.querySelector("#usage-rollups");
@@ -306,6 +307,7 @@ runFinanceReconciliationButton.addEventListener("click", runFinanceReconciliatio
 exportUsageCsvButton.addEventListener("click", exportUsageCsv);
 deliverUsageExportButton.addEventListener("click", deliverUsageExport);
 validateObservabilityCollectorButton.addEventListener("click", validateObservabilityCollector);
+validateObservabilityCollectorClusterButton.addEventListener("click", validateObservabilityCollectorCluster);
 runObservabilityRemediationButton.addEventListener("click", runObservabilityRemediation);
 runSchedulerDueButton.addEventListener("click", runSchedulerDueTasks);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
@@ -1073,6 +1075,13 @@ async function deliverUsageExport() {
 
 async function validateObservabilityCollector() {
   state.observabilityCollectorValidation = await api("/api/observability/collector/deployment/validate", {
+    method: "POST",
+  });
+  await refreshOps();
+}
+
+async function validateObservabilityCollectorCluster() {
+  state.observabilityCollectorClusterValidation = await api("/api/observability/collector/cluster/validate", {
     method: "POST",
   });
   await refreshOps();
@@ -2808,6 +2817,7 @@ function renderObservability() {
   const collectorSignalPaths = collectorReadiness?.signal_paths || [];
   const collectorProductionOps = collectorReadiness?.production_ops || {};
   const collectorDeploymentReadiness = collectorReadiness?.deployment_readiness || {};
+  const collectorClusterRollout = collectorReadiness?.cluster_rollout || {};
   const remediationSupervision = collectorReadiness?.remediation_supervision || {};
   const remediationPlan = state.observabilityRemediationPlan;
   const remediationPlanActions = remediationPlan?.actions || [];
@@ -2878,6 +2888,12 @@ function renderObservability() {
             <dd>required ${collectorDeploymentReadiness.controller_required ? "yes" : "no"} · status ${escapeHtml(collectorDeploymentReadiness.latest_controller_status || "none")} · validated ${collectorDeploymentReadiness.latest_controller_validated ? "yes" : "no"}</dd>
             <dt>Deployment message</dt>
             <dd>${escapeHtml(collectorDeploymentReadiness.message || "collector deployment validation is not reported")}</dd>
+            <dt>Cluster rollout</dt>
+            <dd>${escapeHtml(collectorClusterRollout.status || "unknown")} · blocked ${collectorClusterRollout.production_blocked ? "yes" : "no"} · deployment ${collectorClusterRollout.deployment_validated ? "validated" : "not ready"} · controller ${collectorClusterRollout.controller_configured ? "configured" : "missing"} · latest ${escapeHtml(collectorClusterRollout.latest_rollout_at || "none")}</dd>
+            <dt>Cluster controller</dt>
+            <dd>required ${collectorClusterRollout.controller_required ? "yes" : "no"} · status ${escapeHtml(collectorClusterRollout.latest_controller_status || "none")} · validated ${collectorClusterRollout.latest_controller_validated ? "yes" : "no"}</dd>
+            <dt>Cluster message</dt>
+            <dd>${escapeHtml(collectorClusterRollout.message || "collector cluster rollout is not reported")}</dd>
             <dt>Remediation supervision</dt>
             <dd>${escapeHtml(remediationSupervision.status || "unknown")} · blocked ${remediationSupervision.production_blocked ? "yes" : "no"} · required ${remediationSupervision.required ? "yes" : "no"} · controller ${remediationSupervision.controller_configured ? "configured" : "missing"} · latest ${escapeHtml(remediationSupervision.latest_controller_run_at || "none")}</dd>
             <dt>Remediation message</dt>
@@ -3118,6 +3134,14 @@ function renderObservability() {
           ? `<div class="item">
               <strong>Collector Deployment Validation</strong>
               <pre>${escapeHtml(JSON.stringify(state.observabilityCollectorValidation, null, 2))}</pre>
+            </div>`
+          : ""
+      }
+      ${
+        state.observabilityCollectorClusterValidation
+          ? `<div class="item">
+              <strong>Collector Cluster Rollout Validation</strong>
+              <pre>${escapeHtml(JSON.stringify(state.observabilityCollectorClusterValidation, null, 2))}</pre>
             </div>`
           : ""
       }
