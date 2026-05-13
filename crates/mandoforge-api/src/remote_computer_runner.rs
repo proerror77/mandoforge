@@ -94,6 +94,10 @@ pub(crate) struct RemoteComputerRunnerDryRunResponse {
     pub(crate) would_delete_pod: bool,
     pub(crate) live_probe_attempted: bool,
     pub(crate) live_probe_status_code: Option<u16>,
+    pub(crate) kubernetes_api_path: Option<String>,
+    pub(crate) namespace: Option<String>,
+    pub(crate) pod_name: Option<String>,
+    pub(crate) pod_template_path: Option<String>,
     pub(crate) execution_enabled: bool,
     pub(crate) message: String,
     pub(crate) request: Value,
@@ -167,6 +171,10 @@ impl RemoteComputerRunner for ReservedRemoteComputerRunner {
             would_delete_pod: false,
             live_probe_attempted: false,
             live_probe_status_code: None,
+            kubernetes_api_path: None,
+            namespace: None,
+            pod_name: None,
+            pod_template_path: None,
             execution_enabled: false,
             message:
                 "Reserved runner dry-run only; Kubernetes Pod mutation and tool execution are disabled"
@@ -235,6 +243,23 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         let operation_is_create = operation == "create" || operation == "dry_run_create";
         let operation_is_delete = operation == "delete" || operation == "dry_run_delete";
         let operation_is_probe = operation == "probe" || operation == "dry_run_probe";
+        let pod_name = request
+            .pod_name
+            .clone()
+            .filter(|pod_name| !pod_name.trim().is_empty())
+            .unwrap_or_else(|| "agent-remote-computer-dry-run".to_string());
+        let kubernetes_api_path = if operation_is_create {
+            Some(format!("/api/v1/namespaces/{}/pods", config.namespace))
+        } else if operation_is_delete {
+            Some(format!(
+                "/api/v1/namespaces/{}/pods/{}",
+                config.namespace, pod_name
+            ))
+        } else if operation_is_probe {
+            Some("/version".to_string())
+        } else {
+            None
+        };
         let probe_result = if operation_is_probe && readiness.configured {
             Some(probe_kubernetes_version(config).await)
         } else {
@@ -265,6 +290,10 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             would_delete_pod: readiness.configured && operation_is_delete,
             live_probe_attempted: probe_result.is_some(),
             live_probe_status_code,
+            kubernetes_api_path,
+            namespace: Some(config.namespace.clone()),
+            pod_name: Some(pod_name),
+            pod_template_path: Some(config.pod_template_path.clone()),
             execution_enabled: false,
             message: if let Some(message) = probe_failed_message {
                 format!("Kubernetes API probe failed: {message}")
@@ -413,6 +442,14 @@ mod tests {
         assert_eq!(response.status, "dry_run_ready");
         assert!(response.would_create_pod);
         assert!(!response.would_delete_pod);
+        assert_eq!(
+            response.kubernetes_api_path.as_deref(),
+            Some("/api/v1/namespaces/agent-os/pods")
+        );
+        assert_eq!(
+            response.pod_name.as_deref(),
+            Some("agent-remote-computer-test")
+        );
         assert!(!response.execution_enabled);
     }
 
@@ -491,6 +528,7 @@ mod tests {
         assert!(response.configured);
         assert!(response.live_probe_attempted);
         assert_eq!(response.live_probe_status_code, Some(200));
+        assert_eq!(response.kubernetes_api_path.as_deref(), Some("/version"));
         assert!(!response.would_create_pod);
         assert!(!response.would_delete_pod);
         assert!(!response.execution_enabled);
