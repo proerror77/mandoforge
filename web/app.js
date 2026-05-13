@@ -49,6 +49,7 @@ const state = {
   remoteComputerLeases: [],
   remoteComputerAttachments: [],
   remoteComputerStateLocks: [],
+  remoteComputerSidecarHeartbeats: [],
   remoteComputerArtifactDiscovery: null,
   usageRollups: [],
   usageTrend: null,
@@ -1417,6 +1418,7 @@ async function refreshOps() {
     remoteComputerAttachments,
     remoteComputerJobAssignments,
     remoteComputerStateLocks,
+    remoteComputerSidecarHeartbeats,
     approvalGroups,
     approvalEscalationRules,
     approvalNotificationChannelPolicies,
@@ -1458,6 +1460,7 @@ async function refreshOps() {
       api("/api/remote-computer-attachments"),
       api("/api/remote-computer-job-assignments"),
       api("/api/remote-computers/state-locks"),
+      api("/api/remote-computers/sidecars/heartbeats"),
       api("/api/approval-groups"),
       api("/api/approval-escalation-rules"),
       api("/api/approvals/notification-channel-policies"),
@@ -1498,6 +1501,7 @@ async function refreshOps() {
   state.remoteComputerAttachments = remoteComputerAttachments;
   state.remoteComputerJobAssignments = remoteComputerJobAssignments;
   state.remoteComputerStateLocks = remoteComputerStateLocks;
+  state.remoteComputerSidecarHeartbeats = remoteComputerSidecarHeartbeats;
   state.approvalGroups = approvalGroups;
   state.approvalEscalationRules = approvalEscalationRules;
   state.approvalNotificationChannelPolicies = approvalNotificationChannelPolicies;
@@ -1976,6 +1980,7 @@ function renderRemoteComputerReadiness() {
   const attachmentRows = state.remoteComputerAttachments || [];
   const assignmentRows = state.remoteComputerJobAssignments || [];
   const stateLockRows = state.remoteComputerStateLocks || [];
+  const sidecarHeartbeatRows = state.remoteComputerSidecarHeartbeats || [];
   const artifactDiscovery = state.remoteComputerArtifactDiscovery;
   remoteComputerReadinessRoot.innerHTML = `
     <div class="metrics compact-metrics">
@@ -2112,6 +2117,21 @@ function renderRemoteComputerReadiness() {
             ? `<div class="muted">Discovery error: ${escapeHtml(artifactDiscovery.error)}</div>`
             : `<div class="muted">Last discovery: ${formatInteger(artifactDiscovery.artifact_count || 0)} artifacts from ${escapeHtml(artifactDiscovery.remote_computer_id || "unknown")}</div>`
           : `<div class="muted">No remote artifact discovery run in this console session</div>`
+      }
+    </div>
+    <div class="item">
+      <strong>REMOTE COMPUTER SIDECAR HEARTBEATS</strong>
+      <div class="muted">Artifact discovery sidecars post heartbeat events so operators can distinguish manifest presence from live sidecar activity.</div>
+      ${
+        sidecarHeartbeatRows.length
+          ? sidecarHeartbeatRows
+              .slice(0, 10)
+              .map(
+                (heartbeat) =>
+                  `<div class="muted">${escapeHtml(heartbeat.sidecar_name)} · ${escapeHtml(heartbeat.status)} · remote ${escapeHtml(heartbeat.remote_computer_id)} · observed ${escapeHtml(heartbeat.observed_at)}</div>`,
+              )
+              .join("")
+          : `<div class="muted">No remote computer sidecar heartbeats</div>`
       }
     </div>
     <div class="item">

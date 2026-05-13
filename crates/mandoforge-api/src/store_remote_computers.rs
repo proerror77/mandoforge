@@ -7,10 +7,11 @@ use uuid::Uuid;
 use crate::store_backend::StoreBackend;
 use crate::{
     AppError, AppState, CreateRemoteComputer, CreateRemoteComputerAttachment,
-    CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, CreateRemoteComputerStateLock,
+    CreateRemoteComputerJobAssignment, CreateRemoteComputerLease,
+    CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
     ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerAttachment,
-    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerStateLock,
-    UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
+    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerSidecarHeartbeat,
+    RemoteComputerStateLock, UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
 
 impl AppState {
@@ -705,6 +706,118 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn list_remote_computer_sidecar_heartbeats(
+        &self,
+    ) -> Result<Vec<RemoteComputerSidecarHeartbeat>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut heartbeats: Vec<_> = inner
+                    .read()
+                    .await
+                    .remote_computer_sidecar_heartbeats
+                    .values()
+                    .cloned()
+                    .collect();
+                heartbeats.sort_by_key(|heartbeat| heartbeat.observed_at);
+                heartbeats.reverse();
+                Ok(heartbeats)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, remote_computer_id, session_id, assignment_id, sidecar_name, status, observed_at, metadata, created_at
+                     FROM remote_computer_sidecar_heartbeats
+                     WHERE tenant_id = $1
+                     ORDER BY observed_at DESC
+                     LIMIT 250",
+                )
+                .bind(self.tenant_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(remote_computer_sidecar_heartbeat_from_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn record_remote_computer_sidecar_heartbeat(
+        &self,
+        input: CreateRemoteComputerSidecarHeartbeat,
+    ) -> Result<RemoteComputerSidecarHeartbeat, AppError> {
+        let now = Utc::now();
+        let heartbeat = RemoteComputerSidecarHeartbeat {
+            id: Uuid::new_v4(),
+            remote_computer_id: input.remote_computer_id,
+            session_id: input.session_id,
+            assignment_id: input.assignment_id,
+            sidecar_name: input
+                .sidecar_name
+                .unwrap_or_else(|| "artifact-discovery".to_string())
+                .trim()
+                .to_string(),
+            status: input
+                .status
+                .unwrap_or_else(|| "ok".to_string())
+                .trim()
+                .to_string(),
+            observed_at: now,
+            metadata: input.metadata.unwrap_or_else(|| json!({})),
+            created_at: now,
+        };
+        if heartbeat.sidecar_name.is_empty() {
+            return Err(AppError::bad_request("sidecar_name is required"));
+        }
+        if heartbeat.status.is_empty() {
+            return Err(AppError::bad_request(
+                "sidecar heartbeat status is required",
+            ));
+        }
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                if !store
+                    .remote_computers
+                    .contains_key(&heartbeat.remote_computer_id)
+                {
+                    return Err(AppError::not_found("Remote computer not found"));
+                }
+                store
+                    .remote_computer_sidecar_heartbeats
+                    .insert(heartbeat.id, heartbeat.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                let exists: Option<(Uuid,)> = sqlx::query_as(
+                    "SELECT id FROM remote_computers WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(heartbeat.remote_computer_id)
+                .fetch_optional(pool)
+                .await?;
+                if exists.is_none() {
+                    return Err(AppError::not_found("Remote computer not found"));
+                }
+                sqlx::query(
+                    "INSERT INTO remote_computer_sidecar_heartbeats
+                        (id, tenant_id, remote_computer_id, session_id, assignment_id, sidecar_name, status, observed_at, metadata, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                )
+                .bind(heartbeat.id)
+                .bind(self.tenant_id)
+                .bind(heartbeat.remote_computer_id)
+                .bind(heartbeat.session_id)
+                .bind(heartbeat.assignment_id)
+                .bind(&heartbeat.sidecar_name)
+                .bind(&heartbeat.status)
+                .bind(heartbeat.observed_at)
+                .bind(&heartbeat.metadata)
+                .bind(heartbeat.created_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(heartbeat)
+    }
+
     pub(crate) async fn list_stale_remote_computer_attachments(
         &self,
     ) -> Result<Vec<RemoteComputerAttachment>, AppError> {
@@ -1035,6 +1148,22 @@ fn remote_computer_state_lock_from_row(row: PgRow) -> Result<RemoteComputerState
         metadata: row.try_get("metadata")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn remote_computer_sidecar_heartbeat_from_row(
+    row: PgRow,
+) -> Result<RemoteComputerSidecarHeartbeat, AppError> {
+    Ok(RemoteComputerSidecarHeartbeat {
+        id: row.try_get("id")?,
+        remote_computer_id: row.try_get("remote_computer_id")?,
+        session_id: row.try_get("session_id")?,
+        assignment_id: row.try_get("assignment_id")?,
+        sidecar_name: row.try_get("sidecar_name")?,
+        status: row.try_get("status")?,
+        observed_at: row.try_get("observed_at")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 

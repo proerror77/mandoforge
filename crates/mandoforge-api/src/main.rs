@@ -1477,6 +1477,19 @@ struct RemoteComputerStateLock {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerSidecarHeartbeat {
+    id: Uuid,
+    remote_computer_id: Uuid,
+    session_id: Option<Uuid>,
+    assignment_id: Option<Uuid>,
+    sidecar_name: String,
+    status: String,
+    observed_at: DateTime<Utc>,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct CreateRemoteComputer {
     name: String,
@@ -1531,6 +1544,16 @@ struct CreateRemoteComputerStateLock {
 #[derive(Debug, Clone, Deserialize)]
 struct ReleaseRemoteComputerStateLock {
     reason: Option<String>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateRemoteComputerSidecarHeartbeat {
+    remote_computer_id: Uuid,
+    session_id: Option<Uuid>,
+    assignment_id: Option<Uuid>,
+    sidecar_name: Option<String>,
+    status: Option<String>,
     metadata: Option<Value>,
 }
 
@@ -3235,6 +3258,11 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/state-locks/{id}/release",
             post(release_remote_computer_state_lock),
+        )
+        .route(
+            "/api/remote-computers/sidecars/heartbeats",
+            get(list_remote_computer_sidecar_heartbeats)
+                .post(record_remote_computer_sidecar_heartbeat),
         )
         .route(
             "/api/remote-computers",
@@ -5942,6 +5970,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "remote_computer_session_attachments",
         "remote_computer_job_assignments",
         "remote_computer_state_locks",
+        "remote_computer_sidecar_heartbeats",
         "mcp_servers",
         "eval_datasets",
         "eval_cases",
@@ -17375,6 +17404,41 @@ async fn release_remote_computer_state_lock(
     Ok(Json(lock))
 }
 
+async fn list_remote_computer_sidecar_heartbeats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputerSidecarHeartbeat>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_sidecar_heartbeats",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computer_sidecar_heartbeats().await?))
+}
+
+async fn record_remote_computer_sidecar_heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputerSidecarHeartbeat>,
+) -> Result<Json<RemoteComputerSidecarHeartbeat>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ExecutionJobsRun,
+        "remote_computer_sidecar_heartbeat",
+        Some(input.remote_computer_id),
+    )
+    .await?;
+    let heartbeat = state
+        .record_remote_computer_sidecar_heartbeat(input)
+        .await?;
+    record_remote_computer_sidecar_heartbeat_event(&state, &heartbeat).await?;
+    Ok(Json(heartbeat))
+}
+
 async fn list_stale_remote_computer_attachments(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -17585,6 +17649,45 @@ async fn record_remote_computer_state_lock_event(
     Ok(())
 }
 
+async fn record_remote_computer_sidecar_heartbeat_event(
+    state: &AppState,
+    heartbeat: &RemoteComputerSidecarHeartbeat,
+) -> Result<(), AppError> {
+    let details = json!({
+        "heartbeat_id": heartbeat.id,
+        "remote_computer_id": heartbeat.remote_computer_id,
+        "session_id": heartbeat.session_id,
+        "assignment_id": heartbeat.assignment_id,
+        "sidecar_name": heartbeat.sidecar_name,
+        "status": heartbeat.status,
+        "observed_at": heartbeat.observed_at,
+        "metadata": heartbeat.metadata,
+    });
+    if let Some(session_id) = heartbeat.session_id {
+        state
+            .append_event(
+                "worker",
+                Some(heartbeat.id),
+                session_id,
+                "remote_computer.sidecar_heartbeat",
+                details.clone(),
+            )
+            .await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            heartbeat.session_id,
+            "worker",
+            Some(heartbeat.id),
+            "remote_computer.sidecar_heartbeat",
+            "remote_computer_sidecar_heartbeat",
+            Some(heartbeat.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
 async fn build_remote_computer_readiness(
     state: &AppState,
 ) -> Result<RemoteComputerReadinessReport, AppError> {
@@ -17730,6 +17833,7 @@ async fn build_remote_computer_readiness(
         "remote_computer.execution_handoff_canceled".to_string(),
         "remote_computer.state_lock_acquired".to_string(),
         "remote_computer.state_lock_released".to_string(),
+        "remote_computer.sidecar_heartbeat".to_string(),
         "remote_computer.execution_transport_planned".to_string(),
         "remote_computer.execution_transport_completed".to_string(),
         "remote_computer.runner_dry_run".to_string(),
@@ -20210,6 +20314,7 @@ not json
         assert!(names.contains(&"0023_approval_notification_retries.sql"));
         assert!(names.contains(&"0024_tenant_rls_policies.sql"));
         assert!(names.contains(&"0025_remote_computer_state_locks.sql"));
+        assert!(names.contains(&"0026_remote_computer_sidecar_heartbeats.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -20219,9 +20324,10 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
-            include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql")
+            include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
+            include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
@@ -20799,6 +20905,122 @@ not json
         assert!(events.iter().any(|event| {
             event.event_type == "remote_computer.state_lock_released"
                 && event.payload["lock_id"] == json!(lock.id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn remote_computer_sidecar_heartbeats_are_persisted_and_audited() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "sidecar heartbeat"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "sidecar-heartbeat-remote-computer",
+                        "profile": "workspace-write"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let heartbeat: RemoteComputerSidecarHeartbeat = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/sidecars/heartbeats")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "remote_computer_id": computer.id,
+                        "session_id": session.id,
+                        "sidecar_name": "artifact-discovery",
+                        "status": "enabled",
+                        "metadata": {"artifact_dir": "/workspace/artifacts"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(heartbeat.remote_computer_id, computer.id);
+        assert_eq!(heartbeat.sidecar_name, "artifact-discovery");
+        assert_eq!(heartbeat.status, "enabled");
+
+        let heartbeats: Vec<RemoteComputerSidecarHeartbeat> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computers/sidecars/heartbeats")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            heartbeats
+                .iter()
+                .any(|existing| existing.id == heartbeat.id)
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "remote_computer.sidecar_heartbeat"
+                && event.payload["heartbeat_id"] == json!(heartbeat.id)
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "remote_computer.sidecar_heartbeat"
+                && log.resource_id == Some(heartbeat.id)
         }));
     }
 
