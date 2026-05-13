@@ -3680,6 +3680,8 @@ function renderProviders() {
         <dl>
           <dt>Latest run</dt>
           <dd>${renderProviderPolicyGateRun(policyGateRuns.latest_run)}</dd>
+          <dt>Production enforcement</dt>
+          <dd>${escapeHtml(policyGateRuns.production_enforcement?.status || "unknown")} · blocked ${policyGateRuns.production_enforcement?.production_blocked ? "yes" : "no"} · ${escapeHtml(policyGateRuns.production_enforcement?.message || "not reported")}</dd>
         </dl>
         ${
           policyGateRunAttention.length

@@ -60,7 +60,7 @@ wait_for_static_ui() {
     hasCostAlertRoutes: text.includes('Create Alert Route') && Array.from(document.querySelectorAll('#cost-alert-route-form input')).some((input) => input.placeholder.includes('SMTP recipient email')) && text.includes('No cost alert routes'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
     hasProviderApprovalWorkflow: text.includes('Request Provider Approval') && text.includes('Approver subject'),
-    hasProviderGateRuns: text.includes('Run Provider Gate') && text.includes('PROVIDER GATE RUNS') && text.includes('No provider policy gate runs'),
+    hasProviderGateRuns: text.includes('Run Provider Gate') && text.includes('PROVIDER GATE RUNS') && text.includes('PRODUCTION ENFORCEMENT'),
     hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy') && text.includes('POLICY REVISIONS') && text.includes('Create Policy Revision') && text.includes('Gate cases JSON') && text.includes('Rollout %') && text.includes('Activate after') && text.includes('Activate before'),
     hasPolicyRolloutCancel: text.includes('Cancel Staged Rollout') && text.includes('Run Due Policy Rollouts') && text.includes('Rollback Active Policy') && text.includes('RUNTIME ROLLOUT'),
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),

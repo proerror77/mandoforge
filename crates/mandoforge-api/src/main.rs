@@ -2156,7 +2156,18 @@ struct ProviderPolicyGateRunSummary {
     warning_run_count: usize,
     latest_run: Option<ProviderPolicyGateRun>,
     recent_runs: Vec<ProviderPolicyGateRun>,
+    production_enforcement: ProviderPolicyGateEnforcement,
     attention_items: Vec<ProviderPolicyGateRunAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderPolicyGateEnforcement {
+    status: String,
+    production_blocked: bool,
+    required_fresh_hours: i64,
+    latest_run_status: Option<String>,
+    latest_run_age_hours: Option<i64>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7089,6 +7100,19 @@ fn build_provider_policy_gate_run_summary(
         }
         _ => {}
     }
+    let production_enforcement =
+        provider_policy_gate_production_enforcement(latest_run.as_ref(), generated_at);
+    if production_enforcement.production_blocked {
+        attention_items.push(ProviderPolicyGateRunAttentionItem {
+            kind: "production_provider_gate_blocked".to_string(),
+            severity: if production_enforcement.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: production_enforcement.message.clone(),
+        });
+    }
     recent_runs.truncate(10);
     ProviderPolicyGateRunSummary {
         generated_at,
@@ -7098,7 +7122,53 @@ fn build_provider_policy_gate_run_summary(
         warning_run_count,
         latest_run,
         recent_runs,
+        production_enforcement,
         attention_items,
+    }
+}
+
+fn provider_policy_gate_production_enforcement(
+    latest_run: Option<&ProviderPolicyGateRun>,
+    generated_at: DateTime<Utc>,
+) -> ProviderPolicyGateEnforcement {
+    let required_fresh_hours = 24;
+    let latest_run_age_hours = latest_run.map(|run| (generated_at - run.ran_at).num_hours());
+    let latest_run_status = latest_run.map(|run| run.status.clone());
+    let (status, production_blocked, message) = match latest_run {
+        None => (
+            "blocked",
+            true,
+            "production provider rollout is blocked until provider policy gate runs".to_string(),
+        ),
+        Some(run) if run.status == "failed" => (
+            "blocked",
+            true,
+            "production provider rollout is blocked by a failed provider policy gate".to_string(),
+        ),
+        Some(run) if run.status == "warning" => (
+            "attention",
+            true,
+            "production provider rollout requires manual approval because the latest provider policy gate has warnings".to_string(),
+        ),
+        Some(run) if (generated_at - run.ran_at).num_hours() >= required_fresh_hours => (
+            "stale",
+            true,
+            "production provider rollout is blocked until provider policy gate is refreshed"
+                .to_string(),
+        ),
+        Some(_) => (
+            "ready",
+            false,
+            "latest provider policy gate is fresh and passed".to_string(),
+        ),
+    };
+    ProviderPolicyGateEnforcement {
+        status: status.to_string(),
+        production_blocked,
+        required_fresh_hours,
+        latest_run_status,
+        latest_run_age_hours,
+        message,
     }
 }
 
@@ -23398,13 +23468,25 @@ not json
         .await;
         assert_eq!(gate_runs.run_count, 2);
         assert_eq!(gate_runs.failed_run_count, 2);
-        assert_eq!(gate_runs.latest_run.unwrap().status, "failed");
+        assert_eq!(gate_runs.latest_run.as_ref().unwrap().status, "failed");
+        assert_eq!(gate_runs.production_enforcement.status, "blocked");
+        assert!(gate_runs.production_enforcement.production_blocked);
+        assert_eq!(
+            gate_runs
+                .production_enforcement
+                .latest_run_status
+                .as_deref(),
+            Some("failed")
+        );
         assert!(
             gate_runs
                 .attention_items
                 .iter()
                 .any(|item| { item.kind == "latest_gate_failed" && item.severity == "critical" })
         );
+        assert!(gate_runs.attention_items.iter().any(|item| {
+            item.kind == "production_provider_gate_blocked" && item.severity == "critical"
+        }));
     }
 
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {
