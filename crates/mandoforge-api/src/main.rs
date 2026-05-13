@@ -2855,6 +2855,7 @@ struct VaultReadinessReport {
     secret_provider: SecretProviderHealth,
     kms: VaultKmsReadiness,
     production_rotation: VaultProductionRotationReadiness,
+    production_recovery: VaultKmsRecoveryReadiness,
     secret_record_count: usize,
     active_secret_record_count: usize,
     provider_ref_count: usize,
@@ -2877,6 +2878,21 @@ struct VaultProductionRotationReadiness {
     latest_rotation_validated: bool,
     latest_rotation_run_at: Option<DateTime<Utc>>,
     latest_rotation_run_status: Option<String>,
+    blocking_reasons: Vec<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultKmsRecoveryReadiness {
+    status: String,
+    production_blocked: bool,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_recovery_at: Option<DateTime<Utc>>,
+    latest_recovery_status: Option<String>,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
+    latest_rotation_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
 }
@@ -2908,6 +2924,19 @@ struct VaultKmsRotationRun {
     blocked_count: usize,
     actions: Vec<String>,
     external_execution: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultKmsRecoveryValidationRun {
+    status: String,
+    checked_at: DateTime<Utc>,
+    kms_provider: String,
+    secret_record_count: usize,
+    latest_rotation_validated: bool,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
+    issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3796,6 +3825,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/vault/health", get(get_vault_health))
         .route("/api/vault/readiness", get(get_vault_readiness))
         .route("/api/vault/kms/rotation/run", post(run_vault_kms_rotation))
+        .route(
+            "/api/vault/kms/recovery/validate",
+            post(validate_vault_kms_recovery),
+        )
         .route(
             "/api/vault/secrets",
             get(list_secret_records).post(create_secret_record),
@@ -11423,6 +11456,118 @@ async fn run_vault_kms_rotation(
     Ok(Json(execute_vault_kms_rotation(&state).await?))
 }
 
+async fn validate_vault_kms_recovery(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<VaultKmsRecoveryValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "vault".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let checked_at = Utc::now();
+    let lookup = |key: &str| std::env::var(key).ok();
+    let kms = kms_readiness_from_lookup(&lookup);
+    let secret_records = state.list_secret_records().await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let controller_required = vault_kms_recovery_controller_required(&lookup);
+    let controller_configured = vault_kms_recovery_controller_configured(&lookup);
+    let readiness = build_vault_kms_recovery_readiness(
+        &kms,
+        &audit_logs,
+        checked_at,
+        controller_required,
+        controller_configured,
+    );
+    let mut issues = readiness.blocking_reasons.clone();
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "vault_kms_recovery_not_ready"
+        } else {
+            "controller_not_configured"
+        }
+    });
+    if controller_configured {
+        match execute_vault_kms_recovery_controller(
+            &lookup,
+            &principal.subject_id,
+            checked_at,
+            &kms,
+            &secret_records,
+            &readiness,
+        )
+        .await
+        {
+            Ok(execution) => {
+                if execution.get("status").and_then(Value::as_str) != Some("validated") {
+                    issues.push("vault KMS recovery controller did not validate".to_string());
+                }
+                controller_execution = execution;
+            }
+            Err(error) => {
+                issues.push("vault KMS recovery controller failed".to_string());
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    }
+    if controller_required
+        && controller_execution.get("status").and_then(Value::as_str) != Some("validated")
+    {
+        issues
+            .push("vault KMS recovery controller evidence is missing or not validated".to_string());
+    }
+    dedupe_strings(&mut issues);
+    let status = if issues.is_empty() {
+        "validated"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "vault.kms_recovery_validation",
+            "vault",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "kms_provider": kms.provider,
+                "secret_record_count": secret_records.len(),
+                "latest_rotation_validated": readiness.latest_rotation_validated,
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+                "issues": issues,
+                "checked_at": checked_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(VaultKmsRecoveryValidationRun {
+        status,
+        checked_at,
+        kms_provider: kms.provider,
+        secret_record_count: secret_records.len(),
+        latest_rotation_validated: readiness.latest_rotation_validated,
+        controller_required,
+        controller_configured,
+        controller_execution,
+        issues,
+    }))
+}
+
 async fn list_secret_records(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -14059,6 +14204,13 @@ where
         audit_logs,
         generated_at,
     );
+    let production_recovery = build_vault_kms_recovery_readiness(
+        &kms,
+        audit_logs,
+        generated_at,
+        vault_kms_recovery_controller_required(&lookup),
+        vault_kms_recovery_controller_configured(&lookup),
+    );
     if production_rotation.production_blocked {
         attention_items.push(VaultReadinessAttentionItem {
             resource_type: "vault".to_string(),
@@ -14067,6 +14219,16 @@ where
             kind: "production_rotation_blocked".to_string(),
             severity: "critical".to_string(),
             message: production_rotation.message.clone(),
+        });
+    }
+    if production_recovery.production_blocked {
+        attention_items.push(VaultReadinessAttentionItem {
+            resource_type: "vault".to_string(),
+            resource_id: None,
+            resource_name: "kms_recovery".to_string(),
+            kind: "production_recovery_blocked".to_string(),
+            severity: "critical".to_string(),
+            message: production_recovery.message.clone(),
         });
     }
 
@@ -14093,6 +14255,7 @@ where
         secret_provider,
         kms,
         production_rotation,
+        production_recovery,
         secret_record_count: secret_records.len(),
         active_secret_record_count: secret_records
             .iter()
@@ -14181,6 +14344,200 @@ fn build_vault_production_rotation_readiness(
         blocking_reasons,
         message,
     }
+}
+
+fn build_vault_kms_recovery_readiness(
+    kms: &VaultKmsReadiness,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
+) -> VaultKmsRecoveryReadiness {
+    let latest_rotation_run = audit_logs
+        .iter()
+        .filter(|log| log.action == "vault.kms_rotation_run")
+        .max_by_key(|log| log.created_at);
+    let latest_rotation_validated = latest_rotation_run.is_some_and(|log| {
+        log.details.get("status").and_then(Value::as_str) == Some("validated")
+            && (generated_at - log.created_at).num_hours() < 30
+    });
+    let latest_recovery = audit_logs
+        .iter()
+        .filter(|log| log.action == "vault.kms_recovery_validation")
+        .max_by_key(|log| log.created_at);
+    let latest_recovery_status = latest_recovery
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_status = latest_recovery
+        .and_then(|log| log.details.get("controller_execution"))
+        .and_then(|execution| execution.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
+    let mut blocking_reasons = Vec::new();
+    if kms.status != "ready" || !kms.configured {
+        blocking_reasons
+            .push("external KMS/HSM readiness is not configured and validated".to_string());
+    }
+    if !latest_rotation_validated {
+        blocking_reasons.push(
+            "validated KMS rotation evidence is required before recovery validation".to_string(),
+        );
+    }
+    if latest_recovery_status.as_deref() != Some("validated") {
+        blocking_reasons.push("no validated KMS recovery drill evidence exists".to_string());
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons
+            .push("vault KMS recovery controller is required but not configured".to_string());
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons
+            .push("vault KMS recovery controller evidence is missing or not validated".to_string());
+    }
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Vault KMS recovery readiness is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Vault KMS recovery has recent rotation evidence and validated recovery-controller drill evidence".to_string()
+    };
+    VaultKmsRecoveryReadiness {
+        status,
+        production_blocked,
+        controller_required,
+        controller_configured,
+        latest_recovery_at: latest_recovery.map(|log| log.created_at),
+        latest_recovery_status,
+        latest_controller_status,
+        latest_controller_validated,
+        latest_rotation_validated,
+        blocking_reasons,
+        message,
+    }
+}
+
+fn vault_kms_recovery_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_KMS_RECOVERY_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn vault_kms_recovery_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_KMS_RECOVERY_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_vault_kms_recovery_controller<F>(
+    lookup: &F,
+    subject: &str,
+    checked_at: DateTime<Utc>,
+    kms: &VaultKmsReadiness,
+    secret_records: &[SecretRecord],
+    readiness: &VaultKmsRecoveryReadiness,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_KMS_RECOVERY_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_KMS_RECOVERY_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_KMS_RECOVERY_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_KMS_RECOVERY_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let secret_refs = secret_records
+        .iter()
+        .map(|record| {
+            json!({
+                "id": record.id,
+                "name": record.name,
+                "scope_type": record.scope_type,
+                "scope_id": record.scope_id,
+                "path": record.path,
+                "key": record.key,
+                "status": record.status,
+                "version": record.version,
+                "updated_at": record.updated_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = json!({
+        "type": "mandoforge.kms_recovery_validation",
+        "subject": subject,
+        "checked_at": checked_at,
+        "kms": {
+            "provider": kms.provider,
+            "status": kms.status,
+            "key_id_configured": kms.key_id_configured,
+            "rotation_policy_configured": kms.rotation_policy_configured,
+            "endpoint_configured": kms.endpoint_configured,
+            "validation_mode": kms.validation_mode,
+        },
+        "readiness": {
+            "status": readiness.status,
+            "production_blocked": readiness.production_blocked,
+            "latest_rotation_validated": readiness.latest_rotation_validated,
+            "blocking_reasons": readiness.blocking_reasons,
+        },
+        "secret_refs": secret_refs,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "vault KMS recovery controller failed with status {http_status}"
+        )));
+    }
+    let provider_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": provider_status,
+        "recovery_id": body.get("recovery_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 fn kms_readiness_from_lookup<F>(lookup: &F) -> VaultKmsReadiness
@@ -36141,6 +36498,30 @@ not json
         }))
     }
 
+    async fn mock_kms_recovery_endpoint(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-kms-recovery-token")
+        );
+        assert_eq!(payload["type"], "mandoforge.kms_recovery_validation");
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "recovery_id": "kms-recovery-1",
+            "message": "KMS recovery drill validated",
+            "steps": [
+                {"name": "restore-key-material", "status": "validated"},
+                {"name": "verify-secret-consumers", "status": "passed"}
+            ]
+        }))
+    }
+
     #[tokio::test]
     async fn provider_health_resolves_vault_api_key_ref_for_external_probe() {
         let vault_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -36505,6 +36886,132 @@ not json
 
         vault_server.abort();
         kms_server.abort();
+    }
+
+    #[tokio::test]
+    async fn vault_kms_recovery_controller_executes_external_boundary() {
+        let generated_at = Utc::now();
+        let kms = VaultKmsReadiness {
+            provider: "mock-kms".to_string(),
+            status: "ready".to_string(),
+            configured: true,
+            key_id_configured: true,
+            rotation_policy_configured: true,
+            endpoint_configured: true,
+            validation_mode: "health-check".to_string(),
+            issues: Vec::new(),
+        };
+        let secret_record = SecretRecord {
+            id: Uuid::new_v4(),
+            name: "kms-recovery-provider".to_string(),
+            path: "providers/openai".to_string(),
+            key: "api_key".to_string(),
+            scope_type: "tenant".to_string(),
+            scope_id: None,
+            status: "active".to_string(),
+            version: 2,
+            created_at: generated_at - chrono::Duration::days(1),
+            updated_at: generated_at - chrono::Duration::minutes(10),
+        };
+        let rotation_audit = new_audit_log(
+            None,
+            "system",
+            None,
+            "vault.kms_rotation_run",
+            "vault",
+            None,
+            json!({
+                "status": "validated",
+                "kms_provider": "mock-kms",
+                "external_execution": {"status": "validated"}
+            }),
+        );
+        let readiness = build_vault_kms_recovery_readiness(
+            &kms,
+            std::slice::from_ref(&rotation_audit),
+            generated_at,
+            false,
+            true,
+        );
+        assert_eq!(readiness.status, "blocked");
+        assert!(readiness.latest_rotation_validated);
+
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("kms recovery listener");
+        let recovery_addr = listener.local_addr().expect("kms recovery addr");
+        let recovery = Router::new()
+            .route("/recover", post(mock_kms_recovery_endpoint))
+            .with_state(payloads.clone());
+        let recovery_server = tokio::spawn(async move {
+            axum::serve(listener, recovery)
+                .await
+                .expect("mock kms recovery");
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_KMS_RECOVERY_CONTROLLER_URL" => {
+                Some(format!("http://{recovery_addr}/recover"))
+            }
+            "MANDOFORGE_KMS_RECOVERY_CONTROLLER_TOKEN" => {
+                Some("test-kms-recovery-token".to_string())
+            }
+            _ => None,
+        };
+
+        let execution = execute_vault_kms_recovery_controller(
+            &lookup,
+            "admin-1",
+            generated_at,
+            &kms,
+            &[secret_record.clone()],
+            &readiness,
+        )
+        .await
+        .expect("kms recovery controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(execution["recovery_id"], "kms-recovery-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.kms_recovery_validation");
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["kms"]["provider"], "mock-kms");
+        assert_eq!(
+            payloads[0]["secret_refs"][0]["id"],
+            secret_record.id.to_string()
+        );
+        assert!(payloads[0]["secret_value"].is_null());
+
+        let ready = build_vault_kms_recovery_readiness(
+            &kms,
+            &[
+                rotation_audit,
+                new_audit_log(
+                    None,
+                    "user",
+                    None,
+                    "vault.kms_recovery_validation",
+                    "vault",
+                    None,
+                    json!({
+                        "status": "validated",
+                        "controller_execution": {
+                            "attempted": true,
+                            "status": "validated",
+                            "recovery_id": "kms-recovery-1"
+                        }
+                    }),
+                ),
+            ],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(ready.latest_controller_validated);
+
+        recovery_server.abort();
     }
 
     #[tokio::test]

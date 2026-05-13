@@ -15,6 +15,7 @@ const state = {
   vaultHealth: null,
   vaultReadiness: null,
   vaultKmsRotationRun: null,
+  vaultKmsRecoveryValidation: null,
   secretRecords: [],
   policy: null,
   policyDecision: null,
@@ -135,6 +136,7 @@ const vaultReadinessRoot = document.querySelector("#vault-readiness");
 const secretRecordRoot = document.querySelector("#secret-records");
 const checkVaultHealthButton = document.querySelector("#check-vault-health");
 const runVaultKmsRotationButton = document.querySelector("#run-vault-kms-rotation");
+const validateVaultKmsRecoveryButton = document.querySelector("#validate-vault-kms-recovery");
 const policyRoot = document.querySelector("#policy-summary");
 const policyForm = document.querySelector("#policy-simulate-form");
 const policyTestForm = document.querySelector("#policy-test-form");
@@ -271,6 +273,7 @@ secretForm.addEventListener("submit", createSecretRecord);
 evalJudgeProfileForm.addEventListener("submit", createEvalJudgeProfile);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
 runVaultKmsRotationButton.addEventListener("click", runVaultKmsRotation);
+validateVaultKmsRecoveryButton.addEventListener("click", validateVaultKmsRecovery);
 policyForm.addEventListener("submit", simulatePolicy);
 policyTestForm.addEventListener("submit", testPolicy);
 policyRevisionForm.addEventListener("submit", createPolicyRevision);
@@ -4339,6 +4342,13 @@ async function runVaultKmsRotation() {
   await refreshOps();
 }
 
+async function validateVaultKmsRecovery() {
+  state.vaultKmsRecoveryValidation = await api("/api/vault/kms/recovery/validate", {
+    method: "POST",
+  });
+  await refreshOps();
+}
+
 function renderVaultHealth() {
   vaultHealthRoot.innerHTML = state.vaultHealth
     ? `<div class="item">
@@ -4358,7 +4368,9 @@ function renderVaultReadiness() {
   const attentionItems = readiness.attention_items || [];
   const checks = readiness.checks || [];
   const productionRotation = readiness.production_rotation || {};
+  const productionRecovery = readiness.production_recovery || {};
   const kmsRotationRun = state.vaultKmsRotationRun;
+  const kmsRecoveryValidation = state.vaultKmsRecoveryValidation;
   vaultReadinessRoot.innerHTML = `
     <div class="metric-grid">
       <div class="metric"><span>Readiness</span><strong>${escapeHtml(readiness.status)}</strong></div>
@@ -4368,6 +4380,7 @@ function renderVaultReadiness() {
       <div class="metric"><span>Stale Rotations</span><strong>${formatInteger(readiness.stale_rotation_count)}</strong></div>
       <div class="metric"><span>KMS</span><strong>${escapeHtml(readiness.kms?.status || "unknown")}</strong></div>
       <div class="metric"><span>Prod Rotation</span><strong>${escapeHtml(productionRotation.status || "unknown")}</strong></div>
+      <div class="metric"><span>KMS Recovery</span><strong>${escapeHtml(productionRecovery.status || "unknown")}</strong></div>
     </div>
     <div class="item">
       <strong>Secret provider: ${escapeHtml(readiness.secret_provider?.status || "unknown")}</strong>
@@ -4387,6 +4400,17 @@ function renderVaultReadiness() {
              <div class="muted">External execution: ${escapeHtml(kmsRotationRun.external_execution?.status || "unknown")} · attempted ${escapeHtml(kmsRotationRun.external_execution?.attempted ? "yes" : "no")} · HTTP ${escapeHtml(kmsRotationRun.external_execution?.http_status || "n/a")}</div>
              <pre>${escapeHtml(JSON.stringify(kmsRotationRun, null, 2))}</pre>`
           : `<div class="muted">No KMS rotation gate run in this console session</div>`
+      }
+    </div>
+    <div class="item">
+      <strong>KMS RECOVERY GATE</strong>
+      <div class="muted">${escapeHtml(productionRecovery.message || "Vault KMS recovery gate is not reported")}</div>
+      <div class="muted">controller required ${productionRecovery.controller_required ? "yes" : "no"} · configured ${productionRecovery.controller_configured ? "yes" : "no"} · latest ${escapeHtml(productionRecovery.latest_controller_status || "none")} · validated ${productionRecovery.latest_controller_validated ? "yes" : "no"} · rotation evidence ${productionRecovery.latest_rotation_validated ? "yes" : "no"}</div>
+      ${
+        kmsRecoveryValidation
+          ? `<div class="muted">Latest recovery validation: ${escapeHtml(kmsRecoveryValidation.status)} · controller ${escapeHtml(kmsRecoveryValidation.controller_execution?.status || "skipped")} · checked ${escapeHtml(kmsRecoveryValidation.checked_at)}</div>
+             <pre>${escapeHtml(JSON.stringify(kmsRecoveryValidation, null, 2))}</pre>`
+          : `<div class="muted">No KMS recovery validation in this console session</div>`
       }
     </div>
     ${
