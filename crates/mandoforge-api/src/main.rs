@@ -1262,6 +1262,7 @@ struct ObservabilityCollectorReadiness {
     health_check: ObservabilityCollectorHealthCheck,
     signal_paths: Vec<ObservabilityCollectorSignalPath>,
     production_ops: ObservabilityCollectorProductionOpsReadiness,
+    deployment_readiness: ObservabilityCollectorDeploymentReadiness,
     attention_items: Vec<ObservabilityCollectorAttentionItem>,
 }
 
@@ -1273,6 +1274,21 @@ struct ObservabilityCollectorProductionOpsReadiness {
     configured_signal_path_count: usize,
     health_checked: bool,
     health_status: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityCollectorDeploymentReadiness {
+    status: String,
+    production_blocked: bool,
+    otlp_enabled: bool,
+    endpoint_configured: bool,
+    deployment_validated: bool,
+    latest_validation_at: Option<DateTime<Utc>>,
+    latest_validation_age_hours: Option<i64>,
+    latest_validation_status: Option<String>,
+    latest_validation_healthy: bool,
+    blocking_reasons: Vec<String>,
     message: String,
 }
 
@@ -3505,6 +3521,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/observability/collector-readiness",
             get(get_observability_collector_readiness),
+        )
+        .route(
+            "/api/observability/collector/deployment/validate",
+            post(validate_observability_collector_deployment),
         )
         .route(
             "/api/observability/remediation/plan",
@@ -15037,6 +15057,71 @@ async fn get_observability_collector_readiness(
     Ok(Json(build_observability_collector_readiness(&state).await))
 }
 
+async fn validate_observability_collector_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "observability".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+
+    let checked_at = Utc::now();
+    let config = &state.observability_config;
+    let endpoint_configured = config
+        .otlp_endpoint
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let mut issues = Vec::new();
+    let mut healthy = false;
+
+    if !config.is_enabled() {
+        issues.push("OTLP export is disabled".to_string());
+    } else if !endpoint_configured {
+        issues.push("OTLP collector endpoint is not configured".to_string());
+    } else {
+        match state.telemetry_exporter.health_check(config).await {
+            Ok(()) => {
+                healthy = true;
+            }
+            Err(error) => {
+                issues.push(error.message);
+            }
+        }
+    }
+
+    let status = if healthy { "healthy" } else { "blocked" };
+    let result = json!({
+        "status": status,
+        "healthy": healthy,
+        "otlp_enabled": config.is_enabled(),
+        "endpoint_configured": endpoint_configured,
+        "service_name": config.service_name.clone(),
+        "sample_ratio": config.sample_ratio,
+        "issues": issues,
+        "subject": principal.subject_id,
+        "checked_at": checked_at,
+    });
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "observability.collector_deployment_validation",
+            "observability",
+            None,
+            result.clone(),
+        ))
+        .await?;
+    Ok(Json(result))
+}
+
 async fn get_observability_remediation_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -15307,6 +15392,13 @@ async fn build_observability_collector_readiness(
         &health_check,
         &signal_paths,
     );
+    let audit_logs = state.list_audit_logs(None).await.unwrap_or_default();
+    let deployment_readiness = build_observability_collector_deployment_readiness(
+        config.is_enabled(),
+        endpoint_configured,
+        &audit_logs,
+        generated_at,
+    );
     if production_ops.production_blocked {
         attention_items.push(ObservabilityCollectorAttentionItem {
             kind: "collector_production_ops_blocked".to_string(),
@@ -15316,6 +15408,17 @@ async fn build_observability_collector_readiness(
                 "warning".to_string()
             },
             message: production_ops.message.clone(),
+        });
+    }
+    if deployment_readiness.production_blocked {
+        attention_items.push(ObservabilityCollectorAttentionItem {
+            kind: "collector_deployment_validation_blocked".to_string(),
+            severity: if deployment_readiness.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: deployment_readiness.message.clone(),
         });
     }
     let status = if attention_items
@@ -15340,6 +15443,7 @@ async fn build_observability_collector_readiness(
         health_check,
         signal_paths,
         production_ops,
+        deployment_readiness,
         attention_items,
     }
 }
@@ -15412,6 +15516,76 @@ fn build_observability_collector_production_ops(
         configured_signal_path_count,
         health_checked: health_check.checked,
         health_status: health_check.status.clone(),
+        message,
+    }
+}
+
+fn build_observability_collector_deployment_readiness(
+    otlp_enabled: bool,
+    endpoint_configured: bool,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> ObservabilityCollectorDeploymentReadiness {
+    let latest_validation = audit_logs
+        .iter()
+        .filter(|log| log.action == "observability.collector_deployment_validation")
+        .max_by_key(|log| log.created_at);
+    let latest_validation_at = latest_validation.map(|log| log.created_at);
+    let latest_validation_age_hours =
+        latest_validation_at.map(|created_at| (generated_at - created_at).num_hours());
+    let latest_validation_status = latest_validation
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_validation_healthy = latest_validation
+        .and_then(|log| log.details.get("healthy"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut blocking_reasons = Vec::new();
+
+    if !otlp_enabled {
+        blocking_reasons.push("OTLP export is disabled".to_string());
+    }
+    if !endpoint_configured {
+        blocking_reasons.push("collector endpoint is not configured".to_string());
+    }
+    if latest_validation.is_none() {
+        blocking_reasons.push("collector deployment validation has not run".to_string());
+    }
+    if latest_validation.is_some() && !latest_validation_healthy {
+        blocking_reasons.push("latest collector deployment validation was not healthy".to_string());
+    }
+    if latest_validation_age_hours.is_some_and(|hours| hours >= 24) {
+        blocking_reasons.push("collector deployment validation evidence is stale".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Observability collector deployment validation is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Observability collector deployment has a recent healthy validation run".to_string()
+    };
+
+    ObservabilityCollectorDeploymentReadiness {
+        status,
+        production_blocked,
+        otlp_enabled,
+        endpoint_configured,
+        deployment_validated: latest_validation_healthy && !production_blocked,
+        latest_validation_at,
+        latest_validation_age_hours,
+        latest_validation_status,
+        latest_validation_healthy,
+        blocking_reasons,
         message,
     }
 }
@@ -26786,11 +26960,33 @@ not json
             )
             .await
             .expect("append provider event");
+        state
+            .append_audit_log(new_audit_log(
+                None,
+                "user",
+                None,
+                "observability.collector_deployment_validation",
+                "observability",
+                None,
+                json!({
+                    "status": "healthy",
+                    "healthy": true,
+                    "otlp_enabled": true,
+                    "endpoint_configured": true,
+                    "service_name": "mandoforge-api-test",
+                    "sample_ratio": 1.0,
+                    "issues": []
+                }),
+            ))
+            .await
+            .expect("append deployment validation");
 
         let collector = build_observability_collector_readiness(&state).await;
         assert_eq!(collector.status, "ready");
         assert!(collector.health_check.checked);
         assert_eq!(collector.health_check.status, "healthy");
+        assert_eq!(collector.deployment_readiness.status, "ready");
+        assert!(collector.deployment_readiness.deployment_validated);
         assert_eq!(collector.signal_paths.len(), 3);
         assert!(
             collector
@@ -29242,6 +29438,28 @@ not json
                 .iter()
                 .any(|item| item.kind == "collector_production_ops_blocked")
         );
+        assert_eq!(collector_readiness.deployment_readiness.status, "blocked");
+        assert!(collector_readiness.deployment_readiness.production_blocked);
+        assert!(
+            collector_readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "collector_deployment_validation_blocked")
+        );
+
+        let collector_validation: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/observability/collector/deployment/validate")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(collector_validation["status"], "blocked");
+        assert_eq!(collector_validation["healthy"], false);
 
         let remediation_plan: ObservabilityRemediationPlan = request_json(
             app.clone(),
@@ -29307,6 +29525,10 @@ not json
                 .iter()
                 .any(|log| log.action == "observability.remediation_run")
         );
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "observability.collector_deployment_validation"
+                && log.details["healthy"] == false
+        }));
     }
 
     #[tokio::test]

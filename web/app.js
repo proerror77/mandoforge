@@ -156,6 +156,7 @@ const remoteArtifactDiscoveryForm = document.querySelector("#remote-artifact-dis
 const remoteStateLockForm = document.querySelector("#remote-state-lock-form");
 const usageRoot = document.querySelector("#usage-summary");
 const observabilityRoot = document.querySelector("#observability-summary");
+const validateObservabilityCollectorButton = document.querySelector("#validate-observability-collector");
 const runObservabilityRemediationButton = document.querySelector("#run-observability-remediation");
 const runSchedulerDueButton = document.querySelector("#run-scheduler-due");
 const usageRollupRoot = document.querySelector("#usage-rollups");
@@ -270,6 +271,7 @@ deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
 runFinanceOperationsButton.addEventListener("click", runFinanceOperations);
 exportUsageCsvButton.addEventListener("click", exportUsageCsv);
 deliverUsageExportButton.addEventListener("click", deliverUsageExport);
+validateObservabilityCollectorButton.addEventListener("click", validateObservabilityCollector);
 runObservabilityRemediationButton.addEventListener("click", runObservabilityRemediation);
 runSchedulerDueButton.addEventListener("click", runSchedulerDueTasks);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
@@ -976,6 +978,13 @@ async function exportUsageCsv() {
 
 async function deliverUsageExport() {
   state.usageExportDelivery = await api("/api/usage/export/deliver", {
+    method: "POST",
+  });
+  await refreshOps();
+}
+
+async function validateObservabilityCollector() {
+  state.observabilityCollectorValidation = await api("/api/observability/collector/deployment/validate", {
     method: "POST",
   });
   await refreshOps();
@@ -2582,6 +2591,7 @@ function renderObservability() {
   const collectorAttention = collectorReadiness?.attention_items || [];
   const collectorSignalPaths = collectorReadiness?.signal_paths || [];
   const collectorProductionOps = collectorReadiness?.production_ops || {};
+  const collectorDeploymentReadiness = collectorReadiness?.deployment_readiness || {};
   const remediationPlan = state.observabilityRemediationPlan;
   const remediationPlanActions = remediationPlan?.actions || [];
   const remediation = state.observabilityRemediation;
@@ -2644,6 +2654,10 @@ function renderObservability() {
             <dd>${escapeHtml(collectorProductionOps.status || "unknown")} · blocked ${collectorProductionOps.production_blocked ? "yes" : "no"} · paths ${formatInteger(collectorProductionOps.configured_signal_path_count || 0)}/${formatInteger(collectorProductionOps.signal_path_count || 0)} · health ${escapeHtml(collectorProductionOps.health_status || "unknown")}</dd>
             <dt>Production message</dt>
             <dd>${escapeHtml(collectorProductionOps.message || "collector production ops are not reported")}</dd>
+            <dt>Deployment validation</dt>
+            <dd>${escapeHtml(collectorDeploymentReadiness.status || "unknown")} · blocked ${collectorDeploymentReadiness.production_blocked ? "yes" : "no"} · validated ${collectorDeploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${collectorDeploymentReadiness.latest_validation_healthy ? "yes" : "no"} · latest ${escapeHtml(collectorDeploymentReadiness.latest_validation_at || "none")}</dd>
+            <dt>Deployment message</dt>
+            <dd>${escapeHtml(collectorDeploymentReadiness.message || "collector deployment validation is not reported")}</dd>
           </dl>
           ${
             collectorSignalPaths.length
@@ -2870,8 +2884,16 @@ function renderObservability() {
             .join("")
         : `<div class="muted">No recent error events</div>`
     }
-    ${
-      remediation
+      ${
+        state.observabilityCollectorValidation
+          ? `<div class="item">
+              <strong>Collector Deployment Validation</strong>
+              <pre>${escapeHtml(JSON.stringify(state.observabilityCollectorValidation, null, 2))}</pre>
+            </div>`
+          : ""
+      }
+      ${
+        remediation
         ? `<h4>Remediation Run</h4>
           <div class="item">
             <strong>${escapeHtml(remediation.status)}</strong>
