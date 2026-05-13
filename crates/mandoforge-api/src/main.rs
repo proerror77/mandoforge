@@ -1381,6 +1381,7 @@ struct RemoteComputerReadinessReport {
     warm_pool: RemoteComputerWarmPoolReadiness,
     artifact_discovery_sidecar: RemoteComputerManifestReadiness,
     sidecar_supervision: RemoteComputerSidecarSupervisionReadiness,
+    sidecar_recovery: RemoteComputerSidecarRecoveryReadiness,
     runner: RemoteComputerRunnerReadiness,
     execution_transport: RemoteComputerExecutionTransportReadiness,
     event_types: Vec<String>,
@@ -1446,6 +1447,43 @@ struct RemoteComputerSidecarSupervisionReadiness {
     stale_heartbeat_count: usize,
     stale_after_seconds: i64,
     latest_observed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerSidecarRecoveryReadiness {
+    status: String,
+    replacement_enabled: bool,
+    runner_configured: bool,
+    runner_live_mutation_enabled: bool,
+    unhealthy_count: usize,
+    replaceable_pod_count: usize,
+    blocked_reason: Option<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerSidecarRecoveryTarget {
+    remote_computer_id: Uuid,
+    name: String,
+    pod_name: Option<String>,
+    reason: String,
+    latest_observed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerSidecarRecoveryRun {
+    generated_at: DateTime<Utc>,
+    status: String,
+    replacement_enabled: bool,
+    runner_status: String,
+    unhealthy_count: usize,
+    planned_replacement_count: usize,
+    attempted_replacement_count: usize,
+    blocked_replacement_count: usize,
+    targets: Vec<RemoteComputerSidecarRecoveryTarget>,
+    runner_responses: Vec<RemoteComputerRunnerDryRunResponse>,
+    execution_enabled: bool,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3401,6 +3439,10 @@ fn build_router(state: AppState) -> Router {
             "/api/remote-computers/sidecars/heartbeats",
             get(list_remote_computer_sidecar_heartbeats)
                 .post(record_remote_computer_sidecar_heartbeat),
+        )
+        .route(
+            "/api/remote-computers/sidecars/recovery/run",
+            post(run_remote_computer_sidecar_recovery),
         )
         .route(
             "/api/remote-computers",
@@ -18130,6 +18172,23 @@ async fn record_remote_computer_sidecar_heartbeat(
     Ok(Json(heartbeat))
 }
 
+async fn run_remote_computer_sidecar_recovery(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RemoteComputerSidecarRecoveryRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_sidecar_recovery",
+        None,
+    )
+    .await?;
+    Ok(Json(
+        execute_remote_computer_sidecar_recovery(&state).await?,
+    ))
+}
+
 async fn list_stale_remote_computer_attachments(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -18379,6 +18438,126 @@ async fn record_remote_computer_sidecar_heartbeat_event(
     Ok(())
 }
 
+async fn execute_remote_computer_sidecar_recovery(
+    state: &AppState,
+) -> Result<RemoteComputerSidecarRecoveryRun, AppError> {
+    let targets = remote_computer_sidecar_recovery_targets(state).await?;
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = remote_computer_runner_for_config(&config);
+    let runner_readiness = runner.readiness(&config);
+    let replacement_enabled = env_bool("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED");
+    let live_replacement_enabled = replacement_enabled
+        && runner_readiness.configured
+        && runner_readiness.live_mutation_enabled
+        && config.mutation_enabled
+        && config.live_mutation_enabled;
+    let mut runner_responses = Vec::new();
+    let mut attempted_replacement_count = 0;
+    let mut blocked_replacement_count = 0;
+    for target in &targets {
+        let Some(pod_name) = target.pod_name.clone() else {
+            blocked_replacement_count += 1;
+            continue;
+        };
+        if !live_replacement_enabled {
+            blocked_replacement_count += 1;
+            continue;
+        }
+        let delete = runner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_delete".to_string()),
+                    remote_computer_id: Some(target.remote_computer_id),
+                    session_id: None,
+                    pod_name: Some(pod_name.clone()),
+                    metadata: Some(json!({
+                        "reason": target.reason,
+                        "sidecar_recovery": true,
+                        "replacement_step": "delete_unhealthy_pod"
+                    })),
+                },
+            )
+            .await;
+        attempted_replacement_count += 1;
+        runner_responses.push(delete);
+        let create = runner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_create".to_string()),
+                    remote_computer_id: Some(target.remote_computer_id),
+                    session_id: None,
+                    pod_name: Some(pod_name),
+                    metadata: Some(json!({
+                        "reason": target.reason,
+                        "sidecar_recovery": true,
+                        "artifact_discovery_enabled": true,
+                        "replacement_step": "create_replacement_pod"
+                    })),
+                },
+            )
+            .await;
+        runner_responses.push(create);
+    }
+    let failed_attempts = runner_responses
+        .iter()
+        .filter(|response| !matches!(response.status.as_str(), "mutation_ok"))
+        .count();
+    let status = if targets.is_empty() {
+        "noop"
+    } else if !replacement_enabled {
+        "blocked"
+    } else if attempted_replacement_count == 0 {
+        "blocked"
+    } else if failed_attempts > 0 {
+        "attention"
+    } else {
+        "completed"
+    }
+    .to_string();
+    let message = if targets.is_empty() {
+        "No unhealthy Remote Computer sidecars require recovery".to_string()
+    } else if !replacement_enabled {
+        "Sidecar recovery planned replacements but live replacement is blocked until MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED is enabled".to_string()
+    } else if !live_replacement_enabled {
+        "Sidecar recovery is enabled, but the Kubernetes runner live mutation gates are not fully open".to_string()
+    } else if failed_attempts > 0 {
+        "One or more Remote Computer sidecar replacement mutations failed".to_string()
+    } else {
+        "Remote Computer sidecar replacement run completed for unhealthy Pods".to_string()
+    };
+    let run = RemoteComputerSidecarRecoveryRun {
+        generated_at: Utc::now(),
+        status,
+        replacement_enabled,
+        runner_status: runner_readiness.status,
+        unhealthy_count: targets.len(),
+        planned_replacement_count: targets
+            .iter()
+            .filter(|target| target.pod_name.is_some())
+            .count(),
+        attempted_replacement_count,
+        blocked_replacement_count,
+        targets,
+        runner_responses,
+        execution_enabled: false,
+        message,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "remote_computer.sidecar_recovery_run",
+            "remote_computer_sidecar",
+            None,
+            json!(&run),
+        ))
+        .await?;
+    Ok(run)
+}
+
 async fn build_remote_computer_readiness(
     state: &AppState,
 ) -> Result<RemoteComputerReadinessReport, AppError> {
@@ -18518,6 +18697,9 @@ async fn build_remote_computer_readiness(
         build_remote_computer_sidecar_supervision(state, artifact_discovery_sidecar.present)
             .await?;
     let runner = build_remote_computer_runner_readiness();
+    let sidecar_recovery_targets = remote_computer_sidecar_recovery_targets(state).await?;
+    let sidecar_recovery =
+        build_remote_computer_sidecar_recovery_readiness(&sidecar_recovery_targets, &runner);
     let execution_transport = build_remote_computer_execution_transport_readiness(state).await?;
 
     let event_types = vec![
@@ -18630,6 +18812,13 @@ async fn build_remote_computer_readiness(
             "one or more artifact-discovery sidecar heartbeats are older than the configured stale threshold",
         ));
     }
+    if sidecar_recovery.status == "blocked" {
+        attention_items.push(remote_computer_attention(
+            "sidecar_replacement_blocked",
+            "warning",
+            "Remote Computer sidecar recovery found unhealthy sidecars, but replacement automation is blocked",
+        ));
+    }
     if !runner.configured {
         attention_items.push(remote_computer_attention(
             "runner_reserved",
@@ -18679,6 +18868,10 @@ async fn build_remote_computer_readiness(
     if artifact_discovery_sidecar.present {
         runbook_actions.push(
             "monitor /api/remote-computers/sidecars/heartbeats and treat stale or missing artifact-discovery heartbeats as Remote Computer pilot blockers"
+                .to_string(),
+        );
+        runbook_actions.push(
+            "run /api/remote-computers/sidecars/recovery/run to produce an audited Pod replacement plan; enable MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED only after Kubernetes runner live mutation gates are validated"
                 .to_string(),
         );
     }
@@ -18733,6 +18926,7 @@ async fn build_remote_computer_readiness(
         warm_pool,
         artifact_discovery_sidecar,
         sidecar_supervision,
+        sidecar_recovery,
         runner,
         execution_transport,
         event_types,
@@ -18793,6 +18987,12 @@ async fn build_remote_computer_execution_transport_readiness(
     })
 }
 
+fn sidecar_stale_after_seconds() -> i64 {
+    env_i64("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_STALE_AFTER_SECONDS")
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(180)
+}
+
 async fn build_remote_computer_sidecar_supervision(
     state: &AppState,
     sidecar_manifest_present: bool,
@@ -18804,9 +19004,7 @@ async fn build_remote_computer_sidecar_supervision(
         .filter(|computer| matches!(computer.status.as_str(), "available" | "leased" | "running"))
         .collect();
     let heartbeats = state.list_remote_computer_sidecar_heartbeats().await?;
-    let stale_after_seconds = env_i64("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_STALE_AFTER_SECONDS")
-        .filter(|seconds| *seconds > 0)
-        .unwrap_or(180);
+    let stale_after_seconds = sidecar_stale_after_seconds();
     let now = Utc::now();
     let mut latest_by_remote: HashMap<Uuid, RemoteComputerSidecarHeartbeat> = HashMap::new();
     for heartbeat in heartbeats.iter().filter(|heartbeat| {
@@ -18857,6 +19055,109 @@ async fn build_remote_computer_sidecar_supervision(
         stale_after_seconds,
         latest_observed_at,
     })
+}
+
+async fn remote_computer_sidecar_recovery_targets(
+    state: &AppState,
+) -> Result<Vec<RemoteComputerSidecarRecoveryTarget>, AppError> {
+    let active_remote_computers: Vec<_> = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .filter(|computer| matches!(computer.status.as_str(), "available" | "leased" | "running"))
+        .collect();
+    let heartbeats = state.list_remote_computer_sidecar_heartbeats().await?;
+    let stale_after_seconds = sidecar_stale_after_seconds();
+    let now = Utc::now();
+    let mut latest_by_remote: HashMap<Uuid, RemoteComputerSidecarHeartbeat> = HashMap::new();
+    for heartbeat in heartbeats.iter().filter(|heartbeat| {
+        heartbeat.sidecar_name == "artifact-discovery" && heartbeat.status != "disabled"
+    }) {
+        latest_by_remote
+            .entry(heartbeat.remote_computer_id)
+            .and_modify(|existing| {
+                if heartbeat.observed_at > existing.observed_at {
+                    *existing = heartbeat.clone();
+                }
+            })
+            .or_insert_with(|| heartbeat.clone());
+    }
+    let mut targets = Vec::new();
+    for computer in active_remote_computers {
+        match latest_by_remote.get(&computer.id) {
+            None => targets.push(RemoteComputerSidecarRecoveryTarget {
+                remote_computer_id: computer.id,
+                name: computer.name,
+                pod_name: computer.pod_name,
+                reason: "missing_artifact_discovery_heartbeat".to_string(),
+                latest_observed_at: None,
+            }),
+            Some(heartbeat)
+                if now
+                    .signed_duration_since(heartbeat.observed_at)
+                    .num_seconds()
+                    > stale_after_seconds =>
+            {
+                targets.push(RemoteComputerSidecarRecoveryTarget {
+                    remote_computer_id: computer.id,
+                    name: computer.name,
+                    pod_name: computer.pod_name,
+                    reason: "stale_artifact_discovery_heartbeat".to_string(),
+                    latest_observed_at: Some(heartbeat.observed_at),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(targets)
+}
+
+fn build_remote_computer_sidecar_recovery_readiness(
+    targets: &[RemoteComputerSidecarRecoveryTarget],
+    runner: &RemoteComputerRunnerReadiness,
+) -> RemoteComputerSidecarRecoveryReadiness {
+    let replacement_enabled = env_bool("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED");
+    let replaceable_pod_count = targets
+        .iter()
+        .filter(|target| target.pod_name.is_some())
+        .count();
+    let blocked_reason = if targets.is_empty() {
+        None
+    } else if !replacement_enabled {
+        Some("replacement_gate_disabled".to_string())
+    } else if !runner.configured {
+        Some("runner_not_configured".to_string())
+    } else if !runner.live_mutation_enabled {
+        Some("runner_live_mutation_disabled".to_string())
+    } else if replaceable_pod_count < targets.len() {
+        Some("unhealthy_remote_computer_missing_pod_name".to_string())
+    } else {
+        None
+    };
+    let status = if targets.is_empty() {
+        "ready"
+    } else if blocked_reason.is_some() {
+        "blocked"
+    } else {
+        "ready_to_replace"
+    };
+    let message = if targets.is_empty() {
+        "No unhealthy Remote Computer sidecars require Pod replacement".to_string()
+    } else if let Some(reason) = &blocked_reason {
+        format!("Remote Computer sidecar replacement is blocked by {reason}")
+    } else {
+        "Remote Computer sidecar replacement gate is open for unhealthy Pods".to_string()
+    };
+    RemoteComputerSidecarRecoveryReadiness {
+        status: status.to_string(),
+        replacement_enabled,
+        runner_configured: runner.configured,
+        runner_live_mutation_enabled: runner.live_mutation_enabled,
+        unhealthy_count: targets.len(),
+        replaceable_pod_count,
+        blocked_reason,
+        message,
+    }
 }
 
 fn env_bool(name: &str) -> bool {
@@ -21983,11 +22284,38 @@ not json
                 .missing_heartbeat_count,
             1
         );
+        assert_eq!(
+            readiness_without_heartbeat.sidecar_recovery.status,
+            "blocked"
+        );
+        assert_eq!(
+            readiness_without_heartbeat.sidecar_recovery.unhealthy_count,
+            1
+        );
+        assert_eq!(
+            readiness_without_heartbeat
+                .sidecar_recovery
+                .replaceable_pod_count,
+            1
+        );
+        assert_eq!(
+            readiness_without_heartbeat
+                .sidecar_recovery
+                .blocked_reason
+                .as_deref(),
+            Some("replacement_gate_disabled")
+        );
         assert!(
             readiness_without_heartbeat
                 .attention_items
                 .iter()
                 .any(|item| item.kind == "artifact_discovery_sidecar_heartbeat_missing")
+        );
+        assert!(
+            readiness_without_heartbeat
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "sidecar_replacement_blocked")
         );
 
         let heartbeat = state
@@ -22029,12 +22357,64 @@ not json
                 .stale_heartbeat_count,
             1
         );
+        assert_eq!(
+            readiness_with_stale_heartbeat.sidecar_recovery.status,
+            "blocked"
+        );
+        assert_eq!(
+            readiness_with_stale_heartbeat
+                .sidecar_recovery
+                .unhealthy_count,
+            1
+        );
         assert!(
             readiness_with_stale_heartbeat
                 .attention_items
                 .iter()
                 .any(|item| item.kind == "artifact_discovery_sidecar_heartbeat_stale")
         );
+    }
+
+    #[tokio::test]
+    async fn remote_computer_sidecar_recovery_run_is_audited_and_fail_closed() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let computer = state
+            .create_remote_computer(CreateRemoteComputer {
+                name: "sidecar-recovery-remote-computer".to_string(),
+                profile: Some("workspace-write".to_string()),
+                namespace: None,
+                pod_name: Some("agent-remote-computer-recovery".to_string()),
+                workspace_path: None,
+                state_mount_path: None,
+                metadata: None,
+            })
+            .await
+            .expect("create remote computer");
+
+        let run = execute_remote_computer_sidecar_recovery(&state)
+            .await
+            .expect("run sidecar recovery");
+        assert_eq!(run.status, "blocked");
+        assert_eq!(run.unhealthy_count, 1);
+        assert_eq!(run.planned_replacement_count, 1);
+        assert_eq!(run.attempted_replacement_count, 0);
+        assert_eq!(run.blocked_replacement_count, 1);
+        assert!(!run.replacement_enabled);
+        assert!(!run.execution_enabled);
+        assert_eq!(run.targets[0].remote_computer_id, computer.id);
+        assert_eq!(
+            run.targets[0].reason,
+            "missing_artifact_discovery_heartbeat"
+        );
+        assert!(run.runner_responses.is_empty());
+
+        let audit_logs = state.list_audit_logs(None).await.expect("audit logs");
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "remote_computer.sidecar_recovery_run"
+                && log.details["status"] == json!("blocked")
+                && log.details["unhealthy_count"] == json!(1)
+                && log.details["execution_enabled"] == json!(false)
+        }));
     }
 
     #[tokio::test]

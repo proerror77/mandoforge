@@ -54,6 +54,7 @@ const state = {
   remoteComputerStateLocks: [],
   remoteComputerSidecarHeartbeats: [],
   remoteComputerArtifactDiscovery: null,
+  remoteComputerSidecarRecoveryRun: null,
   usageRollups: [],
   usageTrend: null,
   usageFinanceSummary: null,
@@ -2013,6 +2014,7 @@ function renderRemoteComputerReadiness() {
   const warmPool = report.warm_pool || {};
   const artifactDiscoverySidecar = report.artifact_discovery_sidecar || {};
   const sidecarSupervision = report.sidecar_supervision || {};
+  const sidecarRecovery = report.sidecar_recovery || {};
   const runner = state.remoteComputerRunnerReadiness || report.runner || {};
   const executionTransport = report.execution_transport || {};
   const attentionItems = report.attention_items || [];
@@ -2024,6 +2026,7 @@ function renderRemoteComputerReadiness() {
   const stateLockRows = state.remoteComputerStateLocks || [];
   const sidecarHeartbeatRows = state.remoteComputerSidecarHeartbeats || [];
   const artifactDiscovery = state.remoteComputerArtifactDiscovery;
+  const sidecarRecoveryRun = state.remoteComputerSidecarRecoveryRun;
   remoteComputerReadinessRoot.innerHTML = `
     <div class="metrics compact-metrics">
       <div class="metric">
@@ -2180,6 +2183,18 @@ function renderRemoteComputerReadiness() {
       }
     </div>
     <div class="item">
+      <strong>REMOTE COMPUTER SIDECAR RECOVERY</strong>
+      <div class="muted">${escapeHtml(sidecarRecovery.status || "unknown")} · replacement gate ${sidecarRecovery.replacement_enabled ? "enabled" : "disabled"} · runner ${sidecarRecovery.runner_configured ? "configured" : "not configured"} · live mutation ${sidecarRecovery.runner_live_mutation_enabled ? "enabled" : "disabled"}</div>
+      <div class="muted">Unhealthy ${formatInteger(sidecarRecovery.unhealthy_count || 0)} · replaceable Pods ${formatInteger(sidecarRecovery.replaceable_pod_count || 0)} · blocked ${escapeHtml(sidecarRecovery.blocked_reason || "none")}</div>
+      <div class="muted">${escapeHtml(sidecarRecovery.message || "Sidecar recovery gate is not reported")}</div>
+      <button class="secondary inline-button" data-run-remote-sidecar-recovery="true">Run Sidecar Recovery Gate</button>
+      ${
+        sidecarRecoveryRun
+          ? `<div class="muted">Last run: ${escapeHtml(sidecarRecoveryRun.status || "unknown")} · unhealthy ${formatInteger(sidecarRecoveryRun.unhealthy_count || 0)} · attempted ${formatInteger(sidecarRecoveryRun.attempted_replacement_count || 0)} · blocked ${formatInteger(sidecarRecoveryRun.blocked_replacement_count || 0)} · ${escapeHtml(sidecarRecoveryRun.message || "")}</div>`
+          : `<div class="muted">No sidecar recovery run in this console session</div>`
+      }
+    </div>
+    <div class="item">
       <strong>REMOTE COMPUTER ATTENTION</strong>
       ${
         attentionItems.length
@@ -2203,6 +2218,9 @@ function renderRemoteComputerReadiness() {
   `;
   remoteComputerReadinessRoot.querySelectorAll("[data-release-remote-state-lock]").forEach((button) => {
     button.addEventListener("click", () => releaseRemoteStateLock(button.dataset.releaseRemoteStateLock));
+  });
+  remoteComputerReadinessRoot.querySelectorAll("[data-run-remote-sidecar-recovery]").forEach((button) => {
+    button.addEventListener("click", runRemoteSidecarRecovery);
   });
 }
 
@@ -2261,6 +2279,13 @@ async function releaseRemoteStateLock(lockId) {
   await api(`/api/remote-computers/state-locks/${lockId}/release`, {
     method: "POST",
     body: JSON.stringify({ reason: "released-from-static-admin-console" }),
+  });
+  await refreshOps();
+}
+
+async function runRemoteSidecarRecovery() {
+  state.remoteComputerSidecarRecoveryRun = await api("/api/remote-computers/sidecars/recovery/run", {
+    method: "POST",
   });
   await refreshOps();
 }
