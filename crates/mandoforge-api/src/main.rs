@@ -1077,7 +1077,11 @@ struct CodexTurnTrace {
     command_count: usize,
     poll_count: usize,
     error_count: usize,
+    duration_seconds: i64,
+    command_ids: Vec<String>,
     operations: Vec<String>,
+    next_action: String,
+    latest_error: Option<Value>,
     first_seen_at: DateTime<Utc>,
     last_seen_at: DateTime<Utc>,
 }
@@ -1088,6 +1092,11 @@ struct CodexAppServerTraceDetail {
     trace: CodexTurnTrace,
     runs: Vec<CodexAppServerRun>,
     status_timeline: Vec<CodexAppServerStatusPoint>,
+    by_status: HashMap<String, usize>,
+    by_operation: HashMap<String, usize>,
+    terminal_count: usize,
+    non_terminal_count: usize,
+    command_ids: Vec<String>,
     errors: Vec<Value>,
     latest_response: Value,
 }
@@ -9741,6 +9750,7 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
         let first = group.first().expect("group has at least one run");
         let latest = group.last().expect("group has at least one run");
         let mut operations = BTreeSet::new();
+        let mut command_ids = BTreeSet::new();
         let mut command_count = 0usize;
         let mut poll_count = 0usize;
         let mut error_count = 0usize;
@@ -9748,6 +9758,9 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
             operations.insert(run.operation.clone());
             if run.operation.contains("command") || run.command_id.is_some() {
                 command_count += 1;
+            }
+            if let Some(command_id) = run.command_id.as_ref() {
+                command_ids.insert(command_id.clone());
             }
             if run.operation.contains("poll") {
                 poll_count += 1;
@@ -9757,18 +9770,34 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
             }
         }
         let latest_status = latest.status.clone();
+        let terminal = codex_turn_status_is_terminal(&latest_status);
+        let latest_error = group.iter().rev().find_map(|run| run.error.clone());
+        let next_action = if codex_run_status_failed(&latest_status) || latest_error.is_some() {
+            "inspect_error"
+        } else if latest.turn_id.is_some() && !terminal {
+            "poll_or_interrupt"
+        } else if terminal {
+            "complete"
+        } else {
+            "none"
+        }
+        .to_string();
         traces.push(CodexTurnTrace {
             trace_key,
             turn_id: latest.turn_id.clone().or_else(|| first.turn_id.clone()),
             thread_id: latest.thread_id.clone().or_else(|| first.thread_id.clone()),
             latest_run_id: latest.id,
             latest_status: latest_status.clone(),
-            terminal: codex_turn_status_is_terminal(&latest_status),
+            terminal,
             run_count: group.len(),
             command_count,
             poll_count,
             error_count,
+            duration_seconds: (latest.created_at - first.created_at).num_seconds(),
+            command_ids: command_ids.into_iter().collect(),
             operations: operations.into_iter().collect(),
+            next_action,
+            latest_error,
             first_seen_at: first.created_at,
             last_seen_at: latest.created_at,
         });
@@ -10132,6 +10161,23 @@ fn build_codex_app_server_trace_detail(
             error: run.error.clone(),
         })
         .collect::<Vec<_>>();
+    let mut by_status = HashMap::new();
+    let mut by_operation = HashMap::new();
+    let mut command_ids = BTreeSet::new();
+    let mut terminal_count = 0usize;
+    let mut non_terminal_count = 0usize;
+    for run in &matching {
+        increment_count(&mut by_status, run.status.as_str());
+        increment_count(&mut by_operation, run.operation.as_str());
+        if let Some(command_id) = run.command_id.as_ref() {
+            command_ids.insert(command_id.clone());
+        }
+        if codex_turn_status_is_terminal(&run.status) {
+            terminal_count += 1;
+        } else {
+            non_terminal_count += 1;
+        }
+    }
     let errors = matching
         .iter()
         .filter_map(|run| run.error.clone())
@@ -10145,6 +10191,11 @@ fn build_codex_app_server_trace_detail(
         trace,
         runs: matching,
         status_timeline,
+        by_status,
+        by_operation,
+        terminal_count,
+        non_terminal_count,
+        command_ids: command_ids.into_iter().collect(),
         errors,
         latest_response,
     })
@@ -23046,12 +23097,21 @@ not json
         assert_eq!(turn_1.command_count, 1);
         assert_eq!(turn_1.poll_count, 1);
         assert!(turn_1.terminal);
+        assert_eq!(turn_1.duration_seconds, 2);
+        assert_eq!(turn_1.command_ids, vec!["command-1".to_string()]);
+        assert_eq!(turn_1.next_action, "complete");
+        assert_eq!(turn_1.latest_error, None);
         assert!(turn_1.operations.contains(&"command.execute".to_string()));
         let turn_1_detail = build_codex_app_server_trace_detail(&runs, "turn-1")
             .expect("turn-1 detail should exist");
         assert_eq!(turn_1_detail.trace.trace_key, "turn-1");
         assert_eq!(turn_1_detail.runs.len(), 3);
         assert_eq!(turn_1_detail.status_timeline.len(), 3);
+        assert_eq!(turn_1_detail.by_status["running"], 2);
+        assert_eq!(turn_1_detail.by_operation["command.execute"], 1);
+        assert_eq!(turn_1_detail.terminal_count, 1);
+        assert_eq!(turn_1_detail.non_terminal_count, 2);
+        assert_eq!(turn_1_detail.command_ids, vec!["command-1".to_string()]);
         assert_eq!(turn_1_detail.latest_response["status"], "completed");
         let turn_2 = summary
             .traces
@@ -23060,6 +23120,12 @@ not json
             .expect("turn-2 trace");
         assert_eq!(turn_2.error_count, 1);
         assert_eq!(turn_2.latest_status, "poll_failed");
+        assert_eq!(turn_2.next_action, "inspect_error");
+        assert_eq!(turn_2.duration_seconds, 0);
+        assert_eq!(
+            turn_2.latest_error.as_ref().expect("latest error")["message"],
+            "timeout"
+        );
 
         let control = build_codex_app_server_control_plane_summary(
             Some(&CodexAppServerConfig {

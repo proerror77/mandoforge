@@ -1831,6 +1831,7 @@ function renderCodexAppServer() {
   const productionOps = controlSummary?.production_ops || {};
   const deploymentReadiness = controlSummary?.deployment_readiness || {};
   const controlAttention = controlSummary?.attention_items || [];
+  const traceDetail = codex.traceDetail;
   const traceRows = (traceSummary?.traces || [])
     .slice(0, 8)
     .map(
@@ -1840,6 +1841,8 @@ function renderCodexAppServer() {
           <td>${escapeHtml(trace.latest_status)}</td>
           <td>${formatInteger(trace.run_count)} runs · ${formatInteger(trace.command_count)} commands · ${formatInteger(trace.poll_count)} polls</td>
           <td>${formatInteger(trace.error_count)}</td>
+          <td>${escapeHtml(trace.next_action || "none")}</td>
+          <td>${formatDurationSeconds(trace.duration_seconds)}</td>
           <td>${escapeHtml((trace.operations || []).join(", "))}</td>
           <td>${escapeHtml(trace.last_seen_at)}</td>
           <td><button type="button" class="secondary" data-codex-trace="${escapeHtml(trace.trace_key)}">Detail</button></td>
@@ -1864,6 +1867,8 @@ function renderCodexAppServer() {
                   <th>Status</th>
                   <th>Activity</th>
                   <th>Errors</th>
+                  <th>Next</th>
+                  <th>Duration</th>
                   <th>Operations</th>
                   <th>Last Seen</th>
                   <th>Detail</th>
@@ -1872,6 +1877,57 @@ function renderCodexAppServer() {
               <tbody>${traceRows}</tbody>
             </table>`
           : `<div class="muted">No Codex turn traces yet.</div>`
+      }`
+    : "";
+  const traceDetailDashboard = traceDetail
+    ? `<h4>Trace Detail</h4>
+      <div class="item">
+        <strong>${escapeHtml(traceDetail.trace?.turn_id || traceDetail.trace?.trace_key || "Codex trace")}</strong>
+        <div class="muted">Status ${escapeHtml(traceDetail.trace?.latest_status || "unknown")} · next ${escapeHtml(traceDetail.trace?.next_action || "none")} · duration ${formatDurationSeconds(traceDetail.trace?.duration_seconds || 0)} · terminal ${traceDetail.trace?.terminal ? "yes" : "no"}</div>
+        <div class="muted">Commands ${escapeHtml((traceDetail.command_ids || traceDetail.trace?.command_ids || []).join(", ") || "none")} · terminal runs ${formatInteger(traceDetail.terminal_count || 0)} · non-terminal runs ${formatInteger(traceDetail.non_terminal_count || 0)}</div>
+        ${
+          traceDetail.trace?.latest_error
+            ? `<pre>${escapeHtml(JSON.stringify(traceDetail.trace.latest_error, null, 2))}</pre>`
+            : `<div class="muted">No latest error for this trace.</div>`
+        }
+      </div>
+      <div class="metric-grid compact-metrics">
+        ${Object.entries(traceDetail.by_status || {})
+          .map(
+            ([status, count]) =>
+              `<div class="metric"><span>${escapeHtml(status)}</span><strong>${formatInteger(count)}</strong></div>`,
+          )
+          .join("")}
+      </div>
+      ${
+        (traceDetail.status_timeline || []).length
+          ? `<table class="usage-table">
+              <thead>
+                <tr>
+                  <th>Operation</th>
+                  <th>Status</th>
+                  <th>Terminal</th>
+                  <th>Created</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${(traceDetail.status_timeline || [])
+                  .map(
+                    (point) => `
+                      <tr>
+                        <td>${escapeHtml(point.operation)}</td>
+                        <td>${escapeHtml(point.status)}</td>
+                        <td>${point.terminal ? "yes" : "no"}</td>
+                        <td>${escapeHtml(point.created_at)}</td>
+                        <td>${escapeHtml(point.error ? JSON.stringify(point.error) : "none")}</td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>`
+          : `<div class="muted">No trace timeline points.</div>`
       }`
     : "";
   const runDashboard = `
@@ -1950,6 +2006,7 @@ function renderCodexAppServer() {
     ${controlDashboard}
     ${runDashboard}
     ${traceDashboard}
+    ${traceDetailDashboard}
     ${runs ? `<h4>Persisted Codex Runs</h4>${runs}` : ""}
   `;
   codexAppServerRoot.querySelectorAll("[data-poll-codex-run]").forEach((button) => {
@@ -3548,6 +3605,17 @@ function formatDurationMs(value) {
     return `${(milliseconds / 1000).toFixed(2)}s`;
   }
   return `${milliseconds.toFixed(0)}ms`;
+}
+
+function formatDurationSeconds(value) {
+  const seconds = Number(value || 0);
+  if (seconds >= 3600) {
+    return `${(seconds / 3600).toFixed(1)}h`;
+  }
+  if (seconds >= 60) {
+    return `${(seconds / 60).toFixed(1)}m`;
+  }
+  return `${seconds.toFixed(0)}s`;
 }
 
 function renderPolicy() {
