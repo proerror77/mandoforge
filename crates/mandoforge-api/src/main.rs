@@ -1219,6 +1219,20 @@ struct WorkerLeaseSummary {
 struct WorkerK8sReadiness {
     worker_manifest_present: bool,
     worker_manifest_path: String,
+    service_account_name: Option<String>,
+    service_account_manifest_present: bool,
+    service_account_manifest_path: String,
+    automount_service_account_token_disabled: bool,
+    pod_run_as_non_root: bool,
+    seccomp_runtime_default: bool,
+    container_allow_privilege_escalation_disabled: bool,
+    container_read_only_root_filesystem: bool,
+    container_drops_all_capabilities: bool,
+    resources_requests_configured: bool,
+    resources_limits_configured: bool,
+    network_policy_present: bool,
+    network_policy_path: String,
+    hardening_status: String,
     scheduler_manifest_present: bool,
     scheduler_manifest_path: String,
 }
@@ -17021,12 +17035,7 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
         stale_leases,
         oldest_stale_lease_age_seconds,
     };
-    let k8s = WorkerK8sReadiness {
-        worker_manifest_present: project_file_path("deploy/k8s/worker.yaml").is_some(),
-        worker_manifest_path: "deploy/k8s/worker.yaml".to_string(),
-        scheduler_manifest_present: project_file_path("deploy/k8s/scheduler.yaml").is_some(),
-        scheduler_manifest_path: "deploy/k8s/scheduler.yaml".to_string(),
-    };
+    let k8s = worker_k8s_readiness_from_manifests();
     let autoscaling = worker_autoscaling_readiness_from_manifests(&[
         "deploy/k8s/worker-hpa.yaml",
         "deploy/k8s/worker-keda.yaml",
@@ -17095,6 +17104,13 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
             message: "deploy/k8s/worker.yaml is not present in this runtime package".to_string(),
         });
     }
+    if k8s.worker_manifest_present && k8s.hardening_status != "hardened" {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_hardening_incomplete".to_string(),
+            severity: "warning".to_string(),
+            message: "worker Deployment is present, but securityContext, ServiceAccount, NetworkPolicy, or resource bounds are incomplete".to_string(),
+        });
+    }
     if !autoscaling.autoscaling_manifest_present {
         attention_items.push(WorkerReadinessAttentionItem {
             kind: "worker_autoscaling_missing".to_string(),
@@ -17157,6 +17173,11 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
         runbook_actions.push(
             "replace Core NATS handoff with JetStream before claiming durable NATS queues"
                 .to_string(),
+        );
+    }
+    if k8s.worker_manifest_present && k8s.hardening_status != "hardened" {
+        runbook_actions.push(
+            "complete worker Pod hardening: restricted ServiceAccount, token automount disabled, RuntimeDefault seccomp, no privilege escalation, dropped capabilities, read-only root filesystem, resource bounds, and NetworkPolicy".to_string(),
         );
     }
 
@@ -17233,6 +17254,138 @@ fn worker_queue_backend_readiness(kind: &str) -> WorkerQueueBackendReadiness {
             semantics: "process-local in-memory queue for local demo and tests".to_string(),
         },
     }
+}
+
+fn worker_k8s_readiness_from_manifests() -> WorkerK8sReadiness {
+    let worker_manifest_path = "deploy/k8s/worker.yaml";
+    let service_account_manifest_path = "deploy/k8s/worker-serviceaccount.yaml";
+    let network_policy_path = "deploy/k8s/worker-networkpolicy.yaml";
+    let scheduler_manifest_path = "deploy/k8s/scheduler.yaml";
+
+    let worker_manifest = read_yaml_manifest_value(worker_manifest_path).and_then(|manifest| {
+        (manifest.get("kind").and_then(Value::as_str) == Some("Deployment")).then_some(manifest)
+    });
+    let worker_manifest_present = worker_manifest.is_some();
+    let service_account_name = worker_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.pointer("/spec/template/spec/serviceAccountName"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let automount_service_account_token_disabled = worker_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.pointer("/spec/template/spec/automountServiceAccountToken"))
+        .and_then(Value::as_bool)
+        == Some(false);
+    let pod_run_as_non_root = worker_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.pointer("/spec/template/spec/securityContext/runAsNonRoot"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let seccomp_runtime_default = worker_manifest
+        .as_ref()
+        .and_then(|manifest| {
+            manifest.pointer("/spec/template/spec/securityContext/seccompProfile/type")
+        })
+        .and_then(Value::as_str)
+        == Some("RuntimeDefault");
+    let worker_container = worker_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.pointer("/spec/template/spec/containers"))
+        .and_then(Value::as_array)
+        .and_then(|containers| {
+            containers
+                .iter()
+                .find(|container| container.get("name").and_then(Value::as_str) == Some("worker"))
+        });
+    let container_allow_privilege_escalation_disabled = worker_container
+        .and_then(|container| container.pointer("/securityContext/allowPrivilegeEscalation"))
+        .and_then(Value::as_bool)
+        == Some(false);
+    let container_read_only_root_filesystem = worker_container
+        .and_then(|container| container.pointer("/securityContext/readOnlyRootFilesystem"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let container_drops_all_capabilities = worker_container
+        .and_then(|container| container.pointer("/securityContext/capabilities/drop"))
+        .and_then(Value::as_array)
+        .is_some_and(|drops| drops.iter().any(|drop| drop.as_str() == Some("ALL")));
+    let resources_requests_configured = worker_container
+        .and_then(|container| container.pointer("/resources/requests"))
+        .and_then(Value::as_object)
+        .is_some_and(|requests| requests.contains_key("cpu") && requests.contains_key("memory"));
+    let resources_limits_configured = worker_container
+        .and_then(|container| container.pointer("/resources/limits"))
+        .and_then(Value::as_object)
+        .is_some_and(|limits| limits.contains_key("cpu") && limits.contains_key("memory"));
+    let service_account_manifest_present = service_account_name.as_deref().is_some_and(|name| {
+        manifest_has_kind_name(service_account_manifest_path, "ServiceAccount", name)
+    });
+    let network_policy_present =
+        network_policy_targets_app(network_policy_path, "mandoforge-worker");
+
+    let hardening_complete = worker_manifest_present
+        && service_account_manifest_present
+        && automount_service_account_token_disabled
+        && pod_run_as_non_root
+        && seccomp_runtime_default
+        && container_allow_privilege_escalation_disabled
+        && container_read_only_root_filesystem
+        && container_drops_all_capabilities
+        && resources_requests_configured
+        && resources_limits_configured
+        && network_policy_present;
+    let hardening_status = if hardening_complete {
+        "hardened"
+    } else if worker_manifest_present {
+        "incomplete"
+    } else {
+        "missing"
+    }
+    .to_string();
+
+    WorkerK8sReadiness {
+        worker_manifest_present,
+        worker_manifest_path: worker_manifest_path.to_string(),
+        service_account_name,
+        service_account_manifest_present,
+        service_account_manifest_path: service_account_manifest_path.to_string(),
+        automount_service_account_token_disabled,
+        pod_run_as_non_root,
+        seccomp_runtime_default,
+        container_allow_privilege_escalation_disabled,
+        container_read_only_root_filesystem,
+        container_drops_all_capabilities,
+        resources_requests_configured,
+        resources_limits_configured,
+        network_policy_present,
+        network_policy_path: network_policy_path.to_string(),
+        hardening_status,
+        scheduler_manifest_present: project_file_path(scheduler_manifest_path).is_some(),
+        scheduler_manifest_path: scheduler_manifest_path.to_string(),
+    }
+}
+
+fn read_yaml_manifest_value(relative_path: &str) -> Option<Value> {
+    let resolved_path = project_file_path(relative_path)?;
+    let content = std::fs::read_to_string(resolved_path).ok()?;
+    serde_yml::from_str::<Value>(&content).ok()
+}
+
+fn manifest_has_kind_name(relative_path: &str, kind: &str, name: &str) -> bool {
+    read_yaml_manifest_value(relative_path).is_some_and(|manifest| {
+        manifest.get("kind").and_then(Value::as_str) == Some(kind)
+            && manifest.pointer("/metadata/name").and_then(Value::as_str) == Some(name)
+    })
+}
+
+fn network_policy_targets_app(relative_path: &str, app: &str) -> bool {
+    read_yaml_manifest_value(relative_path).is_some_and(|manifest| {
+        manifest.get("kind").and_then(Value::as_str) == Some("NetworkPolicy")
+            && manifest
+                .pointer("/spec/podSelector/matchLabels/app")
+                .and_then(Value::as_str)
+                == Some(app)
+    })
 }
 
 fn worker_autoscaling_readiness_from_manifests(paths: &[&str]) -> WorkerAutoscalingReadiness {
@@ -29534,6 +29687,30 @@ not json
             worker_readiness.autoscaling.validation_status,
             "queue_depth_configured"
         );
+        assert!(worker_readiness.k8s.worker_manifest_present);
+        assert_eq!(
+            worker_readiness.k8s.service_account_name.as_deref(),
+            Some("mandoforge-worker")
+        );
+        assert!(worker_readiness.k8s.service_account_manifest_present);
+        assert!(
+            worker_readiness
+                .k8s
+                .automount_service_account_token_disabled
+        );
+        assert!(worker_readiness.k8s.pod_run_as_non_root);
+        assert!(worker_readiness.k8s.seccomp_runtime_default);
+        assert!(
+            worker_readiness
+                .k8s
+                .container_allow_privilege_escalation_disabled
+        );
+        assert!(worker_readiness.k8s.container_read_only_root_filesystem);
+        assert!(worker_readiness.k8s.container_drops_all_capabilities);
+        assert!(worker_readiness.k8s.resources_requests_configured);
+        assert!(worker_readiness.k8s.resources_limits_configured);
+        assert!(worker_readiness.k8s.network_policy_present);
+        assert_eq!(worker_readiness.k8s.hardening_status, "hardened");
         assert!(
             worker_readiness
                 .autoscaling

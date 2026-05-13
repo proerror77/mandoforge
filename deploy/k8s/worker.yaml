@@ -12,13 +12,23 @@ spec:
       labels:
         app: mandoforge-worker
     spec:
+      serviceAccountName: mandoforge-worker
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: worker
           image: ghcr.io/proerror77/mandoforge:latest
           imagePullPolicy: IfNotPresent
           command: ["mandoforge-worker"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: BASE_URL
               value: "http://mandoforge-api:8787"
@@ -35,3 +45,9 @@ spec:
             limits:
               cpu: "500m"
               memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

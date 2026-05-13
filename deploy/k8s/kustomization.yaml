@@ -7,7 +7,9 @@ resources:
   - secret.example.yaml
   - postgres.yaml
   - api.yaml
+  - worker-serviceaccount.yaml
   - worker.yaml
+  - worker-networkpolicy.yaml
   - worker-hpa.yaml
   - worker-keda.yaml
   - scheduler.yaml

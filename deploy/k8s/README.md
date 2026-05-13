@@ -6,7 +6,7 @@ It contains:
 
 - Namespace.
 - API Deployment and Service.
-- Worker Deployment for queued execution jobs.
+- Worker Deployment for queued execution jobs, with a restricted ServiceAccount, disabled token automount, RuntimeDefault seccomp, dropped capabilities, read-only root filesystem, resource bounds, and a worker NetworkPolicy.
 - Worker HPA skeleton for CPU-based scaling experiments.
 - Worker KEDA ScaledObject for queue-depth scaling experiments.
 - Agent Remote Computer Pod template with zero replicas.
@@ -39,7 +39,7 @@ Production notes:
 - Replace the example Secret before deployment.
 - Prefer external Postgres or a mature Postgres Operator for production.
 - Replace `emptyDir` workspaces with PVC or object-storage-backed artifact sync before long-running workers.
-- Add NetworkPolicy before enabling shell, Codex, HTTP, or MCP execution in shared clusters.
+- Review and adapt the worker NetworkPolicy before enabling shell, Codex, HTTP, or MCP execution in shared clusters.
 - Keep Codex and sandbox execution disabled or tightly constrained before multi-tenant use; the current worker drains jobs through the API execution endpoint.
 - Treat `worker-hpa.yaml` and `worker-keda.yaml` as autoscaling pilot manifests. KEDA is wired to a Prometheus queue-depth query, but you still need production metrics, load validation, and isolation policy before claiming production autoscaling.
 - Treat the Remote Computer manifests as readiness skeletons only. They do not yet create per-session Pod leases, warm pools, or distributed Memory/Notes/Skills synchronization.

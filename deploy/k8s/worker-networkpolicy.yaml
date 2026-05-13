@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mandoforge-worker-restricted
+spec:
+  podSelector:
+    matchLabels:
+      app: mandoforge-worker
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mandoforge-api
+      ports:
+        - protocol: TCP
+          port: 8787
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

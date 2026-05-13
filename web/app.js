@@ -1908,6 +1908,9 @@ function renderWorkerReadiness() {
       <strong>LEASES / AUTOSCALING</strong>
       <div class="muted">Leased ${formatInteger(leaseSummary.leased_jobs || 0)} · Stale leases ${formatInteger(leaseSummary.stale_leases || 0)} · Oldest stale lease ${formatOptionalSeconds(leaseSummary.oldest_stale_lease_age_seconds)}</div>
       <div class="muted">K8s worker manifest: ${k8s.worker_manifest_present ? "present" : "missing"} · Autoscaling manifest: ${autoscaling.autoscaling_manifest_present ? "present" : "missing"}</div>
+      <div class="muted">WORKER HARDENING: ${escapeHtml(k8s.hardening_status || "unknown")} · SA ${escapeHtml(k8s.service_account_name || "none")} · NetworkPolicy ${k8s.network_policy_present ? "present" : "missing"}</div>
+      <div class="muted">Security: non-root ${k8s.pod_run_as_non_root ? "yes" : "no"} · seccomp ${k8s.seccomp_runtime_default ? "RuntimeDefault" : "missing"} · no privilege escalation ${k8s.container_allow_privilege_escalation_disabled ? "yes" : "no"} · drop ALL caps ${k8s.container_drops_all_capabilities ? "yes" : "no"} · read-only root ${k8s.container_read_only_root_filesystem ? "yes" : "no"}</div>
+      <div class="muted">Resources: requests ${k8s.resources_requests_configured ? "configured" : "missing"} · limits ${k8s.resources_limits_configured ? "configured" : "missing"} · token automount ${k8s.automount_service_account_token_disabled ? "disabled" : "enabled/unknown"}</div>
       <div class="muted">AUTOSCALING SKELETON: ${escapeHtml(autoscaling.validation_status || "unknown")} · min ${formatOptionalInteger(autoscaling.configured_min_replicas)} · max ${formatOptionalInteger(autoscaling.configured_max_replicas)}</div>
       <div class="muted">Targets: ${escapeHtml((autoscaling.scale_target_refs || []).join(", ") || "none")}</div>
     </div>
