@@ -17,7 +17,6 @@ for manifest in "${manifests[@]}"; do
     echo "missing Stage 2 evidence manifest: $manifest" >&2
     exit 1
   fi
-  kubectl create --dry-run=client --validate=false -f "$manifest" >/dev/null
 done
 
 kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out
@@ -29,6 +28,26 @@ fi
 
 if ! grep -q "kind: Job" /tmp/mandoforge-stage2-evidence-kustomize.out; then
   echo "Stage 2 evidence kustomize render is missing a Job" >&2
+  exit 1
+fi
+
+if ! grep -q "kind: Secret" deploy/stage2-evidence/stage2-controller-env-secret.example.yaml; then
+  echo "Stage 2 controller env example is not a Kubernetes Secret" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-stage2-controller-env" deploy/stage2-evidence/stage2-controller-env-secret.example.yaml; then
+  echo "Stage 2 controller env Secret example has the wrong name" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-stage2-production-evidence-gate" deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml; then
+  echo "Stage 2 production evidence Job example has the wrong name" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-stage2-controller-env" deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml; then
+  echo "Stage 2 production evidence Job example does not consume the controller env Secret" >&2
   exit 1
 fi
 

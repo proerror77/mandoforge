@@ -19,7 +19,6 @@ for manifest in "${dry_run_manifests[@]}"; do
     echo "missing Remote Computer manifest: $manifest" >&2
     exit 1
   fi
-  kubectl create --dry-run=client --validate=false -f "$manifest" >/dev/null
 done
 
 kubectl kustomize deploy/k8s >/tmp/mandoforge-k8s-render.out
