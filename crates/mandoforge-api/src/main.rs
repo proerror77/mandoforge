@@ -2263,6 +2263,10 @@ struct TenantProductionRoutingReadiness {
     header_fail_closed: bool,
     membership_scope_enforced: bool,
     rls_ready: bool,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
     message: String,
     blocking_reasons: Vec<String>,
 }
@@ -3536,6 +3540,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/tenant-isolation/readiness",
             get(get_tenant_isolation_readiness),
+        )
+        .route(
+            "/api/tenant-isolation/routing/validate",
+            post(validate_tenant_production_routing),
         )
         .route("/api/organizations/{id}", delete(delete_organization))
         .route(
@@ -7334,6 +7342,62 @@ async fn get_tenant_isolation_readiness(
     Ok(Json(build_tenant_isolation_readiness(&state).await?))
 }
 
+async fn validate_tenant_production_routing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "tenant_isolation".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let readiness = build_tenant_isolation_readiness(&state).await?;
+    let checked_at = Utc::now();
+    let execution = execute_tenant_production_routing_controller(
+        &|key| std::env::var(key).ok(),
+        Some(principal.subject_id.as_str()),
+        checked_at,
+        &readiness,
+    )
+    .await?;
+    let status = execution
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed")
+        .to_string();
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.production_routing_validation_run",
+            "tenant_isolation",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "controller_configured": true,
+                "controller_execution": execution,
+                "runtime_tenant_mode": readiness.runtime_tenant_mode,
+                "rls_status": readiness.rls.status,
+                "checked_at": checked_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": status,
+        "checked_at": checked_at,
+        "controller_configured": true,
+        "controller_execution": execution,
+        "readiness_status": readiness.status,
+        "production_routing_status": readiness.production_routing.status,
+    })))
+}
+
 async fn build_tenant_isolation_readiness(
     state: &AppState,
 ) -> Result<TenantIsolationReadinessReport, AppError> {
@@ -7379,12 +7443,16 @@ async fn build_tenant_isolation_readiness(
     };
     let header_fail_closed = true;
     let membership_scope_enforced = true;
+    let audit_logs = state.list_audit_logs(None).await?;
     let mut attention_items = Vec::new();
     let production_routing = build_tenant_production_routing_readiness(
         "single_runtime_tenant",
         header_fail_closed,
         membership_scope_enforced,
         &rls,
+        &audit_logs,
+        tenant_production_routing_controller_required(&|key| std::env::var(key).ok()),
+        tenant_production_routing_controller_configured(&|key| std::env::var(key).ok()),
     );
     attention_items.push(TenantIsolationAttentionItem {
         kind: "single_runtime_tenant".to_string(),
@@ -7461,9 +7529,23 @@ fn build_tenant_production_routing_readiness(
     header_fail_closed: bool,
     membership_scope_enforced: bool,
     rls: &TenantIsolationRlsReadiness,
+    audit_logs: &[AuditLog],
+    controller_required: bool,
+    controller_configured: bool,
 ) -> TenantProductionRoutingReadiness {
     let cross_tenant_routing_supported = runtime_tenant_mode == "tenant_routed";
     let rls_ready = rls.enabled && rls.forced && rls.tenant_context_configured;
+    let latest_controller_status = audit_logs
+        .iter()
+        .filter(|log| log.action == "tenant.production_routing_validation_run")
+        .max_by_key(|log| log.created_at)
+        .and_then(|log| {
+            log.details["controller_execution"]["status"]
+                .as_str()
+                .or_else(|| log.details["status"].as_str())
+        })
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
     if !cross_tenant_routing_supported {
         blocking_reasons.push(
@@ -7479,6 +7561,16 @@ fn build_tenant_production_routing_readiness(
     if !rls_ready {
         blocking_reasons.push(
             "Postgres RLS is not fully enabled, forced, and tenant-context configured".to_string(),
+        );
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons.push(
+            "tenant production routing controller is required but not configured".to_string(),
+        );
+    }
+    if controller_required && !latest_controller_validated {
+        blocking_reasons.push(
+            "tenant production routing controller has no recent validated evidence".to_string(),
         );
     }
     let production_blocked = !blocking_reasons.is_empty();
@@ -7504,9 +7596,108 @@ fn build_tenant_production_routing_readiness(
         header_fail_closed,
         membership_scope_enforced,
         rls_ready,
+        controller_required,
+        controller_configured,
+        latest_controller_status,
+        latest_controller_validated,
         message,
         blocking_reasons,
     }
+}
+
+fn tenant_production_routing_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn tenant_production_routing_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+async fn execute_tenant_production_routing_controller<F>(
+    lookup: &F,
+    subject: Option<&str>,
+    checked_at: DateTime<Utc>,
+    readiness: &TenantIsolationReadinessReport,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_TENANT_ROUTING_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_TENANT_ROUTING_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.tenant_production_routing_validation",
+        "subject": subject,
+        "checked_at": checked_at,
+        "runtime_tenant_id": readiness.runtime_tenant_id,
+        "runtime_tenant_mode": readiness.runtime_tenant_mode,
+        "header_fail_closed": readiness.header_fail_closed,
+        "membership_scope_enforced": readiness.membership_scope_enforced,
+        "production_routing": readiness.production_routing,
+        "scoped_counts": readiness.scoped_counts,
+        "rls": readiness.rls,
+        "table_coverage": {
+            "tracked_table_count": readiness.table_coverage.len(),
+            "missing_rls_tables": readiness.table_coverage.iter()
+                .filter(|table| !table.rls_enabled || !table.rls_forced)
+                .map(|table| table.table.clone())
+                .collect::<Vec<_>>(),
+        },
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "tenant production routing controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(controller_status, "validated" | "success" | "ok");
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "validation_id": body.get("validation_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "checks": body.get("checks").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -27252,6 +27443,108 @@ not json
         controller_server.abort();
     }
 
+    #[tokio::test]
+    async fn tenant_production_routing_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("tenant routing listener");
+        let controller_addr = listener.local_addr().expect("tenant routing addr");
+        let controller = Router::new()
+            .route("/tenant-routing", post(mock_tenant_routing_controller))
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock tenant routing controller");
+        });
+        let checked_at = Utc::now();
+        let readiness = ready_tenant_isolation_readiness(checked_at);
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/tenant-routing"))
+            }
+            "MANDOFORGE_TENANT_ROUTING_CONTROLLER_TOKEN" => {
+                Some("tenant-routing-token".to_string())
+            }
+            _ => None,
+        };
+
+        let execution = execute_tenant_production_routing_controller(
+            &lookup,
+            Some("admin-1"),
+            checked_at,
+            &readiness,
+        )
+        .await
+        .expect("tenant routing controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(execution["validation_id"], "tenant-routing-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.tenant_production_routing_validation"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["runtime_tenant_mode"], "tenant_routed");
+        assert!(payloads[0]["secret"].is_null());
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn tenant_production_routing_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let rls = ready_tenant_rls_readiness();
+        let missing_controller = build_tenant_production_routing_readiness(
+            "tenant_routed",
+            true,
+            true,
+            &rls,
+            &[],
+            true,
+            false,
+        );
+        assert_eq!(missing_controller.status, "blocked");
+        assert!(missing_controller.blocking_reasons.iter().any(|reason| {
+            reason == "tenant production routing controller is required but not configured"
+        }));
+
+        let validated_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.production_routing_validation_run",
+            "tenant_isolation",
+            None,
+            json!({
+                "status": "validated",
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "validation_id": "tenant-routing-1"
+                },
+                "checked_at": generated_at,
+            }),
+        );
+        let ready = build_tenant_production_routing_readiness(
+            "tenant_routed",
+            true,
+            true,
+            &rls,
+            &[validated_audit],
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert!(ready.latest_controller_validated);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+    }
+
     #[test]
     fn worker_load_validation_evidence_requires_controller_when_configured() {
         let generated_at = Utc::now();
@@ -27816,6 +28109,63 @@ not json
             },
             runbook_actions: vec![],
             attention_items: vec![],
+        }
+    }
+
+    fn ready_tenant_rls_readiness() -> TenantIsolationRlsReadiness {
+        TenantIsolationRlsReadiness {
+            required_for_production: true,
+            enabled: true,
+            forced: true,
+            migration_asset_present: true,
+            tenant_context_configured: true,
+            enabled_table_count: 2,
+            forced_table_count: 2,
+            tracked_table_count: 2,
+            status: "configured".to_string(),
+        }
+    }
+
+    fn ready_tenant_isolation_readiness(
+        generated_at: DateTime<Utc>,
+    ) -> TenantIsolationReadinessReport {
+        let rls = ready_tenant_rls_readiness();
+        let production_routing = build_tenant_production_routing_readiness(
+            "tenant_routed",
+            true,
+            true,
+            &rls,
+            &[],
+            false,
+            true,
+        );
+        TenantIsolationReadinessReport {
+            generated_at,
+            status: "ready".to_string(),
+            readiness_score: 100,
+            runtime_tenant_id: Uuid::new_v4(),
+            runtime_tenant_mode: "tenant_routed".to_string(),
+            header_fail_closed: true,
+            membership_scope_enforced: true,
+            production_routing,
+            scoped_counts: TenantIsolationScopedCounts {
+                organizations: 1,
+                teams: 1,
+                projects: 1,
+                memberships: 1,
+                invitations: 0,
+            },
+            table_coverage: vec![TenantIsolationTableCoverage {
+                table: "agents".to_string(),
+                tenant_id_required: true,
+                store_filters_tenant: true,
+                rls_required_for_production: true,
+                rls_enabled: true,
+                rls_forced: true,
+            }],
+            rls,
+            attention_items: vec![],
+            runbook_actions: vec![],
         }
     }
 
@@ -33857,6 +34207,30 @@ not json
                 {"name": "queue_pressure", "status": "passed"},
                 {"name": "keda_scale_out", "status": "passed"},
                 {"name": "isolated_worker_pool", "status": "passed"}
+            ]
+        }))
+    }
+
+    async fn mock_tenant_routing_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer tenant-routing-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "validation_id": "tenant-routing-1",
+            "message": "tenant routing target validated",
+            "checks": [
+                {"name": "runtime_routing", "status": "passed"},
+                {"name": "header_fail_closed", "status": "passed"},
+                {"name": "rls_context", "status": "passed"}
             ]
         }))
     }

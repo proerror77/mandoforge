@@ -82,6 +82,7 @@ const state = {
   memberships: [],
   tenantInvitations: [],
   tenantIsolationReadiness: null,
+  tenantRoutingValidation: null,
   tenantProvisioning: null,
   selectedOrganizationId: "",
   selectedTeamId: "",
@@ -169,6 +170,7 @@ const costAlertRouteRoot = document.querySelector("#cost-alert-routes");
 const governanceRoot = document.querySelector("#governance-status");
 const organizationRoot = document.querySelector("#organizations");
 const tenantIsolationReadinessRoot = document.querySelector("#tenant-isolation-readiness");
+const validateTenantRoutingButton = document.querySelector("#validate-tenant-routing");
 const teamRoot = document.querySelector("#teams");
 const projectRoot = document.querySelector("#projects");
 const membershipRoot = document.querySelector("#memberships");
@@ -235,6 +237,7 @@ const codexAppServerRoot = document.querySelector("#codex-app-server");
 document.querySelector("#new-session").addEventListener("click", runDemo);
 agentForm.addEventListener("submit", createAgent);
 organizationForm.addEventListener("submit", createOrganization);
+validateTenantRoutingButton.addEventListener("click", validateTenantRouting);
 tenantProvisioningForm.addEventListener("submit", bootstrapTenantProvisioning);
 organizationOwnerForm.addEventListener("submit", transferOrganizationOwnership);
 teamForm.addEventListener("submit", createTeam);
@@ -1057,6 +1060,13 @@ async function runSchedulerDueTasks() {
     method: "POST",
   });
   await refreshApprovals();
+  await refreshOps();
+}
+
+async function validateTenantRouting() {
+  state.tenantRoutingValidation = await api("/api/tenant-isolation/routing/validate", {
+    method: "POST",
+  });
   await refreshOps();
 }
 
@@ -2675,6 +2685,7 @@ function renderTenantIsolationReadiness() {
   const counts = report.scoped_counts || {};
   const rls = report.rls || {};
   const productionRouting = report.production_routing || {};
+  const tenantRoutingValidation = state.tenantRoutingValidation;
   const attentionItems = report.attention_items || [];
   const tableCoverage = report.table_coverage || [];
   tenantIsolationReadinessRoot.innerHTML = `
@@ -2694,6 +2705,12 @@ function renderTenantIsolationReadiness() {
       <strong>PRODUCTION ROUTING GATE</strong>
       <div class="muted">${escapeHtml(productionRouting.message || "tenant production routing gate is not reported")}</div>
       <div class="muted">cross-tenant routing ${productionRouting.cross_tenant_routing_supported ? "ready" : "missing"} · header fail-closed ${productionRouting.header_fail_closed ? "yes" : "no"} · membership scope ${productionRouting.membership_scope_enforced ? "yes" : "no"} · RLS ready ${productionRouting.rls_ready ? "yes" : "no"}</div>
+      <div class="muted">controller required ${productionRouting.controller_required ? "yes" : "no"} · configured ${productionRouting.controller_configured ? "yes" : "no"} · status ${escapeHtml(productionRouting.latest_controller_status || "none")} · validated ${productionRouting.latest_controller_validated ? "yes" : "no"}</div>
+      ${
+        tenantRoutingValidation
+          ? `<div class="muted">Latest validation: ${escapeHtml(tenantRoutingValidation.status || "unknown")} · ${escapeHtml(tenantRoutingValidation.checked_at || "")}</div>`
+          : ""
+      }
     </div>
     <div class="item">
       <strong>TABLE COVERAGE</strong>
