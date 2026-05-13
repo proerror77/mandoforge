@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::{Component, Path as FsPath, PathBuf},
     time::Duration,
 };
@@ -14,7 +15,10 @@ use uuid::Uuid;
 use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnResponse};
 use crate::execution_queue::{ExecutionJob, ExecutionJobRequest};
 use crate::shell_runner::{shell_command, shell_runner};
-use crate::{AppError, AppState, Approval, Artifact, ToolCall, new_audit_log};
+use crate::{
+    AppError, AppState, Approval, Artifact, CreateRemoteComputerJobAssignment, ToolCall,
+    new_audit_log, record_remote_computer_job_assignment_event,
+};
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const MAX_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
@@ -133,13 +137,11 @@ pub(crate) async fn run_execution_job(
     worker_id: &str,
 ) -> Result<ExecutionJob, AppError> {
     let job = state.execution_queue.start(job_id, worker_id).await?;
-    let remote_computer_assignment = state
-        .list_remote_computer_job_assignments()
-        .await?
-        .into_iter()
-        .find(|assignment| {
-            assignment.execution_job_id == job.id && assignment.status == "assigned"
-        });
+    let remote_computer_assignment =
+        match active_remote_computer_assignment_for_job(state, &job).await? {
+            Some(assignment) => Some(assignment),
+            None => auto_assign_remote_computer_for_job(state, &job, worker_id).await?,
+        };
     if let Some(assignment) = remote_computer_assignment.as_ref() {
         let details = json!({
             "assignment_id": assignment.id,
@@ -306,6 +308,78 @@ async fn append_remote_computer_execution_transport_plan(
         ))
         .await?;
     Ok(())
+}
+
+async fn active_remote_computer_assignment_for_job(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<Option<crate::RemoteComputerJobAssignment>, AppError> {
+    Ok(state
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .find(|assignment| {
+            assignment.execution_job_id == job.id && assignment.status == "assigned"
+        }))
+}
+
+async fn auto_assign_remote_computer_for_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+) -> Result<Option<crate::RemoteComputerJobAssignment>, AppError> {
+    let assigned_lease_ids: HashSet<_> = state
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .filter(|assignment| assignment.status == "assigned")
+        .map(|assignment| assignment.lease_id)
+        .collect();
+    let Some(lease) = state
+        .list_remote_computer_leases()
+        .await?
+        .into_iter()
+        .filter(|lease| {
+            lease.status == "leased"
+                && !assigned_lease_ids.contains(&lease.id)
+                && lease
+                    .lease_expires_at
+                    .is_none_or(|lease_expires_at| lease_expires_at > Utc::now())
+                && lease
+                    .session_id
+                    .is_none_or(|session_id| session_id == job.session_id)
+        })
+        .max_by_key(|lease| {
+            (
+                lease.session_id == Some(job.session_id),
+                lease.heartbeat_at.unwrap_or(lease.created_at),
+            )
+        })
+    else {
+        return Ok(None);
+    };
+    let assignment = state
+        .create_remote_computer_job_assignment(
+            job.id,
+            job.session_id,
+            CreateRemoteComputerJobAssignment {
+                lease_id: lease.id,
+                assigned_by: Some(worker_id.to_string()),
+                metadata: Some(json!({
+                    "handoff_mode": "auto-worker-lease",
+                    "source": "run_execution_job"
+                })),
+            },
+        )
+        .await?;
+    record_remote_computer_job_assignment_event(
+        state,
+        &assignment,
+        job,
+        "remote_computer.execution_handoff_assigned",
+    )
+    .await?;
+    Ok(Some(assignment))
 }
 
 fn env_flag(name: &str) -> bool {
