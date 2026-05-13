@@ -21,10 +21,11 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 ## Next Stage 2 Slices
 
-1. Add the Agent Remote Computer live Kubernetes client behind the adapter skeleton described in [Agent Remote Computer Plan](agent-remote-computer-plan.md), keeping create/delete fail-closed unless explicitly configured and without moving tool execution into Pods yet.
-2. Add production multi-step rollout orchestration beyond the current policy/release summary dashboards.
-3. Add production finance close workflow automation beyond the current bounded close run, static readiness, forecast, pressure, acknowledgement, audit-evidence, and scheduled export delivery surfaces.
-4. Add broader remediation automation beyond safe approval/Codex due-runs and production collector-specific OTLP hardening beyond readiness checks.
-5. Add production App Server control-plane polish beyond current static steering dashboards.
-6. Continue hardening Vault/KMS beyond the new readiness gate by adding real secret-value write/rotation orchestration when a production KMS/HSM target is selected.
-7. Extend approval notification routing from env-gated webhook/Slack/email delivery and run history to persisted channel policy, retries/backoff, and richer provider-grade delivery operations.
+1. Connect approved queued execution to Remote Computer leases/Pods without bypassing Tool Router, Policy Engine, Approval Engine, event log, or audit paths.
+2. Promote JuiceFS, warm-pool, and KEDA examples into explicit opt-in overlays once namespace, secret, metrics, and conflict-handling rules are implemented.
+3. Add production multi-step rollout orchestration beyond the current policy/release summary dashboards.
+4. Add production finance close workflow automation beyond the current bounded close run, static readiness, forecast, pressure, acknowledgement, audit-evidence, and scheduled export delivery surfaces.
+5. Add broader remediation automation beyond safe approval/Codex due-runs and production collector-specific OTLP hardening beyond readiness checks.
+6. Add production App Server control-plane polish beyond current static steering dashboards.
+7. Continue hardening Vault/KMS beyond the new readiness gate by adding real secret-value write/rotation orchestration when a production KMS/HSM target is selected.
+8. Extend approval notification routing from env-gated webhook/Slack/email delivery and run history to persisted channel policy, retries/backoff, and richer provider-grade delivery operations.

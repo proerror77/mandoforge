@@ -23,7 +23,7 @@ This audit is intentionally strict. A reserved boundary, UI placeholder, passing
 | Observability with OTel traces/metrics/logs | OTLP-shaped logs/traces/metrics export from event append boundary, observability summary, collector readiness gate, remediation plan/run, scheduler due-plan, and scheduler orchestration summary exist; tests include `appended_session_events_export_telemetry_when_enabled`, `http_telemetry_exporter_posts_logs_traces_and_metrics_to_otlp_boundary`, and `observability_summary_reports_dashboard_backpressure`. | Partial: collector readiness is now API/UI-visible, but broader remediation automation and production collector hardening are not complete. |
 | Cost tracking, budgets, alerts, trends, finance exports | Usage summary/trends, provider cost budgets, alert routes/delivery/ack, finance summary, CSV export, scheduled export delivery, alert-delivery audit metadata, Finance Operations readiness/runbook UI panels, and a controlled finance close run endpoint exist; tests include `builds_usage_trend_from_rollups_and_budget_pressure`, `builds_usage_finance_dashboard_attention_items`, `builds_usage_finance_operations_summary_from_audit_history`, and `usage_finance_summary_requires_admin_and_reports_dashboard`. | Partial: production finance operations now include readiness, audit-evidence summaries, and a bounded close run, but full production finance close workflows are not complete. |
 | UI v2 admin console | Static UI covers tenant governance, provider settings, Vault, approval governance, policy, eval/release, MCP, worker, usage, Codex App Server, observability, remediation, and scheduler orchestration panels; `./scripts/verify-static-ui-actionbook.sh` validates a static UI smoke path without relying on browser MCP. | Partial: full production CRUD flows, dashboard polish, and richer rollout operations remain incomplete. |
-| Kubernetes scheduler/deployment groundwork | `deploy/k8s` kustomize renders successfully, including scheduler CronJob for aggregate due-run supervision. Latest check: `kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out` returned 249 lines. | Covered for Stage 2 skeleton; not a complete enterprise deployment. |
+| Kubernetes scheduler/deployment groundwork | `deploy/k8s` kustomize renders successfully, including scheduler CronJob for aggregate due-run supervision. Latest check: `kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out` returned 357 lines. | Covered for Stage 2 skeleton; not a complete enterprise deployment. |
 
 ## Latest Verification Commands
 
@@ -34,6 +34,7 @@ cargo fmt --all -- --check
 node --check web/app.js
 git diff --check
 cargo test -p mandoforge-api
+cargo check -p mandoforge-api --bin mandoforge-worker
 ./scripts/verify-static-ui-actionbook.sh
 kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out
 lsof -nP -iTCP:8791 -sTCP:LISTEN || true
@@ -43,9 +44,9 @@ lsof -nP -iTCP:9324 -sTCP:LISTEN || true
 Latest evidence:
 
 ```text
-cargo test -p mandoforge-api: 121 passed
+cargo test -p mandoforge-api: 132 passed
 static UI actionbook smoke ok
-kustomize rendered 249 lines
+kustomize rendered 357 lines
 ports 8791 and 9324 had no residual listeners after Actionbook verification
 ```
 
