@@ -3125,6 +3125,10 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/execution-jobs", get(list_execution_jobs))
         .route(
+            "/api/execution-jobs/{id}/cancel",
+            post(cancel_execution_job_route),
+        )
+        .route(
             "/api/execution-jobs/{id}/remote-computer-lease",
             post(assign_execution_job_remote_computer_lease),
         )
@@ -13967,11 +13971,12 @@ async fn build_observability_summary(state: &AppState) -> Result<ObservabilitySu
             }
             ExecutionJobStatus::Running => running_jobs += 1,
             ExecutionJobStatus::Failed => failed_jobs += 1,
-            ExecutionJobStatus::Completed => {}
+            ExecutionJobStatus::Completed | ExecutionJobStatus::Canceled => {}
         }
         if job.attempt_count > 0
             && job.attempt_count < job.max_attempts
             && job.status != ExecutionJobStatus::Completed
+            && job.status != ExecutionJobStatus::Canceled
         {
             retryable_jobs += 1;
         }
@@ -14035,6 +14040,7 @@ fn execution_job_status_label(status: &ExecutionJobStatus) -> &'static str {
         ExecutionJobStatus::Running => "running",
         ExecutionJobStatus::Completed => "completed",
         ExecutionJobStatus::Failed => "failed",
+        ExecutionJobStatus::Canceled => "canceled",
     }
 }
 
@@ -17197,6 +17203,7 @@ async fn build_remote_computer_readiness(
         "remote_computer.execution_handoff_completed".to_string(),
         "remote_computer.execution_handoff_released".to_string(),
         "remote_computer.execution_handoff_failed".to_string(),
+        "remote_computer.execution_handoff_canceled".to_string(),
         "remote_computer.execution_transport_planned".to_string(),
         "remote_computer.execution_transport_completed".to_string(),
         "remote_computer.runner_dry_run".to_string(),
@@ -17395,15 +17402,15 @@ async fn build_remote_computer_execution_transport_readiness(
             "assigned_file_write".to_string(),
             "assigned_shell_exec".to_string(),
             "assigned_codex_exec".to_string(),
+            "cancel_assigned_pod_exec".to_string(),
             "audit_handoff".to_string(),
             "fail_closed".to_string(),
         ],
         required_implementation: vec![
             "general workspace artifact sync from Pod filesystem to Artifact Store".to_string(),
-            "cancellation propagation".to_string(),
         ],
         message:
-            "Remote Computer runner can route assigned file.write, shell.exec, and codex.exec jobs through gated Kubernetes Pod exec, while general artifact sync remains on the existing worker path"
+            "Remote Computer runner can route assigned file.write, shell.exec, and codex.exec jobs through gated Kubernetes Pod exec and propagate cancellation through Pod deletion, while general artifact sync remains on the existing worker path"
                 .to_string(),
     })
 }
@@ -17484,10 +17491,12 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
             ExecutionJobStatus::Running => running_jobs += 1,
             ExecutionJobStatus::Completed => completed_jobs += 1,
             ExecutionJobStatus::Failed => failed_jobs += 1,
+            ExecutionJobStatus::Canceled => {}
         }
         if job.attempt_count > 0
             && job.attempt_count < job.max_attempts
             && job.status != ExecutionJobStatus::Completed
+            && job.status != ExecutionJobStatus::Canceled
         {
             retryable_jobs += 1;
         }
@@ -18016,6 +18025,148 @@ async fn run_execution_job_route(
         resume_provider_after_approval(&state, completed.session_id).await?;
     }
     Ok(Json(completed))
+}
+
+async fn cancel_execution_job_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
+    authorize_execution_job_run(&state, &headers, id).await?;
+    let job = state.execution_queue.get(id).await?;
+    if matches!(
+        job.status,
+        ExecutionJobStatus::Completed | ExecutionJobStatus::Failed | ExecutionJobStatus::Canceled
+    ) {
+        return Ok(Json(job));
+    }
+    let propagation = propagate_remote_computer_execution_cancel(&state, &job).await?;
+    let canceled = state.execution_queue.cancel(id).await?;
+    state
+        .append_event(
+            "worker",
+            Some(canceled.id),
+            canceled.session_id,
+            "execution.canceled",
+            json!({
+                "execution_job_id": canceled.id,
+                "approval_id": canceled.approval_id,
+                "tool_call_id": canceled.tool_call_id,
+                "tool": canceled.tool_name,
+                "previous_status": job.status,
+                "remote_computer": propagation,
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(canceled.session_id),
+            "worker",
+            Some(canceled.id),
+            "execution.canceled",
+            "execution_job",
+            Some(canceled.id),
+            json!({
+                "tool": canceled.tool_name,
+                "previous_status": job.status,
+                "remote_computer": propagation,
+            }),
+        ))
+        .await?;
+    Ok(Json(canceled))
+}
+
+async fn propagate_remote_computer_execution_cancel(
+    state: &AppState,
+    job: &execution_queue::ExecutionJob,
+) -> Result<Value, AppError> {
+    let Some(assignment) = state
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .find(|assignment| {
+            assignment.execution_job_id == job.id && assignment.status == "assigned"
+        })
+    else {
+        return Ok(json!({"assigned": false, "pod_delete_attempted": false}));
+    };
+    let mut metadata = json!({
+        "execution_job_status": "canceled",
+        "canceled_at": Utc::now(),
+    });
+    let mut pod_delete_attempted = false;
+    let mut pod_delete_status = None;
+    let mut pod_delete_message = None;
+    if remote_computer_pod_execution_requested_from_env() {
+        let remote_computer = state
+            .list_remote_computers()
+            .await?
+            .into_iter()
+            .find(|computer| computer.id == assignment.remote_computer_id)
+            .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+        if let Some(pod_name) = remote_computer.pod_name.clone() {
+            let config = RemoteComputerRunnerConfig::from_env();
+            let response = remote_computer_runner_for_config(&config)
+                .mutate(
+                    &config,
+                    RemoteComputerRunnerDryRunRequest {
+                        operation: Some("live_delete".to_string()),
+                        remote_computer_id: Some(remote_computer.id),
+                        session_id: Some(job.session_id),
+                        pod_name: Some(pod_name.clone()),
+                        metadata: Some(json!({
+                            "execution_job_id": job.id,
+                            "tool_call_id": job.tool_call_id,
+                            "cancel_reason": "execution_job_cancel",
+                        })),
+                    },
+                )
+                .await;
+            pod_delete_attempted = response.live_mutation_attempted;
+            pod_delete_status = Some(response.status.clone());
+            pod_delete_message = Some(response.message.clone());
+            metadata["pod_delete"] = json!({
+                "attempted": response.live_mutation_attempted,
+                "status": response.status,
+                "message": response.message,
+                "pod_name": pod_name,
+            });
+            if response.status != "mutation_ok" {
+                return Err(AppError::bad_request(format!(
+                    "Remote Computer Pod cancellation failed: {}",
+                    response.message
+                )));
+            }
+        }
+    }
+    let updated = state
+        .update_remote_computer_job_assignment_status(assignment.id, "canceled", metadata)
+        .await?;
+    record_remote_computer_job_assignment_event(
+        state,
+        &updated,
+        job,
+        "remote_computer.execution_handoff_canceled",
+    )
+    .await?;
+    Ok(json!({
+        "assigned": true,
+        "assignment_id": updated.id,
+        "remote_computer_id": updated.remote_computer_id,
+        "lease_id": updated.lease_id,
+        "pod_delete_attempted": pod_delete_attempted,
+        "pod_delete_status": pod_delete_status,
+        "pod_delete_message": pod_delete_message,
+    }))
+}
+
+fn remote_computer_pod_execution_requested_from_env() -> bool {
+    let mode = std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    env_bool("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED")
+        && matches!(mode.as_str(), "kubernetes" | "k8s")
 }
 
 async fn authorize_execution_job_run(
@@ -19107,6 +19258,21 @@ not json
         assert_eq!(failed.attempt_count, 2);
         assert_eq!(failed.last_error.as_deref(), Some("still failing"));
         assert!(failed.completed_at.is_some());
+
+        let cancelable = queue
+            .enqueue(ExecutionJobRequest {
+                session_id: Uuid::new_v4(),
+                approval_id: Uuid::new_v4(),
+                tool_call_id: Uuid::new_v4(),
+                tool_name: "shell.exec".to_string(),
+                max_attempts: None,
+            })
+            .await
+            .expect("queue cancelable job");
+        let canceled = queue.cancel(cancelable.id).await.expect("cancel job");
+        assert_eq!(canceled.status, ExecutionJobStatus::Canceled);
+        assert!(canceled.completed_at.is_some());
+        assert!(canceled.lease_expires_at.is_none());
     }
 
     #[tokio::test]
@@ -19125,10 +19291,112 @@ not json
             assert!(queue.start(Uuid::new_v4(), "worker").await.is_err());
             assert!(queue.complete(Uuid::new_v4()).await.is_err());
             assert!(queue.fail(Uuid::new_v4()).await.is_err());
+            assert!(queue.cancel(Uuid::new_v4()).await.is_err());
             assert!(queue.retry_or_fail(Uuid::new_v4(), "error").await.is_err());
             assert!(queue.list().await.is_err());
             assert!(queue.get(Uuid::new_v4()).await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn execution_job_cancel_route_marks_job_canceled_and_audits() {
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "cancel execution job"}),
+            ),
+        )
+        .await;
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {"path": "cancel.md", "content": "cancel me"}
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id)
+        .expect("execution job queued");
+
+        let canceled: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{}/cancel", job.id))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(canceled.status, ExecutionJobStatus::Canceled);
+        assert!(canceled.completed_at.is_some());
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "execution.canceled"
+                && event.payload["execution_job_id"] == json!(job.id)
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs.iter().any(|log| {
+                log.action == "execution.canceled" && log.resource_id == Some(job.id)
+            })
+        );
     }
 
     #[tokio::test]

@@ -61,6 +61,10 @@ impl ExecutionQueue {
         self.backend.fail(job_id).await
     }
 
+    pub(crate) async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+        self.backend.cancel(job_id).await
+    }
+
     pub(crate) async fn retry_or_fail(
         &self,
         job_id: Uuid,
@@ -90,6 +94,8 @@ pub(crate) trait ExecutionQueueBackend: Send + Sync {
     async fn complete(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
 
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
+
+    async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
 
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError>;
 
@@ -139,6 +145,7 @@ pub(crate) enum ExecutionJobStatus {
     Running,
     Completed,
     Failed,
+    Canceled,
 }
 
 impl ExecutionJobStatus {
@@ -148,6 +155,7 @@ impl ExecutionJobStatus {
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Canceled => "canceled",
         }
     }
 }
@@ -160,6 +168,7 @@ impl FromStr for ExecutionJobStatus {
             "running" => Self::Running,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
+            "canceled" | "cancelled" => Self::Canceled,
             _ => Self::Queued,
         })
     }
@@ -249,6 +258,11 @@ impl ExecutionQueueBackend for MemoryExecutionQueue {
         self.update(job_id, ExecutionJobStatus::Failed, None).await
     }
 
+    async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+        self.update(job_id, ExecutionJobStatus::Canceled, None)
+            .await
+    }
+
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
         let mut state = self.inner.write().await;
         let job = state
@@ -308,7 +322,9 @@ impl MemoryExecutionQueue {
                 job.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
                 job.attempt_count += 1;
             }
-            ExecutionJobStatus::Completed | ExecutionJobStatus::Failed => {
+            ExecutionJobStatus::Completed
+            | ExecutionJobStatus::Failed
+            | ExecutionJobStatus::Canceled => {
                 job.completed_at = Some(Utc::now());
                 job.lease_expires_at = None;
             }
@@ -368,6 +384,11 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
 
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.update(job_id, ExecutionJobStatus::Failed, None).await
+    }
+
+    async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+        self.update(job_id, ExecutionJobStatus::Canceled, None)
+            .await
     }
 
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
@@ -440,7 +461,7 @@ impl PostgresExecutionQueue {
             .bind(job_id)
             .fetch_optional(&self.pool)
             .await?,
-            ExecutionJobStatus::Completed | ExecutionJobStatus::Failed => sqlx::query(
+            ExecutionJobStatus::Completed | ExecutionJobStatus::Failed | ExecutionJobStatus::Canceled => sqlx::query(
                 "UPDATE execution_jobs
                  SET status = $1, completed_at = COALESCE(completed_at, now()), lease_expires_at = NULL
                  WHERE tenant_id = $2 AND id = $3

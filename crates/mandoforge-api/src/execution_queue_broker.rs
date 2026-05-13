@@ -1225,6 +1225,30 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         Ok(pending_job.job.clone())
     }
 
+    async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+        match self.kind {
+            BrokerQueueKind::Redis => {
+                let config = self.redis_config().await?;
+                self.ack_redis_job(config, job_id).await?;
+            }
+            BrokerQueueKind::Nats => {
+                self.broker_config().await?;
+            }
+            BrokerQueueKind::NatsJetstream => {
+                let config = self.broker_config().await?;
+                self.ack_jetstream_job(config, job_id).await?;
+            }
+        }
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        pending_job.job.status = ExecutionJobStatus::Canceled;
+        pending_job.job.completed_at = Some(Utc::now());
+        pending_job.job.lease_expires_at = None;
+        Ok(pending_job.job.clone())
+    }
+
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
         let (job, message_id) = {
             let mut pending = self.pending.write().await;
