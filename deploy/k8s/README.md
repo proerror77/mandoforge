@@ -15,6 +15,7 @@ It contains:
 - Remote Computer warm-pool example, kept outside the default kustomization.
 - Remote Computer KEDA ScaledObject example, kept outside the default kustomization.
 - Remote Computer pilot bundle at `../kustomization.yaml` that opts into JuiceFS, warm-pool, and Remote Computer KEDA examples together.
+- Stage 2 production evidence gate Job at `../stage2-evidence/kustomization.yaml`, kept outside the default kustomization so it can be run explicitly after the API is deployed.
 - Scheduler CronJob for due policy, approval, release, and MCP automation, using a dedicated ServiceAccount with token automount disabled and Secret-sourced scheduler subject, role, and shared token headers.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
@@ -34,6 +35,12 @@ Render the opt-in Remote Computer pilot bundle before applying it to a real clus
 kubectl kustomize deploy
 ```
 
+Render the opt-in Stage 2 evidence gate Job:
+
+```bash
+kubectl kustomize deploy/stage2-evidence
+```
+
 Production notes:
 
 - Replace the example Secret before deployment.
@@ -51,4 +58,5 @@ Production notes:
 - Treat `remote-computer-warm-pool.yaml` as an opt-in example. It keeps placeholder Pods warm but does not yet lease, assign, or attach sessions to them.
 - Treat `remote-computer-keda.yaml` as an opt-in example. It assumes Prometheus metrics that are not production-hardened yet.
 - Treat `../kustomization.yaml` as the reviewable bundle for enabling those examples together; do not apply it until storage credentials, Prometheus metrics, namespace policy, and state conflict rules have been reviewed.
+- Treat `../stage2-evidence/kustomization.yaml` as an inventory Job first. Its default `ALLOW_BLOCKED=1` collects readiness evidence without claiming completion; patch `RUN_STAGE2_PRODUCTION_VALIDATIONS=1` only when the external validation controllers and real deployment targets are configured.
 - Replace the scheduler example shared token before production exposure. If `MANDOFORGE_SCHEDULER_TOKEN` is set in the API runtime, `/api/scheduler/run-due` requires the CronJob to send the matching `x-mandoforge-scheduler-token` header in addition to Admin authorization.

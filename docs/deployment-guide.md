@@ -145,3 +145,11 @@ BASE_URL=http://127.0.0.1:8787 \
 ```
 
 This gate remains fail-closed until `/api/stage2/readiness` reports no open completion gaps. See `docs/stage2-production-evidence-gate.md` for the optional flags that enable higher-impact KMS rotation, Remote Computer sidecar recovery, and finance close/reconciliation checks.
+
+For in-cluster inventory runs, render or apply the opt-in Kubernetes Job:
+
+```bash
+kubectl kustomize deploy/stage2-evidence
+```
+
+The Job uses the published MandoForge image, calls `http://mandoforge-api:8787`, writes evidence to an ephemeral volume, and defaults to `ALLOW_BLOCKED=1` so it can inventory an incomplete Stage 2 deployment without pretending the stage is complete.
