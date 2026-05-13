@@ -1437,6 +1437,7 @@ struct RemoteComputerReadinessReport {
     pod_template: RemoteComputerManifestReadiness,
     service_account: RemoteComputerManifestReadiness,
     state_filesystem: RemoteComputerStateFilesystemReadiness,
+    production_state_sync: RemoteComputerProductionStateSyncReadiness,
     network_policy: RemoteComputerManifestReadiness,
     autoscaling: RemoteComputerAutoscalingReadiness,
     warm_pool: RemoteComputerWarmPoolReadiness,
@@ -1448,6 +1449,20 @@ struct RemoteComputerReadinessReport {
     event_types: Vec<String>,
     attention_items: Vec<RemoteComputerAttentionItem>,
     runbook_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerProductionStateSyncReadiness {
+    status: String,
+    production_blocked: bool,
+    distributed_filesystem_configured: bool,
+    production_profile_present: bool,
+    state_contract_present: bool,
+    lock_manager_configured: bool,
+    conflict_policy: String,
+    provider: String,
+    blocking_reasons: Vec<String>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19338,6 +19353,8 @@ async fn build_remote_computer_readiness(
         }
         .to_string(),
     };
+    let production_state_sync =
+        build_remote_computer_production_state_sync_readiness(&state_filesystem);
     let remote_pool_scaled_object_path = "deploy/k8s/remote-computer-keda.yaml";
     let remote_pool_scaled_object_present =
         project_file_path(remote_pool_scaled_object_path).is_some();
@@ -19456,6 +19473,13 @@ async fn build_remote_computer_readiness(
             "distributed_state_filesystem_missing",
             "warning",
             "state mount has a PVC/RWX placeholder and optional JuiceFS production profile; set a real JuiceFS/CephFS/Longhorn or equivalent provider before multi-Pod state sync",
+        ));
+    }
+    if production_state_sync.production_blocked {
+        attention_items.push(remote_computer_attention(
+            "production_state_sync_blocked",
+            "critical",
+            production_state_sync.message.as_str(),
         ));
     }
     if !network_policy.present {
@@ -19608,6 +19632,7 @@ async fn build_remote_computer_readiness(
         pod_template,
         service_account,
         state_filesystem,
+        production_state_sync,
         network_policy,
         autoscaling,
         warm_pool,
@@ -19620,6 +19645,64 @@ async fn build_remote_computer_readiness(
         attention_items,
         runbook_actions,
     })
+}
+
+fn build_remote_computer_production_state_sync_readiness(
+    state_filesystem: &RemoteComputerStateFilesystemReadiness,
+) -> RemoteComputerProductionStateSyncReadiness {
+    let mut blocking_reasons = Vec::new();
+    if !state_filesystem.distributed_filesystem_configured {
+        blocking_reasons.push(
+            "no real distributed filesystem provider is configured for multi-Pod state sync"
+                .to_string(),
+        );
+    }
+    if !state_filesystem.production_profile_present {
+        blocking_reasons.push(
+            "production state filesystem profile manifest is missing or not packaged".to_string(),
+        );
+    }
+    if !state_filesystem.state_contract_present {
+        blocking_reasons.push("Memory/Notes/Skills state contract is missing".to_string());
+    }
+    if !state_filesystem.lock_manager_configured {
+        blocking_reasons
+            .push("lock-aware state sync manager is not configured for shared writes".to_string());
+    }
+    if state_filesystem.conflict_policy != "one-active-writer-per-session" {
+        blocking_reasons.push(
+            "state conflict policy is not the expected one-active-writer contract".to_string(),
+        );
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Remote Computer production state sync is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Remote Computer production state sync has a distributed filesystem provider, production profile, state contract, and lock-aware write coordination".to_string()
+    };
+
+    RemoteComputerProductionStateSyncReadiness {
+        status,
+        production_blocked,
+        distributed_filesystem_configured: state_filesystem.distributed_filesystem_configured,
+        production_profile_present: state_filesystem.production_profile_present,
+        state_contract_present: state_filesystem.state_contract_present,
+        lock_manager_configured: state_filesystem.lock_manager_configured,
+        conflict_policy: state_filesystem.conflict_policy.clone(),
+        provider: state_filesystem.provider.clone(),
+        blocking_reasons,
+        message,
+    }
 }
 
 async fn build_remote_computer_execution_transport_readiness(
@@ -34415,7 +34498,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(remote_computer_readiness.status, "attention");
+        assert_eq!(remote_computer_readiness.status, "critical");
         assert!(remote_computer_readiness.pod_template.present);
         assert!(remote_computer_readiness.service_account.present);
         assert!(remote_computer_readiness.state_filesystem.pvc_present);
@@ -34467,6 +34550,35 @@ not json
                 .supported_providers
                 .iter()
                 .any(|provider| provider == "juicefs")
+        );
+        assert_eq!(
+            remote_computer_readiness.production_state_sync.status,
+            "blocked"
+        );
+        assert!(
+            remote_computer_readiness
+                .production_state_sync
+                .production_blocked
+        );
+        assert!(
+            !remote_computer_readiness
+                .production_state_sync
+                .distributed_filesystem_configured
+        );
+        assert!(
+            remote_computer_readiness
+                .production_state_sync
+                .production_profile_present
+        );
+        assert!(
+            remote_computer_readiness
+                .production_state_sync
+                .state_contract_present
+        );
+        assert!(
+            !remote_computer_readiness
+                .production_state_sync
+                .lock_manager_configured
         );
         assert!(remote_computer_readiness.network_policy.present);
         assert!(remote_computer_readiness.warm_pool.manifest_present);
@@ -34531,6 +34643,14 @@ not json
                 .attention_items
                 .iter()
                 .any(|item| item.kind == "distributed_state_filesystem_missing")
+        );
+        assert!(
+            remote_computer_readiness
+                .attention_items
+                .iter()
+                .any(|item| {
+                    item.kind == "production_state_sync_blocked" && item.severity == "critical"
+                })
         );
         assert!(
             remote_computer_readiness

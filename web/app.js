@@ -2022,6 +2022,7 @@ function renderRemoteComputerReadiness() {
   const podTemplate = report.pod_template || {};
   const serviceAccount = report.service_account || {};
   const stateFs = report.state_filesystem || {};
+  const productionStateSync = report.production_state_sync || {};
   const networkPolicy = report.network_policy || {};
   const autoscaling = report.autoscaling || {};
   const warmPool = report.warm_pool || {};
@@ -2058,6 +2059,10 @@ function renderRemoteComputerReadiness() {
         <span>State FS</span>
         <strong>${escapeHtml(stateFs.status || "unknown")}</strong>
       </div>
+      <div class="metric">
+        <span>Prod State Sync</span>
+        <strong>${escapeHtml(productionStateSync.status || "unknown")}</strong>
+      </div>
     </div>
     <div class="item">
       <strong>REMOTE COMPUTER READINESS</strong>
@@ -2073,6 +2078,11 @@ function renderRemoteComputerReadiness() {
       <div class="muted">Contract: ${escapeHtml(stateFs.state_contract_path || "unknown")} · ${stateFs.state_contract_present ? "present" : "missing"} · conflict policy ${escapeHtml(stateFs.conflict_policy || "unknown")} · lock manager ${stateFs.lock_manager_configured ? "configured" : "missing"}</div>
       <div class="muted">Layout: ${escapeHtml((stateFs.state_layout_paths || []).join(", ") || "not reported")} · sync contract ${escapeHtml(stateFs.sync_contract_status || "unknown")}</div>
       <div class="muted">Provider source: ${stateFs.provider_configured_by_env ? "env" : "placeholder"} · example manifest: ${stateFs.provider_manifest_present ? "present" : "missing"} · ${escapeHtml((stateFs.supported_providers || []).join(", ") || "no providers listed")}</div>
+    </div>
+    <div class="item">
+      <strong>PRODUCTION STATE SYNC GATE</strong>
+      <div class="muted">${escapeHtml(productionStateSync.message || "Remote Computer production state sync gate is not reported")}</div>
+      <div class="muted">provider ${escapeHtml(productionStateSync.provider || "unknown")} · distributed ${productionStateSync.distributed_filesystem_configured ? "yes" : "no"} · profile ${productionStateSync.production_profile_present ? "present" : "missing"} · contract ${productionStateSync.state_contract_present ? "present" : "missing"} · lock manager ${productionStateSync.lock_manager_configured ? "yes" : "no"}</div>
     </div>
     <div class="item">
       <strong>WARM POOL / SCALING</strong>
