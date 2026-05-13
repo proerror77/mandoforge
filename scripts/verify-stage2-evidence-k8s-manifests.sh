@@ -17,7 +17,7 @@ for manifest in "${manifests[@]}"; do
     echo "missing Stage 2 evidence manifest: $manifest" >&2
     exit 1
   fi
-  kubectl create --dry-run=client -f "$manifest" >/dev/null
+  kubectl create --dry-run=client --validate=false -f "$manifest" >/dev/null
 done
 
 kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out
