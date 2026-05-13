@@ -19321,6 +19321,21 @@ not json
         );
     }
 
+    #[test]
+    fn tenant_rls_migration_covers_tracked_tables() {
+        let migration = include_str!("../../../db/migrations/0024_tenant_rls_policies.sql");
+        assert!(migration.contains("mandoforge_current_tenant_id"));
+        assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
+        for table in tenant_isolation_tracked_tables() {
+            assert!(
+                migration.contains(&format!("'{table}'"))
+                    || (table == "agent_versions"
+                        && migration.contains("tenant_isolation_agent_versions")),
+                "RLS migration should mention tracked tenant table {table}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn remote_computer_leases_are_audited_without_executing_tools() {
         let app = test_app().await;
