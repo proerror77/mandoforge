@@ -1949,7 +1949,7 @@ function renderRemoteComputerReadiness() {
     <div class="item">
       <strong>WARM POOL / SCALING</strong>
       <div class="muted">Warm pool: ${escapeHtml(warmPool.status || "unknown")} · manifest ${warmPool.manifest_present ? "present" : "missing"}</div>
-      <div class="muted">Worker HPA ${autoscaling.worker_hpa_present ? "present" : "missing"} · KEDA ${autoscaling.keda_manifest_present ? "present" : "missing"} · queue-depth scaling ${autoscaling.queue_depth_scaling_present ? "present" : "missing"}</div>
+      <div class="muted">Worker HPA ${autoscaling.worker_hpa_present ? "present" : "missing"} · KEDA ${autoscaling.keda_manifest_present ? "present" : "missing"} · remote pool scaler ${autoscaling.remote_pool_scaled_object_present ? "present" : "missing"} · queue-depth scaling ${autoscaling.queue_depth_scaling_present ? "present" : "missing"}</div>
     </div>
     <div class="item">
       <strong>RUNNER BOUNDARY</strong>

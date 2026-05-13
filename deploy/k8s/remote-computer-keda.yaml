@@ -1,0 +1,22 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: mandoforge-agent-remote-computer-warm-pool
+spec:
+  scaleTargetRef:
+    name: mandoforge-agent-remote-computer-warm-pool
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 30
+  cooldownPeriod: 300
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local
+        metricName: mandoforge_remote_computer_pool_pressure
+        threshold: "3"
+        query: |
+          max(
+            mandoforge_execution_jobs_queued{executor="remote_computer"}
+            + mandoforge_remote_computer_attachments_stale
+          )

@@ -12,6 +12,7 @@ It contains:
 - Remote Computer service account, RWX state PVC placeholder, and deny-by-default NetworkPolicy.
 - JuiceFS CSI Remote Computer state example, kept outside the default kustomization.
 - Remote Computer warm-pool example, kept outside the default kustomization.
+- Remote Computer KEDA ScaledObject example, kept outside the default kustomization.
 - Scheduler CronJob for due policy, approval, release, and MCP automation.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
@@ -36,4 +37,5 @@ Production notes:
 - Treat the Remote Computer manifests as readiness skeletons only. They do not yet create per-session Pod leases, warm pools, or distributed Memory/Notes/Skills synchronization.
 - Treat `remote-computer-state-juicefs-example.yaml` as an opt-in example. Replace its secret values, namespace, object store, and metadata backend before applying it.
 - Treat `remote-computer-warm-pool.yaml` as an opt-in example. It keeps placeholder Pods warm but does not yet lease, assign, or attach sessions to them.
+- Treat `remote-computer-keda.yaml` as an opt-in example. It assumes Prometheus metrics that are not production-hardened yet.
 - Replace the scheduler's demo admin headers with a real service-account or gateway-auth path before production exposure.

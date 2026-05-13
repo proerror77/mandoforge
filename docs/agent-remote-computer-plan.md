@@ -51,6 +51,7 @@ Covered today:
 - K8s Remote Computer manifests exist for the Pod template, service account, state PVC placeholder, and NetworkPolicy skeleton.
 - A JuiceFS CSI example manifest documents the target shared `/agent-state` provider shape, but it is not included in the default kustomization and must be configured explicitly before use.
 - A warm-pool Deployment example documents the cold-start mitigation shape, but it is not included in the default kustomization and does not yet assign sessions to prestarted Pods.
+- A KEDA ScaledObject example documents the queue-pressure scaling shape for the warm pool, but it is not included in the default kustomization and depends on production metrics work.
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness, dry-run, and explicit mutate endpoints.
@@ -71,7 +72,7 @@ Not covered today:
 - No production distributed filesystem integration yet; JuiceFS exists as an example manifest only, while CephFS, Longhorn RWX, cloud file storage, or object-backed sync remain future provider options.
 - No production warm pool assignment; the warm-pool manifest is an opt-in skeleton only.
 - No artifact/state sync daemon inside the Pod.
-- No KEDA/HPA queue-depth scaling for remote computer pools.
+- No production KEDA/HPA queue-depth scaling for remote computer pools; the KEDA manifest is an opt-in example only.
 - No production Kubernetes mutation rollout; the current adapter has a gated Pod API create/delete boundary only.
 - No Kubernetes Pod mutation from the scheduler; reclaim remains metadata-only.
 
@@ -207,7 +208,7 @@ Stage 3 should make Remote Computer the primary sandbox substrate.
 2. Execute `shell.exec`, `codex.exec`, and selected tool runners inside the leased Pod.
 3. Add artifact and event sync from Pod to MandoForge.
 4. Add warm pool controller.
-5. Add KEDA queue-depth and pool-pressure autoscaling.
+5. Wire the KEDA queue-depth and pool-pressure example to real Prometheus metrics and an opt-in overlay.
 6. Add hard sandbox profiles:
    - `read-only`
    - `workspace-write`

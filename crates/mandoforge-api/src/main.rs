@@ -1266,6 +1266,8 @@ struct RemoteComputerStateFilesystemReadiness {
 struct RemoteComputerAutoscalingReadiness {
     worker_hpa_present: bool,
     keda_manifest_present: bool,
+    remote_pool_scaled_object_present: bool,
+    remote_pool_scaled_object_path: String,
     queue_depth_scaling_present: bool,
     status: String,
 }
@@ -16066,13 +16068,22 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         }
         .to_string(),
     };
+    let remote_pool_scaled_object_path = "deploy/k8s/remote-computer-keda.yaml";
+    let remote_pool_scaled_object_present =
+        project_file_path(remote_pool_scaled_object_path).is_some();
+    let worker_keda_present = project_file_path("deploy/k8s/worker-keda.yaml").is_some();
     let autoscaling = RemoteComputerAutoscalingReadiness {
         worker_hpa_present: project_file_path("deploy/k8s/worker-hpa.yaml").is_some(),
         keda_manifest_present: project_file_path("deploy/k8s/keda.yaml").is_some()
-            || project_file_path("deploy/k8s/worker-keda.yaml").is_some(),
-        queue_depth_scaling_present: project_file_path("deploy/k8s/worker-keda.yaml").is_some(),
-        status: if project_file_path("deploy/k8s/worker-keda.yaml").is_some() {
-            "queue_depth_scaling_present"
+            || worker_keda_present
+            || remote_pool_scaled_object_present,
+        remote_pool_scaled_object_present,
+        remote_pool_scaled_object_path: remote_pool_scaled_object_path.to_string(),
+        queue_depth_scaling_present: remote_pool_scaled_object_present,
+        status: if remote_pool_scaled_object_present {
+            "remote_pool_scaler_example_present"
+        } else if worker_keda_present {
+            "worker_queue_scaling_present"
         } else if project_file_path("deploy/k8s/worker-hpa.yaml").is_some() {
             "hpa_skeleton"
         } else {
@@ -16176,7 +16187,7 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
     }
     if !autoscaling.queue_depth_scaling_present {
         runbook_actions.push(
-            "add KEDA or another queue-depth scaler before claiming remote computer pool autoscaling"
+            "add or enable deploy/k8s/remote-computer-keda.yaml before claiming remote computer pool autoscaling"
                 .to_string(),
         );
     }
@@ -28331,6 +28342,16 @@ not json
         assert!(remote_computer_readiness.network_policy.present);
         assert!(remote_computer_readiness.warm_pool.manifest_present);
         assert_eq!(remote_computer_readiness.warm_pool.status, "skeleton");
+        assert!(
+            remote_computer_readiness
+                .autoscaling
+                .remote_pool_scaled_object_present
+        );
+        assert!(
+            remote_computer_readiness
+                .autoscaling
+                .queue_depth_scaling_present
+        );
         assert_eq!(remote_computer_readiness.runner.status, "reserved");
         assert!(!remote_computer_readiness.runner.configured);
         assert!(
