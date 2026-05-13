@@ -165,7 +165,9 @@ grep -q "runObservabilityRemediation" /tmp/mandoforge-actionbook-app.js
 grep -q "Create Judge Profile" /tmp/mandoforge-actionbook-index.html
 grep -q "Bootstrap Stage 2 Suite" /tmp/mandoforge-actionbook-index.html
 grep -q "vaultReadiness" /tmp/mandoforge-actionbook-app.js
+grep -q "vaultKmsRotationRun" /tmp/mandoforge-actionbook-app.js
 grep -q "vault-readiness" /tmp/mandoforge-actionbook-index.html
+grep -q "run-vault-kms-rotation" /tmp/mandoforge-actionbook-index.html
 grep -q "approvalNotificationRouting" /tmp/mandoforge-actionbook-app.js
 grep -q "approval-notification-routing" /tmp/mandoforge-actionbook-index.html
 grep -q "approvalNotificationRuns" /tmp/mandoforge-actionbook-app.js

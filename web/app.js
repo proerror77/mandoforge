@@ -12,6 +12,7 @@ const state = {
   providerHealth: {},
   vaultHealth: null,
   vaultReadiness: null,
+  vaultKmsRotationRun: null,
   secretRecords: [],
   policy: null,
   policyDecision: null,
@@ -123,6 +124,7 @@ const vaultHealthRoot = document.querySelector("#vault-health");
 const vaultReadinessRoot = document.querySelector("#vault-readiness");
 const secretRecordRoot = document.querySelector("#secret-records");
 const checkVaultHealthButton = document.querySelector("#check-vault-health");
+const runVaultKmsRotationButton = document.querySelector("#run-vault-kms-rotation");
 const policyRoot = document.querySelector("#policy-summary");
 const policyForm = document.querySelector("#policy-simulate-form");
 const policyTestForm = document.querySelector("#policy-test-form");
@@ -236,6 +238,7 @@ runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
 secretForm.addEventListener("submit", createSecretRecord);
 evalJudgeProfileForm.addEventListener("submit", createEvalJudgeProfile);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
+runVaultKmsRotationButton.addEventListener("click", runVaultKmsRotation);
 policyForm.addEventListener("submit", simulatePolicy);
 policyTestForm.addEventListener("submit", testPolicy);
 policyRevisionForm.addEventListener("submit", createPolicyRevision);
@@ -3879,6 +3882,13 @@ async function checkVaultHealth() {
   renderVaultHealth();
 }
 
+async function runVaultKmsRotation() {
+  state.vaultKmsRotationRun = await api("/api/vault/kms/rotation/run", {
+    method: "POST",
+  });
+  await refreshOps();
+}
+
 function renderVaultHealth() {
   vaultHealthRoot.innerHTML = state.vaultHealth
     ? `<div class="item">
@@ -3897,6 +3907,7 @@ function renderVaultReadiness() {
   }
   const attentionItems = readiness.attention_items || [];
   const checks = readiness.checks || [];
+  const kmsRotationRun = state.vaultKmsRotationRun;
   vaultReadinessRoot.innerHTML = `
     <div class="metric-grid">
       <div class="metric"><span>Readiness</span><strong>${escapeHtml(readiness.status)}</strong></div>
@@ -3910,6 +3921,14 @@ function renderVaultReadiness() {
       <strong>Secret provider: ${escapeHtml(readiness.secret_provider?.status || "unknown")}</strong>
       <div class="muted">${escapeHtml(readiness.secret_provider?.provider_kind || "unknown")} · ${escapeHtml(readiness.secret_provider?.healthy ? "healthy" : "unhealthy")}</div>
       <div class="muted">KMS ${escapeHtml(readiness.kms?.provider || "reserved")} · key ${escapeHtml(readiness.kms?.key_id_configured ? "configured" : "missing")} · rotation ${escapeHtml(readiness.kms?.rotation_policy_configured ? "configured" : "missing")}</div>
+    </div>
+    <div class="item">
+      <strong>KMS ROTATION GATE</strong>
+      ${
+        kmsRotationRun
+          ? `<div class="muted">${escapeHtml(kmsRotationRun.status)} · KMS ${escapeHtml(kmsRotationRun.kms_status)} · secret provider ${escapeHtml(kmsRotationRun.secret_provider_status)} · stale refs ${formatInteger(kmsRotationRun.stale_rotation_count || 0)} · rotated ${formatInteger(kmsRotationRun.rotated_count || 0)}</div><pre>${escapeHtml(JSON.stringify(kmsRotationRun, null, 2))}</pre>`
+          : `<div class="muted">No KMS rotation gate run in this console session</div>`
+      }
     </div>
     ${
       attentionItems.length

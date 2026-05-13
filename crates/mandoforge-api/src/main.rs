@@ -2331,6 +2331,20 @@ struct VaultKmsReadiness {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultKmsRotationRun {
+    status: String,
+    checked_at: DateTime<Utc>,
+    kms_provider: String,
+    kms_status: String,
+    secret_provider_status: String,
+    secret_record_count: usize,
+    stale_rotation_count: usize,
+    rotated_count: usize,
+    blocked_count: usize,
+    actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct VaultReadinessCheck {
     resource_type: String,
     resource_id: Option<Uuid>,
@@ -3106,6 +3120,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/vault/health", get(get_vault_health))
         .route("/api/vault/readiness", get(get_vault_readiness))
+        .route("/api/vault/kms/rotation/run", post(run_vault_kms_rotation))
         .route(
             "/api/vault/secrets",
             get(list_secret_records).post(create_secret_record),
@@ -7965,6 +7980,21 @@ async fn get_vault_readiness(
     )))
 }
 
+async fn run_vault_kms_rotation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<VaultKmsRotationRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "vault_kms_rotation",
+        None,
+    )
+    .await?;
+    Ok(Json(execute_vault_kms_rotation(&state).await?))
+}
+
 async fn list_secret_records(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -8053,6 +8083,72 @@ async fn rotate_secret_record(
         ))
         .await?;
     Ok(Json(record))
+}
+
+async fn execute_vault_kms_rotation(state: &AppState) -> Result<VaultKmsRotationRun, AppError> {
+    let checked_at = Utc::now();
+    let secret_provider = secret_provider_health_from_lookup(|key| std::env::var(key).ok()).await;
+    let kms = kms_readiness_from_lookup(&|key| std::env::var(key).ok());
+    let secret_records = state.list_secret_records().await?;
+    let stale_cutoff = checked_at - ChronoDuration::days(90);
+    let stale_rotation_count = secret_records
+        .iter()
+        .filter(|record| record.status == "active" && record.updated_at < stale_cutoff)
+        .count();
+    let mut actions = Vec::new();
+    if !secret_provider.healthy {
+        actions.push("configure_healthy_vault_secret_provider".to_string());
+    }
+    if !kms.configured {
+        actions.push("configure_external_kms_or_hsm".to_string());
+    }
+    if stale_rotation_count > 0 {
+        actions.push("rotate_stale_secret_values_with_new_vault_versions".to_string());
+    }
+    let blocked_count = usize::from(!secret_provider.healthy) + usize::from(!kms.configured);
+    let status = if blocked_count > 0 {
+        "blocked"
+    } else if stale_rotation_count > 0 {
+        "attention"
+    } else {
+        "validated"
+    }
+    .to_string();
+    let run = VaultKmsRotationRun {
+        status,
+        checked_at,
+        kms_provider: kms.provider,
+        kms_status: kms.status,
+        secret_provider_status: secret_provider.status,
+        secret_record_count: secret_records.len(),
+        stale_rotation_count,
+        rotated_count: 0,
+        blocked_count,
+        actions,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "vault.kms_rotation_run",
+            "vault",
+            None,
+            json!({
+                "status": run.status,
+                "kms_provider": run.kms_provider,
+                "kms_status": run.kms_status,
+                "secret_provider_status": run.secret_provider_status,
+                "secret_record_count": run.secret_record_count,
+                "stale_rotation_count": run.stale_rotation_count,
+                "rotated_count": run.rotated_count,
+                "blocked_count": run.blocked_count,
+                "actions": run.actions,
+                "checked_at": run.checked_at,
+            }),
+        ))
+        .await?;
+    Ok(run)
 }
 
 fn validate_secret_record_input(
@@ -24180,7 +24276,7 @@ not json
         .await;
 
         let report: VaultReadinessReport = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/vault/readiness")
                 .header("x-mandoforge-subject", "admin-1")
@@ -24210,6 +24306,39 @@ not json
                 && item
                     .message
                     .contains("external KMS/HSM provider is not configured")
+        }));
+        let rotation_run: VaultKmsRotationRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/vault/kms/rotation/run")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rotation_run.status, "blocked");
+        assert_eq!(rotation_run.kms_status, "reserved");
+        assert_eq!(rotation_run.blocked_count, 2);
+        assert!(
+            rotation_run
+                .actions
+                .iter()
+                .any(|action| action == "configure_external_kms_or_hsm")
+        );
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "vault.kms_rotation_run" && log.details["status"] == "blocked"
         }));
     }
 
