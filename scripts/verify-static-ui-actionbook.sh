@@ -77,7 +77,7 @@ wait_for_static_ui() {
     hasReleasePromotionWorkflow: (text.includes('Request Prod Approval') || text.includes('No eval runs')) && Boolean(document.querySelector('#agent-releases')) && text.includes('RELEASE AUTOMATION RUNS'),
     hasAgentReleases: text.includes('AGENT RELEASES') && Boolean(document.querySelector('#agent-releases')),
     hasWorkerDashboard: text.includes('Worker Dashboard') && text.includes('Queue readiness') && text.includes('QUEUE DURABILITY') && text.includes('AUTOSCALING SKELETON') && text.includes('WORKER RUNBOOK ACTIONS') && Boolean(document.querySelector('#worker-readiness')),
-    hasRemoteComputerReadiness: text.includes('Remote Computers') && text.includes('REMOTE COMPUTER READINESS') && text.includes('STATE FILESYSTEM') && text.includes('RUNNER BOUNDARY') && text.includes('REMOTE COMPUTER LEASE STORE') && text.includes('REMOTE COMPUTER ATTACHMENTS') && text.includes('REMOTE COMPUTER RUNBOOK') && Boolean(document.querySelector('#remote-computer-readiness')),
+    hasRemoteComputerReadiness: text.includes('Remote Computers') && text.includes('REMOTE COMPUTER READINESS') && text.includes('STATE FILESYSTEM') && text.includes('RUNNER BOUNDARY') && text.includes('REMOTE COMPUTER LEASE STORE') && text.includes('REMOTE COMPUTER ATTACHMENTS') && text.includes('REMOTE COMPUTER STATE LOCKS') && text.includes('REMOTE ARTIFACT DISCOVERY') && text.includes('Discover Remote Artifacts') && text.includes('Acquire State Lock') && text.includes('REMOTE COMPUTER RUNBOOK') && Boolean(document.querySelector('#remote-computer-readiness')),
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
     metricCards: document.querySelectorAll('.metric').length,
     hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
@@ -173,6 +173,10 @@ grep -q "approval-notification-runs" /tmp/mandoforge-actionbook-index.html
 grep -q "workerReadiness" /tmp/mandoforge-actionbook-app.js
 grep -q "worker-readiness" /tmp/mandoforge-actionbook-index.html
 grep -q "remote-computer-readiness" /tmp/mandoforge-actionbook-index.html
+grep -q "remoteComputerStateLocks" /tmp/mandoforge-actionbook-app.js
+grep -q "discoverRemoteArtifacts" /tmp/mandoforge-actionbook-app.js
+grep -q "Acquire State Lock" /tmp/mandoforge-actionbook-index.html
+grep -q "Discover Remote Artifacts" /tmp/mandoforge-actionbook-index.html
 curl -fsS "$BASE_URL/api/usage" \
   -H 'x-mandoforge-subject: actionbook-smoke' \
   -H 'x-mandoforge-roles: admin' \

@@ -580,7 +580,41 @@
             </div>
             <div>
               <h3>Remote Computers</h3>
-              <div class="muted">Pod template / state filesystem / warm pool readiness</div>
+              <div class="muted">Pod template / state filesystem / warm pool readiness / artifact discovery / state locks</div>
+              <form id="remote-artifact-discovery-form" class="stack-form compact-form">
+                <label>
+                  Session ID
+                  <input name="session_id" placeholder="Session UUID" />
+                </label>
+                <label>
+                  Remote computer ID
+                  <input name="remote_computer_id" placeholder="Remote Computer UUID" />
+                </label>
+                <label>
+                  Artifact dir
+                  <input name="artifact_dir" value="artifacts" />
+                </label>
+                <button type="submit">Discover Remote Artifacts</button>
+              </form>
+              <form id="remote-state-lock-form" class="stack-form compact-form">
+                <label>
+                  Lock key
+                  <input name="lock_key" value="memory/session-notes.md" />
+                </label>
+                <label>
+                  Session ID
+                  <input name="session_id" placeholder="Optional session UUID" />
+                </label>
+                <label>
+                  Remote computer ID
+                  <input name="remote_computer_id" placeholder="Optional remote computer UUID" />
+                </label>
+                <label>
+                  Lease ID
+                  <input name="lease_id" placeholder="Optional lease UUID" />
+                </label>
+                <button type="submit">Acquire State Lock</button>
+              </form>
               <div id="remote-computer-readiness" class="list"></div>
             </div>
             <div>
@@ -655,6 +689,6 @@
         <div id="events" class="events"></div>
       </section>
     </main>
-    <script src="/app.js?v=stage2-remote-computer"></script>
+    <script src="/app.js?v=stage2-remote-computer-state-locks"></script>
   </body>
 </html>

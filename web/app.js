@@ -48,6 +48,8 @@ const state = {
   remoteComputers: [],
   remoteComputerLeases: [],
   remoteComputerAttachments: [],
+  remoteComputerStateLocks: [],
+  remoteComputerArtifactDiscovery: null,
   usageRollups: [],
   usageTrend: null,
   usageFinanceSummary: null,
@@ -143,6 +145,8 @@ const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
 const workerReadinessRoot = document.querySelector("#worker-readiness");
 const remoteComputerReadinessRoot = document.querySelector("#remote-computer-readiness");
+const remoteArtifactDiscoveryForm = document.querySelector("#remote-artifact-discovery-form");
+const remoteStateLockForm = document.querySelector("#remote-state-lock-form");
 const usageRoot = document.querySelector("#usage-summary");
 const observabilityRoot = document.querySelector("#observability-summary");
 const runObservabilityRemediationButton = document.querySelector("#run-observability-remediation");
@@ -247,6 +251,8 @@ runDueMcpHealthButton.addEventListener("click", runDueMcpHealth);
 runDueMcpRolloutsButton.addEventListener("click", runDueMcpRollouts);
 loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
+remoteArtifactDiscoveryForm.addEventListener("submit", discoverRemoteArtifacts);
+remoteStateLockForm.addEventListener("submit", acquireRemoteStateLock);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
 runFinanceOperationsButton.addEventListener("click", runFinanceOperations);
@@ -1410,6 +1416,7 @@ async function refreshOps() {
     remoteComputerLeases,
     remoteComputerAttachments,
     remoteComputerJobAssignments,
+    remoteComputerStateLocks,
     approvalGroups,
     approvalEscalationRules,
     approvalNotificationChannelPolicies,
@@ -1450,6 +1457,7 @@ async function refreshOps() {
       api("/api/remote-computer-leases"),
       api("/api/remote-computer-attachments"),
       api("/api/remote-computer-job-assignments"),
+      api("/api/remote-computers/state-locks"),
       api("/api/approval-groups"),
       api("/api/approval-escalation-rules"),
       api("/api/approvals/notification-channel-policies"),
@@ -1489,6 +1497,7 @@ async function refreshOps() {
   state.remoteComputerLeases = remoteComputerLeases;
   state.remoteComputerAttachments = remoteComputerAttachments;
   state.remoteComputerJobAssignments = remoteComputerJobAssignments;
+  state.remoteComputerStateLocks = remoteComputerStateLocks;
   state.approvalGroups = approvalGroups;
   state.approvalEscalationRules = approvalEscalationRules;
   state.approvalNotificationChannelPolicies = approvalNotificationChannelPolicies;
@@ -1965,6 +1974,8 @@ function renderRemoteComputerReadiness() {
   const leaseRows = state.remoteComputerLeases || [];
   const attachmentRows = state.remoteComputerAttachments || [];
   const assignmentRows = state.remoteComputerJobAssignments || [];
+  const stateLockRows = state.remoteComputerStateLocks || [];
+  const artifactDiscovery = state.remoteComputerArtifactDiscovery;
   remoteComputerReadinessRoot.innerHTML = `
     <div class="metrics compact-metrics">
       <div class="metric">
@@ -2024,7 +2035,7 @@ function renderRemoteComputerReadiness() {
     </div>
     <div class="item">
       <strong>REMOTE COMPUTER LEASE STORE</strong>
-      <div class="muted">${formatInteger(computerRows.length)} computers · ${formatInteger(leaseRows.length)} leases · ${formatInteger(attachmentRows.length)} attachments · ${formatInteger(assignmentRows.length)} job handoffs · execution remains on approved worker path</div>
+      <div class="muted">${formatInteger(computerRows.length)} computers · ${formatInteger(leaseRows.length)} leases · ${formatInteger(attachmentRows.length)} attachments · ${formatInteger(assignmentRows.length)} job handoffs · ${formatInteger(stateLockRows.length)} state locks · execution remains on approved worker path</div>
       ${
         computerRows.length
           ? computerRows
@@ -2073,6 +2084,35 @@ function renderRemoteComputerReadiness() {
       }
     </div>
     <div class="item">
+      <strong>REMOTE COMPUTER STATE LOCKS</strong>
+      <div class="muted">Acquire State Lock coordinates Memory / Notes / Skills / Artifacts writes before multi-Pod shared-state mutation.</div>
+      ${
+        stateLockRows.length
+          ? stateLockRows
+              .map(
+                (lock) =>
+                  `<div class="muted">${escapeHtml(lock.status)} · ${escapeHtml(lock.lock_key)} · owner ${escapeHtml(lock.owner || "none")} · expires ${escapeHtml(lock.expires_at || "none")} ${
+                    lock.status === "held"
+                      ? `<button class="secondary inline-button" data-release-remote-state-lock="${escapeHtml(lock.id)}">Release State Lock</button>`
+                      : ""
+                  }</div>`,
+              )
+              .join("")
+          : `<div class="muted">No remote computer state locks</div>`
+      }
+    </div>
+    <div class="item">
+      <strong>REMOTE ARTIFACT DISCOVERY</strong>
+      <div class="muted">Discover Remote Artifacts scans a shared Remote Computer workspace and records artifacts, events, and audit logs.</div>
+      ${
+        artifactDiscovery
+          ? artifactDiscovery.error
+            ? `<div class="muted">Discovery error: ${escapeHtml(artifactDiscovery.error)}</div>`
+            : `<div class="muted">Last discovery: ${formatInteger(artifactDiscovery.artifact_count || 0)} artifacts from ${escapeHtml(artifactDiscovery.remote_computer_id || "unknown")}</div>`
+          : `<div class="muted">No remote artifact discovery run in this console session</div>`
+      }
+    </div>
+    <div class="item">
       <strong>REMOTE COMPUTER ATTENTION</strong>
       ${
         attentionItems.length
@@ -2094,11 +2134,68 @@ function renderRemoteComputerReadiness() {
       }
     </div>
   `;
+  remoteComputerReadinessRoot.querySelectorAll("[data-release-remote-state-lock]").forEach((button) => {
+    button.addEventListener("click", () => releaseRemoteStateLock(button.dataset.releaseRemoteStateLock));
+  });
 }
 
 function formatOptionalSeconds(value) {
   if (value === null || value === undefined) return "none";
   return `${formatInteger(value)}s`;
+}
+
+function optionalFormValue(form, name) {
+  const value = String(form.get(name) || "").trim();
+  return value || undefined;
+}
+
+async function discoverRemoteArtifacts(event) {
+  event.preventDefault();
+  const form = new FormData(remoteArtifactDiscoveryForm);
+  const sessionId = optionalFormValue(form, "session_id");
+  const remoteComputerId = optionalFormValue(form, "remote_computer_id");
+  if (!sessionId || !remoteComputerId) {
+    state.remoteComputerArtifactDiscovery = {
+      error: "Session ID and Remote computer ID are required before artifact discovery",
+    };
+    renderRemoteComputerReadiness();
+    return;
+  }
+  state.remoteComputerArtifactDiscovery = await api("/api/remote-computers/artifacts/discover", {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: sessionId,
+      remote_computer_id: remoteComputerId,
+      artifact_dir: optionalFormValue(form, "artifact_dir") || "artifacts",
+      max_files: 10,
+    }),
+  });
+  await refreshOps();
+}
+
+async function acquireRemoteStateLock(event) {
+  event.preventDefault();
+  const form = new FormData(remoteStateLockForm);
+  await api("/api/remote-computers/state-locks", {
+    method: "POST",
+    body: JSON.stringify({
+      lock_key: optionalFormValue(form, "lock_key") || "memory/session-notes.md",
+      session_id: optionalFormValue(form, "session_id"),
+      remote_computer_id: optionalFormValue(form, "remote_computer_id"),
+      lease_id: optionalFormValue(form, "lease_id"),
+      owner: "static-admin-console",
+      lease_seconds: 900,
+    }),
+  });
+  await refreshOps();
+}
+
+async function releaseRemoteStateLock(lockId) {
+  await api(`/api/remote-computers/state-locks/${lockId}/release`, {
+    method: "POST",
+    body: JSON.stringify({ reason: "released-from-static-admin-console" }),
+  });
+  await refreshOps();
 }
 
 function renderExecutionJobs() {
