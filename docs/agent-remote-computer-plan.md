@@ -49,6 +49,7 @@ Covered today:
 - Codex App Server and Codex CLI execution remain governed by approval and queue paths.
 - Remote Computer readiness is API/UI-visible.
 - K8s Remote Computer manifests exist for the Pod template, service account, state PVC placeholder, and NetworkPolicy skeleton.
+- A JuiceFS CSI example manifest documents the target shared `/agent-state` provider shape, but it is not included in the default kustomization and must be configured explicitly before use.
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness, dry-run, and explicit mutate endpoints.
@@ -65,8 +66,8 @@ Not covered today:
 - No actual session-to-Pod runtime attach.
 - No actual Remote Computer execution path.
 - No actual Pod attach transport; session attachment is control-plane state only.
-- No real distributed Memory/Notes/Skills mount.
-- No distributed filesystem integration such as JuiceFS, CephFS, Longhorn RWX, or object-backed sync.
+- No real distributed Memory/Notes/Skills mount in the default deployment.
+- No production distributed filesystem integration yet; JuiceFS exists as an example manifest only, while CephFS, Longhorn RWX, cloud file storage, or object-backed sync remain future provider options.
 - No warm pool of prestarted agent Pods.
 - No artifact/state sync daemon inside the Pod.
 - No KEDA/HPA queue-depth scaling for remote computer pools.
@@ -213,7 +214,7 @@ Stage 3 should make Remote Computer the primary sandbox substrate.
    - `codex-workspace`
    - `gvisor-isolated`
    - `firecracker-isolated` later
-7. Add distributed state filesystem integration, starting with JuiceFS CSI examples.
+7. Promote the JuiceFS CSI example into an opt-in overlay once secret handling, namespace selection, and state sync conflict rules are implemented.
 8. Add conflict policy for shared Memory/Notes/Skills writes.
 9. Add per-team/project Pod security and network policies.
 10. Add remote computer replay view in the Session Timeline.

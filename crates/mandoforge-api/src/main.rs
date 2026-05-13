@@ -1255,6 +1255,10 @@ struct RemoteComputerStateFilesystemReadiness {
     mount_path: String,
     distributed_filesystem_configured: bool,
     provider: String,
+    provider_configured_by_env: bool,
+    provider_manifest_present: bool,
+    provider_manifest_path: String,
+    supported_providers: Vec<String>,
     status: String,
 }
 
@@ -16024,19 +16028,16 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         "network_policy",
     );
     let pvc_path = "deploy/k8s/remote-computer-state-pvc.yaml";
+    let provider_manifest_path = "deploy/k8s/remote-computer-state-juicefs-example.yaml";
     let pvc_present = project_file_path(pvc_path).is_some();
-    let distributed_filesystem_configured =
-        std::env::var("MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER")
-            .ok()
-            .map(|provider| {
-                let provider = provider.trim();
-                !provider.is_empty() && provider != "pvc-placeholder"
-            })
-            .unwrap_or(false);
     let state_provider = std::env::var("MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER")
         .ok()
-        .filter(|provider| !provider.trim().is_empty())
+        .map(|provider| provider.trim().to_string())
+        .filter(|provider| !provider.is_empty())
         .unwrap_or_else(|| "pvc-placeholder".to_string());
+    let provider_configured_by_env = state_provider != "pvc-placeholder";
+    let provider_manifest_present = project_file_path(provider_manifest_path).is_some();
+    let distributed_filesystem_configured = provider_configured_by_env;
     let state_filesystem = RemoteComputerStateFilesystemReadiness {
         pvc_present,
         pvc_path: pvc_path.to_string(),
@@ -16044,8 +16045,20 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         mount_path: "/agent-state".to_string(),
         distributed_filesystem_configured,
         provider: state_provider,
+        provider_configured_by_env,
+        provider_manifest_present,
+        provider_manifest_path: provider_manifest_path.to_string(),
+        supported_providers: vec![
+            "juicefs".to_string(),
+            "cephfs".to_string(),
+            "longhorn-rwx".to_string(),
+            "cloud-file-storage".to_string(),
+            "object-sync".to_string(),
+        ],
         status: if pvc_present && distributed_filesystem_configured {
             "configured"
+        } else if pvc_present && provider_manifest_present {
+            "example_present"
         } else if pvc_present {
             "skeleton"
         } else {
@@ -16122,7 +16135,7 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         attention_items.push(remote_computer_attention(
             "distributed_state_filesystem_missing",
             "warning",
-            "state mount is a PVC/RWX placeholder; JuiceFS/CephFS/Longhorn or another distributed state provider is not configured",
+            "state mount has a PVC/RWX placeholder and optional JuiceFS example; set a real JuiceFS/CephFS/Longhorn or equivalent provider before multi-Pod state sync",
         ));
     }
     if !network_policy.present {
@@ -16155,9 +16168,9 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
     }
 
     let mut runbook_actions = Vec::new();
-    if state_filesystem.status == "skeleton" {
+    if !state_filesystem.distributed_filesystem_configured {
         runbook_actions.push(
-            "select a real RWX/distributed state provider before running multi-Pod Memory/Notes/Skills sync"
+            "set MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER to juicefs, cephfs, longhorn-rwx, or an equivalent provider before running multi-Pod Memory/Notes/Skills sync"
                 .to_string(),
         );
     }
@@ -28301,7 +28314,19 @@ not json
         assert!(remote_computer_readiness.state_filesystem.pvc_present);
         assert_eq!(
             remote_computer_readiness.state_filesystem.status,
-            "skeleton"
+            "example_present"
+        );
+        assert!(
+            remote_computer_readiness
+                .state_filesystem
+                .provider_manifest_present
+        );
+        assert!(
+            remote_computer_readiness
+                .state_filesystem
+                .supported_providers
+                .iter()
+                .any(|provider| provider == "juicefs")
         );
         assert!(remote_computer_readiness.network_policy.present);
         assert_eq!(remote_computer_readiness.runner.status, "reserved");

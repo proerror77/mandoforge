@@ -10,6 +10,7 @@ It contains:
 - Worker HPA skeleton for CPU-based scaling experiments.
 - Agent Remote Computer Pod template with zero replicas.
 - Remote Computer service account, RWX state PVC placeholder, and deny-by-default NetworkPolicy.
+- JuiceFS CSI Remote Computer state example, kept outside the default kustomization.
 - Scheduler CronJob for due policy, approval, release, and MCP automation.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
@@ -32,4 +33,5 @@ Production notes:
 - Keep Codex and sandbox execution disabled or tightly constrained before multi-tenant use; the current worker drains jobs through the API execution endpoint.
 - Treat `worker-hpa.yaml` as an autoscaling skeleton only. Validate metrics-server, queue pressure behavior, and load characteristics before claiming production autoscaling.
 - Treat the Remote Computer manifests as readiness skeletons only. They do not yet create per-session Pod leases, warm pools, or distributed Memory/Notes/Skills synchronization.
+- Treat `remote-computer-state-juicefs-example.yaml` as an opt-in example. Replace its secret values, namespace, object store, and metadata backend before applying it.
 - Replace the scheduler's demo admin headers with a real service-account or gateway-auth path before production exposure.
