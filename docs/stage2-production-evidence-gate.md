@@ -22,7 +22,7 @@ MANDOFORGE_STAGE2_TEAM_ID=<team_uuid> \
 
 This mode calls the bounded validation endpoints for tenant routing, provider deployment, policy rollout orchestration, Vault recovery, worker load validation, Remote Computer state sync, approval notifications, Codex App Server, agent release deployment/orchestration, observability collector deployment/cluster rollout, and team-scoped MCP connector rollout.
 
-Use `deploy/stage2-evidence/stage2-production-controllers.env.example` as the operator checklist for the external controller URLs, required flags, and opt-in validation switches. `deploy/stage2-evidence/stage2-controller-env-secret.example.yaml` shows the matching Kubernetes Secret shape. These are templates only; real URLs and tokens belong in your secret manager, CI environment, or Kubernetes Secret generation pipeline.
+Use `deploy/stage2-evidence/stage2-production-controllers.env.example` as the operator checklist for the external controller URLs, required flags, and opt-in validation switches. `deploy/stage2-evidence/stage2-controller-env-secret.example.yaml` shows the matching Kubernetes Secret shape, and `deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml` shows the strict production-validation Job that consumes that Secret through `envFrom`. These are templates only; real URLs and tokens belong in your secret manager, CI environment, or Kubernetes Secret generation pipeline.
 
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 

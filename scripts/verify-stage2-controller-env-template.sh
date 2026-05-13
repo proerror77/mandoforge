@@ -4,6 +4,7 @@ set -euo pipefail
 template="deploy/stage2-evidence/stage2-production-controllers.env.example"
 job_manifest="deploy/stage2-evidence/stage2-evidence-gate-job.yaml"
 secret_manifest="deploy/stage2-evidence/stage2-controller-env-secret.example.yaml"
+production_job_manifest="deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml"
 api_source="crates/mandoforge-api/src/main.rs"
 
 required_template_vars=(
@@ -126,6 +127,11 @@ if [[ ! -f "$secret_manifest" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$production_job_manifest" ]]; then
+  echo "missing Stage 2 production evidence Job example: $production_job_manifest" >&2
+  exit 1
+fi
+
 for var in "${required_template_vars[@]}"; do
   if ! grep -q "^${var}=" "$template"; then
     echo "Stage 2 controller env template is missing $var" >&2
@@ -165,5 +171,15 @@ for flag in "${required_job_flags[@]}"; do
     exit 1
   fi
 done
+
+if ! grep -q "name: mandoforge-stage2-controller-env" "$production_job_manifest"; then
+  echo "Stage 2 production evidence Job must consume mandoforge-stage2-controller-env" >&2
+  exit 1
+fi
+
+if grep -q "name: RUN_STAGE2_PRODUCTION_VALIDATIONS" "$production_job_manifest"; then
+  echo "Stage 2 production evidence Job should read validation flags from the Secret, not hard-coded env" >&2
+  exit 1
+fi
 
 echo "stage2 controller env template ok"
