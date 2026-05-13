@@ -153,7 +153,7 @@ impl AppState {
         input: CreateRemoteComputerLease,
     ) -> Result<RemoteComputerLease, AppError> {
         let now = Utc::now();
-        let lease_seconds = input.lease_seconds.unwrap_or(900).clamp(60, 86_400);
+        let lease_seconds = input.lease_seconds.unwrap_or(900).clamp(-86_400, 86_400);
         let lease = RemoteComputerLease {
             id: Uuid::new_v4(),
             remote_computer_id,

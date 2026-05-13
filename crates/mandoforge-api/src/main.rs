@@ -1363,6 +1363,19 @@ struct UpdateRemoteComputerAttachment {
     metadata: Option<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerReclaimRun {
+    generated_at: DateTime<Utc>,
+    status: String,
+    stale_attachment_count: usize,
+    reclaimed_attachment_count: usize,
+    expired_lease_count: usize,
+    reclaimed_lease_count: usize,
+    attachments: Vec<RemoteComputerAttachment>,
+    leases: Vec<RemoteComputerLease>,
+    execution_enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ProviderUsageSummary {
     request_count: usize,
@@ -2925,6 +2938,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/runner/dry-run",
             post(dry_run_remote_computer_runner),
+        )
+        .route(
+            "/api/remote-computers/reclaim-stale",
+            post(reclaim_stale_remote_computers),
         )
         .route(
             "/api/remote-computers",
@@ -15538,6 +15555,104 @@ async fn list_remote_computers(
     Ok(Json(state.list_remote_computers().await?))
 }
 
+async fn reclaim_stale_remote_computers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RemoteComputerReclaimRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computers",
+        None,
+    )
+    .await?;
+    let stale_attachments = state.list_stale_remote_computer_attachments().await?;
+    let expired_leases: Vec<_> = state
+        .list_remote_computer_leases()
+        .await?
+        .into_iter()
+        .filter(|lease| {
+            lease.status == "leased"
+                && lease
+                    .lease_expires_at
+                    .is_some_and(|lease_expires_at| lease_expires_at <= Utc::now())
+        })
+        .collect();
+
+    let mut reclaimed_attachments = Vec::new();
+    for attachment in &stale_attachments {
+        let reclaimed = state
+            .release_remote_computer_attachment(
+                attachment.id,
+                UpdateRemoteComputerAttachment {
+                    reason: Some("stale attachment reclaimed".to_string()),
+                    metadata: Some(json!({
+                        "reclaim_reason": "stale_attachment",
+                        "execution_enabled": false
+                    })),
+                },
+            )
+            .await?;
+        record_remote_computer_attachment_event(
+            &state,
+            &reclaimed,
+            "remote_computer.attachment_reclaimed",
+        )
+        .await?;
+        reclaimed_attachments.push(reclaimed);
+    }
+
+    let mut reclaimed_leases = Vec::new();
+    for lease in &expired_leases {
+        let reclaimed = state
+            .update_remote_computer_lease_status(
+                lease.id,
+                "failed",
+                UpdateRemoteComputerLease {
+                    reason: Some("expired lease reclaimed".to_string()),
+                    metadata: Some(json!({
+                        "reclaim_reason": "expired_lease",
+                        "execution_enabled": false
+                    })),
+                },
+            )
+            .await?;
+        record_remote_computer_lease_event(&state, &reclaimed, "remote_computer.lease_reclaimed")
+            .await?;
+        reclaimed_leases.push(reclaimed);
+    }
+
+    let run = RemoteComputerReclaimRun {
+        generated_at: Utc::now(),
+        status: if reclaimed_attachments.is_empty() && reclaimed_leases.is_empty() {
+            "noop"
+        } else {
+            "completed"
+        }
+        .to_string(),
+        stale_attachment_count: stale_attachments.len(),
+        reclaimed_attachment_count: reclaimed_attachments.len(),
+        expired_lease_count: expired_leases.len(),
+        reclaimed_lease_count: reclaimed_leases.len(),
+        attachments: reclaimed_attachments,
+        leases: reclaimed_leases,
+        execution_enabled: false,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "remote_computer.reclaim_stale_run",
+            "remote_computers",
+            None,
+            json!(&run),
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
 async fn create_remote_computer(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -15894,6 +16009,8 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         "remote_computer.attached".to_string(),
         "remote_computer.runner_dry_run".to_string(),
         "remote_computer.detached".to_string(),
+        "remote_computer.attachment_reclaimed".to_string(),
+        "remote_computer.lease_reclaimed".to_string(),
         "remote_computer.released".to_string(),
         "remote_computer.failed".to_string(),
     ];
@@ -15983,6 +16100,10 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
     );
     runbook_actions.push(
         "attach sessions to remote computer leases only as control-plane state until Pod telemetry and artifact sync are implemented"
+            .to_string(),
+    );
+    runbook_actions.push(
+        "run /api/remote-computers/reclaim-stale to clear stale attachment and expired lease records without executing tools"
             .to_string(),
     );
 
@@ -18298,6 +18419,178 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "remote_computer.detached")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_computer_stale_reclaim_is_audited_without_execution() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "remote computer reclaim"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "remote-computer-reclaim-test",
+                        "profile": "workspace-write"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let lease: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computers/{}/leases", computer.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "worker_id": "remote-manager-reclaim",
+                        "lease_seconds": -1
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let attachment: RemoteComputerAttachment = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computer-leases/{}/attach", lease.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "attached_by": "remote-manager-reclaim",
+                        "stale_after_seconds": -1
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(attachment.status, "attached");
+
+        let run: RemoteComputerReclaimRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/reclaim-stale")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.stale_attachment_count, 1);
+        assert_eq!(run.reclaimed_attachment_count, 1);
+        assert_eq!(run.expired_lease_count, 1);
+        assert_eq!(run.reclaimed_lease_count, 1);
+        assert!(!run.execution_enabled);
+        assert_eq!(run.attachments[0].status, "released");
+        assert_eq!(run.leases[0].status, "failed");
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            tool_calls.is_empty(),
+            "stale reclaim must not execute tools"
+        );
+
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(jobs.is_empty(), "stale reclaim must not enqueue jobs");
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let event_types: Vec<_> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        assert!(event_types.contains(&"remote_computer.attachment_reclaimed"));
+        assert!(event_types.contains(&"remote_computer.lease_reclaimed"));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/audit-logs", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "remote_computer.attachment_reclaimed")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "remote_computer.lease_reclaimed")
         );
     }
 

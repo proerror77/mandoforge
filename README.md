@@ -249,6 +249,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/remote-computers/readiness`
 - `GET /api/remote-computers/runner/readiness`
 - `POST /api/remote-computers/runner/dry-run`
+- `POST /api/remote-computers/reclaim-stale`
 - `GET /api/remote-computers`
 - `POST /api/remote-computers`
 - `POST /api/remote-computers/:id/leases`

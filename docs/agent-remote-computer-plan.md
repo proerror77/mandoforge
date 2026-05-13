@@ -53,6 +53,7 @@ Covered today:
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness and dry-run endpoints.
 - `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
+- `POST /api/remote-computers/reclaim-stale` reclaims stale attachments and expired leases with event/audit records and no tool execution.
 
 Not covered today:
 
@@ -66,6 +67,7 @@ Not covered today:
 - No artifact/state sync daemon inside the Pod.
 - No KEDA/HPA queue-depth scaling for remote computer pools.
 - No real Kubernetes client mutation path; the current runner only reports intent and dry-run evidence.
+- No scheduler integration for Remote Computer reclaim runs yet.
 
 ## Target Components
 
@@ -152,6 +154,8 @@ Completed Stage 2 readiness skeleton:
    - `remote_computer.attached`
    - `remote_computer.runner_dry_run`
    - `remote_computer.detached`
+   - `remote_computer.attachment_reclaimed`
+   - `remote_computer.lease_reclaimed`
    - `remote_computer.released`
    - `remote_computer.failed`
 - Add reserved runner boundary:
@@ -167,11 +171,17 @@ Completed Stage 2 readiness skeleton:
    - `POST /api/remote-computer-attachments/:id/release`
    - audit actions `remote_computer.attached` and `remote_computer.detached`
    - tests proving attachments do not enqueue jobs or execute tools
+- Add Admin-only stale reclaim:
+   - `POST /api/remote-computers/reclaim-stale`
+   - releases stale attachments
+   - fails expired leases
+   - audit actions `remote_computer.attachment_reclaimed`, `remote_computer.lease_reclaimed`, and `remote_computer.reclaim_stale_run`
+   - tests proving reclaim does not enqueue jobs or execute tools
 
 Remaining Stage 2 pilot work:
 
 1. Add a real Kubernetes client implementation behind the existing runner boundary, still fail-closed by policy and configuration.
-2. Add stale lease/attachment reclaim automation.
+2. Wire stale Remote Computer reclaim into scheduler due-plan/run history.
 3. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
 
 Stage 2 acceptance for this slice:
@@ -181,6 +191,7 @@ Stage 2 acceptance for this slice:
 - UI renders readiness without requiring a live cluster.
 - Runner readiness and dry-run routes are Admin-only, audited, and fail closed without mutating Kubernetes.
 - Session attachment APIs persist attach/release/stale evidence without creating jobs or tool calls.
+- Stale reclaim is Admin-only, audited, and does not create execution jobs or tool calls.
 - Docs clearly state this is a skeleton/pilot boundary, not production remote execution.
 
 ## Stage 3 Plan
@@ -222,15 +233,15 @@ Stage 3 acceptance:
 
 ## Immediate Next Slice
 
-After the session attach state, the next coherent implementation slice should be:
+After stale reclaim, the next coherent implementation slice should be:
 
 ```text
-Add Remote Computer stale lease and attachment reclaim run
+Wire Remote Computer reclaim into scheduler due-runs
 ```
 
 Concrete deliverables:
 
-- Add an Admin-only due-run that marks stale attachments or expired leases as attention/released according to policy.
 - Add scheduler summary evidence for stale Remote Computer state.
+- Run Remote Computer reclaim from `/api/scheduler/run-due`.
 - Keep `shell.exec` and `codex.exec` on the approved worker path until Pod lifecycle telemetry is reliable.
-- Add tests proving stale reclaim is auditable and does not bypass Tool Router, Policy Engine, or Approval Engine.
+- Add tests proving scheduler-triggered reclaim is auditable and does not bypass Tool Router, Policy Engine, or Approval Engine.
