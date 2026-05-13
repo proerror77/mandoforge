@@ -4212,10 +4212,13 @@ function renderApprovalNotificationRuns() {
   }
   const attentionItems = runs.attention_items || [];
   const recentRuns = runs.recent_runs || [];
+  const productionOps = runs.production_ops || {};
   approvalNotificationRunsRoot.innerHTML = `
     <div class="item">
       <strong>NOTIFICATION RUNS</strong>
       <div class="muted">Runs ${formatInteger(runs.run_count)} · delivered ${formatInteger(runs.delivered_run_count)} · reserved ${formatInteger(runs.reserved_run_count)} · failed ${formatInteger(runs.failed_run_count)}</div>
+      <div class="muted">Production ops: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · routing ${escapeHtml(productionOps.routing_status || "unknown")} · channels ${formatInteger(productionOps.channel_count || 0)} · unroutable ${formatInteger(productionOps.unroutable_pending_count || 0)}</div>
+      <div class="muted">${escapeHtml(productionOps.message || "Production approval notification ops are not reported")}</div>
       ${
         latestRun
           ? `<div class="muted">Latest action: ${escapeHtml(latestRun.status)} · delivered ${formatInteger(latestRun.delivered_count)} · reserved ${formatInteger(latestRun.reserved_count)} · failed ${formatInteger(latestRun.failed_count)} · skipped ${formatInteger(latestRun.skipped_count)}</div>`

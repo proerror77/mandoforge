@@ -575,7 +575,20 @@ struct ApprovalNotificationDeliveryRunSummary {
     failed_run_count: usize,
     latest_run: Option<ApprovalNotificationDeliveryRunRecord>,
     recent_runs: Vec<ApprovalNotificationDeliveryRunRecord>,
+    production_ops: ApprovalNotificationProductionOpsReadiness,
     attention_items: Vec<ApprovalNotificationDeliveryRunAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationProductionOpsReadiness {
+    status: String,
+    production_blocked: bool,
+    latest_run_status: Option<String>,
+    latest_run_age_hours: Option<i64>,
+    routing_status: String,
+    channel_count: usize,
+    unroutable_pending_count: usize,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16325,9 +16338,20 @@ async fn get_approval_notification_delivery_runs(
     )
     .await?;
     let audit_logs = state.list_audit_logs(None).await?;
+    let routing = build_approval_notification_routing_summary(
+        state.list_approvals().await?,
+        state.list_approval_groups().await?,
+        state.list_approval_escalation_rules().await?,
+        state.list_approval_notification_channel_policies().await?,
+        state.approval_webhook_url.is_some(),
+        approval_slack_webhook_url_from_env().is_some(),
+        approval_email_relay_url_from_env().is_some(),
+    )
+    .await;
     Ok(Json(build_approval_notification_delivery_run_summary(
         &audit_logs,
         Utc::now(),
+        &routing,
     )))
 }
 
@@ -16552,6 +16576,7 @@ fn recently_notified_approval_ids(audit_logs: &[AuditLog], now: DateTime<Utc>) -
 fn build_approval_notification_delivery_run_summary(
     audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
+    routing: &ApprovalNotificationRoutingSummary,
 ) -> ApprovalNotificationDeliveryRunSummary {
     let mut recent_runs: Vec<_> = audit_logs
         .iter()
@@ -16609,6 +16634,22 @@ fn build_approval_notification_delivery_run_summary(
         }
         _ => {}
     }
+    let production_ops = build_approval_notification_production_ops_readiness(
+        latest_run.as_ref(),
+        routing,
+        generated_at,
+    );
+    if production_ops.production_blocked {
+        attention_items.push(ApprovalNotificationDeliveryRunAttentionItem {
+            kind: "approval_notification_production_blocked".to_string(),
+            severity: if production_ops.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: production_ops.message.clone(),
+        });
+    }
     recent_runs.truncate(10);
     ApprovalNotificationDeliveryRunSummary {
         generated_at,
@@ -16618,7 +16659,68 @@ fn build_approval_notification_delivery_run_summary(
         failed_run_count,
         latest_run,
         recent_runs,
+        production_ops,
         attention_items,
+    }
+}
+
+fn build_approval_notification_production_ops_readiness(
+    latest_run: Option<&ApprovalNotificationDeliveryRunRecord>,
+    routing: &ApprovalNotificationRoutingSummary,
+    generated_at: DateTime<Utc>,
+) -> ApprovalNotificationProductionOpsReadiness {
+    let latest_run_age_hours = latest_run.map(|run| (generated_at - run.ran_at).num_hours());
+    let latest_run_status = latest_run.map(|run| run.status.clone());
+    let (status, production_blocked, message) = if routing.channel_count == 0 {
+        (
+            "blocked",
+            true,
+            "approval notification production ops are blocked because no delivery channel is configured".to_string(),
+        )
+    } else if routing.unroutable_pending_count > 0 {
+        (
+            "blocked",
+            true,
+            "approval notification production ops are blocked because pending approvals are unroutable".to_string(),
+        )
+    } else {
+        match latest_run {
+            None => (
+                "blocked",
+                true,
+                "approval notification production ops are blocked until a delivery run is recorded".to_string(),
+            ),
+            Some(run) if run.failed_count > 0 || run.status == "failed" => (
+                "blocked",
+                true,
+                "approval notification production ops are blocked by the latest failed delivery run".to_string(),
+            ),
+            Some(run) if run.status == "reserved" => (
+                "attention",
+                true,
+                "approval notification production ops require attention because the latest run was reserved".to_string(),
+            ),
+            Some(run) if (generated_at - run.ran_at).num_hours() >= 24 => (
+                "stale",
+                true,
+                "approval notification production ops are blocked until delivery is refreshed".to_string(),
+            ),
+            Some(_) => (
+                "ready",
+                false,
+                "approval notification routing and latest delivery run are ready".to_string(),
+            ),
+        }
+    };
+    ApprovalNotificationProductionOpsReadiness {
+        status: status.to_string(),
+        production_blocked,
+        latest_run_status,
+        latest_run_age_hours,
+        routing_status: routing.status.clone(),
+        channel_count: routing.channel_count,
+        unroutable_pending_count: routing.unroutable_pending_count,
+        message,
     }
 }
 
@@ -28157,6 +28259,10 @@ not json
         .await;
         assert_eq!(run_summary.run_count, 1);
         assert_eq!(run_summary.delivered_run_count, 1);
+        assert_eq!(run_summary.production_ops.status, "ready");
+        assert!(!run_summary.production_ops.production_blocked);
+        assert_eq!(run_summary.production_ops.routing_status, "warning");
+        assert_eq!(run_summary.production_ops.channel_count, 1);
         assert_eq!(
             run_summary
                 .latest_run
@@ -28290,6 +28396,35 @@ not json
         assert_eq!(delivery.channel_deliveries.len(), 1);
         assert_eq!(delivery.channel_deliveries[0].policy_id, Some(policy.id));
         assert!(!delivery.channel_deliveries[0].target_configured);
+
+        let run: ApprovalNotificationDeliveryRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approvals/notifications/run")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run.status, "reserved");
+        let run_summary: ApprovalNotificationDeliveryRunSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals/notifications/runs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run_summary.production_ops.status, "blocked");
+        assert!(run_summary.production_ops.production_blocked);
+        assert_eq!(run_summary.production_ops.channel_count, 0);
+        assert!(run_summary.attention_items.iter().any(|item| {
+            item.kind == "approval_notification_production_blocked" && item.severity == "critical"
+        }));
 
         let archived: ApprovalNotificationChannelPolicy = request_json(
             app.clone(),
