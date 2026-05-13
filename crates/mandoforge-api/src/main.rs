@@ -993,6 +993,41 @@ struct ObservabilityRemediationPlanAction {
     reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityCollectorReadiness {
+    generated_at: DateTime<Utc>,
+    status: String,
+    service_name: String,
+    otlp_enabled: bool,
+    endpoint_configured: bool,
+    endpoint: Option<String>,
+    sample_ratio: f64,
+    health_check: ObservabilityCollectorHealthCheck,
+    signal_paths: Vec<ObservabilityCollectorSignalPath>,
+    attention_items: Vec<ObservabilityCollectorAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityCollectorHealthCheck {
+    status: String,
+    checked: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityCollectorSignalPath {
+    signal: String,
+    url: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityCollectorAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ProviderUsageSummary {
     request_count: usize,
@@ -2441,6 +2476,10 @@ fn build_router(state: AppState) -> Router {
             get(list_usage_rollups).post(create_usage_rollup),
         )
         .route("/api/observability", get(get_observability_summary))
+        .route(
+            "/api/observability/collector-readiness",
+            get(get_observability_collector_readiness),
+        )
         .route(
             "/api/observability/remediation/plan",
             get(get_observability_remediation_plan),
@@ -11446,6 +11485,14 @@ async fn get_observability_summary(
     Ok(Json(build_observability_summary(&state).await?))
 }
 
+async fn get_observability_collector_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ObservabilityCollectorReadiness>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
+    Ok(Json(build_observability_collector_readiness(&state).await))
+}
+
 async fn get_observability_remediation_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -11627,6 +11674,111 @@ async fn run_observability_remediation(
         ))
         .await?;
     Ok(Json(run))
+}
+
+async fn build_observability_collector_readiness(
+    state: &AppState,
+) -> ObservabilityCollectorReadiness {
+    let generated_at = Utc::now();
+    let config = &state.observability_config;
+    let endpoint = config
+        .otlp_endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_string());
+    let endpoint_configured = endpoint.is_some();
+    let mut attention_items = Vec::new();
+    if !config.is_enabled() {
+        attention_items.push(ObservabilityCollectorAttentionItem {
+            kind: "otlp_disabled".to_string(),
+            severity: "warning".to_string(),
+            message: "OTLP export is disabled; collector readiness cannot be proven".to_string(),
+        });
+    }
+    if config.is_enabled() && !endpoint_configured {
+        attention_items.push(ObservabilityCollectorAttentionItem {
+            kind: "otlp_endpoint_missing".to_string(),
+            severity: "critical".to_string(),
+            message: "OTLP export is enabled without a collector endpoint".to_string(),
+        });
+    }
+    if config.sample_ratio <= 0.0 {
+        attention_items.push(ObservabilityCollectorAttentionItem {
+            kind: "telemetry_sampling_zero".to_string(),
+            severity: "warning".to_string(),
+            message: "telemetry sample ratio is zero; runtime events will not be exported"
+                .to_string(),
+        });
+    }
+    let health_check = if config.is_enabled() && endpoint_configured {
+        match state.telemetry_exporter.health_check(config).await {
+            Ok(()) => ObservabilityCollectorHealthCheck {
+                status: "healthy".to_string(),
+                checked: true,
+                message: "collector health check succeeded".to_string(),
+            },
+            Err(error) => {
+                attention_items.push(ObservabilityCollectorAttentionItem {
+                    kind: "collector_health_failed".to_string(),
+                    severity: "critical".to_string(),
+                    message: error.message.clone(),
+                });
+                ObservabilityCollectorHealthCheck {
+                    status: "failed".to_string(),
+                    checked: true,
+                    message: error.message,
+                }
+            }
+        }
+    } else {
+        ObservabilityCollectorHealthCheck {
+            status: "skipped".to_string(),
+            checked: false,
+            message: "collector health check skipped because OTLP endpoint is not configured"
+                .to_string(),
+        }
+    };
+    let signal_paths = ["logs", "traces", "metrics"]
+        .into_iter()
+        .map(|signal| ObservabilityCollectorSignalPath {
+            signal: signal.to_string(),
+            url: endpoint.as_ref().map(|endpoint| match signal {
+                "logs" => format!("{endpoint}/v1/logs"),
+                "traces" => format!("{endpoint}/v1/traces"),
+                "metrics" => format!("{endpoint}/v1/metrics"),
+                _ => endpoint.clone(),
+            }),
+            status: if endpoint_configured {
+                "configured".to_string()
+            } else {
+                "missing".to_string()
+            },
+        })
+        .collect::<Vec<_>>();
+    let status = if attention_items
+        .iter()
+        .any(|item| item.severity == "critical")
+    {
+        "failed"
+    } else if attention_items.is_empty() {
+        "ready"
+    } else {
+        "warning"
+    }
+    .to_string();
+    ObservabilityCollectorReadiness {
+        generated_at,
+        status,
+        service_name: config.service_name.clone(),
+        otlp_enabled: config.is_enabled(),
+        endpoint_configured,
+        endpoint,
+        sample_ratio: config.sample_ratio,
+        health_check,
+        signal_paths,
+        attention_items,
+    }
 }
 
 async fn get_cost_alerts(
@@ -17597,6 +17749,18 @@ not json
             .await
             .expect("append provider event");
 
+        let collector = build_observability_collector_readiness(&state).await;
+        assert_eq!(collector.status, "ready");
+        assert!(collector.health_check.checked);
+        assert_eq!(collector.health_check.status, "healthy");
+        assert_eq!(collector.signal_paths.len(), 3);
+        assert!(
+            collector
+                .signal_paths
+                .iter()
+                .any(|path| path.signal == "logs" && path.status == "configured")
+        );
+
         let events = exporter.events.lock().await;
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].name, "session.started");
@@ -19924,6 +20088,25 @@ not json
                 .copied()
                 .unwrap_or(0)
                 >= 2
+        );
+
+        let collector_readiness: ObservabilityCollectorReadiness = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/observability/collector-readiness")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(collector_readiness.status, "warning");
+        assert!(!collector_readiness.otlp_enabled);
+        assert!(
+            collector_readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "otlp_disabled")
         );
 
         let remediation_plan: ObservabilityRemediationPlan = request_json(

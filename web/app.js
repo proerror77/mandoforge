@@ -47,6 +47,7 @@ const state = {
   costAlertRoutes: [],
   usage: null,
   observability: null,
+  observabilityCollectorReadiness: null,
   observabilityRemediationPlan: null,
   observabilityRemediation: null,
   schedulerSummary: null,
@@ -1324,6 +1325,7 @@ async function refreshOps() {
     usageFinanceSummary,
     usageFinanceOperations,
     observability,
+    observabilityCollectorReadiness,
     observabilityRemediationPlan,
     schedulerSummary,
     schedulerDuePlan,
@@ -1353,6 +1355,7 @@ async function refreshOps() {
       api("/api/usage/finance-summary"),
       api("/api/usage/finance-operations/summary"),
       api("/api/observability"),
+      api("/api/observability/collector-readiness"),
       api("/api/observability/remediation/plan"),
       api("/api/scheduler/summary"),
       api("/api/scheduler/due-plan"),
@@ -1381,6 +1384,7 @@ async function refreshOps() {
   state.usageFinanceSummary = usageFinanceSummary;
   state.usageFinanceOperations = usageFinanceOperations;
   state.observability = observability;
+  state.observabilityCollectorReadiness = observabilityCollectorReadiness;
   state.observabilityRemediationPlan = observabilityRemediationPlan;
   state.schedulerSummary = schedulerSummary;
   state.schedulerDuePlan = schedulerDuePlan;
@@ -1946,6 +1950,9 @@ function renderObservability() {
   const backpressure = observability.backpressure || {};
   const telemetry = observability.telemetry || {};
   const errorEvents = observability.recent_error_events || [];
+  const collectorReadiness = state.observabilityCollectorReadiness;
+  const collectorAttention = collectorReadiness?.attention_items || [];
+  const collectorSignalPaths = collectorReadiness?.signal_paths || [];
   const remediationPlan = state.observabilityRemediationPlan;
   const remediationPlanActions = remediationPlan?.actions || [];
   const remediation = state.observabilityRemediation;
@@ -1990,6 +1997,76 @@ function renderObservability() {
       <dt>Oldest queued job</dt>
       <dd>${escapeHtml(backpressure.oldest_queued_job_age_seconds == null ? "none" : `${backpressure.oldest_queued_job_age_seconds}s`)}</dd>
     </dl>
+    ${
+      collectorReadiness
+        ? `<h4>Collector Readiness</h4>
+          <div class="metric-grid compact-metrics">
+            <div class="metric"><span>Status</span><strong>${escapeHtml(collectorReadiness.status)}</strong></div>
+            <div class="metric"><span>OTLP</span><strong>${escapeHtml(collectorReadiness.otlp_enabled ? "enabled" : "disabled")}</strong></div>
+            <div class="metric"><span>Endpoint</span><strong>${escapeHtml(collectorReadiness.endpoint_configured ? "configured" : "missing")}</strong></div>
+            <div class="metric"><span>Health</span><strong>${escapeHtml(collectorReadiness.health_check?.status || "unknown")}</strong></div>
+          </div>
+          <dl>
+            <dt>Collector endpoint</dt>
+            <dd>${escapeHtml(collectorReadiness.endpoint || "none")}</dd>
+            <dt>Health message</dt>
+            <dd>${escapeHtml(collectorReadiness.health_check?.message || "none")}</dd>
+          </dl>
+          ${
+            collectorSignalPaths.length
+              ? `<table class="usage-table">
+                  <thead>
+                    <tr>
+                      <th>Signal</th>
+                      <th>Status</th>
+                      <th>URL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${collectorSignalPaths
+                      .map(
+                        (path) => `
+                          <tr>
+                            <td>${escapeHtml(path.signal)}</td>
+                            <td>${escapeHtml(path.status)}</td>
+                            <td>${escapeHtml(path.url || "none")}</td>
+                          </tr>
+                        `,
+                      )
+                      .join("")}
+                  </tbody>
+                </table>`
+              : `<div class="muted">No collector signal paths.</div>`
+          }
+          ${
+            collectorAttention.length
+              ? `<table class="usage-table">
+                  <thead>
+                    <tr>
+                      <th>Severity</th>
+                      <th>Signal</th>
+                      <th>Message</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${collectorAttention
+                      .map(
+                        (item) => `
+                          <tr>
+                            <td><span class="budget-status ${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</span></td>
+                            <td>${escapeHtml(item.kind)}</td>
+                            <td>${escapeHtml(item.message)}</td>
+                          </tr>
+                        `,
+                      )
+                      .join("")}
+                  </tbody>
+                </table>`
+              : `<div class="muted">No collector readiness attention items.</div>`
+          }
+          <div class="muted">Generated: ${escapeHtml(collectorReadiness.generated_at)}</div>`
+        : ""
+    }
     ${
       remediationPlan
         ? `<h4>Remediation Plan</h4>

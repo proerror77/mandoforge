@@ -299,6 +299,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/usage/finance-operations/summary`
 - `GET /api/usage/alert-routes`
 - `POST /api/usage/alert-routes`
+- `GET /api/observability/collector-readiness`
 - `GET /api/codex-app-server/health`
 - `POST /api/codex-app-server/threads`
 - `POST /api/codex-app-server/threads/:thread_id/turns`
