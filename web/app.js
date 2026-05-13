@@ -4487,6 +4487,7 @@ function renderApprovalNotificationRuns() {
       <div class="muted">Production ops: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · routing ${escapeHtml(productionOps.routing_status || "unknown")} · channels ${formatInteger(productionOps.channel_count || 0)} · unroutable ${formatInteger(productionOps.unroutable_pending_count || 0)}</div>
       <div class="muted">${escapeHtml(productionOps.message || "Production approval notification ops are not reported")}</div>
       <div class="muted">Deployment validation: ${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · channels ${formatInteger(deploymentReadiness.channel_count || 0)} · policies ${formatInteger(deploymentReadiness.active_policy_count || 0)} / ${formatInteger(deploymentReadiness.persisted_policy_count || 0)} · unroutable ${formatInteger(deploymentReadiness.unroutable_pending_count || 0)}</div>
+      <div class="muted">Deployment controller: required ${deploymentReadiness.controller_required ? "yes" : "no"} · configured ${deploymentReadiness.controller_configured ? "yes" : "no"} · latest ${escapeHtml(deploymentReadiness.latest_controller_status || "none")} · executions ${formatInteger(deploymentReadiness.controller_execution_count || 0)} · failed ${formatInteger(deploymentReadiness.controller_failed_count || 0)}</div>
       <div class="muted">${escapeHtml(deploymentReadiness.message || "Approval notification deployment validation has not been reported")}</div>
       ${
         latestRun
@@ -4495,7 +4496,7 @@ function renderApprovalNotificationRuns() {
       }
       ${
         deploymentValidation
-          ? `<div class="muted">Latest validation: ${escapeHtml(deploymentValidation.status)} · pending ${formatInteger(deploymentValidation.pending_approval_count)} · routable ${formatInteger(deploymentValidation.routable_pending_count)} · unroutable ${formatInteger(deploymentValidation.unroutable_pending_count)} · checked ${escapeHtml(deploymentValidation.checked_at)}</div>`
+          ? `<div class="muted">Latest validation: ${escapeHtml(deploymentValidation.status)} · pending ${formatInteger(deploymentValidation.pending_approval_count)} · routable ${formatInteger(deploymentValidation.routable_pending_count)} · unroutable ${formatInteger(deploymentValidation.unroutable_pending_count)} · controller ${escapeHtml(deploymentValidation.controller_execution?.status || "skipped")} · checked ${escapeHtml(deploymentValidation.checked_at)}</div>`
           : `<div class="muted">No notification deployment validation triggered in this browser session</div>`
       }
     </div>

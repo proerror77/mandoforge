@@ -637,6 +637,9 @@ struct ApprovalNotificationDeploymentValidationRun {
     persisted_policy_count: usize,
     active_policy_count: usize,
     routing_status: String,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
     checked_at: DateTime<Utc>,
 }
 
@@ -653,6 +656,12 @@ struct ApprovalNotificationDeploymentReadiness {
     channel_count: usize,
     persisted_policy_count: usize,
     active_policy_count: usize,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
+    controller_execution_count: usize,
+    controller_failed_count: usize,
     deployment_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
@@ -19769,15 +19778,69 @@ async fn validate_approval_notification_deployment(
     )
     .await;
     let checked_at = Utc::now();
-    let status = if routing.channel_count > 0
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = approval_notification_deployment_controller_required(&lookup);
+    let controller_configured = approval_notification_deployment_controller_configured(&lookup);
+    let mut issues = Vec::new();
+    let mut healthy = routing.channel_count > 0
         && routing.active_policy_count > 0
-        && routing.unroutable_pending_count == 0
-    {
-        "healthy"
-    } else {
-        "blocked"
+        && routing.unroutable_pending_count == 0;
+    if routing.channel_count == 0 {
+        issues.push("approval notification deployment validation found no delivery channels");
     }
-    .to_string();
+    if routing.active_policy_count == 0 {
+        issues.push("approval notification deployment validation found no active channel policies");
+    }
+    if routing.unroutable_pending_count > 0 {
+        issues
+            .push("approval notification deployment validation found unroutable pending approvals");
+    }
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "routing_not_ready"
+        } else {
+            "controller_not_configured"
+        }
+    });
+    if healthy && controller_configured {
+        match execute_approval_notification_deployment_controller(
+            &lookup,
+            &principal.subject_id,
+            checked_at,
+            &routing,
+        )
+        .await
+        {
+            Ok(execution) => {
+                let controller_status = execution
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed")
+                    .to_string();
+                controller_execution = execution;
+                if controller_status != "validated" {
+                    healthy = false;
+                    issues.push("approval notification deployment controller did not validate");
+                }
+            }
+            Err(error) => {
+                healthy = false;
+                issues.push("approval notification deployment controller failed");
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    }
+    if healthy && controller_required && !controller_configured {
+        healthy = false;
+        issues.push("approval notification deployment controller is required but not configured");
+    }
+    let status = if healthy { "healthy" } else { "blocked" }.to_string();
     let run = ApprovalNotificationDeploymentValidationRun {
         status,
         pending_approval_count: routing.pending_approval_count,
@@ -19787,6 +19850,9 @@ async fn validate_approval_notification_deployment(
         persisted_policy_count: routing.persisted_policy_count,
         active_policy_count: routing.active_policy_count,
         routing_status: routing.status,
+        controller_required,
+        controller_configured,
+        controller_execution,
         checked_at,
     };
     state
@@ -19807,6 +19873,10 @@ async fn validate_approval_notification_deployment(
                 "persisted_policy_count": run.persisted_policy_count,
                 "active_policy_count": run.active_policy_count,
                 "routing_status": run.routing_status,
+                "controller_required": run.controller_required,
+                "controller_configured": run.controller_configured,
+                "controller_execution": run.controller_execution,
+                "issues": issues,
                 "checked_at": run.checked_at,
             }),
         ))
@@ -20139,8 +20209,14 @@ fn build_approval_notification_delivery_run_summary(
             message: production_ops.message.clone(),
         });
     }
-    let deployment_readiness =
-        build_approval_notification_deployment_readiness(audit_logs, routing, generated_at);
+    let lookup = |key: &str| std::env::var(key).ok();
+    let deployment_readiness = build_approval_notification_deployment_readiness(
+        audit_logs,
+        routing,
+        generated_at,
+        approval_notification_deployment_controller_required(&lookup),
+        approval_notification_deployment_controller_configured(&lookup),
+    );
     if deployment_readiness.production_blocked {
         attention_items.push(ApprovalNotificationDeliveryRunAttentionItem {
             kind: "approval_notification_deployment_validation_blocked".to_string(),
@@ -20231,11 +20307,36 @@ fn build_approval_notification_deployment_readiness(
     audit_logs: &[AuditLog],
     routing: &ApprovalNotificationRoutingSummary,
     generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
 ) -> ApprovalNotificationDeploymentReadiness {
     let latest_validation = audit_logs
         .iter()
         .filter(|log| log.action == "approval.notification_deployment_validation_run")
         .max_by_key(|log| log.created_at);
+    let controller_validation_logs = audit_logs
+        .iter()
+        .filter(|log| {
+            log.action == "approval.notification_deployment_validation_run"
+                && log
+                    .details
+                    .get("controller_execution")
+                    .and_then(|execution| execution.get("attempted"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    let controller_execution_count = controller_validation_logs.len();
+    let controller_failed_count = controller_validation_logs
+        .iter()
+        .filter(|log| {
+            log.details
+                .get("controller_execution")
+                .and_then(|execution| execution.get("status"))
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "validated")
+        })
+        .count();
     let latest_validation_at = latest_validation.map(|log| log.created_at);
     let latest_validation_age_hours =
         latest_validation_at.map(|created_at| (generated_at - created_at).num_hours());
@@ -20261,6 +20362,12 @@ fn build_approval_notification_deployment_readiness(
     let active_policy_count = latest_validation
         .map(|log| json_usize(&log.details, "active_policy_count"))
         .unwrap_or(routing.active_policy_count);
+    let latest_controller_status = latest_validation
+        .and_then(|log| log.details.get("controller_execution"))
+        .and_then(|execution| execution.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
 
     if latest_validation.is_none() {
@@ -20295,6 +20402,18 @@ fn build_approval_notification_deployment_readiness(
         blocking_reasons
             .push("approval notification deployment validation evidence is stale".to_string());
     }
+    if controller_required && !controller_configured {
+        blocking_reasons.push(
+            "approval notification deployment controller is required but not configured"
+                .to_string(),
+        );
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons.push(
+            "approval notification deployment controller evidence is missing or not validated"
+                .to_string(),
+        );
+    }
 
     let production_blocked = !blocking_reasons.is_empty();
     let status = if production_blocked {
@@ -20324,10 +20443,114 @@ fn build_approval_notification_deployment_readiness(
         channel_count,
         persisted_policy_count,
         active_policy_count,
+        controller_required,
+        controller_configured,
+        latest_controller_status,
+        latest_controller_validated,
+        controller_execution_count,
+        controller_failed_count,
         deployment_validated: !production_blocked,
         blocking_reasons,
         message,
     }
+}
+
+fn approval_notification_deployment_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn approval_notification_deployment_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_approval_notification_deployment_controller<F>(
+    lookup: &F,
+    subject: &str,
+    checked_at: DateTime<Utc>,
+    routing: &ApprovalNotificationRoutingSummary,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_URL is required",
+            )
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.approval_notification_deployment",
+        "subject": subject,
+        "checked_at": checked_at,
+        "routing": {
+            "status": routing.status,
+            "pending_approval_count": routing.pending_approval_count,
+            "routable_pending_count": routing.routable_pending_count,
+            "unroutable_pending_count": routing.unroutable_pending_count,
+            "channel_count": routing.channel_count,
+            "persisted_policy_count": routing.persisted_policy_count,
+            "active_policy_count": routing.active_policy_count,
+            "webhook_configured": routing.webhook_configured,
+            "slack_configured": routing.slack_configured,
+            "email_relay_configured": routing.email_relay_configured,
+        }
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "approval notification deployment controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(
+        controller_status,
+        "validated" | "deployed" | "healthy" | "success" | "ok"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 fn approval_notification_delivery_run_from_audit_log(
@@ -29903,6 +30126,29 @@ not json
         Json(json!({"accepted": true}))
     }
 
+    async fn mock_approval_notification_deployment_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer approval-notification-token")
+        );
+        assert_eq!(
+            payload["type"],
+            "mandoforge.approval_notification_deployment"
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "deployment_id": "approval-notification-deployment-1",
+            "steps": ["routing-checked", "delivery-provider-checked"]
+        }))
+    }
+
     async fn flaky_approval_webhook(
         State(counter): State<Arc<std::sync::atomic::AtomicUsize>>,
         Json(payload): Json<Value>,
@@ -34016,6 +34262,12 @@ not json
         assert_eq!(deployment_validation.active_policy_count, 1);
         assert_eq!(deployment_validation.routable_pending_count, 1);
         assert_eq!(deployment_validation.unroutable_pending_count, 0);
+        assert!(!deployment_validation.controller_required);
+        assert!(!deployment_validation.controller_configured);
+        assert_eq!(
+            deployment_validation.controller_execution["status"],
+            "skipped"
+        );
 
         let run: ApprovalNotificationDeliveryRun = request_json(
             app.clone(),
@@ -34087,6 +34339,195 @@ not json
                 .any(|log| log.action == "approval.notification_deployment_validation_run")
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn approval_notification_deployment_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("approval notification deployment listener");
+        let controller_addr = listener
+            .local_addr()
+            .expect("approval notification deployment addr");
+        let controller = Router::new()
+            .route(
+                "/approval-notification-deployment",
+                post(mock_approval_notification_deployment_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock approval notification deployment controller");
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_URL" => Some(format!(
+                "http://{controller_addr}/approval-notification-deployment"
+            )),
+            "MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_TOKEN" => {
+                Some("approval-notification-token".to_string())
+            }
+            _ => None,
+        };
+        let routing = ApprovalNotificationRoutingSummary {
+            status: "warning".to_string(),
+            generated_at: Utc::now(),
+            webhook_configured: true,
+            slack_configured: false,
+            email_relay_configured: false,
+            channel_count: 1,
+            persisted_policy_count: 1,
+            active_policy_count: 1,
+            channel_policies: vec![],
+            pending_approval_count: 2,
+            delegated_pending_count: 2,
+            group_pending_count: 0,
+            routable_pending_count: 2,
+            unroutable_pending_count: 0,
+            approval_group_count: 0,
+            escalation_rule_count: 0,
+            attention_items: vec![],
+        };
+
+        let execution = execute_approval_notification_deployment_controller(
+            &lookup,
+            "admin-1",
+            Utc::now(),
+            &routing,
+        )
+        .await
+        .expect("approval notification deployment controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(
+            execution["deployment_id"],
+            "approval-notification-deployment-1"
+        );
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.approval_notification_deployment"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["routing"]["channel_count"], 1);
+        assert_eq!(payloads[0]["routing"]["routable_pending_count"], 2);
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn approval_notification_deployment_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let routing = ApprovalNotificationRoutingSummary {
+            status: "healthy".to_string(),
+            generated_at,
+            webhook_configured: true,
+            slack_configured: false,
+            email_relay_configured: false,
+            channel_count: 1,
+            persisted_policy_count: 1,
+            active_policy_count: 1,
+            channel_policies: vec![],
+            pending_approval_count: 0,
+            delegated_pending_count: 0,
+            group_pending_count: 0,
+            routable_pending_count: 0,
+            unroutable_pending_count: 0,
+            approval_group_count: 0,
+            escalation_rule_count: 0,
+            attention_items: vec![],
+        };
+        let missing = build_approval_notification_deployment_readiness(
+            &[],
+            &routing,
+            generated_at,
+            true,
+            false,
+        );
+        assert_eq!(missing.status, "blocked");
+        assert!(missing.production_blocked);
+        assert!(missing.controller_required);
+        assert!(!missing.controller_configured);
+        assert!(missing.blocking_reasons.iter().any(|reason| {
+            reason == "approval notification deployment controller is required but not configured"
+        }));
+
+        let stale_without_controller = build_approval_notification_deployment_readiness(
+            &[new_audit_log(
+                None,
+                "user",
+                None,
+                "approval.notification_deployment_validation_run",
+                "approval_notifications",
+                None,
+                json!({
+                    "status": "healthy",
+                    "pending_approval_count": 0,
+                    "routable_pending_count": 0,
+                    "unroutable_pending_count": 0,
+                    "channel_count": 1,
+                    "persisted_policy_count": 1,
+                    "active_policy_count": 1,
+                    "routing_status": "healthy",
+                    "controller_required": true,
+                    "controller_configured": true,
+                    "controller_execution": {
+                        "attempted": false,
+                        "status": "skipped",
+                        "reason": "controller_not_configured"
+                    },
+                    "checked_at": generated_at,
+                }),
+            )],
+            &routing,
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(stale_without_controller.status, "blocked");
+        assert!(stale_without_controller.production_blocked);
+        assert!(!stale_without_controller.latest_controller_validated);
+
+        let ready = build_approval_notification_deployment_readiness(
+            &[new_audit_log(
+                None,
+                "user",
+                None,
+                "approval.notification_deployment_validation_run",
+                "approval_notifications",
+                None,
+                json!({
+                    "status": "healthy",
+                    "pending_approval_count": 0,
+                    "routable_pending_count": 0,
+                    "unroutable_pending_count": 0,
+                    "channel_count": 1,
+                    "persisted_policy_count": 1,
+                    "active_policy_count": 1,
+                    "routing_status": "healthy",
+                    "controller_required": true,
+                    "controller_configured": true,
+                    "controller_execution": {
+                        "attempted": true,
+                        "status": "validated",
+                        "deployment_id": "approval-notification-deployment-1"
+                    },
+                    "checked_at": generated_at,
+                }),
+            )],
+            &routing,
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+        assert!(ready.latest_controller_validated);
+        assert_eq!(ready.controller_execution_count, 1);
+        assert_eq!(ready.controller_failed_count, 0);
     }
 
     #[tokio::test]
