@@ -225,6 +225,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - [Stage 1 Completion Audit](docs/stage1-completion-audit.md)
 - [Stage 2 Gap Audit](docs/stage2-gap-audit.md)
 - [Stage 2 Completion Audit](docs/stage2-completion-audit.md)
+- [Agent Remote Computer Plan](docs/agent-remote-computer-plan.md)
 - [Stage 1 Deployment And Demo Guide](docs/deployment-guide.md)
 - [Kubernetes Skeleton](deploy/k8s/README.md)
 

@@ -21,9 +21,10 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 ## Next Stage 2 Slices
 
-1. Add production multi-step rollout orchestration beyond the current policy/release summary dashboards.
-2. Add production finance close workflow automation beyond the current bounded close run, static readiness, forecast, pressure, acknowledgement, audit-evidence, and scheduled export delivery surfaces.
-3. Add broader remediation automation beyond safe approval/Codex due-runs and production collector-specific OTLP hardening beyond readiness checks.
-4. Add production App Server control-plane polish beyond current static steering dashboards.
-5. Continue hardening Vault/KMS beyond the new readiness gate by adding real secret-value write/rotation orchestration when a production KMS/HSM target is selected.
-6. Extend approval notification routing from env-gated webhook/Slack/email delivery and run history to persisted channel policy, retries/backoff, and richer provider-grade delivery operations.
+1. Add the Agent Remote Computer readiness skeleton described in [Agent Remote Computer Plan](agent-remote-computer-plan.md): Pod template, PVC/RWX state mount placeholder, readiness API, UI readiness panel, and explicit blockers for distributed state, NetworkPolicy, warm pool, and queue-depth autoscaling.
+2. Add production multi-step rollout orchestration beyond the current policy/release summary dashboards.
+3. Add production finance close workflow automation beyond the current bounded close run, static readiness, forecast, pressure, acknowledgement, audit-evidence, and scheduled export delivery surfaces.
+4. Add broader remediation automation beyond safe approval/Codex due-runs and production collector-specific OTLP hardening beyond readiness checks.
+5. Add production App Server control-plane polish beyond current static steering dashboards.
+6. Continue hardening Vault/KMS beyond the new readiness gate by adding real secret-value write/rotation orchestration when a production KMS/HSM target is selected.
+7. Extend approval notification routing from env-gated webhook/Slack/email delivery and run history to persisted channel policy, retries/backoff, and richer provider-grade delivery operations.

@@ -260,6 +260,29 @@ Stage 2/3 target components:
 - `redis-or-nats`
 - `object-storage`
 
+## Agent Remote Computer Target
+
+MandoForge should evolve from generic worker drains toward a Kubernetes Pod-based Agent Remote Computer substrate. In that model, a governed session leases an isolated Pod that behaves like a remote machine for the agent: OS tools, workspace, approved skills, runtime config, code execution, artifact output, and state mounts all live behind the same Tool Router, Policy Engine, Approval Engine, event log, and audit path.
+
+The current repo does not yet implement this substrate. Today it has K8s API/worker/scheduler skeletons, queue-backed execution jobs, worker leases, Docker shell sandbox support, and a worker readiness gate. It does not yet create a Pod per session, maintain a warm pool, or mount distributed Memory/Notes/Skills state into agent Pods.
+
+Target control flow:
+
+```text
+Agent Session
+  -> Harness / Tool Router / Policy Engine
+  -> Execution Job Queue
+  -> Remote Computer Manager
+  -> Kubernetes Pod lease
+  -> Mounted state filesystem
+  -> Sandbox / Codex / shell / tool execution
+  -> Artifact + Event + Audit sync
+```
+
+Stage 2 should add a readiness-only Remote Computer control plane: Pod template, PVC/RWX state mount placeholder, readiness API, UI readiness panel, event names, and honest blockers for NetworkPolicy, warm pool, distributed filesystem, and autoscaling. Stage 3 should make this the primary sandbox substrate by leasing Pods per session, syncing artifacts/events back to MandoForge, adding warm pools, and integrating KEDA/HPA plus a distributed state filesystem option such as JuiceFS CSI.
+
+See [Agent Remote Computer Plan](agent-remote-computer-plan.md).
+
 ## Verification
 
 Current verified path:
