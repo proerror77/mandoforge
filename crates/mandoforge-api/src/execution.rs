@@ -133,6 +133,47 @@ pub(crate) async fn run_execution_job(
     worker_id: &str,
 ) -> Result<ExecutionJob, AppError> {
     let job = state.execution_queue.start(job_id, worker_id).await?;
+    let remote_computer_assignment = state
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .find(|assignment| {
+            assignment.execution_job_id == job.id && assignment.status == "assigned"
+        });
+    if let Some(assignment) = remote_computer_assignment.as_ref() {
+        let details = json!({
+            "assignment_id": assignment.id,
+            "execution_job_id": job.id,
+            "approval_id": job.approval_id,
+            "tool_call_id": job.tool_call_id,
+            "tool": job.tool_name,
+            "remote_computer_id": assignment.remote_computer_id,
+            "lease_id": assignment.lease_id,
+            "worker_id": worker_id,
+            "execution_enabled": false,
+            "handoff_mode": "control-plane-only"
+        });
+        state
+            .append_event(
+                "worker",
+                Some(job.id),
+                job.session_id,
+                "remote_computer.execution_handoff_acknowledged",
+                details.clone(),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(job.session_id),
+                "worker",
+                Some(job.id),
+                "remote_computer.execution_handoff_acknowledged",
+                "remote_computer_job_assignment",
+                Some(assignment.id),
+                details,
+            ))
+            .await?;
+    }
     let approval = state.get_approval(job.approval_id).await?;
     if approval.status != "approved" {
         return Err(AppError::bad_request(

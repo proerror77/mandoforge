@@ -16235,6 +16235,7 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         "remote_computer.heartbeat".to_string(),
         "remote_computer.attached".to_string(),
         "remote_computer.execution_handoff_planned".to_string(),
+        "remote_computer.execution_handoff_acknowledged".to_string(),
         "remote_computer.runner_dry_run".to_string(),
         "remote_computer.detached".to_string(),
         "remote_computer.attachment_reclaimed".to_string(),
@@ -28628,6 +28629,20 @@ not json
         )
         .await;
         assert_eq!(completed.status, ExecutionJobStatus::Completed);
+
+        let events_after_worker_run: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events_after_worker_run.iter().any(|event| {
+            event.event_type == "remote_computer.execution_handoff_acknowledged"
+                && event.payload["assignment_id"] == json!(assignment.id)
+                && event.payload["execution_enabled"] == json!(false)
+        }));
 
         let written = tokio::fs::read_to_string(workspace_file)
             .await

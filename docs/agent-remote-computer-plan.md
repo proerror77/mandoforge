@@ -59,7 +59,7 @@ Covered today:
 - Kubernetes dry-runs return the planned API path, namespace, pod name, and template path so future live calls have an auditable request plan before mutation is enabled.
 - Kubernetes live mutation is gated by both `MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED` and `MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED`; it remains Admin-only and still does not create execution jobs, tool calls, or a session-to-Pod execution path.
 - `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
-- `remote_computer_job_assignments` persists approved execution-job-to-lease handoff plans without starting tool execution or creating extra jobs.
+- `remote_computer_job_assignments` persists approved execution-job-to-lease handoff plans, and worker runs acknowledge that handoff in timeline/audit without moving execution into Pods.
 - `POST /api/remote-computers/reclaim-stale` reclaims stale attachments and expired leases with event/audit records and no tool execution.
 - `/api/scheduler/due-plan` and `/api/scheduler/run-due` include Remote Computer stale reclaim in the aggregate operations path.
 
@@ -162,6 +162,7 @@ Completed Stage 2 readiness skeleton:
    - `remote_computer.heartbeat`
    - `remote_computer.attached`
    - `remote_computer.execution_handoff_planned`
+   - `remote_computer.execution_handoff_acknowledged`
    - `remote_computer.runner_dry_run`
    - `remote_computer.detached`
    - `remote_computer.attachment_reclaimed`
@@ -185,8 +186,9 @@ Completed Stage 2 readiness skeleton:
    - `POST /api/execution-jobs/:id/remote-computer-lease`
    - `GET /api/remote-computer-job-assignments`
    - event `remote_computer.execution_handoff_planned`
-   - audit action `remote_computer.execution_handoff_planned`
-   - tests proving handoff planning does not start tool execution or create another job
+   - event `remote_computer.execution_handoff_acknowledged`
+   - audit actions `remote_computer.execution_handoff_planned` and `remote_computer.execution_handoff_acknowledged`
+   - tests proving handoff planning and worker acknowledgement do not start Pod execution or create another job
 - Add Admin-only stale reclaim:
    - `POST /api/remote-computers/reclaim-stale`
    - releases stale attachments
