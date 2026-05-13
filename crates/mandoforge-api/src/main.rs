@@ -1662,6 +1662,7 @@ struct RemoteComputerSidecarRecoveryRun {
     generated_at: DateTime<Utc>,
     status: String,
     replacement_enabled: bool,
+    validation_controller_configured: bool,
     runner_status: String,
     unhealthy_count: usize,
     planned_replacement_count: usize,
@@ -1669,6 +1670,7 @@ struct RemoteComputerSidecarRecoveryRun {
     blocked_replacement_count: usize,
     targets: Vec<RemoteComputerSidecarRecoveryTarget>,
     runner_responses: Vec<RemoteComputerRunnerDryRunResponse>,
+    validation_result: Value,
     execution_enabled: bool,
     message: String,
 }
@@ -21042,11 +21044,23 @@ async fn record_remote_computer_sidecar_heartbeat_event(
 async fn execute_remote_computer_sidecar_recovery(
     state: &AppState,
 ) -> Result<RemoteComputerSidecarRecoveryRun, AppError> {
+    execute_remote_computer_sidecar_recovery_with_lookup(state, |key| std::env::var(key).ok()).await
+}
+
+async fn execute_remote_computer_sidecar_recovery_with_lookup<F>(
+    state: &AppState,
+    lookup: F,
+) -> Result<RemoteComputerSidecarRecoveryRun, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let targets = remote_computer_sidecar_recovery_targets(state).await?;
     let config = RemoteComputerRunnerConfig::from_env();
     let runner = remote_computer_runner_for_config(&config);
     let runner_readiness = runner.readiness(&config);
     let replacement_enabled = env_bool("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED");
+    let validation_controller_configured =
+        remote_computer_sidecar_validation_controller_configured(&lookup);
     let live_replacement_enabled = replacement_enabled
         && runner_readiness.configured
         && runner_readiness.live_mutation_enabled
@@ -21128,10 +21142,11 @@ async fn execute_remote_computer_sidecar_recovery(
     } else {
         "Remote Computer sidecar replacement run completed for unhealthy Pods".to_string()
     };
-    let run = RemoteComputerSidecarRecoveryRun {
+    let mut run = RemoteComputerSidecarRecoveryRun {
         generated_at: Utc::now(),
         status,
         replacement_enabled,
+        validation_controller_configured,
         runner_status: runner_readiness.status,
         unhealthy_count: targets.len(),
         planned_replacement_count: targets
@@ -21142,9 +21157,45 @@ async fn execute_remote_computer_sidecar_recovery(
         blocked_replacement_count,
         targets,
         runner_responses,
+        validation_result: json!({
+            "attempted": false,
+            "status": "skipped",
+            "reason": if validation_controller_configured {
+                "no_replacement_attempted"
+            } else {
+                "validation_controller_not_configured"
+            }
+        }),
         execution_enabled: false,
         message,
     };
+    if validation_controller_configured && run.attempted_replacement_count > 0 {
+        match execute_remote_computer_sidecar_validation_controller(&lookup, &run).await {
+            Ok(validation) => {
+                let validation_status = validation
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed")
+                    .to_string();
+                run.validation_result = validation;
+                if validation_status != "validated" && run.status == "completed" {
+                    run.status = "attention".to_string();
+                    run.message = "Remote Computer sidecar replacement completed but validation controller did not confirm healthy replacement".to_string();
+                }
+            }
+            Err(error) => {
+                run.validation_result = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+                if run.status == "completed" {
+                    run.status = "attention".to_string();
+                    run.message = "Remote Computer sidecar replacement completed but validation controller failed".to_string();
+                }
+            }
+        }
+    }
     state
         .append_audit_log(new_audit_log(
             None,
@@ -21157,6 +21208,86 @@ async fn execute_remote_computer_sidecar_recovery(
         ))
         .await?;
     Ok(run)
+}
+
+fn remote_computer_sidecar_validation_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_remote_computer_sidecar_validation_controller<F>(
+    lookup: &F,
+    run: &RemoteComputerSidecarRecoveryRun,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.remote_computer_sidecar_replacement_validation",
+        "generated_at": run.generated_at,
+        "status": run.status,
+        "unhealthy_count": run.unhealthy_count,
+        "planned_replacement_count": run.planned_replacement_count,
+        "attempted_replacement_count": run.attempted_replacement_count,
+        "blocked_replacement_count": run.blocked_replacement_count,
+        "targets": run.targets,
+        "runner_response_statuses": run.runner_responses.iter().map(|response| {
+            json!({
+                "status": response.status,
+                "operation": response.operation,
+                "pod_name": response.pod_name,
+            })
+        }).collect::<Vec<_>>(),
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "remote computer sidecar validation controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(
+        controller_status,
+        "validated" | "healthy" | "success" | "ok"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "message": body.get("message").and_then(Value::as_str),
+        "replacement_pods_healthy": body.get("replacement_pods_healthy").and_then(Value::as_bool),
+        "checked_pod_count": body.get("checked_pod_count").and_then(Value::as_u64),
+    }))
 }
 
 async fn build_remote_computer_readiness(
@@ -25325,6 +25456,119 @@ not json
     }
 
     #[tokio::test]
+    async fn remote_computer_sidecar_validation_controller_confirms_replacement() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("sidecar validation listener");
+        let controller_addr = listener.local_addr().expect("sidecar validation addr");
+        let controller = Router::new()
+            .route(
+                "/sidecar-validation",
+                post(mock_remote_sidecar_validation_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock sidecar validation controller");
+        });
+        let remote_computer_id = Uuid::new_v4();
+        let run = RemoteComputerSidecarRecoveryRun {
+            generated_at: Utc::now(),
+            status: "completed".to_string(),
+            replacement_enabled: true,
+            validation_controller_configured: true,
+            runner_status: "ready".to_string(),
+            unhealthy_count: 1,
+            planned_replacement_count: 1,
+            attempted_replacement_count: 1,
+            blocked_replacement_count: 0,
+            targets: vec![RemoteComputerSidecarRecoveryTarget {
+                remote_computer_id,
+                name: "remote-computer-1".to_string(),
+                pod_name: Some("agent-remote-computer-1".to_string()),
+                reason: "stale_heartbeat".to_string(),
+                latest_observed_at: Some(Utc::now()),
+            }],
+            runner_responses: vec![
+                RemoteComputerRunnerDryRunResponse {
+                    status: "mutation_ok".to_string(),
+                    operation: "live_delete".to_string(),
+                    configured: true,
+                    would_create_pod: false,
+                    would_delete_pod: true,
+                    live_probe_attempted: false,
+                    live_probe_status_code: None,
+                    live_mutation_attempted: true,
+                    live_mutation_status_code: Some(200),
+                    kubernetes_api_path: Some(
+                        "/api/v1/namespaces/default/pods/agent-remote-computer-1".to_string(),
+                    ),
+                    namespace: Some("default".to_string()),
+                    pod_name: Some("agent-remote-computer-1".to_string()),
+                    pod_template_path: Some("deploy/k8s/agent-remote-computer.yaml".to_string()),
+                    execution_enabled: true,
+                    message: "deleted".to_string(),
+                    request: json!({"remote_computer_id": remote_computer_id, "operation": "live_delete"}),
+                    exec_result: None,
+                },
+                RemoteComputerRunnerDryRunResponse {
+                    status: "mutation_ok".to_string(),
+                    operation: "live_create".to_string(),
+                    configured: true,
+                    would_create_pod: true,
+                    would_delete_pod: false,
+                    live_probe_attempted: false,
+                    live_probe_status_code: None,
+                    live_mutation_attempted: true,
+                    live_mutation_status_code: Some(201),
+                    kubernetes_api_path: Some("/api/v1/namespaces/default/pods".to_string()),
+                    namespace: Some("default".to_string()),
+                    pod_name: Some("agent-remote-computer-1".to_string()),
+                    pod_template_path: Some("deploy/k8s/agent-remote-computer.yaml".to_string()),
+                    execution_enabled: true,
+                    message: "created".to_string(),
+                    request: json!({"remote_computer_id": remote_computer_id, "operation": "live_create"}),
+                    exec_result: None,
+                },
+            ],
+            validation_result: json!({}),
+            execution_enabled: false,
+            message: "completed".to_string(),
+        };
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_URL" => {
+                Some(format!("http://{controller_addr}/sidecar-validation"))
+            }
+            "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_TOKEN" => {
+                Some("sidecar-token".to_string())
+            }
+            _ => None,
+        };
+
+        let validation = execute_remote_computer_sidecar_validation_controller(&lookup, &run)
+            .await
+            .expect("sidecar validation");
+
+        assert_eq!(validation["status"], "validated");
+        assert_eq!(validation["replacement_pods_healthy"], true);
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.remote_computer_sidecar_replacement_validation"
+        );
+        assert_eq!(payloads[0]["attempted_replacement_count"], 1);
+        assert_eq!(
+            payloads[0]["targets"][0]["remote_computer_id"],
+            remote_computer_id.to_string()
+        );
+
+        controller_server.abort();
+    }
+
+    #[tokio::test]
     async fn remote_computer_runner_boundary_is_reserved_and_dry_run_only() {
         let app = test_app().await;
         let agents: Vec<Agent> = request_json(
@@ -28253,6 +28497,26 @@ not json
                 {"name": "promote", "status": "promoted"},
                 {"name": "verify", "status": "passed"}
             ]
+        }))
+    }
+
+    async fn mock_remote_sidecar_validation_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer sidecar-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "message": "replacement pod sidecars are healthy",
+            "replacement_pods_healthy": true,
+            "checked_pod_count": 1
         }))
     }
 

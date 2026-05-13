@@ -2340,7 +2340,7 @@ function renderRemoteComputerReadiness() {
       <button class="secondary inline-button" data-run-remote-sidecar-recovery="true">Run Sidecar Recovery Gate</button>
       ${
         sidecarRecoveryRun
-          ? `<div class="muted">Last run: ${escapeHtml(sidecarRecoveryRun.status || "unknown")} · unhealthy ${formatInteger(sidecarRecoveryRun.unhealthy_count || 0)} · attempted ${formatInteger(sidecarRecoveryRun.attempted_replacement_count || 0)} · blocked ${formatInteger(sidecarRecoveryRun.blocked_replacement_count || 0)} · ${escapeHtml(sidecarRecoveryRun.message || "")}</div>`
+          ? `<div class="muted">Last run: ${escapeHtml(sidecarRecoveryRun.status || "unknown")} · unhealthy ${formatInteger(sidecarRecoveryRun.unhealthy_count || 0)} · attempted ${formatInteger(sidecarRecoveryRun.attempted_replacement_count || 0)} · blocked ${formatInteger(sidecarRecoveryRun.blocked_replacement_count || 0)} · validation ${escapeHtml(sidecarRecoveryRun.validation_result?.status || "unknown")} · ${escapeHtml(sidecarRecoveryRun.message || "")}</div>`
           : `<div class="muted">No sidecar recovery run in this console session</div>`
       }
     </div>
