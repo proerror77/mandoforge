@@ -44,6 +44,7 @@ const state = {
   executionJobs: [],
   workerReadiness: null,
   remoteComputerReadiness: null,
+  remoteComputerRunnerReadiness: null,
   remoteComputers: [],
   remoteComputerLeases: [],
   usageRollups: [],
@@ -1366,6 +1367,7 @@ async function refreshOps() {
     executionJobs,
     workerReadiness,
     remoteComputerReadiness,
+    remoteComputerRunnerReadiness,
     remoteComputers,
     remoteComputerLeases,
     approvalGroups,
@@ -1401,6 +1403,7 @@ async function refreshOps() {
       api("/api/execution-jobs"),
       api("/api/execution-jobs/worker-readiness"),
       api("/api/remote-computers/readiness"),
+      api("/api/remote-computers/runner/readiness"),
       api("/api/remote-computers"),
       api("/api/remote-computer-leases"),
       api("/api/approval-groups"),
@@ -1435,6 +1438,7 @@ async function refreshOps() {
   state.executionJobs = executionJobs;
   state.workerReadiness = workerReadiness;
   state.remoteComputerReadiness = remoteComputerReadiness;
+  state.remoteComputerRunnerReadiness = remoteComputerRunnerReadiness;
   state.remoteComputers = remoteComputers;
   state.remoteComputerLeases = remoteComputerLeases;
   state.approvalGroups = approvalGroups;
@@ -1901,6 +1905,7 @@ function renderRemoteComputerReadiness() {
   const networkPolicy = report.network_policy || {};
   const autoscaling = report.autoscaling || {};
   const warmPool = report.warm_pool || {};
+  const runner = state.remoteComputerRunnerReadiness || report.runner || {};
   const attentionItems = report.attention_items || [];
   const runbookActions = report.runbook_actions || [];
   const computerRows = state.remoteComputers || [];
@@ -1939,6 +1944,12 @@ function renderRemoteComputerReadiness() {
       <strong>WARM POOL / SCALING</strong>
       <div class="muted">Warm pool: ${escapeHtml(warmPool.status || "unknown")} · manifest ${warmPool.manifest_present ? "present" : "missing"}</div>
       <div class="muted">Worker HPA ${autoscaling.worker_hpa_present ? "present" : "missing"} · KEDA ${autoscaling.keda_manifest_present ? "present" : "missing"} · queue-depth scaling ${autoscaling.queue_depth_scaling_present ? "present" : "missing"}</div>
+    </div>
+    <div class="item">
+      <strong>RUNNER BOUNDARY</strong>
+      <div class="muted">${escapeHtml(runner.status || "unknown")} · mode ${escapeHtml(runner.mode || "reserved")} · configured ${runner.configured ? "yes" : "no"}</div>
+      <div class="muted">Namespace: ${escapeHtml(runner.namespace || "unknown")} · Service account: ${escapeHtml(runner.service_account || "unknown")}</div>
+      <div class="muted">${escapeHtml(runner.message || "Kubernetes Pod mutation is disabled unless a runner is explicitly implemented")}</div>
     </div>
     <div class="item">
       <strong>REMOTE COMPUTER EVENTS</strong>

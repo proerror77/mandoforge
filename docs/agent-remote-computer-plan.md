@@ -1,6 +1,6 @@
 # Agent Remote Computer Plan
 
-This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a control-plane skeleton for this direction, not a production execution substrate. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, deny-by-default NetworkPolicy, `GET /api/remote-computers/readiness`, and persisted Remote Computer lease lifecycle APIs. It does not yet create a dedicated Kubernetes Pod per agent session or mount a real shared distributed state filesystem.
+This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a control-plane skeleton for this direction, not a production execution substrate. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, deny-by-default NetworkPolicy, `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, a fail-closed runner dry-run route, and persisted Remote Computer lease lifecycle APIs. It does not yet create a dedicated Kubernetes Pod per agent session or mount a real shared distributed state filesystem.
 
 ## Objective
 
@@ -51,6 +51,7 @@ Covered today:
 - K8s Remote Computer manifests exist for the Pod template, service account, state PVC placeholder, and NetworkPolicy skeleton.
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
+- `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness and dry-run endpoints.
 
 Not covered today:
 
@@ -62,6 +63,7 @@ Not covered today:
 - No warm pool of prestarted agent Pods.
 - No artifact/state sync daemon inside the Pod.
 - No KEDA/HPA queue-depth scaling for remote computer pools.
+- No real Kubernetes client mutation path; the current runner only reports intent and dry-run evidence.
 
 ## Target Components
 
@@ -145,12 +147,19 @@ Completed Stage 2 readiness skeleton:
    - `remote_computer.leased`
    - `remote_computer.started`
    - `remote_computer.heartbeat`
+   - `remote_computer.runner_dry_run`
    - `remote_computer.released`
    - `remote_computer.failed`
+- Add reserved runner boundary:
+   - `GET /api/remote-computers/runner/readiness`
+   - `POST /api/remote-computers/runner/dry-run`
+   - UI `RUNNER BOUNDARY` section
+   - audit action `remote_computer.runner_dry_run`
+   - tests proving dry-runs do not create leases, execution jobs, or tool calls
 
 Remaining Stage 2 pilot work:
 
-1. Add a Kubernetes client/runner boundary that can create a Pod from the template when policy permits.
+1. Add a real Kubernetes client implementation behind the existing runner boundary, still fail-closed by policy and configuration.
 2. Add session-to-Pod attach state without moving tool execution yet.
 3. Add stale lease reclaim automation.
 4. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
@@ -160,6 +169,7 @@ Stage 2 acceptance for this slice:
 - Readiness endpoint accurately reports whether Pod template, PVC/RWX storage, service account, NetworkPolicy, and autoscaling manifests exist.
 - Kustomize renders the remote computer manifest.
 - UI renders readiness without requiring a live cluster.
+- Runner readiness and dry-run routes are Admin-only, audited, and fail closed without mutating Kubernetes.
 - Docs clearly state this is a skeleton/pilot boundary, not production remote execution.
 
 ## Stage 3 Plan
@@ -201,16 +211,15 @@ Stage 3 acceptance:
 
 ## Immediate Next Slice
 
-After the Remote Computer readiness skeleton, the next coherent implementation slice should be:
+After the reserved runner boundary, the next coherent implementation slice should be:
 
 ```text
-Add Remote Computer Kubernetes runner boundary
+Add Remote Computer session attach state
 ```
 
 Concrete deliverables:
 
-- `RemoteComputerRunner` trait with a reserved implementation.
-- Fail-closed Kubernetes client configuration boundary.
-- Admin-only dry-run create/delete Pod endpoints or runbook route.
-- Readiness fields showing runner configured/reserved state.
-- Tests proving the reserved runner never creates Pods or executes tools.
+- Attach a session to a selected Remote Computer lease without moving tool execution into the Pod.
+- Persist attach/release status and stale attach detection.
+- Keep `shell.exec` and `codex.exec` on the approved worker path until Pod lifecycle telemetry is reliable.
+- Add tests proving attach state is auditable and does not bypass Tool Router, Policy Engine, or Approval Engine.

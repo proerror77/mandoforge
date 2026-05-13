@@ -40,6 +40,7 @@ mod mcp_gateway;
 mod observability;
 mod policy;
 mod provider;
+mod remote_computer_runner;
 mod secrets;
 mod shell_runner;
 mod store_approval_groups;
@@ -70,9 +71,9 @@ use codex_app_server::{
     CodexInterruptResponse, CodexThreadRequest, CodexThreadResponse, CodexTurnRequest,
     CodexTurnResponse, HttpCodexAppServerClient, ReservedCodexAppServerClient,
 };
-use eval_judge::{EvalJudgeClient, EvalJudgeConfig, HttpEvalJudgeClient, ReservedEvalJudgeClient};
+use eval_judge::{EvalJudgeClient, EvalJudgeConfig, HttpEvalJudgeClient};
 #[cfg(test)]
-use eval_judge::{EvalJudgeRequest, EvalJudgeResponse};
+use eval_judge::{EvalJudgeRequest, EvalJudgeResponse, ReservedEvalJudgeClient};
 use execution::{
     ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker, QueueBackedExecutionWorker,
     run_execution_job,
@@ -99,6 +100,11 @@ use provider::parse_openai_compatible_provider_response;
 use provider::{
     HarnessContext, MockProviderClient, OpenAiCompatibleProviderClient, ProviderClient,
     ProviderResponse,
+};
+use remote_computer_runner::{
+    RemoteComputerRunner, RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
+    RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
+    ReservedRemoteComputerRunner,
 };
 use secrets::{
     SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, VaultSecretProvider,
@@ -1227,6 +1233,7 @@ struct RemoteComputerReadinessReport {
     network_policy: RemoteComputerManifestReadiness,
     autoscaling: RemoteComputerAutoscalingReadiness,
     warm_pool: RemoteComputerWarmPoolReadiness,
+    runner: RemoteComputerRunnerReadiness,
     event_types: Vec<String>,
     attention_items: Vec<RemoteComputerAttentionItem>,
     runbook_actions: Vec<String>,
@@ -2881,6 +2888,14 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/readiness",
             get(get_remote_computer_readiness),
+        )
+        .route(
+            "/api/remote-computers/runner/readiness",
+            get(get_remote_computer_runner_readiness),
+        )
+        .route(
+            "/api/remote-computers/runner/dry-run",
+            post(dry_run_remote_computer_runner),
         )
         .route(
             "/api/remote-computers",
@@ -15412,6 +15427,57 @@ async fn get_remote_computer_readiness(
     Ok(Json(build_remote_computer_readiness()))
 }
 
+async fn get_remote_computer_runner_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RemoteComputerRunnerReadiness>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_runner",
+        None,
+    )
+    .await?;
+    Ok(Json(build_remote_computer_runner_readiness()))
+}
+
+async fn dry_run_remote_computer_runner(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RemoteComputerRunnerDryRunRequest>,
+) -> Result<Json<RemoteComputerRunnerDryRunResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_runner",
+        input.remote_computer_id,
+    )
+    .await?;
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = ReservedRemoteComputerRunner;
+    let session_id = input.session_id;
+    let remote_computer_id = input.remote_computer_id;
+    let response = runner.dry_run(&config, input).await;
+    state
+        .append_audit_log(new_audit_log(
+            session_id,
+            "system",
+            None,
+            "remote_computer.runner_dry_run",
+            "remote_computer_runner",
+            remote_computer_id,
+            json!({
+                "config": config,
+                "response": &response,
+                "execution_enabled": false
+            }),
+        ))
+        .await?;
+    Ok(Json(response))
+}
+
 async fn list_remote_computers(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -15663,12 +15729,14 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         }
         .to_string(),
     };
+    let runner = build_remote_computer_runner_readiness();
 
     let event_types = vec![
         "remote_computer.requested".to_string(),
         "remote_computer.leased".to_string(),
         "remote_computer.started".to_string(),
         "remote_computer.heartbeat".to_string(),
+        "remote_computer.runner_dry_run".to_string(),
         "remote_computer.released".to_string(),
         "remote_computer.failed".to_string(),
     ];
@@ -15721,6 +15789,13 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
             "no remote computer warm-pool manifest is present; first Pod lease will still cold start",
         ));
     }
+    if !runner.configured {
+        attention_items.push(remote_computer_attention(
+            "runner_reserved",
+            "warning",
+            "Remote Computer runner is fail-closed; Kubernetes Pod create/delete is dry-run only",
+        ));
+    }
 
     let mut runbook_actions = Vec::new();
     if state_filesystem.status == "skeleton" {
@@ -15743,6 +15818,10 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
     }
     runbook_actions.push(
         "keep shell.exec and codex.exec on the existing approved worker path until remote computer leases are implemented"
+            .to_string(),
+    );
+    runbook_actions.push(
+        "use /api/remote-computers/runner/dry-run to inspect Pod runner intent without mutating Kubernetes"
             .to_string(),
     );
 
@@ -15774,10 +15853,17 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         network_policy,
         autoscaling,
         warm_pool,
+        runner,
         event_types,
         attention_items,
         runbook_actions,
     }
+}
+
+fn build_remote_computer_runner_readiness() -> RemoteComputerRunnerReadiness {
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = ReservedRemoteComputerRunner;
+    runner.readiness(&config)
 }
 
 fn remote_computer_manifest_readiness(
@@ -17714,6 +17800,135 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "remote_computer.released")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_computer_runner_boundary_is_reserved_and_dry_run_only() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "remote computer runner dry run"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let readiness: RemoteComputerRunnerReadiness = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computers/runner/readiness")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(readiness.status, "reserved");
+        assert!(!readiness.configured);
+        assert!(readiness.message.contains("no Pods are created or deleted"));
+
+        let dry_run: RemoteComputerRunnerDryRunResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/runner/dry-run")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "operation": "create",
+                        "session_id": session.id,
+                        "pod_name": "agent-remote-computer-dry-run",
+                        "metadata": {"reason": "test reserved runner"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(dry_run.status, "reserved");
+        assert_eq!(dry_run.operation, "create");
+        assert!(!dry_run.configured);
+        assert!(!dry_run.would_create_pod);
+        assert!(!dry_run.would_delete_pod);
+        assert!(!dry_run.execution_enabled);
+
+        let leases: Vec<RemoteComputerLease> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computer-leases")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(leases.is_empty(), "runner dry-run must not create leases");
+
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            jobs.is_empty(),
+            "runner dry-run must not enqueue execution jobs"
+        );
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            tool_calls.is_empty(),
+            "runner dry-run must not execute tools"
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/audit-logs", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "remote_computer.runner_dry_run")
         );
     }
 
@@ -27214,6 +27429,8 @@ not json
             "skeleton"
         );
         assert!(remote_computer_readiness.network_policy.present);
+        assert_eq!(remote_computer_readiness.runner.status, "reserved");
+        assert!(!remote_computer_readiness.runner.configured);
         assert!(
             remote_computer_readiness
                 .event_types
