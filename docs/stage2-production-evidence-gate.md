@@ -27,6 +27,7 @@ The script deliberately skips higher-impact production actions unless explicitly
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.
 - `RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1` runs the Remote Computer sidecar recovery endpoint.
 - `RUN_STAGE2_FINANCE_CONTROLLERS=1` runs finance close and accounting reconciliation endpoints.
+- `VERIFY_STAGE2_VALIDATION_COVERAGE=1` fails the gate when any declared validation endpoint from `/api/stage2/readiness` is missing from the collected evidence. Leave this off for read-only inventory or partial validation runs.
 
 ## Exit Rules
 
@@ -37,6 +38,7 @@ The script deliberately skips higher-impact production actions unless explicitly
 ## Evidence
 
 The evidence directory contains one JSON file per endpoint plus `summary.txt`.
+It also records declared validation endpoints and any missing validation endpoint evidence.
 
 Useful files:
 
@@ -45,6 +47,8 @@ Useful files:
 - `api-execution-jobs-worker-readiness.json`
 - `api-remote-computers-readiness.json`
 - `api-observability-collector-readiness.json`
+- `validation-declared-endpoints.txt`
+- `validation-missing-endpoints.txt`
 - `summary.txt`
 
 These artifacts are intentionally local by default because they can include deployment metadata. Review before publishing them into issue trackers or release notes.

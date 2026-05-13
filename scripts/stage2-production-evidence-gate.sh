@@ -8,6 +8,7 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/stage2-production-evidence}"
 RUN_VALIDATIONS="${RUN_STAGE2_PRODUCTION_VALIDATIONS:-0}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 TEAM_ID="${MANDOFORGE_STAGE2_TEAM_ID:-}"
+VERIFY_VALIDATION_COVERAGE="${VERIFY_STAGE2_VALIDATION_COVERAGE:-0}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -154,6 +155,43 @@ verify_readiness_inventory_coverage() {
   fi
 }
 
+write_endpoint_coverage() {
+  local field="$1"
+  local label="$2"
+  local fail_on_missing="$3"
+  local readiness_file="$EVIDENCE_DIR/api-stage2-readiness.json"
+  local declared_file="$EVIDENCE_DIR/${label}-declared-endpoints.txt"
+  local missing_file="$EVIDENCE_DIR/${label}-missing-endpoints.txt"
+  local endpoint
+  local resolved
+  local expected_file
+  local missing_count
+
+  : >"$declared_file"
+  : >"$missing_file"
+
+  while IFS= read -r endpoint; do
+    if [[ -z "$endpoint" ]]; then
+      continue
+    fi
+    if ! resolved="$(resolve_requirement_endpoint "$endpoint")"; then
+      continue
+    fi
+    echo "$resolved" >>"$declared_file"
+    expected_file="$EVIDENCE_DIR/$(slugify "$resolved").json"
+    if [[ ! -s "$expected_file" ]]; then
+      echo "$resolved" >>"$missing_file"
+    fi
+  done < <(jq -r ".evidence_requirements[]?.${field}[]?" "$readiness_file" | sort -u)
+
+  missing_count="$(grep -c . "$missing_file" || true)"
+  if [[ "$fail_on_missing" == "1" && "$missing_count" != "0" ]]; then
+    echo "stage2 evidence gate is missing declared $label endpoint evidence:" >&2
+    sed 's/^/- /' "$missing_file" >&2
+    exit 1
+  fi
+}
+
 write_summary() {
   local readiness_file="$EVIDENCE_DIR/api-stage2-readiness.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
@@ -161,23 +199,33 @@ write_summary() {
   local open_gap_count
   local completion_blocked
   local evidence_requirement_count
+  local validation_declared_count
+  local validation_missing_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
   open_gap_count="$(jq -r '.open_gap_count // 0' "$readiness_file")"
   completion_blocked="$(jq -r '.completion_blocked // true' "$readiness_file")"
   evidence_requirement_count="$(jq -r '.evidence_requirements | length' "$readiness_file")"
+  validation_declared_count="$(grep -c . "$EVIDENCE_DIR/validation-declared-endpoints.txt" 2>/dev/null || true)"
+  validation_missing_count="$(grep -c . "$EVIDENCE_DIR/validation-missing-endpoints.txt" 2>/dev/null || true)"
 
   {
     echo "stage2_status=$status"
     echo "completion_blocked=$completion_blocked"
     echo "open_gap_count=$open_gap_count"
     echo "evidence_requirement_count=$evidence_requirement_count"
+    echo "validation_declared_endpoint_count=$validation_declared_count"
+    echo "validation_missing_endpoint_count=$validation_missing_count"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "validations_run=$RUN_VALIDATIONS"
+    echo "validation_coverage_required=$VERIFY_VALIDATION_COVERAGE"
     echo "team_id=${TEAM_ID:-<none>}"
     echo
     echo "open_gaps:"
     jq -r '.open_gaps[]? | "- \(.)"' "$readiness_file"
+    echo
+    echo "missing_validation_endpoints:"
+    sed 's/^/- /' "$EVIDENCE_DIR/validation-missing-endpoints.txt" 2>/dev/null || true
   } >"$summary_file"
 
   cat "$summary_file"
@@ -195,13 +243,18 @@ mkdir -p "$EVIDENCE_DIR"
 curl -fsS "$BASE_URL/healthz" >/dev/null
 collect_readiness
 verify_readiness_inventory_coverage
+write_endpoint_coverage "validation_endpoints" "validation" "0"
 
 if [[ "$RUN_VALIDATIONS" == "1" ]]; then
   run_controller_validations
   collect_readiness
   verify_readiness_inventory_coverage
+  write_endpoint_coverage "validation_endpoints" "validation" "$VERIFY_VALIDATION_COVERAGE"
 else
   echo "controller validations skipped; set RUN_STAGE2_PRODUCTION_VALIDATIONS=1 to execute validation endpoints" >&2
+  if [[ "$VERIFY_VALIDATION_COVERAGE" == "1" ]]; then
+    write_endpoint_coverage "validation_endpoints" "validation" "1"
+  fi
 fi
 
 write_summary
