@@ -1909,8 +1909,23 @@ struct UsageFinanceOperationsSummary {
     last_finance_export: Option<UsageFinanceOperationAudit>,
     last_alert_delivery: Option<UsageFinanceOperationAudit>,
     last_alert_acknowledgement: Option<UsageFinanceOperationAudit>,
+    production_close: UsageFinanceProductionCloseReadiness,
     runbook_actions: Vec<String>,
     attention_items: Vec<UsageFinanceAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageFinanceProductionCloseReadiness {
+    status: String,
+    production_blocked: bool,
+    rollup_fresh: bool,
+    export_target_configured: bool,
+    export_recent: bool,
+    alert_delivery_ready: bool,
+    critical_alerts_acknowledged: bool,
+    failed_delivery_evidence: bool,
+    blocking_reasons: Vec<String>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13340,28 +13355,6 @@ fn build_usage_finance_operations_summary_from_parts(
         runbook_actions.push("create_daily_usage_rollup".to_string());
     }
 
-    dedupe_strings(&mut runbook_actions);
-    let critical_attention_count = attention_items
-        .iter()
-        .filter(|item| item.severity == "critical")
-        .count();
-    let warning_attention_count = attention_items
-        .iter()
-        .filter(|item| item.severity == "warning")
-        .count();
-    let status = if critical_attention_count > 0 {
-        "critical"
-    } else if warning_attention_count > 0 {
-        "attention"
-    } else {
-        "ready"
-    }
-    .to_string();
-    let readiness_score = (100_i64
-        - (critical_attention_count as i64 * 25)
-        - (warning_attention_count as i64 * 10)
-        - (unacknowledged_alert_count as i64 * 5))
-        .clamp(0, 100);
     let rollup_status = if dashboard.rollup_count == 0 {
         "missing"
     } else if dashboard
@@ -13391,6 +13384,47 @@ fn build_usage_finance_operations_summary_from_parts(
         "delivered"
     }
     .to_string();
+    let production_close = build_usage_finance_production_close_readiness(
+        &dashboard,
+        alerts,
+        audit_logs,
+        &rollup_status,
+        &alert_delivery_status,
+        last_finance_export.as_ref(),
+        last_alert_delivery.as_ref(),
+        generated_at,
+    );
+    if production_close.production_blocked {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "finance_production_close_blocked".to_string(),
+            severity: "critical".to_string(),
+            message: production_close.message.clone(),
+            provider_name: None,
+        });
+        runbook_actions.push("resolve_finance_production_close_gate".to_string());
+    }
+    dedupe_strings(&mut runbook_actions);
+    let critical_attention_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "critical")
+        .count();
+    let warning_attention_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "warning")
+        .count();
+    let status = if critical_attention_count > 0 {
+        "critical"
+    } else if warning_attention_count > 0 {
+        "attention"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let readiness_score = (100_i64
+        - (critical_attention_count as i64 * 25)
+        - (warning_attention_count as i64 * 10)
+        - (unacknowledged_alert_count as i64 * 5))
+        .clamp(0, 100);
 
     UsageFinanceOperationsSummary {
         generated_at,
@@ -13406,8 +13440,99 @@ fn build_usage_finance_operations_summary_from_parts(
         last_finance_export,
         last_alert_delivery,
         last_alert_acknowledgement,
+        production_close,
         runbook_actions,
         attention_items,
+    }
+}
+
+fn build_usage_finance_production_close_readiness(
+    dashboard: &UsageFinanceDashboardSummary,
+    alerts: &[CostAlert],
+    audit_logs: &[AuditLog],
+    rollup_status: &str,
+    alert_delivery_status: &str,
+    last_finance_export: Option<&UsageFinanceOperationAudit>,
+    last_alert_delivery: Option<&UsageFinanceOperationAudit>,
+    generated_at: DateTime<Utc>,
+) -> UsageFinanceProductionCloseReadiness {
+    let acknowledgement_cutoff = generated_at - chrono::Duration::hours(24);
+    let critical_alerts_acknowledged = alerts
+        .iter()
+        .filter(|alert| alert.severity == "critical")
+        .all(|alert| {
+            audit_logs.iter().any(|log| {
+                log.action == "usage.alert_acknowledged"
+                    && log.created_at >= acknowledgement_cutoff
+                    && log.details.get("provider_name").and_then(Value::as_str)
+                        == Some(alert.provider_name.as_str())
+                    && log.details.get("severity").and_then(Value::as_str)
+                        == Some(alert.severity.as_str())
+            })
+        });
+    let export_recent = last_finance_export.as_ref().is_some_and(|audit| {
+        audit.status == "delivered" && (generated_at - audit.created_at).num_hours() < 30
+    });
+    let alert_delivery_ready = alerts.is_empty()
+        || (alert_delivery_status == "delivered"
+            && last_alert_delivery
+                .as_ref()
+                .is_some_and(|audit| audit.status != "failed"));
+    let failed_delivery_evidence = last_finance_export
+        .as_ref()
+        .is_some_and(|audit| audit.status == "failed")
+        || last_alert_delivery
+            .as_ref()
+            .is_some_and(|audit| audit.status == "failed");
+    let rollup_fresh = rollup_status == "fresh";
+    let mut blocking_reasons = Vec::new();
+
+    if !rollup_fresh {
+        blocking_reasons.push("usage rollup is missing or stale".to_string());
+    }
+    if !dashboard.finance_export_target_configured {
+        blocking_reasons.push("finance export target is not configured".to_string());
+    }
+    if !export_recent {
+        blocking_reasons.push("finance export has no recent delivered audit evidence".to_string());
+    }
+    if !alert_delivery_ready {
+        blocking_reasons.push("current cost alerts have not been delivered".to_string());
+    }
+    if !critical_alerts_acknowledged {
+        blocking_reasons.push("critical cost alerts have not been acknowledged".to_string());
+    }
+    if failed_delivery_evidence {
+        blocking_reasons.push("failed finance or alert delivery evidence is present".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Finance production close is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Finance production close has fresh rollup, recent export evidence, delivered alerts, and acknowledged critical alerts".to_string()
+    };
+
+    UsageFinanceProductionCloseReadiness {
+        status,
+        production_blocked,
+        rollup_fresh,
+        export_target_configured: dashboard.finance_export_target_configured,
+        export_recent,
+        alert_delivery_ready,
+        critical_alerts_acknowledged,
+        failed_delivery_evidence,
+        blocking_reasons,
+        message,
     }
 }
 
@@ -21201,6 +21326,13 @@ not json
         assert_eq!(summary.rollup_status, "fresh");
         assert_eq!(summary.export_status, "target_missing");
         assert_eq!(summary.alert_delivery_status, "pending_delivery");
+        assert_eq!(summary.production_close.status, "blocked");
+        assert!(summary.production_close.production_blocked);
+        assert!(summary.production_close.rollup_fresh);
+        assert!(!summary.production_close.export_target_configured);
+        assert!(!summary.production_close.export_recent);
+        assert!(!summary.production_close.alert_delivery_ready);
+        assert!(summary.production_close.critical_alerts_acknowledged);
         assert_eq!(
             summary
                 .last_alert_acknowledgement
@@ -21217,6 +21349,9 @@ not json
         );
         assert!(summary.attention_items.iter().any(|item| {
             item.kind == "scheduled_finance_export_blocked" && item.severity == "critical"
+        }));
+        assert!(summary.attention_items.iter().any(|item| {
+            item.kind == "finance_production_close_blocked" && item.severity == "critical"
         }));
     }
 
@@ -21273,6 +21408,10 @@ not json
         .await;
         assert_eq!(operations.rollup_status, "missing");
         assert_eq!(operations.export_status, "target_missing");
+        assert_eq!(operations.production_close.status, "blocked");
+        assert!(operations.production_close.production_blocked);
+        assert!(!operations.production_close.rollup_fresh);
+        assert!(!operations.production_close.export_target_configured);
         assert!(
             operations
                 .runbook_actions

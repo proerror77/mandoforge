@@ -2906,6 +2906,7 @@ function renderUsage() {
   const financeOperationsRun = state.usageFinanceOperationsRun;
   const financeAttention = financeSummary?.attention_items || [];
   const financeOperationsAttention = financeOperations?.attention_items || [];
+  const financeProductionClose = financeOperations?.production_close || {};
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
     ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
   );
@@ -2924,9 +2925,14 @@ function renderUsage() {
               <div class="metric"><span>Rollups</span><strong>${escapeHtml(financeOperations.rollup_status || "unknown")}</strong></div>
               <div class="metric"><span>Export</span><strong>${escapeHtml(financeOperations.export_status || "unknown")}</strong></div>
               <div class="metric"><span>Alert Delivery</span><strong>${escapeHtml(financeOperations.alert_delivery_status || "unknown")}</strong></div>
+              <div class="metric"><span>Prod Close</span><strong>${escapeHtml(financeProductionClose.status || "unknown")}</strong></div>
               <div class="metric"><span>Routes</span><strong>${formatInteger(financeOperations.active_alert_route_count)}</strong></div>
             </div>
             <dl>
+              <dt>Production close gate</dt>
+              <dd>${escapeHtml(financeProductionClose.message || "finance production close gate is not reported")}</dd>
+              <dt>Production close evidence</dt>
+              <dd>rollup ${financeProductionClose.rollup_fresh ? "fresh" : "not fresh"} · export target ${financeProductionClose.export_target_configured ? "ready" : "missing"} · export recent ${financeProductionClose.export_recent ? "yes" : "no"} · alerts delivered ${financeProductionClose.alert_delivery_ready ? "yes" : "no"} · critical ack ${financeProductionClose.critical_alerts_acknowledged ? "yes" : "no"}</dd>
               <dt>Last finance export</dt>
               <dd>${renderFinanceOperationAudit(financeOperations.last_finance_export)}</dd>
               <dt>Last alert delivery</dt>
