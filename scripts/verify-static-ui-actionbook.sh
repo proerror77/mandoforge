@@ -81,7 +81,7 @@ wait_for_static_ui() {
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
     metricCards: document.querySelectorAll('.metric').length,
     hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
-    hasStage2ReadinessGate: text.toLowerCase().includes('stage 2 completion gate') && text.toLowerCase().includes('stage 2 open gaps') && Boolean(document.querySelector('#governance-status')),
+    hasStage2ReadinessGate: text.toLowerCase().includes('stage 2 completion gate') && text.toLowerCase().includes('stage 2 open gaps') && text.toLowerCase().includes('stage 2 evidence checklist') && text.includes('/api/tenant-isolation/routing/validate') && Boolean(document.querySelector('#governance-status')),
     hasAdminConsole: text.includes('Admin Console')
   };
   result.ok = result.title === 'MandoForge Agent OS Kernel'
@@ -167,6 +167,8 @@ grep -q "runObservabilityRemediation" /tmp/mandoforge-actionbook-app.js
 grep -q "validateObservabilityCollectorCluster" /tmp/mandoforge-actionbook-app.js
 grep -q "validate-observability-collector-cluster" /tmp/mandoforge-actionbook-index.html
 grep -q "stage2Readiness" /tmp/mandoforge-actionbook-app.js
+grep -q "evidence_requirements" /tmp/mandoforge-actionbook-app.js
+grep -q "Stage 2 Evidence Checklist" /tmp/mandoforge-actionbook-app.js
 grep -q "/api/stage2/readiness" /tmp/mandoforge-actionbook-app.js
 grep -q "Create Judge Profile" /tmp/mandoforge-actionbook-index.html
 grep -q "Bootstrap Stage 2 Suite" /tmp/mandoforge-actionbook-index.html

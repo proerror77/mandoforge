@@ -1885,6 +1885,7 @@ function renderOps() {
   renderCodexAppServer();
   const stage2Readiness = state.stage2Readiness || {};
   const stage2OpenGaps = stage2Readiness.open_gaps || [];
+  const stage2EvidenceRequirements = stage2Readiness.evidence_requirements || [];
   governanceRoot.innerHTML = `
     <div class="metric-grid compact-metrics">
       <div class="metric"><span>Stage 2</span><strong>${escapeHtml(stage2Readiness.status || "unknown")}</strong></div>
@@ -1912,6 +1913,38 @@ function renderOps() {
             ${stage2OpenGaps.map((gap) => `<li>${escapeHtml(gap)}</li>`).join("")}
           </ol>`
         : `<div class="muted">No Stage 2 open gaps reported by the audit.</div>`
+    }
+    ${
+      stage2EvidenceRequirements.length
+        ? `<h4>Stage 2 Evidence Checklist</h4>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Area</th>
+                  <th>Target</th>
+                  <th>Readiness</th>
+                  <th>Validation</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${stage2EvidenceRequirements
+                  .map(
+                    (requirement) => `<tr>
+                      <td>
+                        <strong>${escapeHtml(requirement.title || requirement.id || "unknown")}</strong>
+                        <div class="muted">${escapeHtml(requirement.gap || "No open gap mapped")}</div>
+                      </td>
+                      <td>${escapeHtml(requirement.production_target || "unknown")}</td>
+                      <td>${(requirement.readiness_endpoints || []).map((endpoint) => `<code>${escapeHtml(endpoint)}</code>`).join("<br>")}</td>
+                      <td>${(requirement.validation_endpoints || []).map((endpoint) => `<code>${escapeHtml(endpoint)}</code>`).join("<br>")}</td>
+                    </tr>`
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>`
+        : `<div class="muted">No Stage 2 evidence requirements reported.</div>`
     }
   `;
 }

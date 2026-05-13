@@ -1739,8 +1739,20 @@ struct Stage2CompletionReadiness {
     audit_present: bool,
     open_gap_count: usize,
     open_gaps: Vec<String>,
+    evidence_requirements: Vec<Stage2EvidenceRequirement>,
     completion_blocked: bool,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Stage2EvidenceRequirement {
+    id: String,
+    title: String,
+    gap: String,
+    production_target: String,
+    readiness_endpoints: Vec<String>,
+    validation_endpoints: Vec<String>,
+    required_evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4378,10 +4390,226 @@ fn build_stage2_completion_readiness() -> Stage2CompletionReadiness {
         audit_path: audit_path.to_string(),
         audit_present,
         open_gap_count: open_gaps.len(),
+        evidence_requirements: build_stage2_evidence_requirements(&open_gaps),
         open_gaps,
         completion_blocked,
         message,
     }
+}
+
+fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2EvidenceRequirement> {
+    let specs = [
+        (
+            "tenant-routing",
+            "Cross-tenant runtime isolation",
+            "Real multi-tenant routing target with RLS enabled, forced, and tenant context configured",
+            vec!["/api/tenant-isolation/readiness"],
+            vec!["/api/tenant-isolation/routing/validate"],
+            vec![
+                "runtime tenant routing is not single-tenant",
+                "tracked tenant tables have enabled and forced RLS",
+                "external routing controller validates cross-tenant isolation when required",
+            ],
+        ),
+        (
+            "policy-rollout",
+            "Policy rollout orchestration",
+            "Real production policy rollout controller target",
+            vec!["/api/policy/rollout/orchestration/readiness"],
+            vec!["/api/policy/rollout/orchestration/validate"],
+            vec![
+                "fresh due-run or rollout supervision evidence",
+                "external orchestration controller confirms production target state when required",
+                "rollback path remains available and audited",
+            ],
+        ),
+        (
+            "provider-rollout",
+            "Provider policy gate workflow",
+            "Real provider deployment, rollout, and rollback target",
+            vec![
+                "/api/providers/summary",
+                "/api/providers/policy-gate",
+                "/api/providers/policy-gate/runs",
+            ],
+            vec![
+                "/api/providers/policy-gate/run",
+                "/api/providers/deployment/validate",
+                "/api/providers/production-rollout/run",
+                "/api/providers/production-rollout/rollback",
+            ],
+            vec![
+                "fresh provider gate covers the current provider set",
+                "deployment controller validates real provider target",
+                "rollout and rollback controller evidence is audited",
+            ],
+        ),
+        (
+            "vault-kms",
+            "Secret lifecycle and KMS/HSM recovery",
+            "Real Vault plus external KMS/HSM lifecycle target",
+            vec!["/api/vault/readiness", "/api/vault/health"],
+            vec![
+                "/api/vault/kms/rotation/run",
+                "/api/vault/kms/recovery/validate",
+            ],
+            vec![
+                "Vault provider is healthy and selected",
+                "KMS rotation evidence exists without exposing secret values",
+                "recovery drill validates a real KMS/HSM target when required",
+            ],
+        ),
+        (
+            "worker-remote-computer",
+            "Worker autoscaling and Remote Computer real-cluster validation",
+            "Durable worker queue, isolated worker pool, and real Remote Computer state filesystem",
+            vec![
+                "/api/execution-jobs/worker-readiness",
+                "/api/remote-computers/readiness",
+                "/api/remote-computers/runner/readiness",
+            ],
+            vec![
+                "/api/execution-jobs/worker-load-validation/run",
+                "/api/remote-computers/state-sync/validate",
+                "/api/remote-computers/sidecars/recovery/run",
+            ],
+            vec![
+                "durable queue-backed worker mode is enabled",
+                "production-like load validation proves autoscaling and worker-pool isolation",
+                "Remote Computer distributed state sync and sidecar replacement are validated against a real cluster",
+            ],
+        ),
+        (
+            "approval-notifications",
+            "Approval notification operations",
+            "Real webhook, Slack, or email notification provider targets",
+            vec![
+                "/api/approvals/notification-routing/summary",
+                "/api/approvals/notifications/runs",
+            ],
+            vec![
+                "/api/approvals/notifications/deployment/validate",
+                "/api/approvals/notifications/ops/validate",
+                "/api/approvals/notifications/run",
+            ],
+            vec![
+                "persisted channel policies route pending approvals",
+                "deployment and ops controllers validate real delivery providers",
+                "bounded delivery attempts are audited",
+            ],
+        ),
+        (
+            "mcp-rollout",
+            "MCP connector rollout orchestration",
+            "Team-scoped MCP deployment, rollout, and rollback target",
+            vec![
+                "/api/teams/{team_id}/mcp-servers/rollouts/summary",
+                "/api/teams/{team_id}/mcp-servers/rollouts/runs",
+            ],
+            vec![
+                "/api/teams/{team_id}/mcp-servers/deployment/validate",
+                "/api/teams/{team_id}/mcp-servers/rollouts/run-due",
+            ],
+            vec![
+                "team MCP connector health and rollout state are fresh",
+                "deployment controller validates real connector supervision",
+                "rollout and rollback controller evidence is present when required",
+            ],
+        ),
+        (
+            "codex-app-server",
+            "Codex App Server control-plane operations",
+            "Real Codex App Server deployment and ops target",
+            vec!["/api/codex-app-server/control-plane/summary"],
+            vec![
+                "/api/codex-app-server/deployment/validate",
+                "/api/codex-app-server/ops/validate",
+                "/api/codex-app-server/runs/poll-stale",
+            ],
+            vec![
+                "deployment validation is fresh and healthy",
+                "ops validation proves stale turn supervision",
+                "controller evidence is present when required",
+            ],
+        ),
+        (
+            "eval-release",
+            "Eval and release rollout orchestration",
+            "Real production agent release target",
+            vec!["/api/agents/releases/automation-runs"],
+            vec![
+                "/api/eval/suites/stage2-regression",
+                "/api/agents/releases/deployment/validate",
+                "/api/agents/releases/orchestration/validate",
+                "/api/agents/releases/run-due",
+            ],
+            vec![
+                "Stage 2 regression suite has passing gate evidence",
+                "release deployment and orchestration controllers validate real target state",
+                "rollback evidence exists for promoted releases",
+            ],
+        ),
+        (
+            "observability-collector",
+            "Real-cluster collector rollout",
+            "Real OTLP collector deployment and cluster rollout target",
+            vec![
+                "/api/observability",
+                "/api/observability/collector-readiness",
+            ],
+            vec![
+                "/api/observability/collector/deployment/validate",
+                "/api/observability/collector/cluster/validate",
+                "/api/observability/remediation/run",
+            ],
+            vec![
+                "OTLP export is enabled and collector health is fresh",
+                "deployment and cluster rollout controllers validate real collector paths",
+                "logs, traces, and metrics endpoints are configured",
+            ],
+        ),
+        (
+            "finance-close",
+            "Finance close and accounting reconciliation",
+            "Real accounting-system reconciliation target",
+            vec!["/api/usage/finance-operations/summary"],
+            vec![
+                "/api/usage/finance-operations/run",
+                "/api/usage/finance-operations/reconcile",
+            ],
+            vec![
+                "usage rollup and export evidence is fresh",
+                "finance close controller confirms production close",
+                "accounting reconciliation controller confirms real target reconciliation when required",
+            ],
+        ),
+        (
+            "ui-production-polish",
+            "Production UI CRUD and dashboard polish",
+            "Operator UI flows for production governance tasks",
+            vec!["/api/stage2/readiness"],
+            vec!["./scripts/verify-static-ui-actionbook.sh"],
+            vec![
+                "admin CRUD flows expose create/update/archive/delete where applicable",
+                "dashboard surfaces production gate evidence without relying on green proxy checks",
+                "static UI smoke covers Stage 2 readiness and key operator panels",
+            ],
+        ),
+    ];
+
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| Stage2EvidenceRequirement {
+            id: spec.0.to_string(),
+            title: spec.1.to_string(),
+            gap: open_gaps.get(index).cloned().unwrap_or_default(),
+            production_target: spec.2.to_string(),
+            readiness_endpoints: spec.3.iter().map(|endpoint| endpoint.to_string()).collect(),
+            validation_endpoints: spec.4.iter().map(|endpoint| endpoint.to_string()).collect(),
+            required_evidence: spec.5.iter().map(|evidence| evidence.to_string()).collect(),
+        })
+        .collect()
 }
 
 fn parse_stage2_open_gaps(audit_content: &str) -> Vec<String> {
@@ -29119,6 +29347,21 @@ Stage 2 is not complete.
         assert_eq!(gaps.len(), 2);
         assert_eq!(gaps[0], "First production blocker.");
         assert_eq!(gaps[1], "Second controller-backed blocker.");
+
+        let readiness = build_stage2_completion_readiness();
+        assert_eq!(readiness.evidence_requirements.len(), 12);
+        assert_eq!(readiness.evidence_requirements[0].id, "tenant-routing");
+        assert!(
+            readiness.evidence_requirements[0]
+                .validation_endpoints
+                .contains(&"/api/tenant-isolation/routing/validate".to_string())
+        );
+        assert!(
+            readiness
+                .evidence_requirements
+                .iter()
+                .any(|requirement| requirement.id == "ui-production-polish")
+        );
     }
 
     #[test]

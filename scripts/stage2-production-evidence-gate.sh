@@ -118,15 +118,18 @@ write_summary() {
   local status
   local open_gap_count
   local completion_blocked
+  local evidence_requirement_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
   open_gap_count="$(jq -r '.open_gap_count // 0' "$readiness_file")"
   completion_blocked="$(jq -r '.completion_blocked // true' "$readiness_file")"
+  evidence_requirement_count="$(jq -r '.evidence_requirements | length' "$readiness_file")"
 
   {
     echo "stage2_status=$status"
     echo "completion_blocked=$completion_blocked"
     echo "open_gap_count=$open_gap_count"
+    echo "evidence_requirement_count=$evidence_requirement_count"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "validations_run=$RUN_VALIDATIONS"
     echo "team_id=${TEAM_ID:-<none>}"
