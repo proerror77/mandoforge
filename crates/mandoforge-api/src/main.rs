@@ -17198,6 +17198,7 @@ async fn build_remote_computer_readiness(
         "remote_computer.execution_handoff_released".to_string(),
         "remote_computer.execution_handoff_failed".to_string(),
         "remote_computer.execution_transport_planned".to_string(),
+        "remote_computer.execution_transport_completed".to_string(),
         "remote_computer.runner_dry_run".to_string(),
         "remote_computer.detached".to_string(),
         "remote_computer.attachment_reclaimed".to_string(),

@@ -14,6 +14,10 @@ use uuid::Uuid;
 
 use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnResponse};
 use crate::execution_queue::{ExecutionJob, ExecutionJobRequest};
+use crate::remote_computer_runner::{
+    RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
+    remote_computer_runner_for_config,
+};
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
     AppError, AppState, Approval, Artifact, CreateRemoteComputerJobAssignment, ToolCall,
@@ -186,6 +190,20 @@ pub(crate) async fn run_execution_job(
     let tool_call = state.get_tool_call(job.tool_call_id).await?;
     let result = match tool_call.tool_name.as_str() {
         "file.write" => execute_approved_file_write(state, &approval, &tool_call).await,
+        "shell.exec"
+            if remote_computer_assignment.is_some()
+                && remote_computer_pod_execution_requested() =>
+        {
+            execute_approved_remote_computer_shell(
+                state,
+                &approval,
+                &tool_call,
+                remote_computer_assignment
+                    .as_ref()
+                    .expect("checked assignment"),
+            )
+            .await
+        }
         "shell.exec" => execute_approved_shell(state, &approval, &tool_call).await,
         "codex.exec" => execute_approved_codex(state, &approval, &tool_call).await,
         _ => {
@@ -273,6 +291,15 @@ pub(crate) async fn run_execution_job(
     }
 }
 
+fn remote_computer_pod_execution_requested() -> bool {
+    let transport_mode = std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let execution_enabled = env_flag("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+    execution_enabled && matches!(transport_mode.as_str(), "kubernetes" | "k8s")
+}
+
 async fn append_remote_computer_execution_transport_plan(
     state: &AppState,
     job: &ExecutionJob,
@@ -298,7 +325,7 @@ async fn append_remote_computer_execution_transport_plan(
         )
     });
     let transport_status = if transport_mode == "kubernetes" && requested_execution_enabled {
-        "blocked_not_implemented"
+        "client_boundary_ready"
     } else if transport_mode == "kubernetes" {
         "blocked"
     } else {
@@ -572,6 +599,139 @@ async fn execute_approved_shell(
             "tool_call",
             Some(tool_call.id),
             json!({"tool": tool_call.tool_name, "command": command, "runner": runner, "exit_code": output.status.code(), "resumed_after_approval": true}),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn execute_approved_remote_computer_shell(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+    assignment: &crate::RemoteComputerJobAssignment,
+) -> Result<(), AppError> {
+    let command = tool_call
+        .args
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("shell.exec requires command"))?;
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == assignment.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    let pod_name = remote_computer
+        .pod_name
+        .clone()
+        .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = remote_computer_runner_for_config(&config);
+    let response = runner
+        .mutate(
+            &config,
+            RemoteComputerRunnerDryRunRequest {
+                operation: Some("live_exec".to_string()),
+                remote_computer_id: Some(remote_computer.id),
+                session_id: Some(approval.session_id),
+                pod_name: Some(pod_name.clone()),
+                metadata: Some(json!({"command": command, "tool_call_id": tool_call.id})),
+            },
+        )
+        .await;
+    let exec_result = response.exec_result.clone().ok_or_else(|| {
+        AppError::bad_request(format!(
+            "Remote Computer Pod exec did not return output: {}",
+            response.message
+        ))
+    })?;
+    if response.status != "exec_ok" || !response.execution_enabled {
+        return Err(AppError::bad_request(response.message));
+    }
+    let limit = execution_output_limit_bytes();
+    let stdout = truncate_output(
+        exec_result
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        limit,
+    );
+    let stderr = truncate_output(
+        exec_result
+            .get("stderr")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        limit,
+    );
+    let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
+    let result = json!({
+        "approval": "approved",
+        "command": command,
+        "runner": "remote_computer_pod_exec",
+        "remote_computer_id": remote_computer.id,
+        "assignment_id": assignment.id,
+        "lease_id": assignment.lease_id,
+        "namespace": remote_computer.namespace,
+        "pod_name": pod_name,
+        "status": status,
+        "stdout": stdout.text,
+        "stdout_bytes": stdout.original_bytes,
+        "stdout_truncated": stdout.truncated,
+        "stderr": stderr.text,
+        "stderr_bytes": stderr.original_bytes,
+        "stderr_truncated": stderr.truncated,
+    });
+    state
+        .append_event(
+            "worker",
+            Some(tool_call.id),
+            approval.session_id,
+            "remote_computer.execution_transport_completed",
+            json!({
+                "tool_call_id": tool_call.id,
+                "assignment_id": assignment.id,
+                "remote_computer_id": remote_computer.id,
+                "lease_id": assignment.lease_id,
+                "pod_name": pod_name,
+                "stdout_bytes": stdout.original_bytes,
+                "stderr_bytes": stderr.original_bytes,
+                "status": status,
+                "execution_enabled": true,
+            }),
+        )
+        .await?;
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+        )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "tool.completed",
+            "tool_call",
+            Some(tool_call.id),
+            json!({
+                "tool": tool_call.tool_name,
+                "command": command,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "pod_name": pod_name,
+                "status": status,
+                "stdout_chars": stdout.text.chars().count(),
+                "stderr_chars": stderr.text.chars().count(),
+                "resumed_after_approval": true
+            }),
         ))
         .await?;
     Ok(())
