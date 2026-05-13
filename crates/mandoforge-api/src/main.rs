@@ -1331,6 +1331,20 @@ struct RemoteComputerAttachment {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerJobAssignment {
+    id: Uuid,
+    execution_job_id: Uuid,
+    remote_computer_id: Uuid,
+    lease_id: Uuid,
+    session_id: Uuid,
+    status: String,
+    assigned_by: Option<String>,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct CreateRemoteComputer {
     name: String,
@@ -1361,6 +1375,13 @@ struct CreateRemoteComputerAttachment {
     session_id: Uuid,
     attached_by: Option<String>,
     stale_after_seconds: Option<i64>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateRemoteComputerJobAssignment {
+    lease_id: Uuid,
+    assigned_by: Option<String>,
     metadata: Option<Value>,
 }
 
@@ -2931,6 +2952,10 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/execution-jobs", get(list_execution_jobs))
         .route(
+            "/api/execution-jobs/{id}/remote-computer-lease",
+            post(assign_execution_job_remote_computer_lease),
+        )
+        .route(
             "/api/execution-jobs/worker-readiness",
             get(get_worker_readiness),
         )
@@ -2973,6 +2998,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computer-attachments",
             get(list_remote_computer_attachments),
+        )
+        .route(
+            "/api/remote-computer-job-assignments",
+            get(list_remote_computer_job_assignments),
         )
         .route(
             "/api/remote-computer-attachments/stale",
@@ -15513,6 +15542,39 @@ async fn list_execution_jobs(
     Ok(Json(state.execution_queue.list().await?))
 }
 
+async fn assign_execution_job_remote_computer_lease(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputerJobAssignment>,
+) -> Result<Json<RemoteComputerJobAssignment>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ExecutionJobsRun,
+        "execution_job",
+        Some(id),
+    )
+    .await?;
+    let job = state.execution_queue.get(id).await?;
+    if job.status != ExecutionJobStatus::Queued && job.status != ExecutionJobStatus::Running {
+        return Err(AppError::bad_request(
+            "only queued or running execution jobs can be assigned to remote computer leases",
+        ));
+    }
+    let assignment = state
+        .create_remote_computer_job_assignment(id, job.session_id, input)
+        .await?;
+    record_remote_computer_job_assignment_event(
+        &state,
+        &assignment,
+        &job,
+        "remote_computer.execution_handoff_planned",
+    )
+    .await?;
+    Ok(Json(assignment))
+}
+
 async fn get_worker_readiness(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -15887,6 +15949,21 @@ async fn list_remote_computer_attachments(
     Ok(Json(state.list_remote_computer_attachments().await?))
 }
 
+async fn list_remote_computer_job_assignments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputerJobAssignment>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_job_assignments",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computer_job_assignments().await?))
+}
+
 async fn list_stale_remote_computer_attachments(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -16018,6 +16095,49 @@ async fn record_remote_computer_attachment_event(
     Ok(())
 }
 
+async fn record_remote_computer_job_assignment_event(
+    state: &AppState,
+    assignment: &RemoteComputerJobAssignment,
+    job: &execution_queue::ExecutionJob,
+    event_type: &str,
+) -> Result<(), AppError> {
+    let details = json!({
+        "assignment_id": assignment.id,
+        "execution_job_id": assignment.execution_job_id,
+        "approval_id": job.approval_id,
+        "tool_call_id": job.tool_call_id,
+        "tool_name": job.tool_name,
+        "remote_computer_id": assignment.remote_computer_id,
+        "lease_id": assignment.lease_id,
+        "session_id": assignment.session_id,
+        "status": assignment.status,
+        "assigned_by": assignment.assigned_by,
+        "metadata": assignment.metadata,
+        "execution_enabled": false
+    });
+    state
+        .append_event(
+            "system",
+            None,
+            assignment.session_id,
+            event_type,
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(assignment.session_id),
+            "system",
+            None,
+            event_type,
+            "remote_computer_job_assignment",
+            Some(assignment.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
 fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
     let pod_template =
         remote_computer_manifest_readiness("deploy/k8s/agent-remote-computer.yaml", "pod_template");
@@ -16114,6 +16234,7 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         "remote_computer.started".to_string(),
         "remote_computer.heartbeat".to_string(),
         "remote_computer.attached".to_string(),
+        "remote_computer.execution_handoff_planned".to_string(),
         "remote_computer.runner_dry_run".to_string(),
         "remote_computer.detached".to_string(),
         "remote_computer.attachment_reclaimed".to_string(),
@@ -18011,6 +18132,7 @@ not json
         assert!(names.contains(&"0018_agent_release_automation.sql"));
         assert!(names.contains(&"0019_remote_computers.sql"));
         assert!(names.contains(&"0020_remote_computer_attachments.sql"));
+        assert!(names.contains(&"0021_remote_computer_job_assignments.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -28372,6 +28494,110 @@ not json
                 .iter()
                 .any(|action| action.contains("existing approved worker path"))
         );
+
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "queued-job-remote-computer",
+                        "profile": "workspace-write",
+                        "pod_name": "agent-remote-computer-job"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let lease: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computers/{}/leases", computer.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "worker_id": "remote-computer-planner",
+                        "lease_seconds": 900
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let assignment: RemoteComputerJobAssignment = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/execution-jobs/{job_id}/remote-computer-lease"
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "lease_id": lease.id,
+                        "assigned_by": "operator-1",
+                        "metadata": {"handoff_mode": "control-plane-only"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(assignment.execution_job_id, job_id);
+        assert_eq!(assignment.lease_id, lease.id);
+        assert_eq!(assignment.session_id, session.id);
+        assert_eq!(assignment.status, "assigned");
+
+        let assignments: Vec<RemoteComputerJobAssignment> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computer-job-assignments")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].execution_job_id, job_id);
+
+        let jobs_after_handoff: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job_after_handoff = jobs_after_handoff
+            .iter()
+            .find(|job| job.id == job_id)
+            .expect("job remains listed after remote computer handoff");
+        assert_eq!(job_after_handoff.status, ExecutionJobStatus::Queued);
+
+        let events_after_handoff: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events_after_handoff.iter().any(|event| {
+            event.event_type == "remote_computer.execution_handoff_planned"
+                && event.payload["execution_enabled"] == json!(false)
+        }));
 
         let (status, error) = request_value(
             app.clone(),

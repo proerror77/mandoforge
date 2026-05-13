@@ -279,7 +279,7 @@ Agent Session
   -> Artifact + Event + Audit sync
 ```
 
-Stage 2 now includes a readiness and lease-state Remote Computer control plane: Pod template, PVC/RWX state mount placeholder, JuiceFS example manifest, warm-pool example manifest, KEDA ScaledObject example, readiness API, UI readiness panel, lease store, session attachment state, scheduler-backed stale reclaim, event names, reserved runner readiness/dry-run/mutation evidence, and honest blockers for production warm-pool assignment, distributed filesystem, and queue-depth autoscaling. Stage 3 should make this the primary sandbox substrate by creating Kubernetes Pods per session, syncing artifacts/events back to MandoForge, assigning warm pools, and integrating KEDA/HPA plus a real distributed state filesystem option such as JuiceFS CSI.
+Stage 2 now includes a readiness and lease-state Remote Computer control plane: Pod template, PVC/RWX state mount placeholder, JuiceFS example manifest, warm-pool example manifest, KEDA ScaledObject example, readiness API, UI readiness panel, lease store, session attachment state, execution-job-to-lease handoff planning, scheduler-backed stale reclaim, event names, reserved runner readiness/dry-run/mutation evidence, and honest blockers for production warm-pool assignment, distributed filesystem, queue-depth autoscaling, and Pod execution transport. Stage 3 should make this the primary sandbox substrate by creating Kubernetes Pods per session, syncing artifacts/events back to MandoForge, assigning warm pools, and integrating KEDA/HPA plus a real distributed state filesystem option such as JuiceFS CSI.
 
 See [Agent Remote Computer Plan](agent-remote-computer-plan.md).
 

@@ -7,7 +7,8 @@ use uuid::Uuid;
 use crate::store_backend::StoreBackend;
 use crate::{
     AppError, AppState, CreateRemoteComputer, CreateRemoteComputerAttachment,
-    CreateRemoteComputerLease, RemoteComputer, RemoteComputerAttachment, RemoteComputerLease,
+    CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, RemoteComputer,
+    RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
     UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
 
@@ -336,6 +337,137 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn list_remote_computer_job_assignments(
+        &self,
+    ) -> Result<Vec<RemoteComputerJobAssignment>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut assignments: Vec<_> = inner
+                    .read()
+                    .await
+                    .remote_computer_job_assignments
+                    .values()
+                    .cloned()
+                    .collect();
+                assignments.sort_by_key(|assignment| assignment.created_at);
+                assignments.reverse();
+                Ok(assignments)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, execution_job_id, remote_computer_id, lease_id, session_id, status, assigned_by, metadata, created_at, updated_at
+                     FROM remote_computer_job_assignments
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(remote_computer_job_assignment_from_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_remote_computer_job_assignment(
+        &self,
+        execution_job_id: Uuid,
+        session_id: Uuid,
+        input: CreateRemoteComputerJobAssignment,
+    ) -> Result<RemoteComputerJobAssignment, AppError> {
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let lease = store
+                    .remote_computer_leases
+                    .get(&input.lease_id)
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+                validate_remote_computer_job_assignment_lease(&lease, session_id)?;
+                if store
+                    .remote_computer_job_assignments
+                    .values()
+                    .any(|assignment| {
+                        assignment.execution_job_id == execution_job_id
+                            && assignment.status == "assigned"
+                    })
+                {
+                    return Err(AppError::bad_request(
+                        "execution job already has an active remote computer assignment",
+                    ));
+                }
+                let assignment = new_remote_computer_job_assignment(
+                    execution_job_id,
+                    session_id,
+                    lease,
+                    input,
+                    now,
+                );
+                store
+                    .remote_computer_job_assignments
+                    .insert(assignment.id, assignment.clone());
+                Ok(assignment)
+            }
+            StoreBackend::Postgres(pool) => {
+                let lease_row = sqlx::query(
+                    "SELECT id, remote_computer_id, session_id, status, worker_id, lease_expires_at, heartbeat_at, metadata, created_at, updated_at
+                     FROM remote_computer_leases
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(input.lease_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+                let lease = remote_computer_lease_from_row(lease_row)?;
+                validate_remote_computer_job_assignment_lease(&lease, session_id)?;
+                let duplicate = sqlx::query(
+                    "SELECT id
+                     FROM remote_computer_job_assignments
+                     WHERE tenant_id = $1 AND execution_job_id = $2 AND status = 'assigned'
+                     LIMIT 1",
+                )
+                .bind(self.tenant_id)
+                .bind(execution_job_id)
+                .fetch_optional(pool)
+                .await?;
+                if duplicate.is_some() {
+                    return Err(AppError::bad_request(
+                        "execution job already has an active remote computer assignment",
+                    ));
+                }
+                let assignment = new_remote_computer_job_assignment(
+                    execution_job_id,
+                    session_id,
+                    lease,
+                    input,
+                    now,
+                );
+                sqlx::query(
+                    "INSERT INTO remote_computer_job_assignments
+                        (id, tenant_id, execution_job_id, remote_computer_id, lease_id, session_id, status, assigned_by, metadata, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                )
+                .bind(assignment.id)
+                .bind(self.tenant_id)
+                .bind(assignment.execution_job_id)
+                .bind(assignment.remote_computer_id)
+                .bind(assignment.lease_id)
+                .bind(assignment.session_id)
+                .bind(&assignment.status)
+                .bind(&assignment.assigned_by)
+                .bind(&assignment.metadata)
+                .bind(assignment.created_at)
+                .bind(assignment.updated_at)
+                .execute(pool)
+                .await?;
+                Ok(assignment)
+            }
+        }
+    }
+
     pub(crate) async fn list_stale_remote_computer_attachments(
         &self,
     ) -> Result<Vec<RemoteComputerAttachment>, AppError> {
@@ -586,6 +718,66 @@ fn remote_computer_attachment_from_row(row: PgRow) -> Result<RemoteComputerAttac
         attached_by: row.try_get("attached_by")?,
         stale_after: row.try_get("stale_after")?,
         released_at: row.try_get("released_at")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn new_remote_computer_job_assignment(
+    execution_job_id: Uuid,
+    session_id: Uuid,
+    lease: RemoteComputerLease,
+    input: CreateRemoteComputerJobAssignment,
+    now: chrono::DateTime<Utc>,
+) -> RemoteComputerJobAssignment {
+    RemoteComputerJobAssignment {
+        id: Uuid::new_v4(),
+        execution_job_id,
+        remote_computer_id: lease.remote_computer_id,
+        lease_id: lease.id,
+        session_id,
+        status: "assigned".to_string(),
+        assigned_by: input
+            .assigned_by
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        metadata: input.metadata.unwrap_or_else(|| json!({})),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn validate_remote_computer_job_assignment_lease(
+    lease: &RemoteComputerLease,
+    session_id: Uuid,
+) -> Result<(), AppError> {
+    if lease.status != "leased" {
+        return Err(AppError::bad_request(
+            "only active remote computer leases can receive execution handoff",
+        ));
+    }
+    if let Some(leased_session_id) = lease.session_id {
+        if leased_session_id != session_id {
+            return Err(AppError::bad_request(
+                "execution handoff session must match the lease session",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn remote_computer_job_assignment_from_row(
+    row: PgRow,
+) -> Result<RemoteComputerJobAssignment, AppError> {
+    Ok(RemoteComputerJobAssignment {
+        id: row.try_get("id")?,
+        execution_job_id: row.try_get("execution_job_id")?,
+        remote_computer_id: row.try_get("remote_computer_id")?,
+        lease_id: row.try_get("lease_id")?,
+        session_id: row.try_get("session_id")?,
+        status: row.try_get("status")?,
+        assigned_by: row.try_get("assigned_by")?,
         metadata: row.try_get("metadata")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,

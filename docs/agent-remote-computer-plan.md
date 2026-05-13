@@ -59,6 +59,7 @@ Covered today:
 - Kubernetes dry-runs return the planned API path, namespace, pod name, and template path so future live calls have an auditable request plan before mutation is enabled.
 - Kubernetes live mutation is gated by both `MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED` and `MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED`; it remains Admin-only and still does not create execution jobs, tool calls, or a session-to-Pod execution path.
 - `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
+- `remote_computer_job_assignments` persists approved execution-job-to-lease handoff plans without starting tool execution or creating extra jobs.
 - `POST /api/remote-computers/reclaim-stale` reclaims stale attachments and expired leases with event/audit records and no tool execution.
 - `/api/scheduler/due-plan` and `/api/scheduler/run-due` include Remote Computer stale reclaim in the aggregate operations path.
 
@@ -68,6 +69,7 @@ Not covered today:
 - No actual session-to-Pod runtime attach.
 - No actual Remote Computer execution path.
 - No actual Pod attach transport; session attachment is control-plane state only.
+- No actual execution-job transport into Pods; job assignment is control-plane handoff state only.
 - No real distributed Memory/Notes/Skills mount in the default deployment.
 - No production distributed filesystem integration yet; JuiceFS exists as an example manifest only, while CephFS, Longhorn RWX, cloud file storage, or object-backed sync remain future provider options.
 - No production warm pool assignment; the warm-pool manifest is an opt-in skeleton only.
@@ -159,6 +161,7 @@ Completed Stage 2 readiness skeleton:
    - `remote_computer.started`
    - `remote_computer.heartbeat`
    - `remote_computer.attached`
+   - `remote_computer.execution_handoff_planned`
    - `remote_computer.runner_dry_run`
    - `remote_computer.detached`
    - `remote_computer.attachment_reclaimed`
@@ -178,6 +181,12 @@ Completed Stage 2 readiness skeleton:
    - `POST /api/remote-computer-attachments/:id/release`
    - audit actions `remote_computer.attached` and `remote_computer.detached`
    - tests proving attachments do not enqueue jobs or execute tools
+- Add execution job handoff planning:
+   - `POST /api/execution-jobs/:id/remote-computer-lease`
+   - `GET /api/remote-computer-job-assignments`
+   - event `remote_computer.execution_handoff_planned`
+   - audit action `remote_computer.execution_handoff_planned`
+   - tests proving handoff planning does not start tool execution or create another job
 - Add Admin-only stale reclaim:
    - `POST /api/remote-computers/reclaim-stale`
    - releases stale attachments
