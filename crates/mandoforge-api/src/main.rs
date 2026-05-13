@@ -1182,6 +1182,30 @@ struct WorkerAutoscalingReadiness {
     autoscaling_manifest_paths: Vec<String>,
     configured_min_replicas: Option<i64>,
     configured_max_replicas: Option<i64>,
+    scale_target_refs: Vec<String>,
+    validation_status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct K8sAutoscalingManifest {
+    kind: Option<String>,
+    spec: Option<K8sAutoscalingSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct K8sAutoscalingSpec {
+    scale_target_ref: Option<K8sScaleTargetRef>,
+    min_replicas: Option<i64>,
+    max_replicas: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct K8sScaleTargetRef {
+    kind: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15317,26 +15341,16 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
         oldest_stale_lease_age_seconds,
     };
     let k8s = WorkerK8sReadiness {
-        worker_manifest_present: std::path::Path::new("deploy/k8s/worker.yaml").exists(),
+        worker_manifest_present: project_file_path("deploy/k8s/worker.yaml").is_some(),
         worker_manifest_path: "deploy/k8s/worker.yaml".to_string(),
-        scheduler_manifest_present: std::path::Path::new("deploy/k8s/scheduler.yaml").exists(),
+        scheduler_manifest_present: project_file_path("deploy/k8s/scheduler.yaml").is_some(),
         scheduler_manifest_path: "deploy/k8s/scheduler.yaml".to_string(),
     };
-    let autoscaling_manifest_paths = [
+    let autoscaling = worker_autoscaling_readiness_from_manifests(&[
         "deploy/k8s/worker-hpa.yaml",
         "deploy/k8s/worker-keda.yaml",
         "deploy/k8s/keda.yaml",
-    ]
-    .into_iter()
-    .filter(|path| std::path::Path::new(path).exists())
-    .map(str::to_string)
-    .collect::<Vec<_>>();
-    let autoscaling = WorkerAutoscalingReadiness {
-        autoscaling_manifest_present: !autoscaling_manifest_paths.is_empty(),
-        autoscaling_manifest_paths,
-        configured_min_replicas: env_i64("MANDOFORGE_WORKER_MIN_REPLICAS"),
-        configured_max_replicas: env_i64("MANDOFORGE_WORKER_MAX_REPLICAS"),
-    };
+    ]);
     let mut attention_items = Vec::new();
     if worker_mode.api_inline_execution {
         attention_items.push(WorkerReadinessAttentionItem {
@@ -15407,6 +15421,12 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
             message: "no worker HPA/KEDA manifest is present; autoscaling remains a production gap"
                 .to_string(),
         });
+    } else if autoscaling.validation_status == "skeleton" {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_autoscaling_skeleton".to_string(),
+            severity: "warning".to_string(),
+            message: "worker HPA/KEDA manifest is present, but production autoscaling still needs cluster metrics, load validation, and isolation policy".to_string(),
+        });
     }
 
     let mut runbook_actions = Vec::new();
@@ -15433,6 +15453,11 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
     if !autoscaling.autoscaling_manifest_present {
         runbook_actions.push(
             "add HPA/KEDA worker autoscaling before declaring production hardening complete"
+                .to_string(),
+        );
+    } else if autoscaling.validation_status == "skeleton" {
+        runbook_actions.push(
+            "validate worker HPA/KEDA behavior under load before declaring production autoscaling complete"
                 .to_string(),
         );
     }
@@ -15509,6 +15534,71 @@ fn worker_queue_backend_readiness(kind: &str) -> WorkerQueueBackendReadiness {
             semantics: "process-local in-memory queue for local demo and tests".to_string(),
         },
     }
+}
+
+fn worker_autoscaling_readiness_from_manifests(paths: &[&str]) -> WorkerAutoscalingReadiness {
+    let mut autoscaling_manifest_paths = Vec::new();
+    let mut configured_min_replicas = env_i64("MANDOFORGE_WORKER_MIN_REPLICAS");
+    let mut configured_max_replicas = env_i64("MANDOFORGE_WORKER_MAX_REPLICAS");
+    let mut scale_target_refs = Vec::new();
+
+    for path in paths {
+        let Some(resolved_path) = project_file_path(path) else {
+            continue;
+        };
+        autoscaling_manifest_paths.push((*path).to_string());
+        let Ok(content) = std::fs::read_to_string(resolved_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_yml::from_str::<K8sAutoscalingManifest>(&content) else {
+            continue;
+        };
+        let Some(spec) = manifest.spec else {
+            continue;
+        };
+        configured_min_replicas = configured_min_replicas.or(spec.min_replicas);
+        configured_max_replicas = configured_max_replicas.or(spec.max_replicas);
+        if let Some(target) = spec.scale_target_ref {
+            let kind = target.kind.unwrap_or_else(|| "unknown".to_string());
+            let name = target.name.unwrap_or_else(|| "unknown".to_string());
+            scale_target_refs.push(format!("{kind}/{name}"));
+        } else if let Some(kind) = manifest.kind {
+            scale_target_refs.push(format!("{kind}/unknown"));
+        }
+    }
+
+    let validation_status = if autoscaling_manifest_paths.is_empty() {
+        "missing"
+    } else {
+        "skeleton"
+    }
+    .to_string();
+
+    WorkerAutoscalingReadiness {
+        autoscaling_manifest_present: !autoscaling_manifest_paths.is_empty(),
+        autoscaling_manifest_paths,
+        configured_min_replicas,
+        configured_max_replicas,
+        scale_target_refs,
+        validation_status,
+    }
+}
+
+fn project_file_path(relative_path: &str) -> Option<PathBuf> {
+    let direct = PathBuf::from(relative_path);
+    if direct.exists() {
+        return Some(direct);
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for ancestor in manifest_dir.ancestors() {
+        let candidate = ancestor.join(relative_path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 fn env_i64(key: &str) -> Option<i64> {
@@ -26333,11 +26423,40 @@ not json
         assert_eq!(worker_readiness.queue_backend.kind, "memory");
         assert_eq!(worker_readiness.job_summary.queued_jobs, 1);
         assert_eq!(worker_readiness.lease_summary.stale_leases, 0);
+        assert!(worker_readiness.autoscaling.autoscaling_manifest_present);
+        assert!(
+            worker_readiness
+                .autoscaling
+                .autoscaling_manifest_paths
+                .iter()
+                .any(|path| path == "deploy/k8s/worker-hpa.yaml")
+        );
+        assert_eq!(
+            worker_readiness.autoscaling.configured_min_replicas,
+            Some(1)
+        );
+        assert_eq!(
+            worker_readiness.autoscaling.configured_max_replicas,
+            Some(3)
+        );
+        assert!(
+            worker_readiness
+                .autoscaling
+                .scale_target_refs
+                .iter()
+                .any(|target| target == "Deployment/mandoforge-worker")
+        );
         assert!(
             worker_readiness
                 .attention_items
                 .iter()
                 .any(|item| item.kind == "queued_jobs_present")
+        );
+        assert!(
+            worker_readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "worker_autoscaling_skeleton")
         );
         assert!(
             worker_readiness

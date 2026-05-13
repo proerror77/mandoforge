@@ -7,6 +7,7 @@ It contains:
 - Namespace.
 - API Deployment and Service.
 - Worker Deployment for queued execution jobs.
+- Worker HPA skeleton for CPU-based scaling experiments.
 - Scheduler CronJob for due policy, approval, release, and MCP automation.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
@@ -27,4 +28,5 @@ Production notes:
 - Replace `emptyDir` workspaces with PVC or object-storage-backed artifact sync before long-running workers.
 - Add NetworkPolicy before enabling shell, Codex, HTTP, or MCP execution in shared clusters.
 - Keep Codex and sandbox execution disabled or tightly constrained before multi-tenant use; the current worker drains jobs through the API execution endpoint.
+- Treat `worker-hpa.yaml` as an autoscaling skeleton only. Validate metrics-server, queue pressure behavior, and load characteristics before claiming production autoscaling.
 - Replace the scheduler's demo admin headers with a real service-account or gateway-auth path before production exposure.

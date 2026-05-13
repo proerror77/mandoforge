@@ -8,4 +8,5 @@ resources:
   - postgres.yaml
   - api.yaml
   - worker.yaml
+  - worker-hpa.yaml
   - scheduler.yaml

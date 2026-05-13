@@ -1848,6 +1848,8 @@ function renderWorkerReadiness() {
       <strong>LEASES / AUTOSCALING</strong>
       <div class="muted">Leased ${formatInteger(leaseSummary.leased_jobs || 0)} · Stale leases ${formatInteger(leaseSummary.stale_leases || 0)} · Oldest stale lease ${formatOptionalSeconds(leaseSummary.oldest_stale_lease_age_seconds)}</div>
       <div class="muted">K8s worker manifest: ${k8s.worker_manifest_present ? "present" : "missing"} · Autoscaling manifest: ${autoscaling.autoscaling_manifest_present ? "present" : "missing"}</div>
+      <div class="muted">AUTOSCALING SKELETON: ${escapeHtml(autoscaling.validation_status || "unknown")} · min ${formatOptionalInteger(autoscaling.configured_min_replicas)} · max ${formatOptionalInteger(autoscaling.configured_max_replicas)}</div>
+      <div class="muted">Targets: ${escapeHtml((autoscaling.scale_target_refs || []).join(", ") || "none")}</div>
     </div>
     <div class="item">
       <strong>ATTENTION ITEMS</strong>
