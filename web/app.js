@@ -1761,6 +1761,7 @@ function renderCodexAppServer() {
     .join("");
   const traceSummary = codex.traces;
   const controlSummary = codex.controlSummary;
+  const productionOps = controlSummary?.production_ops || {};
   const controlAttention = controlSummary?.attention_items || [];
   const traceRows = (traceSummary?.traces || [])
     .slice(0, 8)
@@ -1831,6 +1832,8 @@ function renderCodexAppServer() {
         <div class="metric"><span>Attention</span><strong>${formatInteger(controlAttention.length)}</strong></div>
       </div>
       <div class="muted">Configured: ${escapeHtml(controlSummary.configured ? "yes" : "no")} · timeout ${escapeHtml(controlSummary.timeout_seconds ?? "n/a")}s · latest ${escapeHtml(controlSummary.latest_seen_at || "none")}</div>
+      <div class="muted">Production ops: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · stale candidates ${formatInteger(productionOps.stale_candidate_count || 0)} · failed turns ${formatInteger(productionOps.failed_turn_count || 0)} · latest supervision ${escapeHtml(productionOps.latest_stale_poll_at || "none")}</div>
+      <div class="muted">${escapeHtml(productionOps.message || "Codex App Server production ops are not reported")}</div>
       ${
         controlAttention.length
           ? `<table class="usage-table">

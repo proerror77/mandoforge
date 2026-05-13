@@ -957,7 +957,24 @@ struct CodexAppServerControlPlaneSummary {
     latest_seen_at: Option<DateTime<Utc>>,
     by_status: HashMap<String, usize>,
     by_operation: HashMap<String, usize>,
+    production_ops: CodexAppServerProductionOpsReadiness,
     attention_items: Vec<CodexAppServerControlPlaneAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerProductionOpsReadiness {
+    status: String,
+    production_blocked: bool,
+    configured: bool,
+    run_count: usize,
+    active_turn_count: usize,
+    failed_turn_count: usize,
+    stale_candidate_count: usize,
+    latest_stale_poll_at: Option<DateTime<Utc>>,
+    latest_stale_poll_age_hours: Option<i64>,
+    latest_stale_poll_candidate_count: usize,
+    latest_stale_poll_failed_count: usize,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8683,9 +8700,11 @@ async fn get_codex_app_server_control_plane_summary(
     )
     .await?;
     let runs = state.list_codex_app_server_runs().await?;
+    let audit_logs = state.list_audit_logs(None).await?;
     Ok(Json(build_codex_app_server_control_plane_summary(
         state.codex_app_server_config.as_ref(),
         &runs,
+        &audit_logs,
         Utc::now(),
     )))
 }
@@ -9050,6 +9069,7 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
 fn build_codex_app_server_control_plane_summary(
     config: Option<&CodexAppServerConfig>,
     runs: &[CodexAppServerRun],
+    audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
 ) -> CodexAppServerControlPlaneSummary {
     let trace_summary = build_codex_app_server_trace_summary(runs);
@@ -9120,6 +9140,27 @@ fn build_codex_app_server_control_plane_summary(
         });
     }
 
+    let timeout_seconds = config.map(|config| config.timeout_seconds);
+    let production_ops = build_codex_app_server_production_ops_readiness(
+        config.is_some(),
+        &trace_summary,
+        stale_candidate_count,
+        audit_logs,
+        generated_at,
+    );
+    if production_ops.production_blocked {
+        attention_items.push(CodexAppServerControlPlaneAttentionItem {
+            kind: "production_ops_blocked".to_string(),
+            severity: if production_ops.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: production_ops.message.clone(),
+            trace_key: None,
+            turn_id: None,
+        });
+    }
     let status = if config.is_none() {
         "reserved"
     } else if attention_items
@@ -9133,7 +9174,6 @@ fn build_codex_app_server_control_plane_summary(
         "attention"
     }
     .to_string();
-    let timeout_seconds = config.map(|config| config.timeout_seconds);
 
     CodexAppServerControlPlaneSummary {
         generated_at,
@@ -9150,7 +9190,102 @@ fn build_codex_app_server_control_plane_summary(
         latest_seen_at,
         by_status: trace_summary.by_status,
         by_operation: trace_summary.by_operation,
+        production_ops,
         attention_items,
+    }
+}
+
+fn build_codex_app_server_production_ops_readiness(
+    configured: bool,
+    trace_summary: &CodexAppServerTraceSummary,
+    stale_candidate_count: usize,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> CodexAppServerProductionOpsReadiness {
+    let latest_stale_poll = audit_logs
+        .iter()
+        .filter(|log| log.action == "codex_app_server.stale_poll_due_run")
+        .max_by_key(|log| log.created_at);
+    let latest_stale_poll_at = latest_stale_poll.map(|log| log.created_at);
+    let latest_stale_poll_age_hours =
+        latest_stale_poll_at.map(|created_at| (generated_at - created_at).num_hours());
+    let latest_stale_poll_candidate_count = latest_stale_poll
+        .and_then(|log| log.details.get("candidate_count"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as usize;
+    let latest_stale_poll_failed_count = latest_stale_poll
+        .and_then(|log| log.details.get("failed_count"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as usize;
+    let (status, production_blocked, message) = if !configured {
+        (
+            "blocked",
+            true,
+            "Codex App Server production ops are blocked until the adapter endpoint is configured"
+                .to_string(),
+        )
+    } else if trace_summary.failed_turn_count > 0 {
+        (
+            "blocked",
+            true,
+            "Codex App Server production ops are blocked by failed/interrupted turn traces"
+                .to_string(),
+        )
+    } else if stale_candidate_count > 0 {
+        (
+            "blocked",
+            true,
+            "Codex App Server production ops are blocked by stale non-terminal turns".to_string(),
+        )
+    } else if latest_stale_poll.is_none() {
+        (
+            "blocked",
+            true,
+            "Codex App Server production ops are blocked until stale-turn supervision has run"
+                .to_string(),
+        )
+    } else if latest_stale_poll_failed_count > 0 {
+        (
+            "blocked",
+            true,
+            "Codex App Server production ops are blocked by the latest failed stale-turn poll run"
+                .to_string(),
+        )
+    } else if latest_stale_poll_age_hours.is_some_and(|hours| hours >= 24) {
+        (
+            "stale",
+            true,
+            "Codex App Server production ops are blocked until stale-turn supervision is refreshed"
+                .to_string(),
+        )
+    } else if trace_summary.active_turn_count > 0 {
+        (
+            "attention",
+            false,
+            "Codex App Server has active non-terminal turns, but stale-turn supervision is fresh"
+                .to_string(),
+        )
+    } else {
+        (
+            "ready",
+            false,
+            "Codex App Server stale-turn supervision is fresh and no failed or stale turns remain"
+                .to_string(),
+        )
+    };
+    CodexAppServerProductionOpsReadiness {
+        status: status.to_string(),
+        production_blocked,
+        configured,
+        run_count: trace_summary.run_count,
+        active_turn_count: trace_summary.active_turn_count,
+        failed_turn_count: trace_summary.failed_turn_count,
+        stale_candidate_count,
+        latest_stale_poll_at,
+        latest_stale_poll_age_hours,
+        latest_stale_poll_candidate_count,
+        latest_stale_poll_failed_count,
+        message,
     }
 }
 
@@ -21059,6 +21194,90 @@ not json
             .expect("turn-2 trace");
         assert_eq!(turn_2.error_count, 1);
         assert_eq!(turn_2.latest_status, "poll_failed");
+
+        let control = build_codex_app_server_control_plane_summary(
+            Some(&CodexAppServerConfig {
+                endpoint: "http://codex-app-server.test".to_string(),
+                timeout_seconds: 5,
+            }),
+            &runs,
+            &[],
+            base_time + chrono::Duration::seconds(4),
+        );
+        assert_eq!(control.production_ops.status, "blocked");
+        assert!(control.production_ops.production_blocked);
+        assert_eq!(control.production_ops.failed_turn_count, 1);
+        assert!(
+            control.attention_items.iter().any(|item| {
+                item.kind == "production_ops_blocked" && item.severity == "critical"
+            })
+        );
+    }
+
+    #[test]
+    fn codex_app_server_production_ops_requires_fresh_stale_poll_supervision() {
+        let base_time = "2026-05-13T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid time");
+        let runs = vec![CodexAppServerRun {
+            id: Uuid::new_v4(),
+            operation: "turn.poll".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            turn_id: Some("turn-ready".to_string()),
+            command_id: None,
+            status: "completed".to_string(),
+            request: json!({}),
+            response: json!({"status": "completed"}),
+            error: None,
+            created_at: base_time,
+        }];
+        let config = CodexAppServerConfig {
+            endpoint: "http://codex-app-server.test".to_string(),
+            timeout_seconds: 5,
+        };
+        let without_supervision = build_codex_app_server_control_plane_summary(
+            Some(&config),
+            &runs,
+            &[],
+            base_time + chrono::Duration::minutes(5),
+        );
+        assert_eq!(without_supervision.production_ops.status, "blocked");
+        assert!(without_supervision.production_ops.production_blocked);
+        assert!(
+            without_supervision
+                .production_ops
+                .message
+                .contains("stale-turn supervision has run")
+        );
+
+        let audit_logs = vec![AuditLog {
+            id: Uuid::new_v4(),
+            session_id: None,
+            actor_type: "system".to_string(),
+            actor_id: None,
+            action: "codex_app_server.stale_poll_due_run".to_string(),
+            resource_type: "codex_app_server".to_string(),
+            resource_id: None,
+            details: json!({
+                "candidate_count": 0,
+                "polled_count": 0,
+                "terminal_count": 0,
+                "skipped_count": 0,
+                "failed_count": 0
+            }),
+            created_at: base_time + chrono::Duration::minutes(1),
+        }];
+        let ready = build_codex_app_server_control_plane_summary(
+            Some(&config),
+            &runs,
+            &audit_logs,
+            base_time + chrono::Duration::minutes(5),
+        );
+        assert_eq!(ready.production_ops.status, "ready");
+        assert!(!ready.production_ops.production_blocked);
+        assert_eq!(ready.production_ops.latest_stale_poll_failed_count, 0);
+        assert_eq!(ready.production_ops.latest_stale_poll_candidate_count, 0);
+        assert_eq!(ready.status, "ready");
     }
 
     #[test]
