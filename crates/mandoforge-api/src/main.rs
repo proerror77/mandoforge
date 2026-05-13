@@ -16730,6 +16730,9 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         "remote_computer.execution_handoff_planned".to_string(),
         "remote_computer.execution_handoff_assigned".to_string(),
         "remote_computer.execution_handoff_acknowledged".to_string(),
+        "remote_computer.execution_handoff_completed".to_string(),
+        "remote_computer.execution_handoff_released".to_string(),
+        "remote_computer.execution_handoff_failed".to_string(),
         "remote_computer.execution_transport_planned".to_string(),
         "remote_computer.runner_dry_run".to_string(),
         "remote_computer.detached".to_string(),
@@ -29736,8 +29739,10 @@ not json
             .find(|assignment| assignment.execution_job_id == job_id)
             .expect("auto remote computer assignment");
         assert_eq!(assignment.lease_id, lease.id);
+        assert_eq!(assignment.status, "completed");
         assert_eq!(assignment.assigned_by.as_deref(), Some("remote-worker-1"));
         assert_eq!(assignment.metadata["handoff_mode"], "auto-worker-lease");
+        assert_eq!(assignment.metadata["execution_job_status"], "completed");
 
         let events: Vec<SessionEvent> = request_json(
             app,
@@ -29760,6 +29765,11 @@ not json
             event.event_type == "remote_computer.execution_transport_planned"
                 && event.payload["assignment_id"] == json!(assignment.id)
                 && event.payload["execution_enabled"] == json!(false)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "remote_computer.execution_handoff_completed"
+                && event.payload["assignment_id"] == json!(assignment.id)
+                && event.payload["status"] == json!("completed")
         }));
     }
 }

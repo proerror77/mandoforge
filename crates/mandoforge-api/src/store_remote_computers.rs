@@ -468,6 +468,50 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn update_remote_computer_job_assignment_status(
+        &self,
+        assignment_id: Uuid,
+        status: &str,
+        metadata: serde_json::Value,
+    ) -> Result<RemoteComputerJobAssignment, AppError> {
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let assignment = store
+                    .remote_computer_job_assignments
+                    .get_mut(&assignment_id)
+                    .ok_or_else(|| {
+                        AppError::not_found("Remote computer job assignment not found")
+                    })?;
+                assignment.status = status.to_string();
+                assignment.metadata =
+                    merge_remote_computer_assignment_metadata(&assignment.metadata, metadata);
+                assignment.updated_at = now;
+                Ok(assignment.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE remote_computer_job_assignments
+                     SET status = $1,
+                         metadata = metadata || $2::jsonb,
+                         updated_at = $3
+                     WHERE tenant_id = $4 AND id = $5
+                     RETURNING id, execution_job_id, remote_computer_id, lease_id, session_id, status, assigned_by, metadata, created_at, updated_at",
+                )
+                .bind(status)
+                .bind(metadata)
+                .bind(now)
+                .bind(self.tenant_id)
+                .bind(assignment_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("Remote computer job assignment not found"))?;
+                remote_computer_job_assignment_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn list_stale_remote_computer_attachments(
         &self,
     ) -> Result<Vec<RemoteComputerAttachment>, AppError> {
@@ -782,4 +826,20 @@ fn remote_computer_job_assignment_from_row(
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn merge_remote_computer_assignment_metadata(
+    existing: &serde_json::Value,
+    patch: serde_json::Value,
+) -> serde_json::Value {
+    match (existing.as_object(), patch.as_object()) {
+        (Some(existing), Some(patch)) => {
+            let mut merged = existing.clone();
+            for (key, value) in patch {
+                merged.insert(key.clone(), value.clone());
+            }
+            serde_json::Value::Object(merged)
+        }
+        _ => patch,
+    }
 }

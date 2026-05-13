@@ -201,6 +201,15 @@ pub(crate) async fn run_execution_job(
         }
     };
     if result.is_ok() {
+        finalize_remote_computer_assignment_for_job(
+            state,
+            &job,
+            remote_computer_assignment.as_ref(),
+            "completed",
+            "remote_computer.execution_handoff_completed",
+            json!({"execution_job_status": "completed"}),
+        )
+        .await?;
         state.execution_queue.complete(job.id).await
     } else {
         let error = result.expect_err("checked error");
@@ -208,6 +217,32 @@ pub(crate) async fn run_execution_job(
             .execution_queue
             .retry_or_fail(job.id, &error.message)
             .await?;
+        let assignment_status =
+            if updated.status == crate::execution_queue::ExecutionJobStatus::Queued {
+                "released"
+            } else {
+                "failed"
+            };
+        let assignment_event =
+            if updated.status == crate::execution_queue::ExecutionJobStatus::Queued {
+                "remote_computer.execution_handoff_released"
+            } else {
+                "remote_computer.execution_handoff_failed"
+            };
+        finalize_remote_computer_assignment_for_job(
+            state,
+            &job,
+            remote_computer_assignment.as_ref(),
+            assignment_status,
+            assignment_event,
+            json!({
+                "execution_job_status": updated.status,
+                "attempt_count": updated.attempt_count,
+                "max_attempts": updated.max_attempts,
+                "last_error": updated.last_error,
+            }),
+        )
+        .await?;
         let event_type = if updated.status == crate::execution_queue::ExecutionJobStatus::Queued {
             "execution.retry_queued"
         } else {
@@ -380,6 +415,23 @@ async fn auto_assign_remote_computer_for_job(
     )
     .await?;
     Ok(Some(assignment))
+}
+
+async fn finalize_remote_computer_assignment_for_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    assignment: Option<&crate::RemoteComputerJobAssignment>,
+    status: &str,
+    event_type: &str,
+    metadata: Value,
+) -> Result<(), AppError> {
+    let Some(assignment) = assignment else {
+        return Ok(());
+    };
+    let updated = state
+        .update_remote_computer_job_assignment_status(assignment.id, status, metadata)
+        .await?;
+    record_remote_computer_job_assignment_event(state, &updated, job, event_type).await
 }
 
 fn env_flag(name: &str) -> bool {
