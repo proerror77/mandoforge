@@ -608,6 +608,8 @@ async function createSecretRecord(event) {
     key: String(form.get("key") || "").trim(),
     scope_type: String(form.get("scope_type") || "tenant").trim(),
   };
+  const value = String(form.get("value") || "");
+  if (value) payload.value = value;
   if (scopeId) payload.scope_id = scopeId;
   await api("/api/vault/secrets", {
     method: "POST",

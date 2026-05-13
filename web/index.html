@@ -270,6 +270,10 @@
                   Scope ID
                   <input name="scope_id" placeholder="Optional team/project UUID" />
                 </label>
+                <label>
+                  Secret value
+                  <textarea name="value" rows="2" placeholder="Optional: writes to Vault KV v2 when MANDOFORGE_SECRET_PROVIDER=vault is configured"></textarea>
+                </label>
                 <button type="submit">Register Secret Ref</button>
               </form>
               <div id="vault-health" class="list"></div>

@@ -245,6 +245,12 @@ Current worker boundary:
 - Keep `GET /api/tenant-isolation/readiness` as the operator gate for this boundary. It reports runtime tenant mode, header fail-closed status, scoped resource counts, tenant-scoped table coverage, and the current lack of Postgres Row Level Security.
 - Add Postgres RLS policies and tenant context tests before claiming production cross-tenant isolation.
 
+## Vault Boundary
+
+- Keep `secret_records` as a reference catalog only: it stores path/key/scope/version metadata, never secret values.
+- When `POST /api/vault/secrets` or `POST /api/vault/secrets/:id/rotate` includes a `value`, write that value through the configured `SecretProvider` before mutating the catalog. Reserved or incomplete providers fail closed and do not create or rotate the catalog record.
+- Vault KV v2 is the first concrete provider for read/write. External KMS/HSM envelope encryption and production rotation workflows remain explicit Stage 2 gaps.
+
 ## Deployment Boundary
 
 Current deployment targets:

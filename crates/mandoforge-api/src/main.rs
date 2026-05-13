@@ -108,8 +108,8 @@ use remote_computer_runner::{
     remote_computer_runner_for_config,
 };
 use secrets::{
-    SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, VaultSecretProvider,
-    secret_provider_from_env,
+    SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, SecretValue,
+    VaultSecretProvider, secret_provider_from_env,
 };
 #[cfg(test)]
 use shell_runner::docker_shell_args;
@@ -2226,12 +2226,16 @@ struct CreateSecretRecord {
     scope_type: String,
     #[serde(default)]
     scope_id: Option<Uuid>,
+    #[serde(default)]
+    value: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RotateSecretRecord {
     path: String,
     key: String,
+    #[serde(default)]
+    value: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -7683,6 +7687,10 @@ async fn create_secret_record(
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
     let input = validate_secret_record_input(input)?;
+    let secret_ref = SecretRef::new(input.path.as_str(), input.key.as_str())?;
+    let secret_value_written = write_secret_value_if_provided(&secret_ref, input.value.as_ref())
+        .await?
+        .is_some();
     let record = state.create_secret_record(input).await?;
     state
         .append_audit_log(new_audit_log(
@@ -7697,7 +7705,8 @@ async fn create_secret_record(
                 "name": record.name,
                 "scope_type": record.scope_type,
                 "scope_id": record.scope_id,
-                "version": record.version
+                "version": record.version,
+                "secret_value_written": secret_value_written
             }),
         ))
         .await?;
@@ -7719,7 +7728,10 @@ async fn rotate_secret_record(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
-    SecretRef::new(input.path.as_str(), input.key.as_str())?;
+    let secret_ref = SecretRef::new(input.path.as_str(), input.key.as_str())?;
+    let secret_value_written = write_secret_value_if_provided(&secret_ref, input.value.as_ref())
+        .await?
+        .is_some();
     let record = state.rotate_secret_record(id, input).await?;
     state
         .append_audit_log(new_audit_log(
@@ -7734,7 +7746,8 @@ async fn rotate_secret_record(
                 "name": record.name,
                 "scope_type": record.scope_type,
                 "scope_id": record.scope_id,
-                "version": record.version
+                "version": record.version,
+                "secret_value_written": secret_value_written
             }),
         ))
         .await?;
@@ -7758,6 +7771,21 @@ fn validate_secret_record_input(
     }
     SecretRef::new(input.path.as_str(), input.key.as_str())?;
     Ok(input)
+}
+
+async fn write_secret_value_if_provided(
+    secret_ref: &SecretRef,
+    value: Option<&String>,
+) -> Result<Option<()>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let provider = secret_provider_from_env()?;
+    let config = SecretProviderConfig::from_env()?;
+    provider
+        .write_secret(&config, secret_ref, &SecretValue::from_plaintext(value))
+        .await?;
+    Ok(Some(()))
 }
 
 async fn get_codex_app_server_health(
@@ -27437,6 +27465,34 @@ not json
                 .issues
                 .iter()
                 .any(|issue| issue.contains("secret reads are disabled"))
+        );
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/vault/secrets")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "blocked-secret-value",
+                        "path": "providers/blocked",
+                        "key": "api_key",
+                        "value": "must-not-persist"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("MANDOFORGE_VAULT_ADDR")
         );
 
         let secret_record: SecretRecord = request_json(

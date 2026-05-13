@@ -85,6 +85,13 @@ pub(crate) trait SecretProvider: Send + Sync {
         config: &SecretProviderConfig,
         secret_ref: &SecretRef,
     ) -> Result<SecretValue, AppError>;
+
+    async fn write_secret(
+        &self,
+        config: &SecretProviderConfig,
+        secret_ref: &SecretRef,
+        value: &SecretValue,
+    ) -> Result<(), AppError>;
 }
 
 #[allow(dead_code)]
@@ -163,6 +170,12 @@ impl SecretRef {
 
 #[allow(dead_code)]
 impl SecretValue {
+    pub(crate) fn from_plaintext(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+        }
+    }
+
     pub(crate) fn expose_for_provider_use(&self) -> &str {
         &self.value
     }
@@ -186,6 +199,17 @@ impl SecretProvider for ReservedSecretProvider {
     ) -> Result<SecretValue, AppError> {
         Err(AppError::forbidden(
             "secret reads are disabled until a production secret provider is implemented",
+        ))
+    }
+
+    async fn write_secret(
+        &self,
+        _config: &SecretProviderConfig,
+        _secret_ref: &SecretRef,
+        _value: &SecretValue,
+    ) -> Result<(), AppError> {
+        Err(AppError::forbidden(
+            "secret writes are disabled until a production secret provider is implemented",
         ))
     }
 }
@@ -214,6 +238,10 @@ impl VaultSecretProvider {
             config.normalized_mount(),
             secret_ref.path.trim_matches('/')
         )
+    }
+
+    fn kv_write_url(config: &SecretProviderConfig, secret_ref: &SecretRef) -> String {
+        Self::kv_read_url(config, secret_ref)
     }
 
     fn headers(config: &SecretProviderConfig) -> Result<HeaderMap, AppError> {
@@ -290,6 +318,32 @@ impl SecretProvider for VaultSecretProvider {
         }
         Self::parse_kv_v2_secret(value, secret_ref)
     }
+
+    async fn write_secret(
+        &self,
+        config: &SecretProviderConfig,
+        secret_ref: &SecretRef,
+        value: &SecretValue,
+    ) -> Result<(), AppError> {
+        let response = self
+            .client
+            .post(Self::kv_write_url(config, secret_ref))
+            .headers(Self::headers(config)?)
+            .json(&serde_json::json!({
+                "data": {
+                    (secret_ref.key.clone()): value.expose_for_provider_use()
+                }
+            }))
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(AppError::bad_request(format!(
+            "vault secret write failed with status {status}"
+        )))
+    }
 }
 
 fn validate_secret_component(label: &str, value: &str) -> Result<(), AppError> {
@@ -316,7 +370,7 @@ mod tests {
         Json, Router,
         extract::State,
         http::{HeaderMap as AxumHeaderMap, StatusCode},
-        routing::get,
+        routing::{get, post},
     };
     use serde_json::json;
 
@@ -346,6 +400,26 @@ mod tests {
                 }
             }
         })))
+    }
+
+    async fn mock_vault_kv_write(
+        State(state): State<VaultMockState>,
+        headers: AxumHeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> Result<StatusCode, StatusCode> {
+        let token = headers
+            .get("x-vault-token")
+            .and_then(|value| value.to_str().ok());
+        let namespace = headers
+            .get("x-vault-namespace")
+            .and_then(|value| value.to_str().ok());
+        if token != Some(state.token.as_str()) || namespace != Some(state.namespace.as_str()) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        if body["data"]["api_key"] != "rotated-vault-key" {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Ok(StatusCode::NO_CONTENT)
     }
 
     #[test]
@@ -483,6 +557,16 @@ mod tests {
 
         assert!(provider.health_check(&config).await.is_err());
         assert!(provider.read_secret(&config, &secret_ref).await.is_err());
+        assert!(
+            provider
+                .write_secret(
+                    &config,
+                    &secret_ref,
+                    &super::SecretValue::from_plaintext("secret")
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -582,5 +666,43 @@ mod tests {
 
         server.abort();
         assert_eq!(secret.expose_for_provider_use(), "mock-vault-key");
+    }
+
+    #[tokio::test]
+    async fn vault_secret_provider_writes_kv_v2_secret_over_http() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let router = Router::new()
+            .route("/v1/kv/data/providers/openai", post(mock_vault_kv_write))
+            .with_state(VaultMockState {
+                token: "test-token".to_string(),
+                namespace: "agent-os".to_string(),
+            });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("mock vault");
+        });
+        let config = SecretProviderConfig::from_lookup(|key| match key {
+            "MANDOFORGE_VAULT_ADDR" => Some(format!("http://{addr}")),
+            "MANDOFORGE_VAULT_MOUNT" => Some("kv".to_string()),
+            "MANDOFORGE_VAULT_NAMESPACE" => Some("agent-os".to_string()),
+            "MANDOFORGE_VAULT_TOKEN" => Some("test-token".to_string()),
+            _ => None,
+        })
+        .expect("vault config");
+        let secret_ref = SecretRef::new("providers/openai", "api_key").expect("secret ref");
+        let provider = VaultSecretProvider::new().expect("provider");
+
+        provider
+            .write_secret(
+                &config,
+                &secret_ref,
+                &super::SecretValue::from_plaintext("rotated-vault-key"),
+            )
+            .await
+            .expect("write secret");
+
+        server.abort();
     }
 }
