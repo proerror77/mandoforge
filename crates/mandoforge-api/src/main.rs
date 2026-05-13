@@ -102,9 +102,9 @@ use provider::{
     ProviderResponse,
 };
 use remote_computer_runner::{
-    RemoteComputerRunner, RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
+    RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
-    ReservedRemoteComputerRunner,
+    remote_computer_runner_for_config,
 };
 use secrets::{
     SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, VaultSecretProvider,
@@ -15555,7 +15555,7 @@ async fn dry_run_remote_computer_runner(
     )
     .await?;
     let config = RemoteComputerRunnerConfig::from_env();
-    let runner = ReservedRemoteComputerRunner;
+    let runner = remote_computer_runner_for_config(&config);
     let session_id = input.session_id;
     let remote_computer_id = input.remote_computer_id;
     let response = runner.dry_run(&config, input).await;
@@ -16187,7 +16187,7 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
 
 fn build_remote_computer_runner_readiness() -> RemoteComputerRunnerReadiness {
     let config = RemoteComputerRunnerConfig::from_env();
-    let runner = ReservedRemoteComputerRunner;
+    let runner = remote_computer_runner_for_config(&config);
     runner.readiness(&config)
 }
 

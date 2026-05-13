@@ -1953,6 +1953,7 @@ function renderRemoteComputerReadiness() {
     <div class="item">
       <strong>RUNNER BOUNDARY</strong>
       <div class="muted">${escapeHtml(runner.status || "unknown")} · mode ${escapeHtml(runner.mode || "reserved")} · configured ${runner.configured ? "yes" : "no"}</div>
+      <div class="muted">Client configured: ${runner.client_configured ? "yes" : "no"} · mutation enabled: ${runner.mutation_enabled ? "yes" : "no"} · dry-run only: ${runner.dry_run_only === false ? "no" : "yes"}</div>
       <div class="muted">Namespace: ${escapeHtml(runner.namespace || "unknown")} · Service account: ${escapeHtml(runner.service_account || "unknown")}</div>
       <div class="muted">${escapeHtml(runner.message || "Kubernetes Pod mutation is disabled unless a runner is explicitly implemented")}</div>
     </div>

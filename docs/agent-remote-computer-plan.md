@@ -52,6 +52,7 @@ Covered today:
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness and dry-run endpoints.
+- `KubernetesRemoteComputerRunner` exists as an explicit `MANDOFORGE_REMOTE_COMPUTER_RUNNER=kubernetes` adapter skeleton. It validates template/client config and reports Pod create/delete intent, but remains dry-run-only.
 - `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
 - `POST /api/remote-computers/reclaim-stale` reclaims stale attachments and expired leases with event/audit records and no tool execution.
 - `/api/scheduler/due-plan` and `/api/scheduler/run-due` include Remote Computer stale reclaim in the aggregate operations path.
@@ -67,7 +68,7 @@ Not covered today:
 - No warm pool of prestarted agent Pods.
 - No artifact/state sync daemon inside the Pod.
 - No KEDA/HPA queue-depth scaling for remote computer pools.
-- No real Kubernetes client mutation path; the current runner only reports intent and dry-run evidence.
+- No real Kubernetes client mutation path; the current Kubernetes adapter reports intent and dry-run evidence only.
 - No Kubernetes Pod mutation from the scheduler; reclaim remains metadata-only.
 
 ## Target Components
@@ -181,7 +182,7 @@ Completed Stage 2 readiness skeleton:
 
 Remaining Stage 2 pilot work:
 
-1. Add a real Kubernetes client implementation behind the existing runner boundary, still fail-closed by policy and configuration.
+1. Add a real Kubernetes API client implementation behind the existing adapter boundary, still fail-closed by policy and configuration.
 2. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
 
 Stage 2 acceptance for this slice:
@@ -233,15 +234,15 @@ Stage 3 acceptance:
 
 ## Immediate Next Slice
 
-After scheduler integration, the next coherent implementation slice should be:
+After the Kubernetes adapter skeleton, the next coherent implementation slice should be:
 
 ```text
-Add Remote Computer Kubernetes client adapter skeleton
+Add Remote Computer live Kubernetes client behind explicit opt-in
 ```
 
 Concrete deliverables:
 
-- Add a `KubernetesRemoteComputerRunner` implementation behind explicit env config.
-- Keep create/delete operations dry-run or disabled by default unless a live-cluster flag is set.
+- Add a narrow Kubernetes API client dependency or HTTP client boundary.
+- Keep create/delete operations disabled unless a live-cluster flag and policy gate are both set.
 - Keep `shell.exec` and `codex.exec` on the approved worker path until Pod lifecycle telemetry is reliable.
-- Add tests proving the adapter fails closed without kubeconfig/in-cluster config and still does not bypass Tool Router, Policy Engine, or Approval Engine.
+- Add tests proving live-client failures are audited and still do not bypass Tool Router, Policy Engine, or Approval Engine.
