@@ -35,6 +35,9 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /agent-state
+            - name: state-contract
+              mountPath: /agent-state/.mandoforge/contract
+              readOnly: true
             - name: workspace
               mountPath: /workspace
           resources:
@@ -48,5 +51,8 @@ spec:
         - name: state
           persistentVolumeClaim:
             claimName: mandoforge-remote-computer-state
+        - name: state-contract
+          configMap:
+            name: mandoforge-remote-computer-state-contract
         - name: workspace
           emptyDir: {}

@@ -15,5 +15,6 @@ resources:
   - scheduler.yaml
   - remote-computer-serviceaccount.yaml
   - remote-computer-state-pvc.yaml
+  - remote-computer-state-contract.yaml
   - agent-remote-computer.yaml
   - remote-computer-networkpolicy.yaml

@@ -586,6 +586,7 @@ fn build_kubernetes_pod_request(config: &RemoteComputerRunnerConfig, pod_name: &
                 },
                 "volumeMounts": [
                     {"name": "state", "mountPath": "/agent-state"},
+                    {"name": "state-contract", "mountPath": "/agent-state/.mandoforge/contract", "readOnly": true},
                     {"name": "workspace", "mountPath": "/workspace"}
                 ],
                 "resources": {
@@ -595,6 +596,7 @@ fn build_kubernetes_pod_request(config: &RemoteComputerRunnerConfig, pod_name: &
             }],
             "volumes": [
                 {"name": "state", "persistentVolumeClaim": {"claimName": "mandoforge-remote-computer-state"}},
+                {"name": "state-contract", "configMap": {"name": "mandoforge-remote-computer-state-contract"}},
                 {"name": "workspace", "emptyDir": {}}
             ]
         }
@@ -926,6 +928,24 @@ mod tests {
             assert_eq!(
                 body["spec"]["serviceAccountName"],
                 "mandoforge-remote-computer"
+            );
+            assert!(
+                body["spec"]["containers"][0]["volumeMounts"]
+                    .as_array()
+                    .expect("volume mounts")
+                    .iter()
+                    .any(|mount| mount["name"] == "state-contract"
+                        && mount["mountPath"] == "/agent-state/.mandoforge/contract"
+                        && mount["readOnly"] == json!(true))
+            );
+            assert!(
+                body["spec"]["volumes"]
+                    .as_array()
+                    .expect("volumes")
+                    .iter()
+                    .any(|volume| volume["name"] == "state-contract"
+                        && volume["configMap"]["name"]
+                            == "mandoforge-remote-computer-state-contract")
             );
             Json(json!({"metadata": {"name": "agent-remote-computer-test"}}))
         }

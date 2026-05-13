@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mandoforge-remote-computer-state-contract
+data:
+  state-contract.json: |
+    {
+      "version": 1,
+      "mountPath": "/agent-state",
+      "layout": {
+        "memory": "/agent-state/memory",
+        "notes": "/agent-state/notes",
+        "skills": "/agent-state/skills",
+        "artifacts": "/agent-state/artifacts",
+        "locks": "/agent-state/.locks",
+        "manifests": "/agent-state/.mandoforge"
+      },
+      "conflictPolicy": "one-active-writer-per-session",
+      "writeContract": {
+        "sharedMemoryNotesSkills": "read-mostly",
+        "sessionWorkspace": "single-writer",
+        "writesThrough": "runtime-api-or-lock-aware-sync"
+      }
+    }

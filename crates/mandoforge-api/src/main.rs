@@ -1319,6 +1319,12 @@ struct RemoteComputerStateFilesystemReadiness {
     pvc_path: String,
     access_mode: String,
     mount_path: String,
+    state_contract_present: bool,
+    state_contract_path: String,
+    state_layout_paths: Vec<String>,
+    conflict_policy: String,
+    lock_manager_configured: bool,
+    sync_contract_status: String,
     distributed_filesystem_configured: bool,
     provider: String,
     provider_configured_by_env: bool,
@@ -17045,8 +17051,10 @@ async fn build_remote_computer_readiness(
         "network_policy",
     );
     let pvc_path = "deploy/k8s/remote-computer-state-pvc.yaml";
+    let state_contract_path = "deploy/k8s/remote-computer-state-contract.yaml";
     let provider_manifest_path = "deploy/k8s/remote-computer-state-juicefs-example.yaml";
     let pvc_present = project_file_path(pvc_path).is_some();
+    let state_contract_present = project_file_path(state_contract_path).is_some();
     let state_provider = std::env::var("MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER")
         .ok()
         .map(|provider| provider.trim().to_string())
@@ -17055,11 +17063,41 @@ async fn build_remote_computer_readiness(
     let provider_configured_by_env = state_provider != "pvc-placeholder";
     let provider_manifest_present = project_file_path(provider_manifest_path).is_some();
     let distributed_filesystem_configured = provider_configured_by_env;
+    let conflict_policy = std::env::var("MANDOFORGE_REMOTE_COMPUTER_STATE_CONFLICT_POLICY")
+        .ok()
+        .map(|policy| policy.trim().to_string())
+        .filter(|policy| !policy.is_empty())
+        .unwrap_or_else(|| "one-active-writer-per-session".to_string());
+    let lock_manager_configured = env_bool("MANDOFORGE_REMOTE_COMPUTER_STATE_LOCK_MANAGER");
+    let sync_contract_status =
+        if distributed_filesystem_configured && state_contract_present && lock_manager_configured {
+            "provider_and_lock_manager_configured"
+        } else if distributed_filesystem_configured && state_contract_present {
+            "provider_configured_without_lock_manager"
+        } else if state_contract_present {
+            "contract_documented"
+        } else {
+            "missing"
+        }
+        .to_string();
     let state_filesystem = RemoteComputerStateFilesystemReadiness {
         pvc_present,
         pvc_path: pvc_path.to_string(),
         access_mode: "ReadWriteMany".to_string(),
         mount_path: "/agent-state".to_string(),
+        state_contract_present,
+        state_contract_path: state_contract_path.to_string(),
+        state_layout_paths: vec![
+            "/agent-state/memory".to_string(),
+            "/agent-state/notes".to_string(),
+            "/agent-state/skills".to_string(),
+            "/agent-state/artifacts".to_string(),
+            "/agent-state/.locks".to_string(),
+            "/agent-state/.mandoforge".to_string(),
+        ],
+        conflict_policy,
+        lock_manager_configured,
+        sync_contract_status,
         distributed_filesystem_configured,
         provider: state_provider,
         provider_configured_by_env,
@@ -17165,6 +17203,12 @@ async fn build_remote_computer_readiness(
             "critical",
             "remote computer state PVC placeholder is missing",
         ));
+    } else if !state_filesystem.state_contract_present {
+        attention_items.push(remote_computer_attention(
+            "state_contract_missing",
+            "critical",
+            "remote computer Memory/Notes/Skills state contract ConfigMap is missing",
+        ));
     } else if !state_filesystem.distributed_filesystem_configured {
         attention_items.push(remote_computer_attention(
             "distributed_state_filesystem_missing",
@@ -17212,6 +17256,12 @@ async fn build_remote_computer_readiness(
     if !state_filesystem.distributed_filesystem_configured {
         runbook_actions.push(
             "set MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER to juicefs, cephfs, longhorn-rwx, or an equivalent provider before running multi-Pod Memory/Notes/Skills sync"
+                .to_string(),
+        );
+    }
+    if !state_filesystem.lock_manager_configured {
+        runbook_actions.push(
+            "keep shared Memory/Notes/Skills read-mostly and route writes through runtime APIs until a lock-aware sync manager is configured"
                 .to_string(),
         );
     }
@@ -30261,6 +30311,28 @@ not json
             remote_computer_readiness
                 .state_filesystem
                 .provider_manifest_present
+        );
+        assert!(
+            remote_computer_readiness
+                .state_filesystem
+                .state_contract_present
+        );
+        assert_eq!(
+            remote_computer_readiness.state_filesystem.conflict_policy,
+            "one-active-writer-per-session"
+        );
+        assert_eq!(
+            remote_computer_readiness
+                .state_filesystem
+                .sync_contract_status,
+            "contract_documented"
+        );
+        assert!(
+            remote_computer_readiness
+                .state_filesystem
+                .state_layout_paths
+                .iter()
+                .any(|path| path == "/agent-state/skills")
         );
         assert!(
             remote_computer_readiness

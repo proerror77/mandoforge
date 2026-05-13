@@ -1994,6 +1994,8 @@ function renderRemoteComputerReadiness() {
       <strong>STATE FILESYSTEM</strong>
       <div class="muted">${escapeHtml(stateFs.provider || "unknown")} · ${escapeHtml(stateFs.access_mode || "unknown")} · ${escapeHtml(stateFs.mount_path || "unknown")}</div>
       <div class="muted">PVC: ${escapeHtml(stateFs.pvc_path || "unknown")} · ${stateFs.pvc_present ? "present" : "missing"} · distributed state: ${stateFs.distributed_filesystem_configured ? "configured" : "not configured"}</div>
+      <div class="muted">Contract: ${escapeHtml(stateFs.state_contract_path || "unknown")} · ${stateFs.state_contract_present ? "present" : "missing"} · conflict policy ${escapeHtml(stateFs.conflict_policy || "unknown")} · lock manager ${stateFs.lock_manager_configured ? "configured" : "missing"}</div>
+      <div class="muted">Layout: ${escapeHtml((stateFs.state_layout_paths || []).join(", ") || "not reported")} · sync contract ${escapeHtml(stateFs.sync_contract_status || "unknown")}</div>
       <div class="muted">Provider source: ${stateFs.provider_configured_by_env ? "env" : "placeholder"} · example manifest: ${stateFs.provider_manifest_present ? "present" : "missing"} · ${escapeHtml((stateFs.supported_providers || []).join(", ") || "no providers listed")}</div>
     </div>
     <div class="item">

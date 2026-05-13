@@ -49,6 +49,7 @@ Covered today:
 - Codex App Server and Codex CLI execution remain governed by approval and queue paths.
 - Remote Computer readiness is API/UI-visible.
 - K8s Remote Computer manifests exist for the Pod template, service account, state PVC placeholder, and NetworkPolicy skeleton.
+- A mounted state-contract ConfigMap now defines the `/agent-state` layout for Memory, Notes, Skills, artifacts, lock files, and manifests. The contract records the current conflict rule: one active writer per session workspace, with shared Memory/Notes/Skills kept read-mostly until a lock-aware sync manager is configured.
 - A JuiceFS CSI example manifest documents the target shared `/agent-state` provider shape, but it is not included in the default kustomization and must be configured explicitly before use.
 - A warm-pool Deployment example documents the cold-start mitigation shape, but it is not included in the default kustomization and does not yet assign sessions to prestarted Pods.
 - A KEDA ScaledObject example documents the queue-pressure scaling shape for the warm pool, but it is not included in the default kustomization and depends on production metrics work.
@@ -71,7 +72,7 @@ Not covered today:
 - No actual Pod attach transport; session attachment is control-plane state only.
 - No actual execution-job transport into Pods; job assignment is control-plane handoff state only.
 - Pod exec transport is planned with API path evidence, but remains reserved/fail-closed.
-- No real distributed Memory/Notes/Skills mount in the default deployment.
+- No real distributed Memory/Notes/Skills mount in the default deployment; the default deployment now has only the mounted state layout and conflict contract.
 - No production distributed filesystem integration yet; JuiceFS exists as an example manifest only, while CephFS, Longhorn RWX, cloud file storage, or object-backed sync remain future provider options.
 - No production warm pool assignment; the warm-pool manifest is an opt-in skeleton only.
 - No artifact/state sync daemon inside the Pod.
