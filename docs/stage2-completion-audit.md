@@ -1,6 +1,6 @@
 # Stage 2 Completion Audit
 
-Audit date: 2026-05-13
+Audit date: 2026-05-14
 
 Objective: complete Stage 2, "Governed Runtime Pilot", for the Rust-native Generic Agent OS runtime.
 
@@ -49,10 +49,11 @@ Latest evidence:
 ```text
 cargo test -p mandoforge-api: 211 passed
 cargo test -p mandoforge-api stage2_readiness -- --nocapture: 1 passed
-stage2 production evidence gate local inventory: stage2_status=blocked; open_gap_count=12; evidence_requirement_count=12
+stage2 production evidence gate local inventory: stage2_status=blocked; open_gap_count=12; evidence_requirement_count=12; validation_declared_endpoint_count=26; validation_missing_endpoint_count=26
+strict validation coverage gate fails closed without production validation evidence and reports missing endpoints; controller-backed validation mode reports missing controller configuration, for example POST /api/tenant-isolation/routing/validate returned HTTP 400 with MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL required
 static UI actionbook smoke ok
 kustomize deploy/k8s rendered 659 lines; kustomize deploy/stage2-evidence rendered 67 lines; kustomize deploy rendered 792 lines
-GitHub Actions run 25827504833 passed the expanded CI gate: fmt, check, test, node syntax, Stage 1/2 script syntax, and K8s/evidence overlay render
+GitHub Actions run 25828781372 passed the expanded CI gate: fmt, check, test, node syntax, Stage 1/2 script syntax, and K8s/evidence overlay render
 ports 8791 and 9324 had no residual listeners after Actionbook verification
 ```
 
