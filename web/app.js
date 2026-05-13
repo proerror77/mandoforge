@@ -3996,10 +3996,13 @@ function renderProviders() {
               <div class="metric"><span>Status</span><strong>${escapeHtml(productionRolloutRun.status)}</strong></div>
               <div class="metric"><span>Providers</span><strong>${formatInteger(productionRolloutRun.provider_count)}</strong></div>
               <div class="metric"><span>Gate</span><strong>${escapeHtml(productionRolloutRun.enforcement?.status || "unknown")}</strong></div>
+              <div class="metric"><span>Controller</span><strong>${escapeHtml(productionRolloutRun.controller_configured ? "configured" : "missing")}</strong></div>
             </div>
             <dl>
               <dt>Environment</dt>
               <dd>${escapeHtml(productionRolloutRun.environment || "production")}</dd>
+              <dt>Controller execution</dt>
+              <dd>${escapeHtml(productionRolloutRun.controller_execution?.status || "unknown")} · attempted ${escapeHtml(productionRolloutRun.controller_execution?.attempted ? "yes" : "no")} · HTTP ${escapeHtml(productionRolloutRun.controller_execution?.http_status || "n/a")}</dd>
               <dt>Message</dt>
               <dd>${escapeHtml(productionRolloutRun.message || "not reported")}</dd>
               <dt>Ran at</dt>

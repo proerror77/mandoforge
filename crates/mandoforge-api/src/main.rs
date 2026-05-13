@@ -2503,6 +2503,8 @@ struct ProviderProductionRolloutRun {
     provider_count: usize,
     provider_ids: Vec<Uuid>,
     enforcement: ProviderPolicyGateEnforcement,
+    controller_configured: bool,
+    controller_execution: Value,
     message: String,
     ran_at: DateTime<Utc>,
 }
@@ -7515,7 +7517,26 @@ async fn run_provider_production_rollout(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(
+        execute_provider_production_rollout_with_lookup(
+            &state,
+            principal.subject_id,
+            input,
+            |key| std::env::var(key).ok(),
+        )
+        .await?,
+    ))
+}
 
+async fn execute_provider_production_rollout_with_lookup<F>(
+    state: &AppState,
+    subject_id: String,
+    input: RunProviderProductionRollout,
+    lookup: F,
+) -> Result<ProviderProductionRolloutRun, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let environment =
         optional_trimmed(input.environment.as_deref()).unwrap_or_else(|| "production".to_string());
     let reason = optional_trimmed(input.reason.as_deref());
@@ -7554,7 +7575,13 @@ async fn run_provider_production_rollout(
     let gate_summary = build_provider_policy_gate_run_summary(&audit_logs, generated_at);
     let latest_run = gate_summary.latest_run.as_ref();
     let mut status = "applied".to_string();
-    let mut message = "provider production rollout passed policy gate enforcement".to_string();
+    let message: String;
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": "blocked_before_controller_execution"
+    });
+    let controller_configured = provider_rollout_controller_configured(&lookup);
     if provider_ids.is_empty() {
         status = "blocked".to_string();
         message = "provider production rollout is blocked because no active providers are selected"
@@ -7570,6 +7597,55 @@ async fn run_provider_production_rollout(
         message =
             "provider production rollout is blocked because the latest provider gate does not cover the current provider set"
                 .to_string();
+    } else if !controller_configured {
+        status = "blocked".to_string();
+        message =
+            "provider production rollout is blocked because MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL is not configured"
+                .to_string();
+        controller_execution = json!({
+            "attempted": false,
+            "status": "skipped",
+            "reason": "controller_not_configured"
+        });
+    } else {
+        match execute_provider_rollout_controller(
+            &lookup,
+            &environment,
+            reason.as_deref(),
+            &provider_ids,
+            &providers,
+            &gate_summary.production_enforcement,
+            latest_run,
+            generated_at,
+        )
+        .await
+        {
+            Ok(execution) => {
+                controller_execution = execution.clone();
+                let controller_status = execution
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("blocked");
+                if controller_status == "applied" {
+                    message =
+                        "provider production rollout applied through external rollout controller"
+                            .to_string();
+                } else {
+                    status = "blocked".to_string();
+                    message =
+                        "provider production rollout controller did not confirm apply".to_string();
+                }
+            }
+            Err(error) => {
+                status = "blocked".to_string();
+                message = "provider production rollout controller failed".to_string();
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
     }
     let action = if status == "blocked" {
         "provider.production_rollout_blocked"
@@ -7585,13 +7661,15 @@ async fn run_provider_production_rollout(
             "providers",
             None,
             json!({
-                "subject": principal.subject_id,
+                "subject": subject_id,
                 "status": status,
                 "environment": environment,
                 "reason": reason,
                 "provider_ids": provider_ids,
                 "provider_count": provider_ids.len(),
                 "production_enforcement": gate_summary.production_enforcement.clone(),
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
                 "latest_gate_run_id": latest_run.map(|run| run.id),
                 "latest_gate_provider_count": latest_run.map(|run| run.provider_count),
                 "current_provider_count": providers.len(),
@@ -7599,7 +7677,7 @@ async fn run_provider_production_rollout(
             }),
         ))
         .await?;
-    Ok(Json(ProviderProductionRolloutRun {
+    Ok(ProviderProductionRolloutRun {
         id: audit_log.id,
         status,
         environment,
@@ -7607,8 +7685,104 @@ async fn run_provider_production_rollout(
         provider_count: provider_ids.len(),
         provider_ids,
         enforcement: gate_summary.production_enforcement,
+        controller_configured,
+        controller_execution,
         message,
         ran_at: audit_log.created_at,
+    })
+}
+
+fn provider_rollout_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_provider_rollout_controller<F>(
+    lookup: &F,
+    environment: &str,
+    reason: Option<&str>,
+    provider_ids: &[Uuid],
+    providers: &[ProviderRecord],
+    enforcement: &ProviderPolicyGateEnforcement,
+    latest_run: Option<&ProviderPolicyGateRun>,
+    requested_at: DateTime<Utc>,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_PROVIDER_ROLLOUT_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_PROVIDER_ROLLOUT_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let selected_ids = provider_ids.iter().copied().collect::<HashSet<_>>();
+    let selected_providers = providers
+        .iter()
+        .filter(|provider| selected_ids.contains(&provider.id))
+        .map(|provider| {
+            json!({
+                "id": provider.id,
+                "name": provider.name,
+                "provider_type": provider.provider_type,
+                "status": provider.status,
+                "default_model": provider.default_model,
+                "base_url_configured": provider.base_url.as_deref().is_some_and(|value| !value.trim().is_empty()),
+                "has_api_key_ref": provider.config.get("api_key_ref").and_then(Value::as_str).is_some(),
+                "has_api_key_env": provider.config.get("api_key_env").and_then(Value::as_str).is_some(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = json!({
+        "type": "mandoforge.provider_production_rollout",
+        "environment": environment,
+        "reason": reason,
+        "provider_ids": provider_ids,
+        "providers": selected_providers,
+        "production_enforcement": enforcement,
+        "latest_gate_run_id": latest_run.map(|run| run.id),
+        "latest_gate_run_status": latest_run.map(|run| run.status.clone()),
+        "requested_at": requested_at,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "provider rollout controller failed with status {http_status}"
+        )));
+    }
+    let provider_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("applied");
+    let applied = matches!(provider_status, "applied" | "success" | "ok" | "validated");
+    Ok(json!({
+        "attempted": true,
+        "status": if applied { "applied" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": provider_status,
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
     }))
 }
 
@@ -26951,7 +27125,7 @@ not json
         .await;
         assert_eq!(gate_run.run.status, "passed");
 
-        let applied: ProviderProductionRolloutRun = request_json(
+        let blocked_without_controller: ProviderProductionRolloutRun = request_json(
             app.clone(),
             Request::builder()
                 .method(Method::POST)
@@ -26970,9 +27144,19 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(applied.status, "applied");
-        assert_eq!(applied.provider_count, 1);
-        assert!(!applied.enforcement.production_blocked);
+        assert_eq!(blocked_without_controller.status, "blocked");
+        assert_eq!(blocked_without_controller.provider_count, 1);
+        assert!(!blocked_without_controller.enforcement.production_blocked);
+        assert!(!blocked_without_controller.controller_configured);
+        assert_eq!(
+            blocked_without_controller.controller_execution["reason"],
+            "controller_not_configured"
+        );
+        assert!(
+            blocked_without_controller
+                .message
+                .contains("PROVIDER_ROLLOUT_CONTROLLER_URL")
+        );
 
         let _: ProviderRecord = request_json(
             app.clone(),
@@ -27033,10 +27217,92 @@ not json
             log.action == "provider.production_rollout_blocked"
                 && log.details["status"] == "blocked"
         }));
+    }
+
+    #[tokio::test]
+    async fn provider_production_rollout_executes_external_controller() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let provider = state
+            .create_provider(CreateProviderRecord {
+                provider_type: "mock".to_string(),
+                name: "controller-backed-provider".to_string(),
+                base_url: None,
+                default_model: Some("gpt-5.4-mini".to_string()),
+                config: json!({"budget": {"daily_request_limit": 10}}),
+            })
+            .await
+            .expect("create provider");
+        let gate_run = execute_provider_policy_gate(&state, Some("admin-1".to_string()), "user")
+            .await
+            .expect("policy gate run");
+        assert_eq!(gate_run.run.status, "passed");
+
+        let controller_payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("controller listener");
+        let controller_addr = listener.local_addr().expect("controller addr");
+        let controller = Router::new()
+            .route("/provider-rollout", post(mock_provider_rollout_controller))
+            .with_state(controller_payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock provider rollout controller");
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/provider-rollout"))
+            }
+            "MANDOFORGE_PROVIDER_ROLLOUT_TOKEN" => Some("rollout-token".to_string()),
+            _ => None,
+        };
+
+        let rollout = execute_provider_production_rollout_with_lookup(
+            &state,
+            "admin-1".to_string(),
+            RunProviderProductionRollout {
+                environment: Some("production".to_string()),
+                reason: Some("external controller test".to_string()),
+                provider_ids: vec![provider.id],
+            },
+            lookup,
+        )
+        .await
+        .expect("provider production rollout");
+
+        assert_eq!(rollout.status, "applied");
+        assert_eq!(rollout.provider_count, 1);
+        assert!(rollout.controller_configured);
+        assert_eq!(rollout.controller_execution["status"], "applied");
+        assert_eq!(
+            rollout.controller_execution["deployment_id"],
+            "provider-rollout-1"
+        );
+
+        let payloads = controller_payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.provider_production_rollout"
+        );
+        assert_eq!(payloads[0]["environment"], "production");
+        assert_eq!(payloads[0]["provider_ids"][0], provider.id.to_string());
+        assert_eq!(payloads[0]["latest_gate_run_status"], "passed");
+        assert_eq!(
+            payloads[0]["providers"][0]["name"],
+            "controller-backed-provider"
+        );
+
+        let audit_logs = state.list_audit_logs(None).await.expect("audit logs");
         assert!(audit_logs.iter().any(|log| {
             log.action == "provider.production_rollout_applied"
                 && log.details["status"] == "applied"
+                && log.details["controller_configured"] == true
+                && log.details["controller_execution"]["status"] == "applied"
         }));
+
+        controller_server.abort();
     }
 
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {
@@ -27737,6 +28003,30 @@ not json
                 .is_some_and(|value| value.starts_with("Bearer "))
         );
         Json(json!({"data": [{"id": "gpt-5.4-mini"}]}))
+    }
+
+    async fn mock_provider_rollout_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer rollout-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "applied",
+            "deployment_id": "provider-rollout-1",
+            "message": "rollout controller applied provider config",
+            "steps": [
+                {"name": "preflight", "status": "passed"},
+                {"name": "apply", "status": "applied"},
+                {"name": "verify", "status": "passed"}
+            ]
+        }))
     }
 
     async fn mock_vault_health() -> StatusCode {
