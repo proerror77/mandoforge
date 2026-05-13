@@ -55,8 +55,8 @@ wait_for_static_ui() {
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
     hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
     hasFinanceOperations: text.includes('Run Finance Ops') && text.includes('FINANCE OPERATIONS') && text.includes('OPERATIONS STATUS') && text.includes('RUNBOOK ACTIONS'),
-    hasObservabilityDashboard: text.includes('Observability') && text.includes('Telemetry / Backpressure / Error Events') && text.includes('Run Remediation') && Boolean(document.querySelector('#observability-summary')),
-    hasCollectorReadiness: text.includes('COLLECTOR READINESS') && text.includes('COLLECTOR ENDPOINT') && text.includes('HEALTH MESSAGE'),
+    hasObservabilityDashboard: text.includes('Observability') && text.includes('Telemetry / Backpressure / Error Events') && text.includes('Run Remediation') && text.includes('Validate Collector Cluster') && Boolean(document.querySelector('#observability-summary')),
+    hasCollectorReadiness: text.includes('COLLECTOR READINESS') && text.includes('COLLECTOR ENDPOINT') && text.includes('HEALTH MESSAGE') && (text.includes('CLUSTER ROLLOUT') || text.includes('Cluster rollout')) && Boolean(document.querySelector('#validate-observability-collector-cluster')),
     hasCostAlertRoutes: text.includes('Create Alert Route') && Array.from(document.querySelectorAll('#cost-alert-route-form input')).some((input) => input.placeholder.includes('SMTP recipient email')) && text.includes('No cost alert routes'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
     hasProviderApprovalWorkflow: text.includes('Request Provider Approval') && text.includes('Approver subject'),
@@ -77,7 +77,7 @@ wait_for_static_ui() {
     hasReleasePromotionWorkflow: (text.includes('Request Prod Approval') || text.includes('No eval runs')) && Boolean(document.querySelector('#agent-releases')) && text.includes('RELEASE AUTOMATION RUNS'),
     hasAgentReleases: text.includes('AGENT RELEASES') && Boolean(document.querySelector('#agent-releases')),
     hasWorkerDashboard: text.includes('Worker Dashboard') && text.includes('Queue readiness') && text.includes('QUEUE DURABILITY') && text.includes('AUTOSCALING SKELETON') && text.includes('WORKER LOAD VALIDATION') && text.includes('WORKER RUNBOOK ACTIONS') && Boolean(document.querySelector('#worker-readiness')),
-    hasRemoteComputerReadiness: text.includes('Remote Computers') && text.includes('REMOTE COMPUTER READINESS') && text.includes('STATE FILESYSTEM') && text.includes('Production profile:') && text.includes('RUNNER BOUNDARY') && text.includes('REMOTE COMPUTER LEASE STORE') && text.includes('REMOTE COMPUTER ATTACHMENTS') && text.includes('REMOTE COMPUTER STATE LOCKS') && text.includes('REMOTE ARTIFACT DISCOVERY') && text.includes('REMOTE COMPUTER SIDECAR HEARTBEATS') && text.includes('Supervision:') && text.includes('Artifact discovery sidecar') && text.includes('Discover Remote Artifacts') && text.includes('Acquire State Lock') && text.includes('REMOTE COMPUTER RUNBOOK') && Boolean(document.querySelector('#remote-computer-readiness')),
+    hasRemoteComputerReadiness: text.includes('Remote Computers') && text.includes('REMOTE COMPUTER READINESS') && text.includes('STATE FILESYSTEM') && text.includes('Production profile:') && text.includes('RUNNER BOUNDARY') && text.includes('REMOTE COMPUTER LEASE STORE') && text.includes('REMOTE COMPUTER ATTACHMENTS') && text.includes('REMOTE COMPUTER STATE LOCKS') && text.includes('REMOTE ARTIFACT DISCOVERY') && text.includes('REMOTE COMPUTER SIDECAR HEARTBEATS') && text.includes('Supervision:') && text.includes('Artifact discovery sidecar') && text.includes('Discover Remote Artifacts') && text.includes('Acquire State Lock') && text.includes('Validate State Sync') && text.includes('REMOTE COMPUTER RUNBOOK') && Boolean(document.querySelector('#remote-computer-readiness')) && Boolean(document.querySelector('#validate-remote-state-sync')),
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
     metricCards: document.querySelectorAll('.metric').length,
     hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
@@ -162,6 +162,8 @@ grep -q "bootstrapEvalSuite" /tmp/mandoforge-actionbook-app.js
 grep -q "requestEvalRunPromotion" /tmp/mandoforge-actionbook-app.js
 grep -q "agentReleaseAutomationRuns" /tmp/mandoforge-actionbook-app.js
 grep -q "runObservabilityRemediation" /tmp/mandoforge-actionbook-app.js
+grep -q "validateObservabilityCollectorCluster" /tmp/mandoforge-actionbook-app.js
+grep -q "validate-observability-collector-cluster" /tmp/mandoforge-actionbook-index.html
 grep -q "Create Judge Profile" /tmp/mandoforge-actionbook-index.html
 grep -q "Bootstrap Stage 2 Suite" /tmp/mandoforge-actionbook-index.html
 grep -q "vaultReadiness" /tmp/mandoforge-actionbook-app.js
@@ -178,6 +180,8 @@ grep -q "worker-readiness" /tmp/mandoforge-actionbook-index.html
 grep -q "run-worker-load-validation" /tmp/mandoforge-actionbook-index.html
 grep -q "remote-computer-readiness" /tmp/mandoforge-actionbook-index.html
 grep -q "remoteComputerStateLocks" /tmp/mandoforge-actionbook-app.js
+grep -q "validateRemoteStateSync" /tmp/mandoforge-actionbook-app.js
+grep -q "validate-remote-state-sync" /tmp/mandoforge-actionbook-index.html
 grep -q "remoteComputerSidecarHeartbeats" /tmp/mandoforge-actionbook-app.js
 grep -q "remote_computer_sidecar_supervision" /tmp/mandoforge-actionbook-app.js
 grep -q "discoverRemoteArtifacts" /tmp/mandoforge-actionbook-app.js
