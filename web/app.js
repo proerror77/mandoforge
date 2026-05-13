@@ -71,6 +71,7 @@ const state = {
   projects: [],
   memberships: [],
   tenantInvitations: [],
+  tenantIsolationReadiness: null,
   tenantProvisioning: null,
   selectedOrganizationId: "",
   selectedTeamId: "",
@@ -150,6 +151,7 @@ const usageRollupRoot = document.querySelector("#usage-rollups");
 const costAlertRouteRoot = document.querySelector("#cost-alert-routes");
 const governanceRoot = document.querySelector("#governance-status");
 const organizationRoot = document.querySelector("#organizations");
+const tenantIsolationReadinessRoot = document.querySelector("#tenant-isolation-readiness");
 const teamRoot = document.querySelector("#teams");
 const projectRoot = document.querySelector("#projects");
 const membershipRoot = document.querySelector("#memberships");
@@ -1396,6 +1398,7 @@ async function refreshOps() {
     schedulerDuePlan,
     usageRollups,
     costAlertRoutes,
+    tenantIsolationReadiness,
     organizations,
     executionJobs,
     workerReadiness,
@@ -1435,6 +1438,7 @@ async function refreshOps() {
       api("/api/scheduler/due-plan"),
       api("/api/usage/rollups"),
       api("/api/usage/alert-routes"),
+      api("/api/tenant-isolation/readiness"),
       api("/api/organizations"),
       api("/api/execution-jobs"),
       api("/api/execution-jobs/worker-readiness"),
@@ -1473,6 +1477,7 @@ async function refreshOps() {
   state.schedulerDuePlan = schedulerDuePlan;
   state.usageRollups = usageRollups;
   state.costAlertRoutes = costAlertRoutes;
+  state.tenantIsolationReadiness = tenantIsolationReadiness;
   state.organizations = organizations;
   state.executionJobs = executionJobs;
   state.workerReadiness = workerReadiness;
@@ -2127,6 +2132,7 @@ function renderExecutionJobs() {
 }
 
 function renderTenantGovernance() {
+  renderTenantIsolationReadiness();
   const provisioning = state.tenantProvisioning
     ? `<div class="item">
         <strong>Tenant provisioned</strong>
@@ -2271,6 +2277,49 @@ function renderTenantGovernance() {
       revokeTenantInvitation(button.dataset.revokeInvitation),
     );
   });
+}
+
+function renderTenantIsolationReadiness() {
+  const report = state.tenantIsolationReadiness;
+  if (!report) {
+    tenantIsolationReadinessRoot.innerHTML = `<div class="muted">Tenant isolation readiness not loaded</div>`;
+    return;
+  }
+  const counts = report.scoped_counts || {};
+  const rls = report.rls || {};
+  const attentionItems = report.attention_items || [];
+  const tableCoverage = report.table_coverage || [];
+  tenantIsolationReadinessRoot.innerHTML = `
+    <div class="metric-grid compact-metrics">
+      <div class="metric"><span>Status</span><strong>${escapeHtml(report.status || "unknown")}</strong></div>
+      <div class="metric"><span>Score</span><strong>${formatInteger(report.readiness_score || 0)}</strong></div>
+      <div class="metric"><span>Runtime Tenant</span><strong>${escapeHtml(report.runtime_tenant_mode || "unknown")}</strong></div>
+      <div class="metric"><span>RLS</span><strong>${escapeHtml(rls.status || "unknown")}</strong></div>
+    </div>
+    <div class="item">
+      <strong>TENANT BOUNDARY</strong>
+      <div class="muted">Runtime tenant ${escapeHtml(report.runtime_tenant_id || "unknown")} · header fail-closed ${report.header_fail_closed ? "yes" : "no"} · membership scope ${report.membership_scope_enforced ? "enforced" : "missing"}</div>
+      <div class="muted">Organizations ${formatInteger(counts.organizations || 0)} · Teams ${formatInteger(counts.teams || 0)} · Projects ${formatInteger(counts.projects || 0)} · Memberships ${formatInteger(counts.memberships || 0)} · Invitations ${formatInteger(counts.invitations || 0)}</div>
+    </div>
+    <div class="item">
+      <strong>TABLE COVERAGE</strong>
+      <div class="muted">${formatInteger(tableCoverage.length)} tenant-scoped tables tracked · RLS required ${rls.required_for_production ? "yes" : "no"} · enabled ${rls.enabled ? "yes" : "no"}</div>
+      <div class="muted">${escapeHtml(
+        tableCoverage
+          .slice(0, 10)
+          .map((table) => `${table.table}:${table.store_filters_tenant ? "tenant-filtered" : "missing"}`)
+          .join(", ") || "none",
+      )}</div>
+    </div>
+    <div class="item">
+      <strong>ISOLATION ATTENTION</strong>
+      ${
+        attentionItems.length
+          ? attentionItems.map((item) => `<div class="muted">${escapeHtml(item.severity)} · ${escapeHtml(item.kind)} · ${escapeHtml(item.message)}</div>`).join("")
+          : `<div class="muted">No tenant isolation attention items</div>`
+      }
+    </div>
+  `;
 }
 
 function renderObservability() {

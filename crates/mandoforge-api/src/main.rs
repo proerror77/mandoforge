@@ -1727,6 +1727,54 @@ struct TenantProvisioningResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantIsolationReadinessReport {
+    generated_at: DateTime<Utc>,
+    status: String,
+    readiness_score: i64,
+    runtime_tenant_id: Uuid,
+    runtime_tenant_mode: String,
+    header_fail_closed: bool,
+    membership_scope_enforced: bool,
+    scoped_counts: TenantIsolationScopedCounts,
+    table_coverage: Vec<TenantIsolationTableCoverage>,
+    rls: TenantIsolationRlsReadiness,
+    attention_items: Vec<TenantIsolationAttentionItem>,
+    runbook_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantIsolationScopedCounts {
+    organizations: usize,
+    teams: usize,
+    projects: usize,
+    memberships: usize,
+    invitations: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantIsolationTableCoverage {
+    table: String,
+    tenant_id_required: bool,
+    store_filters_tenant: bool,
+    rls_required_for_production: bool,
+    rls_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantIsolationRlsReadiness {
+    required_for_production: bool,
+    enabled: bool,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantIsolationAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Team {
     id: Uuid,
     organization_id: Uuid,
@@ -2736,6 +2784,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/tenant-provisioning/bootstrap",
             post(bootstrap_tenant_provisioning),
+        )
+        .route(
+            "/api/tenant-isolation/readiness",
+            get(get_tenant_isolation_readiness),
         )
         .route("/api/organizations/{id}", delete(delete_organization))
         .route(
@@ -5552,6 +5604,136 @@ async fn list_organizations(
 ) -> Result<Json<Vec<Organization>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "organizations", None).await?;
     Ok(Json(state.list_organizations().await?))
+}
+
+async fn get_tenant_isolation_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TenantIsolationReadinessReport>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "tenant_isolation",
+        None,
+    )
+    .await?;
+    Ok(Json(build_tenant_isolation_readiness(&state).await?))
+}
+
+async fn build_tenant_isolation_readiness(
+    state: &AppState,
+) -> Result<TenantIsolationReadinessReport, AppError> {
+    let organizations = state.list_organizations().await?;
+    let mut teams_count = 0usize;
+    let mut projects_count = 0usize;
+    let mut memberships_count = 0usize;
+    let mut invitations_count = 0usize;
+    for organization in &organizations {
+        let teams = state.list_teams(organization.id).await?;
+        teams_count += teams.len();
+        memberships_count += state.list_memberships(organization.id).await?.len();
+        invitations_count += state.list_tenant_invitations(organization.id).await?.len();
+        for team in teams {
+            projects_count += state.list_projects(team.id).await?.len();
+        }
+    }
+
+    let rls = TenantIsolationRlsReadiness {
+        required_for_production: true,
+        enabled: false,
+        status: "not_configured".to_string(),
+    };
+    let table_coverage = tenant_isolation_table_coverage();
+    let header_fail_closed = true;
+    let membership_scope_enforced = true;
+    let mut attention_items = Vec::new();
+    attention_items.push(TenantIsolationAttentionItem {
+        kind: "single_runtime_tenant".to_string(),
+        severity: "warning".to_string(),
+        message: "runtime currently binds every request to one configured tenant_id; cross-tenant serving is intentionally disabled".to_string(),
+    });
+    attention_items.push(TenantIsolationAttentionItem {
+        kind: "postgres_rls_missing".to_string(),
+        severity: "warning".to_string(),
+        message: "tenant-scoped store queries filter tenant_id, but Postgres Row Level Security is not enabled yet".to_string(),
+    });
+
+    let runbook_actions = vec![
+        "keep x-mandoforge-tenant-id fail-closed until runtime tenant switching is implemented"
+            .to_string(),
+        "add Postgres RLS policies and tenant-context tests before production multi-tenant serving"
+            .to_string(),
+        "run cross-tenant access tests for agents, sessions, tools, approvals, jobs, audit, and governance resources"
+            .to_string(),
+    ];
+    let warning_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "warning")
+        .count() as i64;
+    let readiness_score = (100_i64 - warning_count * 15).clamp(0, 100);
+
+    Ok(TenantIsolationReadinessReport {
+        generated_at: Utc::now(),
+        status: if warning_count > 0 {
+            "attention"
+        } else {
+            "ready"
+        }
+        .to_string(),
+        readiness_score,
+        runtime_tenant_id: state.tenant_id,
+        runtime_tenant_mode: "single_runtime_tenant".to_string(),
+        header_fail_closed,
+        membership_scope_enforced,
+        scoped_counts: TenantIsolationScopedCounts {
+            organizations: organizations.len(),
+            teams: teams_count,
+            projects: projects_count,
+            memberships: memberships_count,
+            invitations: invitations_count,
+        },
+        table_coverage,
+        rls,
+        attention_items,
+        runbook_actions,
+    })
+}
+
+fn tenant_isolation_table_coverage() -> Vec<TenantIsolationTableCoverage> {
+    [
+        "agents",
+        "agent_versions",
+        "sessions",
+        "session_events",
+        "tool_calls",
+        "approvals",
+        "audit_logs",
+        "artifacts",
+        "providers",
+        "secret_records",
+        "execution_jobs",
+        "organizations",
+        "teams",
+        "projects",
+        "memberships",
+        "tenant_invitations",
+        "remote_computers",
+        "remote_computer_leases",
+        "mcp_servers",
+        "eval_datasets",
+        "eval_runs",
+        "usage_rollups",
+    ]
+    .into_iter()
+    .map(|table| TenantIsolationTableCoverage {
+        table: table.to_string(),
+        tenant_id_required: true,
+        store_filters_tenant: true,
+        rls_required_for_production: true,
+        rls_enabled: false,
+    })
+    .collect()
 }
 
 async fn create_organization(
@@ -24461,7 +24643,7 @@ not json
         );
 
         let (status, _) = request_value(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/agents")
                 .header("x-mandoforge-subject", "admin-1")
@@ -24475,6 +24657,35 @@ not json
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+
+        let readiness: TenantIsolationReadinessReport = request_json(
+            app,
+            Request::builder()
+                .uri("/api/tenant-isolation/readiness")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(readiness.status, "attention");
+        assert_eq!(readiness.runtime_tenant_mode, "single_runtime_tenant");
+        assert!(readiness.header_fail_closed);
+        assert!(readiness.membership_scope_enforced);
+        assert_eq!(readiness.rls.status, "not_configured");
+        assert!(!readiness.rls.enabled);
+        assert!(
+            readiness
+                .table_coverage
+                .iter()
+                .any(|table| table.table == "agents" && table.store_filters_tenant)
+        );
+        assert!(
+            readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "postgres_rls_missing")
+        );
     }
 
     #[tokio::test]

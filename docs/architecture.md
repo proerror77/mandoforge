@@ -238,6 +238,13 @@ Current worker boundary:
 - Keep `GET /api/execution-jobs/worker-readiness` as the operator gate for this boundary. It reports active queue semantics, worker mode, queued/running/retryable/failed pressure, stale leases, K8s worker manifest coverage, worker Pod hardening status, ServiceAccount/token automount state, RuntimeDefault seccomp, privilege/capability/read-only-root checks, resource bounds, NetworkPolicy presence, HPA/KEDA autoscaling manifest presence, parsed scale targets/min/max replicas, KEDA trigger types, queue-depth scaling evidence, attention items, and runbook actions. JetStream mode now reports durable broker handoff, worker KEDA exposes queue-depth scaling configuration, and the worker manifest is restricted by default; the same readiness path still exposes remaining gaps such as production load validation and hard-isolated worker pools.
 - Replace the API-drained queue with a broker-backed queue in a later production stage.
 
+## Tenant Isolation Boundary
+
+- Keep the runtime bound to one configured tenant ID until cross-tenant request routing is implemented. Incoming `x-mandoforge-tenant-id` headers must match that runtime tenant and fail closed otherwise.
+- Keep org/team/project membership enforcement as the application-layer scope boundary for Stage 2 team pilots.
+- Keep `GET /api/tenant-isolation/readiness` as the operator gate for this boundary. It reports runtime tenant mode, header fail-closed status, scoped resource counts, tenant-scoped table coverage, and the current lack of Postgres Row Level Security.
+- Add Postgres RLS policies and tenant context tests before claiming production cross-tenant isolation.
+
 ## Deployment Boundary
 
 Current deployment targets:
