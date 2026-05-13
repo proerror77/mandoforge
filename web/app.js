@@ -63,6 +63,7 @@ const state = {
   selectedOrganizationId: "",
   selectedTeamId: "",
   approvalDeliveries: {},
+  approvalNotificationRouting: null,
   approvalEscalationDueRun: null,
   approvalGroups: [],
   approvalEscalationRules: [],
@@ -148,6 +149,7 @@ const approvalGroupForm = document.querySelector("#approval-group-form");
 const approvalEscalationRuleForm = document.querySelector("#approval-escalation-rule-form");
 const runDueApprovalEscalationsButton = document.querySelector("#run-due-approval-escalations");
 const approvalGovernanceRoot = document.querySelector("#approval-governance");
+const approvalNotificationRoutingRoot = document.querySelector("#approval-notification-routing");
 const providerForm = document.querySelector("#provider-form");
 const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
 const secretForm = document.querySelector("#secret-form");
@@ -1316,6 +1318,7 @@ async function refreshOps() {
     executionJobs,
     approvalGroups,
     approvalEscalationRules,
+    approvalNotificationRouting,
   ] =
     await Promise.all([
       api("/api/providers"),
@@ -1342,6 +1345,7 @@ async function refreshOps() {
       api("/api/execution-jobs"),
       api("/api/approval-groups"),
       api("/api/approval-escalation-rules"),
+      api("/api/approvals/notification-routing/summary"),
     ]);
   state.providers = providers;
   state.providerSummary = providerSummary;
@@ -1367,6 +1371,7 @@ async function refreshOps() {
   state.executionJobs = executionJobs;
   state.approvalGroups = approvalGroups;
   state.approvalEscalationRules = approvalEscalationRules;
+  state.approvalNotificationRouting = approvalNotificationRouting;
   await refreshAgentReleases(false);
   if (
     state.selectedOrganizationId &&
@@ -3190,6 +3195,7 @@ function renderSecretRecords() {
 }
 
 function renderApprovalGovernance() {
+  renderApprovalNotificationRouting();
   const dueRun = state.approvalEscalationDueRun
     ? `<div class="item">
         <strong>Due escalation run: ${escapeHtml(state.approvalEscalationDueRun.status)}</strong>
@@ -3228,6 +3234,59 @@ function renderApprovalGovernance() {
             )
             .join("")
         : `<div class="muted">No escalation rules</div>`
+    }
+  `;
+}
+
+function renderApprovalNotificationRouting() {
+  const routing = state.approvalNotificationRouting;
+  if (!routing) {
+    approvalNotificationRoutingRoot.innerHTML = `<div class="muted">Approval notification routing is not loaded.</div>`;
+    return;
+  }
+  const attentionItems = routing.attention_items || [];
+  approvalNotificationRoutingRoot.innerHTML = `
+    <div class="metric-grid">
+      <div class="metric"><span>Routing</span><strong>${escapeHtml(routing.status)}</strong></div>
+      <div class="metric"><span>Channels</span><strong>${formatInteger(routing.channel_count)}</strong></div>
+      <div class="metric"><span>Pending</span><strong>${formatInteger(routing.pending_approval_count)}</strong></div>
+      <div class="metric"><span>Routable</span><strong>${formatInteger(routing.routable_pending_count)}</strong></div>
+      <div class="metric"><span>Unroutable</span><strong>${formatInteger(routing.unroutable_pending_count)}</strong></div>
+      <div class="metric"><span>Groups</span><strong>${formatInteger(routing.approval_group_count)}</strong></div>
+    </div>
+    <div class="item">
+      <strong>Channels</strong>
+      <div class="muted">webhook ${escapeHtml(routing.webhook_configured ? "configured" : "missing")} · slack ${escapeHtml(routing.slack_configured ? "configured" : "missing")} · email relay ${escapeHtml(routing.email_relay_configured ? "configured" : "missing")}</div>
+      <div class="muted">${formatInteger(routing.delegated_pending_count)} delegated pending · ${formatInteger(routing.group_pending_count)} group-routed pending · ${formatInteger(routing.escalation_rule_count)} escalation rules</div>
+    </div>
+    ${
+      attentionItems.length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Kind</th>
+                <th>Approval</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${attentionItems
+                .slice(0, 8)
+                .map(
+                  (item) => `
+                    <tr>
+                      <td>${escapeHtml(item.severity)}</td>
+                      <td>${escapeHtml(item.kind)}</td>
+                      <td>${escapeHtml(item.approval_id || "global")}</td>
+                      <td>${escapeHtml(item.message)}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : `<div class="muted">No approval notification routing attention items.</div>`
     }
   `;
 }

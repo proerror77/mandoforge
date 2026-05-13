@@ -495,6 +495,32 @@ struct ApprovalNotificationDelivery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationRoutingSummary {
+    status: String,
+    generated_at: DateTime<Utc>,
+    webhook_configured: bool,
+    slack_configured: bool,
+    email_relay_configured: bool,
+    channel_count: usize,
+    pending_approval_count: usize,
+    delegated_pending_count: usize,
+    group_pending_count: usize,
+    routable_pending_count: usize,
+    unroutable_pending_count: usize,
+    approval_group_count: usize,
+    escalation_rule_count: usize,
+    attention_items: Vec<ApprovalNotificationRoutingAttention>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationRoutingAttention {
+    kind: String,
+    severity: String,
+    message: String,
+    approval_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ApprovalEscalationDueRun {
     status: String,
     checked_at: DateTime<Utc>,
@@ -2353,6 +2379,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/approvals/{id}/deliver", post(deliver_approval))
         .route("/api/approvals/{id}/escalate", post(escalate_approval))
         .route(
+            "/api/approvals/notification-routing/summary",
+            get(get_approval_notification_routing_summary),
+        )
+        .route(
             "/api/approvals/escalations/run-due",
             post(run_due_approval_escalations),
         )
@@ -2493,6 +2523,20 @@ fn cost_alert_smtp_config_from_env() -> Option<CostAlertSmtpConfig> {
 
 fn approval_webhook_url_from_env() -> Option<String> {
     std::env::var("MANDOFORGE_APPROVAL_WEBHOOK_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn approval_slack_webhook_url_from_env() -> Option<String> {
+    std::env::var("MANDOFORGE_APPROVAL_SLACK_WEBHOOK_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn approval_email_relay_url_from_env() -> Option<String> {
+    std::env::var("MANDOFORGE_APPROVAL_EMAIL_RELAY_URL")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -13096,6 +13140,147 @@ async fn deliver_approval(
     ))
 }
 
+async fn get_approval_notification_routing_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApprovalNotificationRoutingSummary>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "approval_notifications",
+        None,
+    )
+    .await?;
+    Ok(Json(
+        build_approval_notification_routing_summary(
+            state.list_approvals().await?,
+            state.list_approval_groups().await?,
+            state.list_approval_escalation_rules().await?,
+            state.approval_webhook_url.is_some(),
+            approval_slack_webhook_url_from_env().is_some(),
+            approval_email_relay_url_from_env().is_some(),
+        )
+        .await,
+    ))
+}
+
+async fn build_approval_notification_routing_summary(
+    approvals: Vec<Approval>,
+    approval_groups: Vec<ApprovalGroup>,
+    escalation_rules: Vec<ApprovalEscalationRule>,
+    webhook_configured: bool,
+    slack_configured: bool,
+    email_relay_configured: bool,
+) -> ApprovalNotificationRoutingSummary {
+    let generated_at = Utc::now();
+    let channel_count = [webhook_configured, slack_configured, email_relay_configured]
+        .into_iter()
+        .filter(|configured| *configured)
+        .count();
+    let group_by_id: HashMap<Uuid, ApprovalGroup> = approval_groups
+        .iter()
+        .cloned()
+        .map(|group| (group.id, group))
+        .collect();
+    let pending: Vec<_> = approvals
+        .iter()
+        .filter(|approval| approval.status == "pending")
+        .collect();
+    let mut delegated_pending_count = 0;
+    let mut group_pending_count = 0;
+    let mut routable_pending_count = 0;
+    let mut unroutable_pending_count = 0;
+    let mut attention_items = Vec::new();
+
+    if channel_count == 0 {
+        attention_items.push(ApprovalNotificationRoutingAttention {
+            kind: "missing_channel".to_string(),
+            severity: "critical".to_string(),
+            message: "no approval notification channel is configured".to_string(),
+            approval_id: None,
+        });
+    }
+    if approval_groups.is_empty() {
+        attention_items.push(ApprovalNotificationRoutingAttention {
+            kind: "missing_approval_group".to_string(),
+            severity: "warning".to_string(),
+            message: "no approval groups are configured for escalation fan-out".to_string(),
+            approval_id: None,
+        });
+    }
+    if escalation_rules.is_empty() {
+        attention_items.push(ApprovalNotificationRoutingAttention {
+            kind: "missing_escalation_rule".to_string(),
+            severity: "warning".to_string(),
+            message: "no approval escalation rules are configured".to_string(),
+            approval_id: None,
+        });
+    }
+
+    for approval in &pending {
+        if delegated_approver_subject(approval).is_some() {
+            delegated_pending_count += 1;
+        }
+        let group = delegated_approver_group_id(approval).and_then(|id| group_by_id.get(&id));
+        if group.is_some() {
+            group_pending_count += 1;
+        }
+        let targets = approval_notification_targets(approval, group);
+        if channel_count > 0 && !targets.is_empty() {
+            routable_pending_count += 1;
+        } else {
+            unroutable_pending_count += 1;
+            attention_items.push(ApprovalNotificationRoutingAttention {
+                kind: if targets.is_empty() {
+                    "missing_target"
+                } else {
+                    "missing_channel"
+                }
+                .to_string(),
+                severity: "critical".to_string(),
+                message: if targets.is_empty() {
+                    "pending approval has no delegated approver or approval group targets"
+                        .to_string()
+                } else {
+                    "pending approval has targets but no configured notification channel"
+                        .to_string()
+                },
+                approval_id: Some(approval.id),
+            });
+        }
+    }
+
+    let status = if unroutable_pending_count > 0 || channel_count == 0 {
+        "action_required"
+    } else if attention_items
+        .iter()
+        .any(|item| item.severity == "warning")
+    {
+        "warning"
+    } else {
+        "ready"
+    }
+    .to_string();
+
+    ApprovalNotificationRoutingSummary {
+        status,
+        generated_at,
+        webhook_configured,
+        slack_configured,
+        email_relay_configured,
+        channel_count,
+        pending_approval_count: pending.len(),
+        delegated_pending_count,
+        group_pending_count,
+        routable_pending_count,
+        unroutable_pending_count,
+        approval_group_count: approval_groups.len(),
+        escalation_rule_count: escalation_rules.len(),
+        attention_items,
+    }
+}
+
 async fn deliver_approval_notification(
     state: &AppState,
     approval: &Approval,
@@ -19781,6 +19966,85 @@ not json
                 .iter()
                 .any(|log| log.action == "approval.notification_delivered")
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn approval_notification_routing_summary_reports_routable_pending_work() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let webhook = Router::new().route("/approval", post(mock_approval_webhook));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, webhook)
+                .await
+                .expect("mock approval webhook");
+        });
+        let app = test_app_with_approval_webhook(format!("http://{addr}/approval")).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "approval routing"}),
+            ),
+        )
+        .await;
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/approval.request/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "action": "manual.routing_review",
+                        "risk_level": "medium",
+                        "reason": "Route to an approver.",
+                        "approver_subject": "approver-1"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = Uuid::parse_str(
+            approval_result["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("approval uuid");
+
+        let summary: ApprovalNotificationRoutingSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals/notification-routing/summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(summary.channel_count, 1);
+        assert!(summary.webhook_configured);
+        assert_eq!(summary.pending_approval_count, 1);
+        assert_eq!(summary.delegated_pending_count, 1);
+        assert_eq!(summary.routable_pending_count, 1);
+        assert_eq!(summary.unroutable_pending_count, 0);
+        assert_eq!(summary.status, "warning");
+        assert!(summary.attention_items.iter().all(|item| {
+            item.approval_id != Some(approval_id) || item.kind != "missing_target"
+        }));
         server.abort();
     }
 

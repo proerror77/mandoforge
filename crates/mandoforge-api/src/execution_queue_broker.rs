@@ -1218,9 +1218,19 @@ mod tests {
                 .write_all(b"INFO {\"server_id\":\"test\"}\r\n")
                 .await
                 .expect("write info");
+            let mut command = String::new();
             let mut buffer = vec![0; 4096];
-            let bytes = socket.read(&mut buffer).await.expect("read command");
-            String::from_utf8_lossy(&buffer[..bytes]).to_string()
+            for _ in 0..8 {
+                let bytes = socket.read(&mut buffer).await.expect("read command");
+                if bytes == 0 {
+                    break;
+                }
+                command.push_str(&String::from_utf8_lossy(&buffer[..bytes]));
+                if command.contains("\"tool_name\":\"codex.exec\"") {
+                    break;
+                }
+            }
+            command
         });
         let config = BrokerQueueConfig::from_lookup(BrokerQueueKind::Nats, |key| match key {
             "MANDOFORGE_NATS_URL" => Some(format!("nats://{addr}")),

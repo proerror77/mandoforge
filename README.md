@@ -251,6 +251,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `POST /api/approvals/:id/modify`
 - `POST /api/approvals/:id/deliver`
 - `POST /api/approvals/:id/escalate`
+- `GET /api/approvals/notification-routing/summary`
 - `GET /api/approval-groups`
 - `POST /api/approval-groups`
 - `GET /api/approval-escalation-rules`
