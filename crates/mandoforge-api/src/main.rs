@@ -181,6 +181,40 @@ struct PolicyScheduledRolloutRun {
     reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyRolloutOrchestrationReadiness {
+    status: String,
+    production_blocked: bool,
+    rollout_active: bool,
+    active_revision_id: Option<Uuid>,
+    staged_revision_id: Option<Uuid>,
+    latest_due_run_at: Option<DateTime<Utc>>,
+    latest_due_run_status: Option<String>,
+    latest_due_run_age_hours: Option<i64>,
+    due_run_fresh: bool,
+    latest_validation_at: Option<DateTime<Utc>>,
+    latest_validation_status: Option<String>,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
+    controller_required: bool,
+    controller_configured: bool,
+    blocking_reasons: Vec<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyRolloutOrchestrationValidationRun {
+    status: String,
+    rollout_active: bool,
+    active_revision_id: Option<Uuid>,
+    staged_revision_id: Option<Uuid>,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
+    issues: Vec<String>,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecutionQueueBackendSelection {
     Memory,
@@ -3731,6 +3765,14 @@ fn build_router(state: AppState) -> Router {
         .route("/api/policy", get(get_policy))
         .route("/api/policy/runtime", get(get_policy_runtime))
         .route("/api/policy/rollout/cancel", post(cancel_policy_rollout))
+        .route(
+            "/api/policy/rollout/orchestration/readiness",
+            get(get_policy_rollout_orchestration_readiness),
+        )
+        .route(
+            "/api/policy/rollout/orchestration/validate",
+            post(validate_policy_rollout_orchestration),
+        )
         .route(
             "/api/policy/rollout/rollback",
             post(rollback_policy_rollout),
@@ -10402,6 +10444,139 @@ async fn cancel_policy_rollout(
     Ok(Json(status))
 }
 
+async fn get_policy_rollout_orchestration_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRolloutOrchestrationReadiness>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
+    let lookup = |key: &str| std::env::var(key).ok();
+    Ok(Json(build_policy_rollout_orchestration_readiness(
+        &state.policy_runtime_status().await,
+        &state.list_audit_logs(None).await?,
+        Utc::now(),
+        policy_rollout_orchestration_controller_required(&lookup),
+        policy_rollout_orchestration_controller_configured(&lookup),
+    )))
+}
+
+async fn validate_policy_rollout_orchestration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRolloutOrchestrationValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "policy".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+
+    let checked_at = Utc::now();
+    let runtime = state.policy_runtime_status().await;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = policy_rollout_orchestration_controller_required(&lookup);
+    let controller_configured = policy_rollout_orchestration_controller_configured(&lookup);
+    let readiness = build_policy_rollout_orchestration_readiness(
+        &runtime,
+        &audit_logs,
+        checked_at,
+        controller_required,
+        controller_configured,
+    );
+    let mut issues = readiness.blocking_reasons.clone();
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "policy_rollout_orchestration_not_ready"
+        } else {
+            "controller_not_configured"
+        }
+    });
+
+    if controller_configured {
+        match execute_policy_rollout_orchestration_controller(
+            &lookup,
+            &principal.subject_id,
+            checked_at,
+            &runtime,
+            &readiness,
+        )
+        .await
+        {
+            Ok(execution) => {
+                if execution.get("status").and_then(Value::as_str) != Some("validated") {
+                    issues.push(
+                        "policy rollout orchestration controller did not validate".to_string(),
+                    );
+                }
+                controller_execution = execution;
+            }
+            Err(error) => {
+                issues.push("policy rollout orchestration controller failed".to_string());
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    }
+    if controller_required
+        && controller_execution.get("status").and_then(Value::as_str) != Some("validated")
+    {
+        issues.push(
+            "policy rollout orchestration controller evidence is missing or not validated"
+                .to_string(),
+        );
+    }
+    dedupe_strings(&mut issues);
+
+    let status = if issues.is_empty() {
+        "validated"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.rollout_orchestration_validation_run",
+            "policy",
+            runtime.active_revision_id,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "rollout_active": runtime.rollout_active,
+                "active_revision_id": runtime.active_revision_id,
+                "staged_revision_id": runtime.staged_revision_id,
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+                "issues": issues,
+                "checked_at": checked_at,
+            }),
+        ))
+        .await?;
+
+    Ok(Json(PolicyRolloutOrchestrationValidationRun {
+        status,
+        rollout_active: runtime.rollout_active,
+        active_revision_id: runtime.active_revision_id,
+        staged_revision_id: runtime.staged_revision_id,
+        controller_required,
+        controller_configured,
+        controller_execution,
+        issues,
+        checked_at,
+    }))
+}
+
 async fn rollback_policy_rollout(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -10539,6 +10714,205 @@ async fn execute_due_policy_rollouts(
         ))
         .await?;
     Ok(result)
+}
+
+fn build_policy_rollout_orchestration_readiness(
+    runtime: &PolicyRuntimeStatus,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
+) -> PolicyRolloutOrchestrationReadiness {
+    let latest_due_run = audit_logs
+        .iter()
+        .filter(|log| log.action == "policy.rollout_due_run")
+        .max_by_key(|log| log.created_at);
+    let latest_validation = audit_logs
+        .iter()
+        .filter(|log| log.action == "policy.rollout_orchestration_validation_run")
+        .max_by_key(|log| log.created_at);
+    let latest_due_run_at = latest_due_run.map(|log| log.created_at);
+    let latest_due_run_age_hours =
+        latest_due_run_at.map(|created_at| (generated_at - created_at).num_hours());
+    let latest_due_run_status = latest_due_run
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let due_run_fresh = latest_due_run_age_hours.is_some_and(|hours| hours < 24);
+    let latest_validation_at = latest_validation.map(|log| log.created_at);
+    let latest_validation_status = latest_validation
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_status = latest_validation
+        .and_then(|log| log.details.get("controller_execution"))
+        .and_then(|execution| execution.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
+    let mut blocking_reasons = Vec::new();
+
+    if runtime.active_revision_id.is_none() {
+        blocking_reasons.push("no active policy revision is installed".to_string());
+    }
+    if runtime.rollout_active {
+        blocking_reasons.push("staged policy rollout is still active".to_string());
+    }
+    if latest_due_run.is_none() {
+        blocking_reasons.push("policy rollout due-run supervision has not run".to_string());
+    }
+    if latest_due_run_age_hours.is_some_and(|hours| hours >= 24) {
+        blocking_reasons.push("policy rollout due-run supervision is stale".to_string());
+    }
+    if latest_due_run_status.as_deref() == Some("activated") && runtime.rollout_active {
+        blocking_reasons
+            .push("activated policy rollout still has staged runtime traffic".to_string());
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons.push(
+            "policy rollout orchestration controller is required but not configured".to_string(),
+        );
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons.push(
+            "policy rollout orchestration controller evidence is missing or not validated"
+                .to_string(),
+        );
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Policy rollout production orchestration is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Policy rollout production orchestration has fresh due-run supervision, no active staged rollout, and required controller evidence".to_string()
+    };
+
+    PolicyRolloutOrchestrationReadiness {
+        status,
+        production_blocked,
+        rollout_active: runtime.rollout_active,
+        active_revision_id: runtime.active_revision_id,
+        staged_revision_id: runtime.staged_revision_id,
+        latest_due_run_at,
+        latest_due_run_status,
+        latest_due_run_age_hours,
+        due_run_fresh,
+        latest_validation_at,
+        latest_validation_status,
+        latest_controller_status,
+        latest_controller_validated,
+        controller_required,
+        controller_configured,
+        blocking_reasons,
+        message,
+    }
+}
+
+fn policy_rollout_orchestration_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn policy_rollout_orchestration_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_policy_rollout_orchestration_controller<F>(
+    lookup: &F,
+    subject: &str,
+    checked_at: DateTime<Utc>,
+    runtime: &PolicyRuntimeStatus,
+    readiness: &PolicyRolloutOrchestrationReadiness,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL is required",
+            )
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.policy_rollout_orchestration_validation",
+        "subject": subject,
+        "checked_at": checked_at,
+        "runtime": {
+            "active_revision_id": runtime.active_revision_id,
+            "staged_revision_id": runtime.staged_revision_id,
+            "staged_rollout_percent": runtime.staged_rollout_percent,
+            "rollout_active": runtime.rollout_active,
+        },
+        "readiness": {
+            "status": readiness.status,
+            "production_blocked": readiness.production_blocked,
+            "latest_due_run_status": readiness.latest_due_run_status,
+            "latest_due_run_age_hours": readiness.latest_due_run_age_hours,
+            "due_run_fresh": readiness.due_run_fresh,
+            "blocking_reasons": readiness.blocking_reasons,
+        },
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "policy rollout orchestration controller failed with status {http_status}"
+        )));
+    }
+    let provider_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": provider_status,
+        "orchestration_id": body.get("orchestration_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 async fn create_policy_revision(
@@ -33388,6 +33762,169 @@ not json
     }
 
     #[tokio::test]
+    async fn policy_rollout_orchestration_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("policy rollout orchestration listener");
+        let controller_addr = listener
+            .local_addr()
+            .expect("policy rollout orchestration addr");
+        let controller = Router::new()
+            .route(
+                "/policy-rollout-orchestration",
+                post(mock_policy_rollout_orchestration_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock policy rollout orchestration controller");
+        });
+        let active_revision_id = Uuid::new_v4();
+        let runtime = PolicyRuntimeStatus {
+            active_revision_id: Some(active_revision_id),
+            staged_revision_id: None,
+            staged_rollout_percent: None,
+            rollout_active: false,
+        };
+        let checked_at = Utc::now();
+        let audit_logs = vec![new_audit_log(
+            None,
+            "system",
+            None,
+            "policy.rollout_due_run",
+            "policy",
+            Some(active_revision_id),
+            json!({
+                "status": "noop",
+                "activated_revision_id": null,
+                "scanned_count": 1,
+                "skipped_count": 1,
+                "checked_at": checked_at
+            }),
+        )];
+        let readiness = build_policy_rollout_orchestration_readiness(
+            &runtime,
+            &audit_logs,
+            checked_at,
+            false,
+            true,
+        );
+        assert_eq!(readiness.status, "ready");
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL" => Some(format!(
+                "http://{controller_addr}/policy-rollout-orchestration"
+            )),
+            "MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_TOKEN" => {
+                Some("policy-orchestration-token".to_string())
+            }
+            _ => None,
+        };
+
+        let execution = execute_policy_rollout_orchestration_controller(
+            &lookup, "admin-1", checked_at, &runtime, &readiness,
+        )
+        .await
+        .expect("policy rollout orchestration controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(execution["orchestration_id"], "policy-orchestration-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.policy_rollout_orchestration_validation"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(
+            payloads[0]["runtime"]["active_revision_id"],
+            active_revision_id.to_string()
+        );
+        assert!(payloads[0]["readiness"]["due_run_fresh"].as_bool().unwrap());
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn policy_rollout_orchestration_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let active_revision_id = Uuid::new_v4();
+        let runtime = PolicyRuntimeStatus {
+            active_revision_id: Some(active_revision_id),
+            staged_revision_id: None,
+            staged_rollout_percent: None,
+            rollout_active: false,
+        };
+        let due_run = new_audit_log(
+            None,
+            "system",
+            None,
+            "policy.rollout_due_run",
+            "policy",
+            Some(active_revision_id),
+            json!({
+                "status": "noop",
+                "scanned_count": 1,
+                "skipped_count": 1,
+            }),
+        );
+        let missing = build_policy_rollout_orchestration_readiness(
+            &runtime,
+            std::slice::from_ref(&due_run),
+            generated_at,
+            true,
+            false,
+        );
+        assert_eq!(missing.status, "blocked");
+        assert!(missing.production_blocked);
+        assert!(missing.controller_required);
+        assert!(!missing.controller_configured);
+
+        let without_controller = build_policy_rollout_orchestration_readiness(
+            &runtime,
+            std::slice::from_ref(&due_run),
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(without_controller.status, "blocked");
+        assert!(!without_controller.latest_controller_validated);
+
+        let ready = build_policy_rollout_orchestration_readiness(
+            &runtime,
+            &[
+                due_run,
+                new_audit_log(
+                    None,
+                    "user",
+                    None,
+                    "policy.rollout_orchestration_validation_run",
+                    "policy",
+                    Some(active_revision_id),
+                    json!({
+                        "status": "validated",
+                        "controller_required": true,
+                        "controller_configured": true,
+                        "controller_execution": {
+                            "attempted": true,
+                            "status": "validated",
+                            "orchestration_id": "policy-orchestration-1"
+                        }
+                    }),
+                ),
+            ],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+        assert!(ready.latest_controller_validated);
+    }
+
+    #[tokio::test]
     async fn agent_release_controller_executes_external_rollout_boundary() {
         let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -35278,6 +35815,33 @@ not json
                 {"name": "preflight", "status": "passed"},
                 {"name": "promote", "status": "promoted"},
                 {"name": "verify", "status": "passed"}
+            ]
+        }))
+    }
+
+    async fn mock_policy_rollout_orchestration_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer policy-orchestration-token")
+        );
+        assert_eq!(
+            payload["type"],
+            "mandoforge.policy_rollout_orchestration_validation"
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "orchestration_id": "policy-orchestration-1",
+            "message": "policy rollout orchestration validated",
+            "steps": [
+                {"name": "due-run-supervision", "status": "passed"},
+                {"name": "staged-runtime-clear", "status": "passed"}
             ]
         }))
     }

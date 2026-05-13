@@ -23,6 +23,8 @@ const state = {
   policyRevisions: [],
   policyRevisionDiffs: {},
   policyRevisionGates: {},
+  policyRolloutOrchestrationReadiness: null,
+  policyRolloutOrchestrationValidation: null,
   policyScheduledRolloutRun: null,
   policyRollback: null,
   approvalNotificationOpsValidation: null,
@@ -146,6 +148,7 @@ const policyActivateBeforeInput = document.querySelector("#policy-activate-befor
 const cancelPolicyRolloutButton = document.querySelector("#cancel-policy-rollout");
 const runDuePolicyRolloutsButton = document.querySelector("#run-due-policy-rollouts");
 const rollbackPolicyRolloutButton = document.querySelector("#rollback-policy-rollout");
+const validatePolicyRolloutOrchestrationButton = document.querySelector("#validate-policy-rollout-orchestration");
 const evalDatasetRoot = document.querySelector("#eval-datasets");
 const evalCaseRoot = document.querySelector("#eval-cases");
 const evalRunRoot = document.querySelector("#eval-runs");
@@ -274,6 +277,7 @@ policyRevisionForm.addEventListener("submit", createPolicyRevision);
 cancelPolicyRolloutButton.addEventListener("click", cancelPolicyRollout);
 runDuePolicyRolloutsButton.addEventListener("click", runDuePolicyRollouts);
 rollbackPolicyRolloutButton.addEventListener("click", rollbackPolicyRollout);
+validatePolicyRolloutOrchestrationButton.addEventListener("click", validatePolicyRolloutOrchestration);
 evalDatasetForm.addEventListener("submit", createEvalDataset);
 evalCaseForm.addEventListener("submit", createEvalCase);
 evalRunForm.addEventListener("submit", createEvalRun);
@@ -764,6 +768,7 @@ async function cancelPolicyRollout() {
 async function runDuePolicyRollouts() {
   state.policyScheduledRolloutRun = await api("/api/policy/rollout/run-due", { method: "POST" });
   state.policyRuntime = await api("/api/policy/runtime");
+  state.policyRolloutOrchestrationReadiness = await api("/api/policy/rollout/orchestration/readiness");
   state.policyRevisions = await api("/api/policy/revisions");
   renderPolicy();
 }
@@ -771,8 +776,17 @@ async function runDuePolicyRollouts() {
 async function rollbackPolicyRollout() {
   state.policyRollback = await api("/api/policy/rollout/rollback", { method: "POST" });
   state.policyRuntime = await api("/api/policy/runtime");
+  state.policyRolloutOrchestrationReadiness = await api("/api/policy/rollout/orchestration/readiness");
   state.policyRevisions = await api("/api/policy/revisions");
   state.policy = await api("/api/policy");
+  renderPolicy();
+}
+
+async function validatePolicyRolloutOrchestration() {
+  state.policyRolloutOrchestrationValidation = await api("/api/policy/rollout/orchestration/validate", {
+    method: "POST",
+  });
+  state.policyRolloutOrchestrationReadiness = await api("/api/policy/rollout/orchestration/readiness");
   renderPolicy();
 }
 
@@ -1541,6 +1555,7 @@ async function refreshOps() {
     secretRecords,
     policy,
     policyRuntime,
+    policyRolloutOrchestrationReadiness,
     policyRevisions,
     evalJudgeProfiles,
     evalDatasets,
@@ -1583,6 +1598,7 @@ async function refreshOps() {
       api("/api/vault/secrets"),
       api("/api/policy"),
       api("/api/policy/runtime"),
+      api("/api/policy/rollout/orchestration/readiness"),
       api("/api/policy/revisions"),
       api("/api/eval/judge-profiles"),
       api("/api/eval/datasets"),
@@ -1624,6 +1640,7 @@ async function refreshOps() {
   state.secretRecords = secretRecords;
   state.policy = policy;
   state.policyRuntime = policyRuntime;
+  state.policyRolloutOrchestrationReadiness = policyRolloutOrchestrationReadiness;
   state.policyRevisions = policyRevisions;
   state.evalJudgeProfiles = evalJudgeProfiles;
   state.evalDatasets = evalDatasets;
@@ -3756,6 +3773,7 @@ function renderPolicy() {
   const approvalRequired = state.policy.approval_required || [];
   const allowedTools = state.policy.allowed_tools || {};
   const runtime = state.policyRuntime || {};
+  const rolloutOrchestration = state.policyRolloutOrchestrationReadiness || {};
   policyRoot.innerHTML = `
     <dl>
       <dt>Runtime rollout</dt>
@@ -3764,6 +3782,10 @@ function renderPolicy() {
       <dd>${escapeHtml(runtime.active_revision_id || "config baseline")}</dd>
       <dt>Staged revision</dt>
       <dd>${escapeHtml(runtime.staged_revision_id || "none")}</dd>
+      <dt>Rollout orchestration</dt>
+      <dd>${escapeHtml(rolloutOrchestration.status || "unknown")} · blocked ${rolloutOrchestration.production_blocked ? "yes" : "no"} · due fresh ${rolloutOrchestration.due_run_fresh ? "yes" : "no"} · controller ${rolloutOrchestration.controller_configured ? "configured" : "missing"} · required ${rolloutOrchestration.controller_required ? "yes" : "no"}</dd>
+      <dt>Rollout validation</dt>
+      <dd>${escapeHtml(rolloutOrchestration.latest_validation_status || "none")} · controller ${escapeHtml(rolloutOrchestration.latest_controller_status || "none")} · latest due ${escapeHtml(rolloutOrchestration.latest_due_run_at || "none")}</dd>
       <dt>Blocked tools</dt>
       <dd>${escapeHtml(blockedTools.join(", ") || "none")}</dd>
       <dt>Approval required</dt>
@@ -3796,6 +3818,15 @@ function renderPolicy() {
         <strong>Scheduled rollout run: ${escapeHtml(state.policyScheduledRolloutRun.status)}</strong>
         <div class="muted">${escapeHtml(state.policyScheduledRolloutRun.reason || "")}</div>
         <pre>${escapeHtml(JSON.stringify(state.policyScheduledRolloutRun, null, 2))}</pre>
+      </div>
+    `;
+  }
+  if (state.policyRolloutOrchestrationValidation) {
+    policyDecisionRoot.innerHTML += `
+      <div class="item">
+        <strong>Policy rollout orchestration validation: ${escapeHtml(state.policyRolloutOrchestrationValidation.status)}</strong>
+        <div class="muted">controller ${escapeHtml(state.policyRolloutOrchestrationValidation.controller_execution?.status || "skipped")} · checked ${escapeHtml(state.policyRolloutOrchestrationValidation.checked_at)}</div>
+        <pre>${escapeHtml(JSON.stringify(state.policyRolloutOrchestrationValidation, null, 2))}</pre>
       </div>
     `;
   }
