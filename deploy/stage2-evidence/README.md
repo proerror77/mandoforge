@@ -21,7 +21,7 @@ scripts/verify-stage2-controller-env-template.sh
 scripts/verify-stage2-evidence-k8s-manifests.sh
 ```
 
-The second script performs client-side dry-run validation for the Secret, default evidence Job, strict production Job, and `kubectl kustomize deploy/stage2-evidence`.
+The second script performs offline validation for the Secret shape, default evidence Job, strict production Job, default evidence kustomize render, and strict production evidence kustomize render.
 
 ## Blocked Inventory Run
 
@@ -42,14 +42,14 @@ Use this only after real validation controllers and credentials are configured:
 
 ```bash
 kubectl create namespace agent-os --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -n agent-os -f deploy/stage2-evidence/stage2-controller-env-secret.example.yaml
-kubectl apply -n agent-os -f deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml
-kubectl create -n agent-os -f deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml
+kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone | kubectl apply -f -
 kubectl wait --for=condition=complete job/mandoforge-stage2-production-evidence-gate -n agent-os --timeout=30m
 kubectl logs job/mandoforge-stage2-production-evidence-gate -n agent-os
 ```
 
 For a real run, create `mandoforge-stage2-controller-env` from the same keys but with production controller URLs, tokens, team id, and KMS settings supplied outside git. The strict Job sets `ALLOW_BLOCKED=0` through that Secret and fails closed if required controller evidence is missing, stale, or unhealthy. Keep the `mandoforge-stage2-production-evidence` PVC until the evidence directory has been archived with the release record.
+
+The production kustomize bundle references the reviewed example files under `deploy/stage2-evidence`, so `kubectl kustomize` needs `--load-restrictor LoadRestrictionsNone`. Use your deployment pipeline's secret overlay instead of applying the example Secret with placeholder values.
 
 ## Completion Rule
 

@@ -21,14 +21,31 @@ for manifest in "${manifests[@]}"; do
 done
 
 kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out
+kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone \
+  >/tmp/mandoforge-stage2-production-evidence-kustomize.out
 
 if [[ ! -s /tmp/mandoforge-stage2-evidence-kustomize.out ]]; then
   echo "Stage 2 evidence kustomize render produced no output" >&2
   exit 1
 fi
 
+if [[ ! -s /tmp/mandoforge-stage2-production-evidence-kustomize.out ]]; then
+  echo "Stage 2 production evidence kustomize render produced no output" >&2
+  exit 1
+fi
+
 if ! grep -q "kind: Job" /tmp/mandoforge-stage2-evidence-kustomize.out; then
   echo "Stage 2 evidence kustomize render is missing a Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-stage2-production-evidence-gate" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the strict production Job" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the persistent evidence PVC mount" >&2
   exit 1
 fi
 

@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agent-os
+resources:
+  - ../stage2-evidence/stage2-controller-env-secret.example.yaml
+  - ../stage2-evidence/stage2-production-evidence-pvc.example.yaml
+  - ../stage2-evidence/stage2-production-evidence-gate-job.example.yaml

@@ -33,3 +33,4 @@ jobs:
       - run: scripts/verify-remote-computer-k8s-manifests.sh
       - run: kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out
       - run: kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out && wc -l /tmp/mandoforge-stage2-evidence-kustomize.out
+      - run: kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone >/tmp/mandoforge-stage2-production-evidence-kustomize.out && wc -l /tmp/mandoforge-stage2-production-evidence-kustomize.out
