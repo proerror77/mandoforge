@@ -50,6 +50,7 @@ Covered today:
 - Remote Computer readiness is API/UI-visible.
 - K8s Remote Computer manifests exist for the Pod template, service account, state PVC placeholder, and NetworkPolicy skeleton.
 - A JuiceFS CSI example manifest documents the target shared `/agent-state` provider shape, but it is not included in the default kustomization and must be configured explicitly before use.
+- A warm-pool Deployment example documents the cold-start mitigation shape, but it is not included in the default kustomization and does not yet assign sessions to prestarted Pods.
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness, dry-run, and explicit mutate endpoints.
@@ -68,7 +69,7 @@ Not covered today:
 - No actual Pod attach transport; session attachment is control-plane state only.
 - No real distributed Memory/Notes/Skills mount in the default deployment.
 - No production distributed filesystem integration yet; JuiceFS exists as an example manifest only, while CephFS, Longhorn RWX, cloud file storage, or object-backed sync remain future provider options.
-- No warm pool of prestarted agent Pods.
+- No production warm pool assignment; the warm-pool manifest is an opt-in skeleton only.
 - No artifact/state sync daemon inside the Pod.
 - No KEDA/HPA queue-depth scaling for remote computer pools.
 - No production Kubernetes mutation rollout; the current adapter has a gated Pod API create/delete boundary only.
@@ -214,7 +215,7 @@ Stage 3 should make Remote Computer the primary sandbox substrate.
    - `codex-workspace`
    - `gvisor-isolated`
    - `firecracker-isolated` later
-7. Promote the JuiceFS CSI example into an opt-in overlay once secret handling, namespace selection, and state sync conflict rules are implemented.
+7. Promote the JuiceFS CSI and warm-pool examples into opt-in overlays once secret handling, namespace selection, state sync conflict rules, and Pod assignment are implemented.
 8. Add conflict policy for shared Memory/Notes/Skills writes.
 9. Add per-team/project Pod security and network policies.
 10. Add remote computer replay view in the Session Timeline.

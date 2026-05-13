@@ -28329,6 +28329,8 @@ not json
                 .any(|provider| provider == "juicefs")
         );
         assert!(remote_computer_readiness.network_policy.present);
+        assert!(remote_computer_readiness.warm_pool.manifest_present);
+        assert_eq!(remote_computer_readiness.warm_pool.status, "skeleton");
         assert_eq!(remote_computer_readiness.runner.status, "reserved");
         assert!(!remote_computer_readiness.runner.configured);
         assert!(
