@@ -2191,6 +2191,29 @@ struct ProviderPolicyGateRunAttentionItem {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RunProviderProductionRollout {
+    #[serde(default)]
+    environment: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    provider_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderProductionRolloutRun {
+    id: Uuid,
+    status: String,
+    environment: String,
+    reason: Option<String>,
+    provider_count: usize,
+    provider_ids: Vec<Uuid>,
+    enforcement: ProviderPolicyGateEnforcement,
+    message: String,
+    ran_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProviderPolicyGateCheck {
     provider_id: Uuid,
@@ -3087,6 +3110,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/providers/policy-gate/runs",
             get(get_provider_policy_gate_runs),
+        )
+        .route(
+            "/api/providers/production-rollout/run",
+            post(run_provider_production_rollout),
         )
         .route("/api/providers/{id}/status", patch(update_provider_status))
         .route(
@@ -6772,6 +6799,117 @@ async fn get_provider_policy_gate_runs(
         &audit_logs,
         Utc::now(),
     )))
+}
+
+async fn run_provider_production_rollout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RunProviderProductionRollout>,
+) -> Result<Json<ProviderProductionRolloutRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "providers".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+
+    let environment =
+        optional_trimmed(input.environment.as_deref()).unwrap_or_else(|| "production".to_string());
+    let reason = optional_trimmed(input.reason.as_deref());
+    let providers = state.list_providers().await?;
+    let provider_ids = if input.provider_ids.is_empty() {
+        providers
+            .iter()
+            .filter(|provider| provider.status == "active")
+            .map(|provider| provider.id)
+            .collect::<Vec<_>>()
+    } else {
+        let known_provider_ids = providers
+            .iter()
+            .map(|provider| provider.id)
+            .collect::<HashSet<_>>();
+        let mut missing_provider_ids = Vec::new();
+        for provider_id in &input.provider_ids {
+            if !known_provider_ids.contains(provider_id) {
+                missing_provider_ids.push(*provider_id);
+            }
+        }
+        if !missing_provider_ids.is_empty() {
+            return Err(AppError::bad_request(format!(
+                "provider production rollout references unknown provider id(s): {}",
+                missing_provider_ids
+                    .iter()
+                    .map(Uuid::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        input.provider_ids
+    };
+    let generated_at = Utc::now();
+    let audit_logs = state.list_audit_logs(None).await?;
+    let gate_summary = build_provider_policy_gate_run_summary(&audit_logs, generated_at);
+    let latest_run = gate_summary.latest_run.as_ref();
+    let mut status = "applied".to_string();
+    let mut message = "provider production rollout passed policy gate enforcement".to_string();
+    if provider_ids.is_empty() {
+        status = "blocked".to_string();
+        message = "provider production rollout is blocked because no active providers are selected"
+            .to_string();
+    } else if gate_summary.production_enforcement.production_blocked {
+        status = "blocked".to_string();
+        message = gate_summary.production_enforcement.message.clone();
+    } else if latest_run
+        .map(|run| run.provider_count != providers.len())
+        .unwrap_or(true)
+    {
+        status = "blocked".to_string();
+        message =
+            "provider production rollout is blocked because the latest provider gate does not cover the current provider set"
+                .to_string();
+    }
+    let action = if status == "blocked" {
+        "provider.production_rollout_blocked"
+    } else {
+        "provider.production_rollout_applied"
+    };
+    let audit_log = state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            action,
+            "providers",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "environment": environment,
+                "reason": reason,
+                "provider_ids": provider_ids,
+                "provider_count": provider_ids.len(),
+                "production_enforcement": gate_summary.production_enforcement.clone(),
+                "latest_gate_run_id": latest_run.map(|run| run.id),
+                "latest_gate_provider_count": latest_run.map(|run| run.provider_count),
+                "current_provider_count": providers.len(),
+                "message": message,
+            }),
+        ))
+        .await?;
+    Ok(Json(ProviderProductionRolloutRun {
+        id: audit_log.id,
+        status,
+        environment,
+        reason,
+        provider_count: provider_ids.len(),
+        provider_ids,
+        enforcement: gate_summary.production_enforcement,
+        message,
+        ran_at: audit_log.created_at,
+    }))
 }
 
 fn build_provider_governance_summary(
@@ -23486,6 +23624,155 @@ not json
         );
         assert!(gate_runs.attention_items.iter().any(|item| {
             item.kind == "production_provider_gate_blocked" && item.severity == "critical"
+        }));
+    }
+
+    #[tokio::test]
+    async fn provider_production_rollout_requires_fresh_passing_gate() {
+        let app = test_app().await;
+
+        let provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "production-rollout-mock",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {"budget": {"daily_request_limit": 10}}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let blocked_without_gate: ProviderProductionRolloutRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/providers/production-rollout/run")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "environment": "production",
+                        "reason": "first rollout should fail closed before a gate run",
+                        "provider_ids": [provider.id]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(blocked_without_gate.status, "blocked");
+        assert!(blocked_without_gate.enforcement.production_blocked);
+        assert_eq!(blocked_without_gate.enforcement.status, "blocked");
+
+        let gate_run: ProviderPolicyGateRunResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/providers/policy-gate/run")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(gate_run.run.status, "passed");
+
+        let applied: ProviderProductionRolloutRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/providers/production-rollout/run")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "environment": "production",
+                        "reason": "gate is fresh and passing",
+                        "provider_ids": [provider.id]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(applied.status, "applied");
+        assert_eq!(applied.provider_count, 1);
+        assert!(!applied.enforcement.production_blocked);
+
+        let _: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "post-gate-provider",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {"budget": {"daily_request_limit": 10}}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let blocked_stale_coverage: ProviderProductionRolloutRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/providers/production-rollout/run")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "environment": "production",
+                        "provider_ids": [provider.id]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(blocked_stale_coverage.status, "blocked");
+        assert!(
+            blocked_stale_coverage
+                .message
+                .contains("does not cover the current provider set")
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider.production_rollout_blocked"
+                && log.details["status"] == "blocked"
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider.production_rollout_applied"
+                && log.details["status"] == "applied"
         }));
     }
 

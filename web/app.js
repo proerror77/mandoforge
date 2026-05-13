@@ -9,6 +9,7 @@ const state = {
   providerSummary: null,
   providerPolicyGate: null,
   providerPolicyGateRuns: null,
+  providerProductionRolloutRun: null,
   providerHealth: {},
   vaultHealth: null,
   vaultReadiness: null,
@@ -186,6 +187,7 @@ const approvalNotificationRunsRoot = document.querySelector("#approval-notificat
 const providerForm = document.querySelector("#provider-form");
 const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
 const runProviderPolicyGateButton = document.querySelector("#run-provider-policy-gate");
+const runProviderProductionRolloutButton = document.querySelector("#run-provider-production-rollout");
 const secretForm = document.querySelector("#secret-form");
 const evalJudgeProfileForm = document.querySelector("#eval-judge-profile-form");
 const evalDatasetForm = document.querySelector("#eval-dataset-form");
@@ -235,6 +237,7 @@ runApprovalNotificationsButton.addEventListener("click", runApprovalNotification
 providerForm.addEventListener("submit", createProvider);
 providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
 runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
+runProviderProductionRolloutButton.addEventListener("click", runProviderProductionRollout);
 secretForm.addEventListener("submit", createSecretRecord);
 evalJudgeProfileForm.addEventListener("submit", createEvalJudgeProfile);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
@@ -607,6 +610,18 @@ async function runProviderPolicyGate() {
     method: "POST",
   });
   state.providerPolicyGate = result.report;
+  state.providerPolicyGateRuns = await api("/api/providers/policy-gate/runs");
+  renderProviders();
+}
+
+async function runProviderProductionRollout() {
+  state.providerProductionRolloutRun = await api("/api/providers/production-rollout/run", {
+    method: "POST",
+    body: JSON.stringify({
+      environment: "production",
+      reason: "Static console production rollout gate check",
+    }),
+  });
   state.providerPolicyGateRuns = await api("/api/providers/policy-gate/runs");
   renderProviders();
 }
@@ -3620,6 +3635,7 @@ function renderProviders() {
   const attentionItems = summary?.attention_items || [];
   const policyGate = state.providerPolicyGate;
   const policyGateRuns = state.providerPolicyGateRuns;
+  const productionRolloutRun = state.providerProductionRolloutRun;
   const policyGateChecks = policyGate?.checks || [];
   const policyGateRunAttention = policyGateRuns?.attention_items || [];
   const policyGateHtml = policyGate
@@ -3745,6 +3761,28 @@ function renderProviders() {
       </div>
     `
     : "";
+  const productionRolloutHtml = `
+    <div class="detail-panel">
+      <h4>Production Rollout</h4>
+      ${
+        productionRolloutRun
+          ? `<div class="metric-grid compact-metrics">
+              <div class="metric"><span>Status</span><strong>${escapeHtml(productionRolloutRun.status)}</strong></div>
+              <div class="metric"><span>Providers</span><strong>${formatInteger(productionRolloutRun.provider_count)}</strong></div>
+              <div class="metric"><span>Gate</span><strong>${escapeHtml(productionRolloutRun.enforcement?.status || "unknown")}</strong></div>
+            </div>
+            <dl>
+              <dt>Environment</dt>
+              <dd>${escapeHtml(productionRolloutRun.environment || "production")}</dd>
+              <dt>Message</dt>
+              <dd>${escapeHtml(productionRolloutRun.message || "not reported")}</dd>
+              <dt>Ran at</dt>
+              <dd>${escapeHtml(productionRolloutRun.ran_at || "not recorded")}</dd>
+            </dl>`
+          : `<div class="muted">No production rollout run in this console session.</div>`
+      }
+    </div>
+  `;
   const summaryHtml = summary
     ? `
       <div class="detail-panel">
@@ -3837,7 +3875,8 @@ function renderProviders() {
         )
         .join("")
     : `<div class="muted">No stored providers</div>`;
-  providerRoot.innerHTML = policyGateHtml + policyGateRunsHtml + summaryHtml + providerListHtml;
+  providerRoot.innerHTML =
+    policyGateHtml + policyGateRunsHtml + productionRolloutHtml + summaryHtml + providerListHtml;
   providerRoot.querySelectorAll("[data-provider-status]").forEach((button) => {
     button.addEventListener("click", () =>
       updateProviderStatus(button.dataset.providerStatus, button.dataset.status),
