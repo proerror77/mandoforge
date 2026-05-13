@@ -2792,6 +2792,9 @@ function renderObservability() {
                   codex_app_server_stale_polls: schedulerDueRun.codex_app_server_stale_polls,
                   cost_alert_delivery: schedulerDueRun.cost_alert_delivery,
                   usage_finance_export: schedulerDueRun.usage_finance_export,
+                  remote_computer_reclaim: schedulerDueRun.remote_computer_reclaim,
+                  remote_computer_sidecar_supervision:
+                    schedulerDueRun.remote_computer_sidecar_supervision,
                 },
                 null,
                 2,

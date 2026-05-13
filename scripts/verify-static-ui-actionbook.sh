@@ -175,6 +175,7 @@ grep -q "worker-readiness" /tmp/mandoforge-actionbook-index.html
 grep -q "remote-computer-readiness" /tmp/mandoforge-actionbook-index.html
 grep -q "remoteComputerStateLocks" /tmp/mandoforge-actionbook-app.js
 grep -q "remoteComputerSidecarHeartbeats" /tmp/mandoforge-actionbook-app.js
+grep -q "remote_computer_sidecar_supervision" /tmp/mandoforge-actionbook-app.js
 grep -q "discoverRemoteArtifacts" /tmp/mandoforge-actionbook-app.js
 grep -q "Artifact discovery sidecar" /tmp/mandoforge-actionbook-app.js
 grep -q "Acquire State Lock" /tmp/mandoforge-actionbook-index.html

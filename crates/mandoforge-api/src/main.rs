@@ -680,6 +680,19 @@ struct SchedulerDueRun {
     cost_alert_delivery: Option<CostAlertDelivery>,
     usage_finance_export: UsageFinanceExportDelivery,
     remote_computer_reclaim: RemoteComputerReclaimRun,
+    remote_computer_sidecar_supervision: RemoteComputerSidecarSupervisionRun,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerSidecarSupervisionRun {
+    status: String,
+    checked_at: DateTime<Utc>,
+    active_remote_computer_count: usize,
+    heartbeat_count: usize,
+    missing_heartbeat_count: usize,
+    stale_heartbeat_count: usize,
+    stale_after_seconds: i64,
+    actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13185,6 +13198,27 @@ async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, 
             "no stale Remote Computer attachment or expired lease is due"
         },
     ));
+    let remote_computer_readiness = build_remote_computer_readiness(state).await?;
+    let sidecar_supervision = remote_computer_readiness.sidecar_supervision;
+    let unhealthy_sidecar_count =
+        sidecar_supervision.missing_heartbeat_count + sidecar_supervision.stale_heartbeat_count;
+    actions.push(scheduler_due_plan_item(
+        "remote_computers",
+        "remote_computer_sidecar_supervision",
+        "auto",
+        unhealthy_sidecar_count,
+        sidecar_supervision
+            .active_remote_computer_count
+            .saturating_sub(unhealthy_sidecar_count),
+        sidecar_supervision.active_remote_computer_count,
+        if unhealthy_sidecar_count > 0 {
+            "record missing or stale Remote Computer artifact-discovery sidecar supervision evidence"
+        } else if sidecar_supervision.active_remote_computer_count == 0 {
+            "no active Remote Computer sidecar needs supervision"
+        } else {
+            "Remote Computer sidecar heartbeats are within the configured threshold"
+        },
+    ));
 
     let usage_export_enabled = usage_finance_export_schedule_enabled();
     let usage_export_ready = usage_finance_export_webhook_url().is_some();
@@ -13331,6 +13365,8 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     };
     let usage_finance_export =
         execute_usage_finance_export_delivery(state, true, "system", Some("system")).await?;
+    let remote_computer_sidecar_supervision =
+        execute_remote_computer_sidecar_supervision(state).await?;
     let remote_computer_reclaim = execute_remote_computer_stale_reclaim(state).await?;
     let mut mcp_health_runs = Vec::new();
     let mut mcp_rollout_runs = Vec::new();
@@ -13390,6 +13426,11 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     {
         actions.push("remote_computer_reclaim_processed".to_string());
     }
+    if remote_computer_sidecar_supervision.missing_heartbeat_count > 0
+        || remote_computer_sidecar_supervision.stale_heartbeat_count > 0
+    {
+        actions.push("remote_computer_sidecar_supervision_processed".to_string());
+    }
     let status = if actions.is_empty() {
         "noop"
     } else {
@@ -13411,6 +13452,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
         cost_alert_delivery,
         usage_finance_export,
         remote_computer_reclaim,
+        remote_computer_sidecar_supervision,
     };
     state
         .append_audit_log(new_audit_log(
@@ -13426,6 +13468,65 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
                 "actions": run.actions,
                 "provider_policy_gate_status": run.provider_policy_gate.as_ref().map(|gate| gate.status.clone()),
                 "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
+                "remote_computer_sidecar_supervision_status": run.remote_computer_sidecar_supervision.status,
+                "remote_computer_sidecar_missing_heartbeat_count": run.remote_computer_sidecar_supervision.missing_heartbeat_count,
+                "remote_computer_sidecar_stale_heartbeat_count": run.remote_computer_sidecar_supervision.stale_heartbeat_count,
+                "checked_at": run.checked_at,
+            }),
+        ))
+        .await?;
+    Ok(run)
+}
+
+async fn execute_remote_computer_sidecar_supervision(
+    state: &AppState,
+) -> Result<RemoteComputerSidecarSupervisionRun, AppError> {
+    let checked_at = Utc::now();
+    let readiness = build_remote_computer_readiness(state).await?;
+    let supervision = readiness.sidecar_supervision;
+    let mut actions = Vec::new();
+    if supervision.missing_heartbeat_count > 0 {
+        actions.push("flag_missing_artifact_discovery_sidecar_heartbeats".to_string());
+    }
+    if supervision.stale_heartbeat_count > 0 {
+        actions.push("flag_stale_artifact_discovery_sidecar_heartbeats".to_string());
+    }
+    if !actions.is_empty() {
+        actions
+            .push("keep_remote_computer_pods_out_of_production_until_sidecars_recover".to_string());
+    }
+    let status = if actions.is_empty() {
+        "ok"
+    } else {
+        "attention"
+    }
+    .to_string();
+    let run = RemoteComputerSidecarSupervisionRun {
+        status,
+        checked_at,
+        active_remote_computer_count: supervision.active_remote_computer_count,
+        heartbeat_count: supervision.heartbeat_count,
+        missing_heartbeat_count: supervision.missing_heartbeat_count,
+        stale_heartbeat_count: supervision.stale_heartbeat_count,
+        stale_after_seconds: supervision.stale_after_seconds,
+        actions,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "remote_computer.sidecar_supervision_run",
+            "remote_computer_sidecar",
+            None,
+            json!({
+                "status": run.status,
+                "actions": run.actions,
+                "active_remote_computer_count": run.active_remote_computer_count,
+                "heartbeat_count": run.heartbeat_count,
+                "missing_heartbeat_count": run.missing_heartbeat_count,
+                "stale_heartbeat_count": run.stale_heartbeat_count,
+                "stale_after_seconds": run.stale_after_seconds,
                 "checked_at": run.checked_at,
             }),
         ))
@@ -28443,6 +28544,14 @@ not json
         assert_eq!(remote_computer_plan.area, "remote_computers");
         assert_eq!(remote_computer_plan.status, "due");
         assert_eq!(remote_computer_plan.due_count, 2);
+        let remote_computer_sidecar_plan = plan
+            .actions
+            .iter()
+            .find(|item| item.action == "remote_computer_sidecar_supervision")
+            .expect("remote computer sidecar supervision plan item");
+        assert_eq!(remote_computer_sidecar_plan.area, "remote_computers");
+        assert_eq!(remote_computer_sidecar_plan.status, "due");
+        assert_eq!(remote_computer_sidecar_plan.due_count, 1);
         let cost_alert_plan = plan
             .actions
             .iter()
@@ -28483,6 +28592,12 @@ not json
         assert_eq!(run.remote_computer_reclaim.status, "completed");
         assert_eq!(run.remote_computer_reclaim.reclaimed_attachment_count, 1);
         assert_eq!(run.remote_computer_reclaim.reclaimed_lease_count, 1);
+        assert_eq!(run.remote_computer_sidecar_supervision.status, "attention");
+        assert_eq!(
+            run.remote_computer_sidecar_supervision
+                .missing_heartbeat_count,
+            1
+        );
         if !usage_finance_export_schedule_enabled() {
             assert_eq!(run.usage_finance_export.status, "disabled");
         }
@@ -28495,6 +28610,11 @@ not json
             run.actions
                 .iter()
                 .any(|action| action == "remote_computer_reclaim_processed")
+        );
+        assert!(
+            run.actions
+                .iter()
+                .any(|action| action == "remote_computer_sidecar_supervision_processed")
         );
         assert!(
             run.actions
@@ -28531,6 +28651,12 @@ not json
             summary.recent_runs[0]
                 .actions
                 .iter()
+                .any(|action| action == "remote_computer_sidecar_supervision_processed")
+        );
+        assert!(
+            summary.recent_runs[0]
+                .actions
+                .iter()
                 .any(|action| action == "usage_cost_alert_delivery_processed")
         );
 
@@ -28549,6 +28675,12 @@ not json
                 && log.details["team_count"] == 1
                 && log.details["status"] == "completed"
                 && log.details["cost_alert_delivery_status"] == "reserved"
+                && log.details["remote_computer_sidecar_supervision_status"] == "attention"
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "remote_computer.sidecar_supervision_run"
+                && log.details["status"] == "attention"
+                && log.details["missing_heartbeat_count"] == 1
         }));
     }
 
