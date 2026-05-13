@@ -51,6 +51,14 @@ RUN_STAGE2_PROVIDER_ROLLOUT=1 \
 
 That gate collects provider governance summary, provider policy gate report/history, deployment validation, and optional production rollout/rollback evidence into `.mandoforge/provider-governance-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/provider-governance-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower tenant-isolation proof, run:
+
+```bash
+./scripts/tenant-isolation-evidence-gate.sh
+```
+
+That gate collects tenant isolation readiness and audited production routing validation evidence into `.mandoforge/tenant-isolation-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.
