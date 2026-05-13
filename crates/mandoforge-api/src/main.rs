@@ -2941,6 +2941,10 @@ fn build_router(state: AppState) -> Router {
             post(dry_run_remote_computer_runner),
         )
         .route(
+            "/api/remote-computers/runner/mutate",
+            post(mutate_remote_computer_runner),
+        )
+        .route(
             "/api/remote-computers/reclaim-stale",
             post(reclaim_stale_remote_computers),
         )
@@ -15577,6 +15581,42 @@ async fn dry_run_remote_computer_runner(
     Ok(Json(response))
 }
 
+async fn mutate_remote_computer_runner(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RemoteComputerRunnerDryRunRequest>,
+) -> Result<Json<RemoteComputerRunnerDryRunResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_runner",
+        input.remote_computer_id,
+    )
+    .await?;
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = remote_computer_runner_for_config(&config);
+    let session_id = input.session_id;
+    let remote_computer_id = input.remote_computer_id;
+    let response = runner.mutate(&config, input).await;
+    state
+        .append_audit_log(new_audit_log(
+            session_id,
+            "system",
+            None,
+            "remote_computer.runner_mutate",
+            "remote_computer_runner",
+            remote_computer_id,
+            json!({
+                "config": config,
+                "response": &response,
+                "execution_enabled": false
+            }),
+        ))
+        .await?;
+    Ok(Json(response))
+}
+
 async fn list_remote_computers(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -18199,6 +18239,31 @@ not json
         assert!(!dry_run.would_delete_pod);
         assert!(!dry_run.execution_enabled);
 
+        let mutate: RemoteComputerRunnerDryRunResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/runner/mutate")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "operation": "live_create",
+                        "session_id": session.id,
+                        "pod_name": "agent-remote-computer-dry-run",
+                        "metadata": {"reason": "test reserved runner mutation"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(mutate.status, "blocked");
+        assert_eq!(mutate.operation, "live_create");
+        assert!(!mutate.live_mutation_attempted);
+        assert!(!mutate.execution_enabled);
+
         let leases: Vec<RemoteComputerLease> = request_json(
             app.clone(),
             Request::builder()
@@ -18255,6 +18320,11 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "remote_computer.runner_dry_run")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "remote_computer.runner_mutate")
         );
     }
 

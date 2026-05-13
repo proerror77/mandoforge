@@ -51,16 +51,17 @@ Covered today:
 - K8s Remote Computer manifests exist for the Pod template, service account, state PVC placeholder, and NetworkPolicy skeleton.
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
-- `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness and dry-run endpoints.
-- `KubernetesRemoteComputerRunner` exists as an explicit `MANDOFORGE_REMOTE_COMPUTER_RUNNER=kubernetes` adapter skeleton. It validates template/client config, including kubeconfig or API-server-plus-bearer-token inputs, can perform a read-only `/version` probe, and reports Pod create/delete intent, but remains dry-run-only.
+- `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness, dry-run, and explicit mutate endpoints.
+- `KubernetesRemoteComputerRunner` exists as an explicit `MANDOFORGE_REMOTE_COMPUTER_RUNNER=kubernetes` adapter skeleton. It validates template/client config, including kubeconfig or API-server-plus-bearer-token inputs, can perform a read-only `/version` probe, reports Pod create/delete intent, and can call the Kubernetes Pod create/delete API only when both mutation gates are explicitly enabled.
 - Kubernetes dry-runs return the planned API path, namespace, pod name, and template path so future live calls have an auditable request plan before mutation is enabled.
+- Kubernetes live mutation is gated by both `MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED` and `MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED`; it remains Admin-only and still does not create execution jobs, tool calls, or a session-to-Pod execution path.
 - `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
 - `POST /api/remote-computers/reclaim-stale` reclaims stale attachments and expired leases with event/audit records and no tool execution.
 - `/api/scheduler/due-plan` and `/api/scheduler/run-due` include Remote Computer stale reclaim in the aggregate operations path.
 
 Not covered today:
 
-- No dynamic Kubernetes Pod creation.
+- No dynamic Kubernetes Pod creation from normal session scheduling.
 - No actual session-to-Pod runtime attach.
 - No actual Remote Computer execution path.
 - No actual Pod attach transport; session attachment is control-plane state only.
@@ -69,7 +70,7 @@ Not covered today:
 - No warm pool of prestarted agent Pods.
 - No artifact/state sync daemon inside the Pod.
 - No KEDA/HPA queue-depth scaling for remote computer pools.
-- No real Kubernetes client mutation path; the current Kubernetes adapter reports intent and dry-run evidence only.
+- No production Kubernetes mutation rollout; the current adapter has a gated Pod API create/delete boundary only.
 - No Kubernetes Pod mutation from the scheduler; reclaim remains metadata-only.
 
 ## Target Components
