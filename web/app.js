@@ -2539,6 +2539,7 @@ function renderObservability() {
   const collectorReadiness = state.observabilityCollectorReadiness;
   const collectorAttention = collectorReadiness?.attention_items || [];
   const collectorSignalPaths = collectorReadiness?.signal_paths || [];
+  const collectorProductionOps = collectorReadiness?.production_ops || {};
   const remediationPlan = state.observabilityRemediationPlan;
   const remediationPlanActions = remediationPlan?.actions || [];
   const remediation = state.observabilityRemediation;
@@ -2597,6 +2598,10 @@ function renderObservability() {
             <dd>${escapeHtml(collectorReadiness.endpoint || "none")}</dd>
             <dt>Health message</dt>
             <dd>${escapeHtml(collectorReadiness.health_check?.message || "none")}</dd>
+            <dt>Production ops</dt>
+            <dd>${escapeHtml(collectorProductionOps.status || "unknown")} · blocked ${collectorProductionOps.production_blocked ? "yes" : "no"} · paths ${formatInteger(collectorProductionOps.configured_signal_path_count || 0)}/${formatInteger(collectorProductionOps.signal_path_count || 0)} · health ${escapeHtml(collectorProductionOps.health_status || "unknown")}</dd>
+            <dt>Production message</dt>
+            <dd>${escapeHtml(collectorProductionOps.message || "collector production ops are not reported")}</dd>
           </dl>
           ${
             collectorSignalPaths.length

@@ -1229,7 +1229,19 @@ struct ObservabilityCollectorReadiness {
     sample_ratio: f64,
     health_check: ObservabilityCollectorHealthCheck,
     signal_paths: Vec<ObservabilityCollectorSignalPath>,
+    production_ops: ObservabilityCollectorProductionOpsReadiness,
     attention_items: Vec<ObservabilityCollectorAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityCollectorProductionOpsReadiness {
+    status: String,
+    production_blocked: bool,
+    signal_path_count: usize,
+    configured_signal_path_count: usize,
+    health_checked: bool,
+    health_status: String,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14569,6 +14581,24 @@ async fn build_observability_collector_readiness(
             },
         })
         .collect::<Vec<_>>();
+    let production_ops = build_observability_collector_production_ops(
+        config.is_enabled(),
+        endpoint_configured,
+        config.sample_ratio,
+        &health_check,
+        &signal_paths,
+    );
+    if production_ops.production_blocked {
+        attention_items.push(ObservabilityCollectorAttentionItem {
+            kind: "collector_production_ops_blocked".to_string(),
+            severity: if production_ops.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: production_ops.message.clone(),
+        });
+    }
     let status = if attention_items
         .iter()
         .any(|item| item.severity == "critical")
@@ -14590,7 +14620,80 @@ async fn build_observability_collector_readiness(
         sample_ratio: config.sample_ratio,
         health_check,
         signal_paths,
+        production_ops,
         attention_items,
+    }
+}
+
+fn build_observability_collector_production_ops(
+    otlp_enabled: bool,
+    endpoint_configured: bool,
+    sample_ratio: f64,
+    health_check: &ObservabilityCollectorHealthCheck,
+    signal_paths: &[ObservabilityCollectorSignalPath],
+) -> ObservabilityCollectorProductionOpsReadiness {
+    let signal_path_count = signal_paths.len();
+    let configured_signal_path_count = signal_paths
+        .iter()
+        .filter(|path| path.status == "configured" && path.url.is_some())
+        .count();
+    let (status, production_blocked, message) = if !otlp_enabled {
+        (
+            "blocked",
+            true,
+            "Observability production ops are blocked until OTLP export is enabled".to_string(),
+        )
+    } else if !endpoint_configured {
+        (
+            "blocked",
+            true,
+            "Observability production ops are blocked until an OTLP collector endpoint is configured"
+                .to_string(),
+        )
+    } else if configured_signal_path_count < 3 {
+        (
+            "blocked",
+            true,
+            "Observability production ops are blocked until logs, traces, and metrics paths are configured"
+                .to_string(),
+        )
+    } else if sample_ratio <= 0.0 {
+        (
+            "blocked",
+            true,
+            "Observability production ops are blocked because telemetry sampling is disabled"
+                .to_string(),
+        )
+    } else if !health_check.checked {
+        (
+            "blocked",
+            true,
+            "Observability production ops are blocked until collector health is checked"
+                .to_string(),
+        )
+    } else if health_check.status != "healthy" {
+        (
+            "blocked",
+            true,
+            "Observability production ops are blocked by a failed collector health check"
+                .to_string(),
+        )
+    } else {
+        (
+            "ready",
+            false,
+            "Observability collector is healthy and logs, traces, and metrics paths are configured"
+                .to_string(),
+        )
+    };
+    ObservabilityCollectorProductionOpsReadiness {
+        status: status.to_string(),
+        production_blocked,
+        signal_path_count,
+        configured_signal_path_count,
+        health_checked: health_check.checked,
+        health_status: health_check.status.clone(),
+        message,
     }
 }
 
@@ -28143,13 +28246,27 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(collector_readiness.status, "warning");
+        assert_eq!(collector_readiness.status, "failed");
         assert!(!collector_readiness.otlp_enabled);
+        assert_eq!(collector_readiness.production_ops.status, "blocked");
+        assert!(collector_readiness.production_ops.production_blocked);
+        assert_eq!(
+            collector_readiness
+                .production_ops
+                .configured_signal_path_count,
+            0
+        );
         assert!(
             collector_readiness
                 .attention_items
                 .iter()
                 .any(|item| item.kind == "otlp_disabled")
+        );
+        assert!(
+            collector_readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "collector_production_ops_blocked")
         );
 
         let remediation_plan: ObservabilityRemediationPlan = request_json(
