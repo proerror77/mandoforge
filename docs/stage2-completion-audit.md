@@ -13,7 +13,7 @@ This audit is intentionally strict. A reserved boundary, UI placeholder, passing
 | Multi-tenancy with org/team/project scopes | `organizations`, `teams`, `projects`, `memberships`, and `tenant_invitations` exist; scoped agent/session access is tested by `admin_can_manage_stage2_governance_scope`, `tenant_provisioning_bootstrap_creates_owner_scope_and_audit`, and `tenant_invitations_create_accept_revoke_and_audit_membership`. | Partial: runtime still uses one default tenant boundary, so production cross-tenant isolation is not complete. |
 | RBAC for admin/operator/approver/viewer | `authorization.rs` defines roles and permissions; read/write/run/tool/approval/job/admin routes enforce them; tests include `read_routes_enforce_rbac_role_header`, `write_routes_enforce_rbac_role_header`, `session_run_enforces_rbac_role`, and `approval_decision_enforces_rbac_role`. | Covered |
 | Provider governance and model allowlists | Provider registry, team provider access, model allowlists, provider health, lifecycle approvals, emergency status changes, credential refs, budget enforcement, governance summary, and read-only provider policy gate report are implemented; tests include `provider_health_resolves_vault_api_key_ref_for_external_probe`, `provider_status_approval_requires_separate_approver_and_audits_decision`, and `provider_summary_aggregates_governance_signals`. | Partial: current UI has lifecycle/summary/gate surfaces, but a full production provider policy gate workflow is not complete. |
-| Vault and secret references | Secret ref catalog, Vault KV v2 client boundary, rotation records, provider secret resolution, MCP secret refs, and fail-closed tests exist; tests include `vault_secret_provider_reads_kv_v2_secret_over_http`, `secret_refs_reject_absolute_or_parent_paths`, and `eval_judge_profile_api_normalizes_secret_ref_and_audits`. | Partial: production secret value storage, external KMS/HSM, and real rotation orchestration remain out of scope. |
+| Vault and secret references | Secret ref catalog, Vault KV v2 client boundary, rotation records, provider secret resolution, MCP secret refs, eval judge secret refs, and `GET /api/vault/readiness` production-readiness gate exist. The readiness gate checks Vault provider health, reserved KMS configuration, registered refs, provider/MCP/eval judge consumers, unresolved refs, and stale rotations; the static Vault panel renders the gate. Tests include `vault_secret_provider_reads_kv_v2_secret_over_http`, `secret_refs_reject_absolute_or_parent_paths`, `eval_judge_profile_api_normalizes_secret_ref_and_audits`, and `vault_readiness_reports_secret_consumers_and_kms_gate`. | Partial: production secret value storage and real external KMS/HSM rotation execution remain out of scope, but blockers are now API/UI-visible through the readiness gate. |
 | Worker queue, leases, retries, and resume | In-memory/Postgres execution queue, worker binary, Redis Streams backend, Core NATS backend, lease/retry behavior, stale running reclaim, and queue-backed Codex App Server execution are implemented; tests include `execution_queue_tracks_job_lifecycle`, `queue_backed_worker_defers_approved_tool_until_job_run`, Redis broker tests, and NATS broker publish/message parsing tests. | Partial: NATS is Core NATS broker handoff without JetStream durability, and a separate non-API native worker process is not implemented. |
 | Approval v2: modify, delegate, expire, groups, escalation, delivery | Approval modification, expiry, delegated approver, approval groups, escalation rules, due escalation, and webhook fan-out are implemented; tests include `approval_modify_updates_waiting_tool_args_before_approve`, `delegated_approval_requires_matching_subject_or_admin`, `approval_groups_and_escalation_rules_delegate_decisions`, and `due_approval_escalation_run_advances_pending_approvals_by_rule_order`. | Partial: multi-channel production notification routing remains limited beyond current webhook/email-style route boundaries. |
 | MCP Gateway with registry, allowlists, policy, secret refs, health, rollout | `mcp.call`, team MCP server registry, discovery import, secret refs, health checks, due health, rollout request/apply/due/rollback, and summary UI exist; tests include `mcp_call_executes_through_tool_router_and_gateway_policy` and `mcp_server_config_normalizes_secret_refs_without_secret_values`. | Partial: production connector rollout orchestration is still limited to summary, due-run, manual apply, and rollback. |
@@ -36,16 +36,16 @@ cargo test -p mandoforge-api
 ./scripts/verify-static-ui-actionbook.sh
 kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out
 lsof -nP -iTCP:8791 -sTCP:LISTEN || true
-lsof -nP -iTCP:9224 -sTCP:LISTEN || true
+lsof -nP -iTCP:9324 -sTCP:LISTEN || true
 ```
 
 Latest evidence:
 
 ```text
-cargo test -p mandoforge-api: 117 passed
+cargo test -p mandoforge-api: 120 passed
 static UI actionbook smoke ok
 kustomize rendered 249 lines
-ports 8791 and 9224 had no residual listeners after Actionbook verification
+ports 8791 and 9324 had no residual listeners after Actionbook verification
 ```
 
 ## Open Completion Gaps
@@ -55,7 +55,7 @@ These gaps prevent Stage 2 from being marked complete:
 1. Full production cross-tenant runtime isolation beyond the default tenant boundary.
 2. Production multi-step rollout orchestration beyond preview/history/due-run/rollback surfaces.
 3. Production provider policy gate workflow beyond current lifecycle approval, summary, and read-only gate report surfaces.
-4. Production secret value storage and external KMS/HSM rotation orchestration.
+4. Production secret value storage and real external KMS/HSM rotation execution beyond the new Vault readiness gate.
 5. Production JetStream-style queue durability and a separate non-API native worker process.
 6. Production multi-channel approval notification routing beyond current webhook/fan-out boundaries.
 7. Production MCP connector rollout orchestration beyond current summary, due-run, manual apply, and rollback.

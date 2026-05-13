@@ -17,7 +17,7 @@ use axum::{
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
     routing::{delete, get, patch, post},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -1502,7 +1502,7 @@ struct CreatePolicyRevision {
     body: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SecretProviderHealth {
     provider_kind: String,
     healthy: bool,
@@ -1510,6 +1510,55 @@ struct SecretProviderHealth {
     issues: Vec<String>,
     checks: Value,
     checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultReadinessReport {
+    generated_at: DateTime<Utc>,
+    status: String,
+    secret_provider: SecretProviderHealth,
+    kms: VaultKmsReadiness,
+    secret_record_count: usize,
+    active_secret_record_count: usize,
+    provider_ref_count: usize,
+    mcp_secret_ref_count: usize,
+    eval_judge_secret_ref_count: usize,
+    unresolved_ref_count: usize,
+    stale_rotation_count: usize,
+    checks: Vec<VaultReadinessCheck>,
+    attention_items: Vec<VaultReadinessAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultKmsReadiness {
+    provider: String,
+    status: String,
+    configured: bool,
+    key_id_configured: bool,
+    rotation_policy_configured: bool,
+    issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultReadinessCheck {
+    resource_type: String,
+    resource_id: Option<Uuid>,
+    resource_name: String,
+    status: String,
+    secret_refs: Vec<String>,
+    blockers: Vec<String>,
+    warnings: Vec<String>,
+    recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultReadinessAttentionItem {
+    resource_type: String,
+    resource_id: Option<Uuid>,
+    resource_name: String,
+    kind: String,
+    severity: String,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2194,6 +2243,7 @@ fn build_router(state: AppState) -> Router {
             post(gate_policy_revision),
         )
         .route("/api/vault/health", get(get_vault_health))
+        .route("/api/vault/readiness", get(get_vault_readiness))
         .route(
             "/api/vault/secrets",
             get(list_secret_records).post(create_secret_record),
@@ -6277,6 +6327,29 @@ async fn get_vault_health(
     ))
 }
 
+async fn get_vault_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<VaultReadinessReport>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
+    let secret_provider = secret_provider_health_from_lookup(|key| std::env::var(key).ok()).await;
+    let secret_records = state.list_secret_records().await?;
+    let providers = state.list_providers().await?;
+    let mut mcp_servers = Vec::new();
+    for organization in state.list_organizations().await? {
+        for team in state.list_teams(organization.id).await? {
+            mcp_servers.extend(state.list_mcp_servers(team.id).await?);
+        }
+    }
+    Ok(Json(build_vault_readiness_report(
+        secret_provider,
+        &secret_records,
+        &providers,
+        &mcp_servers,
+        |key| std::env::var(key).ok(),
+    )))
+}
+
 async fn list_secret_records(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -7315,6 +7388,331 @@ where
             },
         },
     }
+}
+
+fn build_vault_readiness_report<F>(
+    secret_provider: SecretProviderHealth,
+    secret_records: &[SecretRecord],
+    providers: &[ProviderRecord],
+    mcp_servers: &[McpServerRecord],
+    lookup: F,
+) -> VaultReadinessReport
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let generated_at = Utc::now();
+    let registered_refs: BTreeSet<String> = secret_records.iter().map(secret_record_ref).collect();
+    let mut checks = Vec::new();
+    let mut attention_items = Vec::new();
+    let mut unresolved_refs = BTreeSet::new();
+    let mut provider_ref_count = 0;
+    let mut eval_judge_secret_ref_count = 0;
+    let mut mcp_secret_ref_count = 0;
+
+    let mut provider_blockers = Vec::new();
+    let mut provider_warnings = Vec::new();
+    let mut provider_recommendations = Vec::new();
+    if !secret_provider.healthy {
+        provider_blockers.push(format!(
+            "secret provider is {}: {}",
+            secret_provider.status,
+            secret_provider.issues.join("; ")
+        ));
+        provider_recommendations
+            .push("configure MANDOFORGE_SECRET_PROVIDER=vault and verify Vault health".to_string());
+    }
+    if secret_provider.provider_kind == "reserved" {
+        provider_blockers
+            .push("reserved secret provider cannot read production secrets".to_string());
+    }
+    if secret_provider.provider_kind == "vault"
+        && secret_provider
+            .checks
+            .get("token_configured")
+            .and_then(Value::as_bool)
+            == Some(false)
+    {
+        provider_blockers.push("Vault token is not configured".to_string());
+    }
+    if secret_records.is_empty() {
+        provider_warnings.push("no secret refs are registered in the catalog".to_string());
+        provider_recommendations
+            .push("register provider, MCP, and judge secret refs before pilot rollout".to_string());
+    }
+    checks.push(VaultReadinessCheck {
+        resource_type: "secret_provider".to_string(),
+        resource_id: None,
+        resource_name: secret_provider.provider_kind.clone(),
+        status: vault_check_status(&provider_blockers, &provider_warnings),
+        secret_refs: vec![],
+        blockers: provider_blockers,
+        warnings: provider_warnings,
+        recommendations: provider_recommendations,
+    });
+
+    let kms = kms_readiness_from_lookup(&lookup);
+    checks.push(VaultReadinessCheck {
+        resource_type: "kms".to_string(),
+        resource_id: None,
+        resource_name: kms.provider.clone(),
+        status: if kms.status == "ready" {
+            "passed".to_string()
+        } else {
+            "failed".to_string()
+        },
+        secret_refs: vec![],
+        blockers: kms.issues.clone(),
+        warnings: vec![],
+        recommendations: if kms.status == "ready" {
+            vec![]
+        } else {
+            vec![
+                "configure MANDOFORGE_KMS_PROVIDER, MANDOFORGE_KMS_KEY_ID, and MANDOFORGE_KMS_ROTATION_POLICY".to_string(),
+            ]
+        },
+    });
+
+    let stale_cutoff = generated_at - ChronoDuration::days(90);
+    for record in secret_records {
+        let mut blockers = Vec::new();
+        let mut warnings = Vec::new();
+        let mut recommendations = Vec::new();
+        if record.status != "active" {
+            blockers.push(format!("secret record status is {}", record.status));
+            recommendations.push("reactivate or rotate this secret ref before rollout".to_string());
+        }
+        if record.updated_at < stale_cutoff {
+            warnings.push("secret ref has not rotated in more than 90 days".to_string());
+            recommendations
+                .push("rotate this secret ref and verify downstream consumers".to_string());
+        }
+        checks.push(VaultReadinessCheck {
+            resource_type: "secret_record".to_string(),
+            resource_id: Some(record.id),
+            resource_name: record.name.clone(),
+            status: vault_check_status(&blockers, &warnings),
+            secret_refs: vec![secret_record_ref(record)],
+            blockers,
+            warnings,
+            recommendations,
+        });
+    }
+
+    for provider in providers {
+        let Some(secret_ref) = provider_api_key_ref(provider) else {
+            if provider_requires_api_key(&provider.provider_type) {
+                let has_env = provider
+                    .config
+                    .get("api_key_env")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty());
+                let mut blockers = Vec::new();
+                let mut warnings = Vec::new();
+                let mut recommendations = Vec::new();
+                if has_env {
+                    warnings.push("provider uses env credential instead of Vault ref".to_string());
+                    recommendations
+                        .push("rotate provider credential to vault:path#key".to_string());
+                } else {
+                    blockers.push("provider requires api_key_ref or api_key_env".to_string());
+                    recommendations.push(
+                        "bind provider credential through a registered Vault ref".to_string(),
+                    );
+                }
+                checks.push(VaultReadinessCheck {
+                    resource_type: "provider".to_string(),
+                    resource_id: Some(provider.id),
+                    resource_name: provider.name.clone(),
+                    status: vault_check_status(&blockers, &warnings),
+                    secret_refs: vec![],
+                    blockers,
+                    warnings,
+                    recommendations,
+                });
+            }
+            continue;
+        };
+        if provider.provider_type == "eval_judge" {
+            eval_judge_secret_ref_count += 1;
+        } else {
+            provider_ref_count += 1;
+        }
+        let mut blockers = Vec::new();
+        let mut recommendations = Vec::new();
+        if !registered_refs.contains(&secret_ref) {
+            unresolved_refs.insert(secret_ref.clone());
+            blockers.push("api_key_ref is not registered in the secret catalog".to_string());
+            recommendations.push("create a matching /api/vault/secrets catalog entry".to_string());
+        }
+        checks.push(VaultReadinessCheck {
+            resource_type: if provider.provider_type == "eval_judge" {
+                "eval_judge_profile".to_string()
+            } else {
+                "provider".to_string()
+            },
+            resource_id: Some(provider.id),
+            resource_name: provider.name.clone(),
+            status: vault_check_status(&blockers, &[]),
+            secret_refs: vec![secret_ref],
+            blockers,
+            warnings: vec![],
+            recommendations,
+        });
+    }
+
+    for server in mcp_servers {
+        let secret_refs = mcp_config_secret_refs(&server.config);
+        if secret_refs.is_empty() {
+            continue;
+        }
+        mcp_secret_ref_count += secret_refs.len();
+        let mut blockers = Vec::new();
+        let mut recommendations = Vec::new();
+        for secret_ref in &secret_refs {
+            if !registered_refs.contains(secret_ref) {
+                unresolved_refs.insert(secret_ref.clone());
+                blockers.push(format!(
+                    "{secret_ref} is not registered in the secret catalog"
+                ));
+            }
+        }
+        if !blockers.is_empty() {
+            recommendations.push(
+                "register every MCP connector secret ref before enabling the connector".to_string(),
+            );
+        }
+        checks.push(VaultReadinessCheck {
+            resource_type: "mcp_server".to_string(),
+            resource_id: Some(server.id),
+            resource_name: server.name.clone(),
+            status: vault_check_status(&blockers, &[]),
+            secret_refs,
+            blockers,
+            warnings: vec![],
+            recommendations,
+        });
+    }
+
+    for check in &checks {
+        for blocker in &check.blockers {
+            attention_items.push(VaultReadinessAttentionItem {
+                resource_type: check.resource_type.clone(),
+                resource_id: check.resource_id,
+                resource_name: check.resource_name.clone(),
+                kind: "blocker".to_string(),
+                severity: "critical".to_string(),
+                message: blocker.clone(),
+            });
+        }
+        for warning in &check.warnings {
+            attention_items.push(VaultReadinessAttentionItem {
+                resource_type: check.resource_type.clone(),
+                resource_id: check.resource_id,
+                resource_name: check.resource_name.clone(),
+                kind: "warning".to_string(),
+                severity: "warning".to_string(),
+                message: warning.clone(),
+            });
+        }
+    }
+
+    let failed_count = checks
+        .iter()
+        .filter(|check| check.status == "failed")
+        .count();
+    let warning_count = checks
+        .iter()
+        .filter(|check| check.status == "warning")
+        .count();
+    let status = if failed_count > 0 {
+        "failed"
+    } else if warning_count > 0 {
+        "warning"
+    } else {
+        "passed"
+    }
+    .to_string();
+
+    VaultReadinessReport {
+        generated_at,
+        status,
+        secret_provider,
+        kms,
+        secret_record_count: secret_records.len(),
+        active_secret_record_count: secret_records
+            .iter()
+            .filter(|record| record.status == "active")
+            .count(),
+        provider_ref_count,
+        mcp_secret_ref_count,
+        eval_judge_secret_ref_count,
+        unresolved_ref_count: unresolved_refs.len(),
+        stale_rotation_count: secret_records
+            .iter()
+            .filter(|record| record.updated_at < stale_cutoff)
+            .count(),
+        checks,
+        attention_items,
+    }
+}
+
+fn kms_readiness_from_lookup<F>(lookup: &F) -> VaultKmsReadiness
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let provider = lookup("MANDOFORGE_KMS_PROVIDER")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "reserved".to_string());
+    let key_id_configured = lookup("MANDOFORGE_KMS_KEY_ID")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let rotation_policy_configured = lookup("MANDOFORGE_KMS_ROTATION_POLICY")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let configured = provider != "reserved" && key_id_configured && rotation_policy_configured;
+    let mut issues = Vec::new();
+    if provider == "reserved" {
+        issues.push("external KMS/HSM provider is not configured".to_string());
+    }
+    if !key_id_configured {
+        issues.push("MANDOFORGE_KMS_KEY_ID is not configured".to_string());
+    }
+    if !rotation_policy_configured {
+        issues.push("MANDOFORGE_KMS_ROTATION_POLICY is not configured".to_string());
+    }
+    VaultKmsReadiness {
+        provider,
+        status: if configured { "ready" } else { "reserved" }.to_string(),
+        configured,
+        key_id_configured,
+        rotation_policy_configured,
+        issues,
+    }
+}
+
+fn vault_check_status(blockers: &[String], warnings: &[String]) -> String {
+    if !blockers.is_empty() {
+        "failed"
+    } else if !warnings.is_empty() {
+        "warning"
+    } else {
+        "passed"
+    }
+    .to_string()
+}
+
+fn secret_record_ref(record: &SecretRecord) -> String {
+    format!("vault:{}#{}", record.path, record.key)
+}
+
+fn provider_api_key_ref(provider: &ProviderRecord) -> Option<String> {
+    provider
+        .config
+        .get("api_key_ref")
+        .and_then(Value::as_str)
+        .and_then(|value| normalize_provider_api_key_ref(value).ok())
 }
 
 async fn update_provider_status(
@@ -16118,6 +16516,136 @@ not json
 
         vault_server.abort();
         provider_server.abort();
+    }
+
+    #[tokio::test]
+    async fn vault_readiness_reports_secret_consumers_and_kms_gate() {
+        let app = test_app().await;
+        let organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/organizations")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Vault Readiness Org", "slug": "vault-readiness-org"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/organizations/{}/teams", organization.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Vault Readiness Team", "slug": "vault-readiness-team"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _: SecretRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/vault/secrets")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "registered-openai",
+                        "path": "providers/openai",
+                        "key": "api_key",
+                        "scope_type": "team",
+                        "scope_id": team.id
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "openai_compatible",
+                        "name": "ready-openai",
+                        "base_url": "https://provider.example.invalid",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {"api_key_ref": "vault:providers/openai#api_key"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _: McpServerRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/mcp-servers", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "readiness-docs",
+                        "transport": "http",
+                        "tool_allowlist": ["search"],
+                        "config": {"secret_refs": ["vault:mcp/docs#api_key"]}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let report: VaultReadinessReport = request_json(
+            app,
+            Request::builder()
+                .uri("/api/vault/readiness")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(report.status, "failed");
+        assert_eq!(report.secret_record_count, 1);
+        assert_eq!(report.active_secret_record_count, 1);
+        assert_eq!(report.provider_ref_count, 1);
+        assert_eq!(report.mcp_secret_ref_count, 1);
+        assert_eq!(report.unresolved_ref_count, 1);
+        assert_eq!(report.kms.status, "reserved");
+        assert!(report.checks.iter().any(|check| {
+            check.resource_type == "provider"
+                && check.resource_id == Some(provider.id)
+                && check.status == "passed"
+        }));
+        assert!(report.attention_items.iter().any(|item| {
+            item.resource_type == "mcp_server" && item.message.contains("vault:mcp/docs#api_key")
+        }));
+        assert!(report.attention_items.iter().any(|item| {
+            item.resource_type == "kms"
+                && item
+                    .message
+                    .contains("external KMS/HSM provider is not configured")
+        }));
     }
 
     #[tokio::test]

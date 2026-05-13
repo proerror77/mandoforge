@@ -3,7 +3,7 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8791}"
 GATE_ADDR="${GATE_ADDR:-127.0.0.1:8791}"
-ACTIONBOOK_CDP_PORT="${ACTIONBOOK_CDP_PORT:-9224}"
+ACTIONBOOK_CDP_PORT="${ACTIONBOOK_CDP_PORT:-9324}"
 ACTIONBOOK_SCREENSHOT="${ACTIONBOOK_SCREENSHOT:-/tmp/mandoforge-actionbook-smoke.png}"
 ACTIONBOOK_EVAL_JSON="${ACTIONBOOK_EVAL_JSON:-/tmp/mandoforge-actionbook-eval.json}"
 CHROME_PATH="${CHROME_PATH:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
@@ -60,6 +60,7 @@ wait_for_static_ui() {
     hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy') && text.includes('POLICY REVISIONS') && text.includes('Create Policy Revision') && text.includes('Gate cases JSON') && text.includes('Rollout %') && text.includes('Activate after') && text.includes('Activate before'),
     hasPolicyRolloutCancel: text.includes('Cancel Staged Rollout') && text.includes('Run Due Policy Rollouts') && text.includes('Rollback Active Policy') && text.includes('RUNTIME ROLLOUT'),
     hasVaultHealthAction: text.includes('Check Vault Health') && text.includes('Register Secret Ref'),
+    hasVaultReadiness: Boolean(document.querySelector('#vault-readiness')) && text.includes('Secret provider:') && text.includes('STALE ROTATIONS'),
     hasApprovalGovernance: text.includes('Approval Governance') && text.includes('Create Approval Group') && text.includes('Create Escalation Rule') && text.includes('Run Due Escalations'),
     hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Load Codex Runs') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering') && text.includes('LONG-RUNNING STEERING'),
     hasMcpLifecycle: text.includes('MCP Servers') && text.includes('Config JSON') && Array.from(document.querySelectorAll('#mcp-form textarea')).some((textarea) => textarea.value.includes('vault:mcp/docs#api_key')) && text.includes('Load Team Servers') && text.includes('Run Team Health') && text.includes('Run Due Health'),
@@ -87,6 +88,7 @@ wait_for_static_ui() {
     && result.hasPolicyConsole
     && result.hasPolicyRolloutCancel
     && result.hasVaultHealthAction
+    && result.hasVaultReadiness
     && result.hasApprovalGovernance
     && result.hasCodexAppServer
     && result.hasMcpLifecycle
@@ -149,6 +151,8 @@ grep -q "requestEvalRunPromotion" /tmp/mandoforge-actionbook-app.js
 grep -q "runObservabilityRemediation" /tmp/mandoforge-actionbook-app.js
 grep -q "Create Judge Profile" /tmp/mandoforge-actionbook-index.html
 grep -q "Bootstrap Stage 2 Suite" /tmp/mandoforge-actionbook-index.html
+grep -q "vaultReadiness" /tmp/mandoforge-actionbook-app.js
+grep -q "vault-readiness" /tmp/mandoforge-actionbook-index.html
 curl -fsS "$BASE_URL/api/usage" \
   -H 'x-mandoforge-subject: actionbook-smoke' \
   -H 'x-mandoforge-roles: admin' \

@@ -276,7 +276,7 @@ After the actionbook smoke, verify that the self-started API and CDP listeners w
 
 ```bash
 lsof -nP -iTCP:8791 -sTCP:LISTEN || true
-lsof -nP -iTCP:9224 -sTCP:LISTEN || true
+lsof -nP -iTCP:9324 -sTCP:LISTEN || true
 ```
 
 Focused manual Postgres smoke can still be run with:

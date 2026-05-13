@@ -72,10 +72,10 @@ Static UI browser smoke, using `actionbook` CLI instead of Playwright or Chrome 
 ```bash
 ./scripts/verify-static-ui-actionbook.sh
 lsof -nP -iTCP:8791 -sTCP:LISTEN || true
-lsof -nP -iTCP:9224 -sTCP:LISTEN || true
+lsof -nP -iTCP:9324 -sTCP:LISTEN || true
 ```
 
-The script starts the API on `127.0.0.1:8791` when needed, launches a headless Chrome CDP endpoint on `9224`, checks the static console through `actionbook`, writes `/tmp/mandoforge-actionbook-smoke.png`, and cleans up both listeners.
+The script starts the API on `127.0.0.1:8791` when needed, launches a headless Chrome CDP endpoint on `9324`, checks the static console through `actionbook`, writes `/tmp/mandoforge-actionbook-smoke.png`, and cleans up both listeners. Override `ACTIONBOOK_CDP_PORT` only when you want to attach a different browser endpoint.
 
 Live final gate, with API, Postgres, and Docker available:
 
@@ -267,6 +267,8 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/policy/revisions/:id/diff`
 - `POST /api/policy/revisions/:id/gate`
 - `POST /api/policy/revisions/:id/activate`
+- `GET /api/vault/health`
+- `GET /api/vault/readiness`
 - `GET /api/vault/secrets`
 - `POST /api/vault/secrets`
 - `POST /api/vault/secrets/:id/rotate`

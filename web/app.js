@@ -10,6 +10,7 @@ const state = {
   providerPolicyGate: null,
   providerHealth: {},
   vaultHealth: null,
+  vaultReadiness: null,
   secretRecords: [],
   policy: null,
   policyDecision: null,
@@ -98,6 +99,7 @@ const auditLogRoot = document.querySelector("#audit-logs");
 const auditDetailRoot = document.querySelector("#audit-detail");
 const providerRoot = document.querySelector("#providers");
 const vaultHealthRoot = document.querySelector("#vault-health");
+const vaultReadinessRoot = document.querySelector("#vault-readiness");
 const secretRecordRoot = document.querySelector("#secret-records");
 const checkVaultHealthButton = document.querySelector("#check-vault-health");
 const policyRoot = document.querySelector("#policy-summary");
@@ -1293,6 +1295,7 @@ async function refreshOps() {
     providers,
     providerSummary,
     providerPolicyGate,
+    vaultReadiness,
     secretRecords,
     policy,
     policyRuntime,
@@ -1318,6 +1321,7 @@ async function refreshOps() {
       api("/api/providers"),
       api("/api/providers/summary"),
       api("/api/providers/policy-gate"),
+      api("/api/vault/readiness"),
       api("/api/vault/secrets"),
       api("/api/policy"),
       api("/api/policy/runtime"),
@@ -1342,6 +1346,7 @@ async function refreshOps() {
   state.providers = providers;
   state.providerSummary = providerSummary;
   state.providerPolicyGate = providerPolicyGate;
+  state.vaultReadiness = vaultReadiness;
   state.secretRecords = secretRecords;
   state.policy = policy;
   state.policyRuntime = policyRuntime;
@@ -1500,6 +1505,7 @@ function renderOps() {
   renderTenantGovernance();
   renderProviders();
   renderVaultHealth();
+  renderVaultReadiness();
   renderSecretRecords();
   renderApprovalGovernance();
   renderPolicy();
@@ -3074,6 +3080,87 @@ function renderVaultHealth() {
         <pre>${escapeHtml(JSON.stringify({ issues: state.vaultHealth.issues, checks: state.vaultHealth.checks }, null, 2))}</pre>
       </div>`
     : `<div class="muted">No Vault health check run yet.</div>`;
+}
+
+function renderVaultReadiness() {
+  const readiness = state.vaultReadiness;
+  if (!readiness) {
+    vaultReadinessRoot.innerHTML = `<div class="muted">Vault readiness data is not loaded.</div>`;
+    return;
+  }
+  const attentionItems = readiness.attention_items || [];
+  const checks = readiness.checks || [];
+  vaultReadinessRoot.innerHTML = `
+    <div class="metric-grid">
+      <div class="metric"><span>Readiness</span><strong>${escapeHtml(readiness.status)}</strong></div>
+      <div class="metric"><span>Secret Refs</span><strong>${formatInteger(readiness.active_secret_record_count)}/${formatInteger(readiness.secret_record_count)}</strong></div>
+      <div class="metric"><span>Consumers</span><strong>${formatInteger(readiness.provider_ref_count + readiness.mcp_secret_ref_count + readiness.eval_judge_secret_ref_count)}</strong></div>
+      <div class="metric"><span>Unresolved</span><strong>${formatInteger(readiness.unresolved_ref_count)}</strong></div>
+      <div class="metric"><span>Stale Rotations</span><strong>${formatInteger(readiness.stale_rotation_count)}</strong></div>
+      <div class="metric"><span>KMS</span><strong>${escapeHtml(readiness.kms?.status || "unknown")}</strong></div>
+    </div>
+    <div class="item">
+      <strong>Secret provider: ${escapeHtml(readiness.secret_provider?.status || "unknown")}</strong>
+      <div class="muted">${escapeHtml(readiness.secret_provider?.provider_kind || "unknown")} · ${escapeHtml(readiness.secret_provider?.healthy ? "healthy" : "unhealthy")}</div>
+      <div class="muted">KMS ${escapeHtml(readiness.kms?.provider || "reserved")} · key ${escapeHtml(readiness.kms?.key_id_configured ? "configured" : "missing")} · rotation ${escapeHtml(readiness.kms?.rotation_policy_configured ? "configured" : "missing")}</div>
+    </div>
+    ${
+      attentionItems.length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Resource</th>
+                <th>Issue</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${attentionItems
+                .slice(0, 8)
+                .map(
+                  (item) => `
+                    <tr>
+                      <td>${escapeHtml(item.severity)}</td>
+                      <td>${escapeHtml(item.resource_type)} · ${escapeHtml(item.resource_name)}</td>
+                      <td>${escapeHtml(item.message)}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : `<div class="muted">No Vault readiness attention items.</div>`
+    }
+    ${
+      checks.length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Check</th>
+                <th>Status</th>
+                <th>Refs</th>
+                <th>Next action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${checks
+                .slice(0, 12)
+                .map(
+                  (check) => `
+                    <tr>
+                      <td>${escapeHtml(check.resource_type)} · ${escapeHtml(check.resource_name)}</td>
+                      <td>${escapeHtml(check.status)}</td>
+                      <td>${escapeHtml((check.secret_refs || []).join(", ") || "none")}</td>
+                      <td>${escapeHtml((check.recommendations || []).join(" · ") || (check.blockers || []).join(" · ") || (check.warnings || []).join(" · ") || "No action")}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : ""
+    }
+  `;
 }
 
 function renderSecretRecords() {
