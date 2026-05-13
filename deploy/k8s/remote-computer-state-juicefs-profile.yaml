@@ -35,18 +35,3 @@ spec:
       namespace: agent-os
     volumeAttributes:
       subPath: mandoforge/agent-state
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mandoforge-remote-computer-state
-  annotations:
-    mandoforge.io/profile: remote-computer-state
-    mandoforge.io/provider: juicefs
-spec:
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 20Gi
-  volumeName: mandoforge-remote-computer-state-juicefs-pv

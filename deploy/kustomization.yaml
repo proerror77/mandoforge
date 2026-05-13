@@ -3,6 +3,8 @@ kind: Kustomization
 namespace: agent-os
 resources:
   - k8s
-  - k8s/remote-computer-state-juicefs-example.yaml
+  - k8s/remote-computer-state-juicefs-profile.yaml
   - k8s/remote-computer-warm-pool.yaml
   - k8s/remote-computer-keda.yaml
+patches:
+  - path: k8s/remote-computer-state-juicefs-pvc-patch.yaml
