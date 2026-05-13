@@ -1830,6 +1830,8 @@ struct RemoteComputerSidecarSupervisionReadiness {
 struct RemoteComputerSidecarRecoveryReadiness {
     status: String,
     replacement_enabled: bool,
+    validation_controller_required: bool,
+    validation_controller_configured: bool,
     runner_configured: bool,
     runner_live_mutation_enabled: bool,
     unhealthy_count: usize,
@@ -1852,6 +1854,7 @@ struct RemoteComputerSidecarRecoveryRun {
     generated_at: DateTime<Utc>,
     status: String,
     replacement_enabled: bool,
+    validation_controller_required: bool,
     validation_controller_configured: bool,
     runner_status: String,
     unhealthy_count: usize,
@@ -26093,14 +26096,20 @@ where
     let config = RemoteComputerRunnerConfig::from_env();
     let runner = remote_computer_runner_for_config(&config);
     let runner_readiness = runner.readiness(&config);
-    let replacement_enabled = env_bool("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED");
+    let replacement_enabled = env_bool_lookup(
+        "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED",
+        &lookup,
+    );
+    let validation_controller_required =
+        remote_computer_sidecar_validation_controller_required(&lookup);
     let validation_controller_configured =
         remote_computer_sidecar_validation_controller_configured(&lookup);
     let live_replacement_enabled = replacement_enabled
         && runner_readiness.configured
         && runner_readiness.live_mutation_enabled
         && config.mutation_enabled
-        && config.live_mutation_enabled;
+        && config.live_mutation_enabled
+        && (!validation_controller_required || validation_controller_configured);
     let mut runner_responses = Vec::new();
     let mut attempted_replacement_count = 0;
     let mut blocked_replacement_count = 0;
@@ -26158,6 +26167,8 @@ where
         "noop"
     } else if !replacement_enabled {
         "blocked"
+    } else if validation_controller_required && !validation_controller_configured {
+        "blocked"
     } else if attempted_replacement_count == 0 {
         "blocked"
     } else if failed_attempts > 0 {
@@ -26170,6 +26181,8 @@ where
         "No unhealthy Remote Computer sidecars require recovery".to_string()
     } else if !replacement_enabled {
         "Sidecar recovery planned replacements but live replacement is blocked until MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED is enabled".to_string()
+    } else if validation_controller_required && !validation_controller_configured {
+        "Sidecar recovery planned replacements but live replacement is blocked until MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_URL is configured".to_string()
     } else if !live_replacement_enabled {
         "Sidecar recovery is enabled, but the Kubernetes runner live mutation gates are not fully open".to_string()
     } else if failed_attempts > 0 {
@@ -26181,6 +26194,7 @@ where
         generated_at: Utc::now(),
         status,
         replacement_enabled,
+        validation_controller_required,
         validation_controller_configured,
         runner_status: runner_readiness.status,
         unhealthy_count: targets.len(),
@@ -26254,6 +26268,20 @@ where
         .unwrap_or(false)
 }
 
+fn remote_computer_sidecar_validation_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 async fn execute_remote_computer_sidecar_validation_controller<F>(
     lookup: &F,
     run: &RemoteComputerSidecarRecoveryRun,
@@ -26278,6 +26306,7 @@ where
         "type": "mandoforge.remote_computer_sidecar_replacement_validation",
         "generated_at": run.generated_at,
         "status": run.status,
+        "validation_controller_required": run.validation_controller_required,
         "unhealthy_count": run.unhealthy_count,
         "planned_replacement_count": run.planned_replacement_count,
         "attempted_replacement_count": run.attempted_replacement_count,
@@ -26951,7 +26980,27 @@ fn build_remote_computer_sidecar_recovery_readiness(
     targets: &[RemoteComputerSidecarRecoveryTarget],
     runner: &RemoteComputerRunnerReadiness,
 ) -> RemoteComputerSidecarRecoveryReadiness {
-    let replacement_enabled = env_bool("MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED");
+    build_remote_computer_sidecar_recovery_readiness_with_lookup(targets, runner, &|key| {
+        std::env::var(key).ok()
+    })
+}
+
+fn build_remote_computer_sidecar_recovery_readiness_with_lookup<F>(
+    targets: &[RemoteComputerSidecarRecoveryTarget],
+    runner: &RemoteComputerRunnerReadiness,
+    lookup: &F,
+) -> RemoteComputerSidecarRecoveryReadiness
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let replacement_enabled = env_bool_lookup(
+        "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED",
+        lookup,
+    );
+    let validation_controller_required =
+        remote_computer_sidecar_validation_controller_required(lookup);
+    let validation_controller_configured =
+        remote_computer_sidecar_validation_controller_configured(lookup);
     let replaceable_pod_count = targets
         .iter()
         .filter(|target| target.pod_name.is_some())
@@ -26966,6 +27015,8 @@ fn build_remote_computer_sidecar_recovery_readiness(
         Some("runner_live_mutation_disabled".to_string())
     } else if replaceable_pod_count < targets.len() {
         Some("unhealthy_remote_computer_missing_pod_name".to_string())
+    } else if validation_controller_required && !validation_controller_configured {
+        Some("validation_controller_required".to_string())
     } else {
         None
     };
@@ -26986,6 +27037,8 @@ fn build_remote_computer_sidecar_recovery_readiness(
     RemoteComputerSidecarRecoveryReadiness {
         status: status.to_string(),
         replacement_enabled,
+        validation_controller_required,
+        validation_controller_configured,
         runner_configured: runner.configured,
         runner_live_mutation_enabled: runner.live_mutation_enabled,
         unhealthy_count: targets.len(),
@@ -26996,8 +27049,14 @@ fn build_remote_computer_sidecar_recovery_readiness(
 }
 
 fn env_bool(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
+    env_bool_lookup(name, &|key| std::env::var(key).ok())
+}
+
+fn env_bool_lookup<F>(name: &str, lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup(name)
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
@@ -32100,6 +32159,52 @@ not json
         }));
     }
 
+    #[test]
+    fn remote_computer_sidecar_recovery_requires_validation_controller_when_configured() {
+        let remote_computer_id = Uuid::new_v4();
+        let targets = vec![RemoteComputerSidecarRecoveryTarget {
+            remote_computer_id,
+            name: "remote-computer-1".to_string(),
+            pod_name: Some("agent-remote-computer-1".to_string()),
+            reason: "stale_artifact_discovery_heartbeat".to_string(),
+            latest_observed_at: Some(Utc::now()),
+        }];
+        let runner = RemoteComputerRunnerReadiness {
+            mode: "kubernetes".to_string(),
+            configured: true,
+            status: "ready".to_string(),
+            namespace: "default".to_string(),
+            pod_template_path: "deploy/k8s/agent-remote-computer.yaml".to_string(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            client_configured: true,
+            api_server_configured: true,
+            bearer_token_configured: true,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            dry_run_only: false,
+            supported_operations: vec!["live_delete".to_string(), "live_create".to_string()],
+            message: "ready".to_string(),
+        };
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED" => Some("true".to_string()),
+            "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_REQUIRED" => Some("true".to_string()),
+            _ => None,
+        };
+
+        let readiness = build_remote_computer_sidecar_recovery_readiness_with_lookup(
+            &targets, &runner, &lookup,
+        );
+
+        assert_eq!(readiness.status, "blocked");
+        assert!(readiness.replacement_enabled);
+        assert!(readiness.validation_controller_required);
+        assert!(!readiness.validation_controller_configured);
+        assert_eq!(
+            readiness.blocked_reason.as_deref(),
+            Some("validation_controller_required")
+        );
+    }
+
     #[tokio::test]
     async fn remote_computer_sidecar_validation_controller_confirms_replacement() {
         let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -32123,6 +32228,7 @@ not json
             generated_at: Utc::now(),
             status: "completed".to_string(),
             replacement_enabled: true,
+            validation_controller_required: true,
             validation_controller_configured: true,
             runner_status: "ready".to_string(),
             unhealthy_count: 1,

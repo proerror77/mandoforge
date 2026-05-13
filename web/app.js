@@ -2450,12 +2450,13 @@ function renderRemoteComputerReadiness() {
     <div class="item">
       <strong>REMOTE COMPUTER SIDECAR RECOVERY</strong>
       <div class="muted">${escapeHtml(sidecarRecovery.status || "unknown")} · replacement gate ${sidecarRecovery.replacement_enabled ? "enabled" : "disabled"} · runner ${sidecarRecovery.runner_configured ? "configured" : "not configured"} · live mutation ${sidecarRecovery.runner_live_mutation_enabled ? "enabled" : "disabled"}</div>
+      <div class="muted">Validation controller: required ${sidecarRecovery.validation_controller_required ? "yes" : "no"} · configured ${sidecarRecovery.validation_controller_configured ? "yes" : "no"}</div>
       <div class="muted">Unhealthy ${formatInteger(sidecarRecovery.unhealthy_count || 0)} · replaceable Pods ${formatInteger(sidecarRecovery.replaceable_pod_count || 0)} · blocked ${escapeHtml(sidecarRecovery.blocked_reason || "none")}</div>
       <div class="muted">${escapeHtml(sidecarRecovery.message || "Sidecar recovery gate is not reported")}</div>
       <button class="secondary inline-button" data-run-remote-sidecar-recovery="true">Run Sidecar Recovery Gate</button>
       ${
         sidecarRecoveryRun
-          ? `<div class="muted">Last run: ${escapeHtml(sidecarRecoveryRun.status || "unknown")} · unhealthy ${formatInteger(sidecarRecoveryRun.unhealthy_count || 0)} · attempted ${formatInteger(sidecarRecoveryRun.attempted_replacement_count || 0)} · blocked ${formatInteger(sidecarRecoveryRun.blocked_replacement_count || 0)} · validation ${escapeHtml(sidecarRecoveryRun.validation_result?.status || "unknown")} · ${escapeHtml(sidecarRecoveryRun.message || "")}</div>`
+          ? `<div class="muted">Last run: ${escapeHtml(sidecarRecoveryRun.status || "unknown")} · unhealthy ${formatInteger(sidecarRecoveryRun.unhealthy_count || 0)} · attempted ${formatInteger(sidecarRecoveryRun.attempted_replacement_count || 0)} · blocked ${formatInteger(sidecarRecoveryRun.blocked_replacement_count || 0)} · validation required ${sidecarRecoveryRun.validation_controller_required ? "yes" : "no"} · validation ${escapeHtml(sidecarRecoveryRun.validation_result?.status || "unknown")} · ${escapeHtml(sidecarRecoveryRun.message || "")}</div>`
           : `<div class="muted">No sidecar recovery run in this console session</div>`
       }
     </div>
