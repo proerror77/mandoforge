@@ -1956,6 +1956,7 @@ function renderRemoteComputerReadiness() {
   const autoscaling = report.autoscaling || {};
   const warmPool = report.warm_pool || {};
   const runner = state.remoteComputerRunnerReadiness || report.runner || {};
+  const executionTransport = report.execution_transport || {};
   const attentionItems = report.attention_items || [];
   const runbookActions = report.runbook_actions || [];
   const computerRows = state.remoteComputers || [];
@@ -2005,6 +2006,13 @@ function renderRemoteComputerReadiness() {
       <div class="muted">API server: ${runner.api_server_configured ? "configured" : "not configured"} · bearer token: ${runner.bearer_token_configured ? "configured" : "not configured"}</div>
       <div class="muted">Namespace: ${escapeHtml(runner.namespace || "unknown")} · Service account: ${escapeHtml(runner.service_account || "unknown")}</div>
       <div class="muted">${escapeHtml(runner.message || "Kubernetes Pod mutation is disabled unless a runner is explicitly implemented")}</div>
+    </div>
+    <div class="item">
+      <strong>EXECUTION TRANSPORT</strong>
+      <div class="muted">${escapeHtml(executionTransport.status || "unknown")} · mode ${escapeHtml(executionTransport.mode || "reserved")} · requested ${executionTransport.requested_execution_enabled ? "yes" : "no"} · enabled ${executionTransport.execution_enabled ? "yes" : "no"}</div>
+      <div class="muted">Assignments ${formatInteger(executionTransport.assignment_count || 0)} · active ${formatInteger(executionTransport.active_assignment_count || 0)}</div>
+      <div class="muted">Required: ${escapeHtml((executionTransport.required_implementation || []).join(", ") || "not reported")}</div>
+      <div class="muted">${escapeHtml(executionTransport.message || "Pod exec transport is not implemented")}</div>
     </div>
     <div class="item">
       <strong>REMOTE COMPUTER EVENTS</strong>

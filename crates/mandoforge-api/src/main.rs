@@ -1300,6 +1300,7 @@ struct RemoteComputerReadinessReport {
     autoscaling: RemoteComputerAutoscalingReadiness,
     warm_pool: RemoteComputerWarmPoolReadiness,
     runner: RemoteComputerRunnerReadiness,
+    execution_transport: RemoteComputerExecutionTransportReadiness,
     event_types: Vec<String>,
     attention_items: Vec<RemoteComputerAttentionItem>,
     runbook_actions: Vec<String>,
@@ -1343,6 +1344,19 @@ struct RemoteComputerWarmPoolReadiness {
     manifest_present: bool,
     manifest_path: String,
     status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerExecutionTransportReadiness {
+    mode: String,
+    requested_execution_enabled: bool,
+    execution_enabled: bool,
+    status: String,
+    assignment_count: usize,
+    active_assignment_count: usize,
+    supported_operations: Vec<String>,
+    required_implementation: Vec<String>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16318,7 +16332,7 @@ async fn get_remote_computer_readiness(
         None,
     )
     .await?;
-    Ok(Json(build_remote_computer_readiness()))
+    Ok(Json(build_remote_computer_readiness(&state).await?))
 }
 
 async fn get_remote_computer_runner_readiness(
@@ -16861,7 +16875,9 @@ pub(crate) async fn record_remote_computer_job_assignment_event(
     Ok(())
 }
 
-fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
+async fn build_remote_computer_readiness(
+    state: &AppState,
+) -> Result<RemoteComputerReadinessReport, AppError> {
     let pod_template =
         remote_computer_manifest_readiness("deploy/k8s/agent-remote-computer.yaml", "pod_template");
     let service_account = remote_computer_manifest_readiness(
@@ -16950,6 +16966,7 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         .to_string(),
     };
     let runner = build_remote_computer_runner_readiness();
+    let execution_transport = build_remote_computer_execution_transport_readiness(state).await?;
 
     let event_types = vec![
         "remote_computer.requested".to_string(),
@@ -17027,6 +17044,13 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
             "Remote Computer runner is fail-closed; Kubernetes Pod create/delete is dry-run only",
         ));
     }
+    if !execution_transport.execution_enabled {
+        attention_items.push(remote_computer_attention(
+            "pod_execution_transport_disabled",
+            "warning",
+            "Remote Computer job handoff can be planned and audited, but approved tools still execute on the existing worker path",
+        ));
+    }
 
     let mut runbook_actions = Vec::new();
     if !state_filesystem.distributed_filesystem_configured {
@@ -17060,6 +17084,10 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
             .to_string(),
     );
     runbook_actions.push(
+        "implement Kubernetes Pod exec streaming, result capture, and artifact sync before enabling MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED"
+            .to_string(),
+    );
+    runbook_actions.push(
         "run /api/remote-computers/reclaim-stale to clear stale attachment and expired lease records without executing tools"
             .to_string(),
     );
@@ -17082,7 +17110,7 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
     }
     .to_string();
 
-    RemoteComputerReadinessReport {
+    Ok(RemoteComputerReadinessReport {
         generated_at: Utc::now(),
         status,
         readiness_score,
@@ -17093,10 +17121,70 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         autoscaling,
         warm_pool,
         runner,
+        execution_transport,
         event_types,
         attention_items,
         runbook_actions,
+    })
+}
+
+async fn build_remote_computer_execution_transport_readiness(
+    state: &AppState,
+) -> Result<RemoteComputerExecutionTransportReadiness, AppError> {
+    let assignments = state.list_remote_computer_job_assignments().await?;
+    let assignment_count = assignments.len();
+    let active_assignment_count = assignments
+        .iter()
+        .filter(|assignment| assignment.status == "assigned")
+        .count();
+    let mode = std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "reserved".to_string());
+    let requested_execution_enabled = env_bool("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+    let execution_enabled = false;
+    let status = if mode == "kubernetes" && requested_execution_enabled {
+        "blocked_not_implemented"
+    } else if mode == "kubernetes" {
+        "blocked"
+    } else {
+        "reserved"
     }
+    .to_string();
+    Ok(RemoteComputerExecutionTransportReadiness {
+        mode,
+        requested_execution_enabled,
+        execution_enabled,
+        status,
+        assignment_count,
+        active_assignment_count,
+        supported_operations: vec![
+            "plan_pod_exec_intent".to_string(),
+            "audit_handoff".to_string(),
+            "fail_closed".to_string(),
+        ],
+        required_implementation: vec![
+            "Kubernetes exec streaming subprotocol".to_string(),
+            "stdout/stderr/status capture into tool results".to_string(),
+            "workspace artifact sync from Pod to Artifact Store".to_string(),
+            "session event replay for Pod execution output".to_string(),
+            "timeout and cancellation propagation".to_string(),
+        ],
+        message:
+            "Remote Computer execution transport is control-plane-only; no approved tool is executed inside a Kubernetes Pod yet"
+                .to_string(),
+    })
+}
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }
 
 fn build_remote_computer_runner_readiness() -> RemoteComputerRunnerReadiness {
@@ -29993,6 +30081,28 @@ not json
         );
         assert_eq!(remote_computer_readiness.runner.status, "reserved");
         assert!(!remote_computer_readiness.runner.configured);
+        assert_eq!(
+            remote_computer_readiness.execution_transport.status,
+            "reserved"
+        );
+        assert_eq!(
+            remote_computer_readiness
+                .execution_transport
+                .assignment_count,
+            0
+        );
+        assert!(
+            !remote_computer_readiness
+                .execution_transport
+                .execution_enabled
+        );
+        assert!(
+            remote_computer_readiness
+                .execution_transport
+                .required_implementation
+                .iter()
+                .any(|item| item.contains("Kubernetes exec streaming"))
+        );
         assert!(
             remote_computer_readiness
                 .event_types
@@ -30088,6 +30198,33 @@ not json
         .await;
         assert_eq!(assignments.len(), 1);
         assert_eq!(assignments[0].execution_job_id, job_id);
+
+        let readiness_after_assignment: RemoteComputerReadinessReport = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computers/readiness")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            readiness_after_assignment
+                .execution_transport
+                .assignment_count,
+            1
+        );
+        assert_eq!(
+            readiness_after_assignment
+                .execution_transport
+                .active_assignment_count,
+            1
+        );
+        assert_eq!(
+            readiness_after_assignment.execution_transport.status,
+            "reserved"
+        );
 
         let jobs_after_handoff: Vec<execution_queue::ExecutionJob> = request_json(
             app.clone(),
