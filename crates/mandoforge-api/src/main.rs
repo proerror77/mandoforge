@@ -669,6 +669,7 @@ struct SchedulerDueRun {
     checked_at: DateTime<Utc>,
     team_count: usize,
     actions: Vec<String>,
+    provider_policy_gate: Option<ProviderPolicyGateRun>,
     policy_rollout: PolicyScheduledRolloutRun,
     approval_escalations: ApprovalEscalationDueRun,
     agent_releases: AgentReleaseAutomationRun,
@@ -6134,6 +6135,16 @@ async fn run_provider_policy_gate(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(
+        execute_provider_policy_gate(&state, Some(principal.subject_id), "user").await?,
+    ))
+}
+
+async fn execute_provider_policy_gate(
+    state: &AppState,
+    subject: Option<String>,
+    actor_type: &str,
+) -> Result<ProviderPolicyGateRunResponse, AppError> {
     let providers = state.list_providers().await?;
     let audit_logs = state.list_audit_logs(None).await?;
     let report = build_provider_policy_gate_report(&providers, &audit_logs);
@@ -6152,13 +6163,13 @@ async fn run_provider_policy_gate(
     let audit_log = state
         .append_audit_log(new_audit_log(
             None,
-            "user",
+            actor_type,
             None,
             "provider.policy_gate_run",
             "providers",
             None,
             json!({
-                "subject": principal.subject_id,
+                "subject": subject,
                 "status": report.status,
                 "provider_count": report.provider_count,
                 "passed_count": report.passed_count,
@@ -6172,7 +6183,7 @@ async fn run_provider_policy_gate(
         .await?;
     let run = provider_policy_gate_run_from_audit_log(&audit_log)
         .ok_or_else(|| anyhow::anyhow!("failed to build provider policy gate run"))?;
-    Ok(Json(ProviderPolicyGateRunResponse { run, report }))
+    Ok(ProviderPolicyGateRunResponse { run, report })
 }
 
 async fn get_provider_policy_gate_runs(
@@ -6575,6 +6586,23 @@ fn provider_policy_gate_run_from_audit_log(log: &AuditLog) -> Option<ProviderPol
         warning_provider_names,
         ran_at: log.created_at,
     })
+}
+
+fn provider_policy_gate_is_due(
+    providers: &[ProviderRecord],
+    audit_logs: &[AuditLog],
+    now: DateTime<Utc>,
+) -> bool {
+    if providers.is_empty() {
+        return false;
+    }
+    let latest_run = audit_logs
+        .iter()
+        .filter_map(provider_policy_gate_run_from_audit_log)
+        .max_by_key(|run| run.ran_at);
+    latest_run
+        .map(|run| (now - run.ran_at).num_hours() >= 24)
+        .unwrap_or(true)
 }
 
 fn json_usize(value: &Value, key: &str) -> usize {
@@ -12085,6 +12113,27 @@ async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, 
         },
     ));
 
+    let providers = state.list_providers().await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let provider_gate_due = provider_policy_gate_is_due(&providers, &audit_logs, generated_at);
+    actions.push(scheduler_due_plan_item(
+        "providers",
+        "provider_policy_gate",
+        "auto",
+        usize::from(provider_gate_due),
+        providers
+            .len()
+            .saturating_sub(usize::from(provider_gate_due)),
+        providers.len(),
+        if provider_gate_due {
+            "run provider policy gate because no fresh gate run covers configured providers"
+        } else if providers.is_empty() {
+            "no providers are configured for policy gate evaluation"
+        } else {
+            "provider policy gate has fresh run history"
+        },
+    ));
+
     let approvals = state.list_approvals().await?;
     let approval_rules = state.list_approval_escalation_rules().await?;
     let pending_approvals: Vec<_> = approvals
@@ -12330,6 +12379,17 @@ fn scheduler_due_plan_item(
 
 async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun, AppError> {
     let checked_at = Utc::now();
+    let providers = state.list_providers().await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let provider_policy_gate = if provider_policy_gate_is_due(&providers, &audit_logs, checked_at) {
+        Some(
+            execute_provider_policy_gate(state, Some("system".to_string()), "system")
+                .await?
+                .run,
+        )
+    } else {
+        None
+    };
     let policy_rollout = execute_due_policy_rollouts(state, "scheduler", "system").await?;
     let approval_escalations = execute_due_approval_escalations(state).await?;
     let agent_releases = execute_due_agent_release_promotions(state).await?;
@@ -12366,6 +12426,9 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     let mut actions = Vec::new();
     if policy_rollout.status == "activated" {
         actions.push("policy_rollout_activated".to_string());
+    }
+    if provider_policy_gate.is_some() {
+        actions.push("provider_policy_gate_processed".to_string());
     }
     if approval_escalations.expired_count > 0 || approval_escalations.escalated_count > 0 {
         actions.push("approval_escalations_processed".to_string());
@@ -12406,6 +12469,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
         checked_at,
         team_count,
         actions,
+        provider_policy_gate,
         policy_rollout,
         approval_escalations,
         agent_releases,
@@ -12427,6 +12491,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
                 "status": run.status,
                 "team_count": run.team_count,
                 "actions": run.actions,
+                "provider_policy_gate_status": run.provider_policy_gate.as_ref().map(|gate| gate.status.clone()),
                 "checked_at": run.checked_at,
             }),
         ))
@@ -20412,6 +20477,51 @@ not json
                 .any(|blocker| blocker.contains("requires base_url"))
         );
 
+        let scheduler_plan: SchedulerDuePlan = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/scheduler/due-plan")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let provider_gate_plan = scheduler_plan
+            .actions
+            .iter()
+            .find(|item| item.action == "provider_policy_gate")
+            .expect("provider policy gate due-plan item");
+        assert_eq!(provider_gate_plan.area, "providers");
+        assert_eq!(provider_gate_plan.status, "due");
+        assert_eq!(provider_gate_plan.due_count, 1);
+        assert_eq!(provider_gate_plan.target_count, 2);
+
+        let scheduler_run: SchedulerDueRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/scheduler/run-due")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let scheduled_gate = scheduler_run
+            .provider_policy_gate
+            .as_ref()
+            .expect("scheduled provider policy gate run");
+        assert_eq!(scheduled_gate.status, "failed");
+        assert_eq!(scheduled_gate.provider_count, 2);
+        assert_eq!(scheduled_gate.failed_count, 2);
+        assert!(
+            scheduler_run
+                .actions
+                .iter()
+                .any(|action| action == "provider_policy_gate_processed")
+        );
+
         let gate_run: ProviderPolicyGateRunResponse = request_json(
             app.clone(),
             Request::builder()
@@ -20444,8 +20554,8 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(gate_runs.run_count, 1);
-        assert_eq!(gate_runs.failed_run_count, 1);
+        assert_eq!(gate_runs.run_count, 2);
+        assert_eq!(gate_runs.failed_run_count, 2);
         assert_eq!(gate_runs.latest_run.unwrap().status, "failed");
         assert!(
             gate_runs

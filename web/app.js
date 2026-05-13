@@ -2596,6 +2596,7 @@ function renderObservability() {
             <pre>${escapeHtml(
               JSON.stringify(
                 {
+                  provider_policy_gate: schedulerDueRun.provider_policy_gate,
                   policy_rollout: schedulerDueRun.policy_rollout,
                   approval_escalations: schedulerDueRun.approval_escalations,
                   agent_releases: schedulerDueRun.agent_releases,
