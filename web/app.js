@@ -4663,6 +4663,7 @@ function renderAgentReleases() {
     ? `<div class="item">
         <strong>Release automation run</strong>
         <div class="muted">${formatInteger(automationRun.pending_count)} pending · ${formatInteger(automationRun.promoted_count)} promoted · ${formatInteger(automationRun.rejected_count)} rejected · ${formatInteger(automationRun.skipped_count)} skipped · ${escapeHtml(automationRun.checked_at)}</div>
+        <div class="muted">Controller ${escapeHtml(automationRun.controller_configured ? "configured" : "not configured")} · executions ${formatInteger(automationRun.controller_execution_count || 0)} · failed ${formatInteger(automationRun.controller_failed_count || 0)}</div>
       </div>`
     : "";
   const automationRunHistory = renderAgentReleaseAutomationRuns(

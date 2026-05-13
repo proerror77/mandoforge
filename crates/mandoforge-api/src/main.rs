@@ -300,6 +300,9 @@ struct AgentReleaseAutomationRun {
     promoted_count: usize,
     rejected_count: usize,
     skipped_count: usize,
+    controller_configured: bool,
+    controller_execution_count: usize,
+    controller_failed_count: usize,
     results: Vec<Value>,
 }
 
@@ -4374,12 +4377,25 @@ async fn run_due_agent_release_promotions(
 async fn execute_due_agent_release_promotions(
     state: &AppState,
 ) -> Result<AgentReleaseAutomationRun, AppError> {
+    execute_due_agent_release_promotions_with_lookup(state, |key| std::env::var(key).ok()).await
+}
+
+async fn execute_due_agent_release_promotions_with_lookup<F>(
+    state: &AppState,
+    lookup: F,
+) -> Result<AgentReleaseAutomationRun, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let checked_at = Utc::now();
     let releases = state.list_pending_agent_releases().await?;
     let pending_count = releases.len();
     let mut promoted_count = 0usize;
     let mut rejected_count = 0usize;
     let mut skipped_count = 0usize;
+    let controller_configured = agent_release_controller_configured(&lookup);
+    let mut controller_execution_count = 0usize;
+    let mut controller_failed_count = 0usize;
     let mut results = Vec::new();
     for release in releases {
         if release_automation_is_expired(&release, checked_at) {
@@ -4418,6 +4434,49 @@ async fn execute_due_agent_release_promotions(
         }
         match release_automation_due_decision(&release, checked_at) {
             ReleaseAutomationDecision::Promote => {
+                let mut controller_execution = json!({
+                    "attempted": false,
+                    "status": "skipped",
+                    "reason": "controller_not_configured"
+                });
+                if controller_configured {
+                    controller_execution_count += 1;
+                    match execute_agent_release_controller(&lookup, &release, checked_at).await {
+                        Ok(execution) => {
+                            controller_execution = execution;
+                            if controller_execution.get("status").and_then(Value::as_str)
+                                != Some("promoted")
+                            {
+                                skipped_count += 1;
+                                controller_failed_count += 1;
+                                results.push(json!({
+                                    "release_id": release.id,
+                                    "agent_id": release.agent_id,
+                                    "status": "skipped",
+                                    "reason": "controller_not_promoted",
+                                    "controller_execution": controller_execution,
+                                }));
+                                continue;
+                            }
+                        }
+                        Err(error) => {
+                            skipped_count += 1;
+                            controller_failed_count += 1;
+                            results.push(json!({
+                                "release_id": release.id,
+                                "agent_id": release.agent_id,
+                                "status": "skipped",
+                                "reason": "controller_failed",
+                                "controller_execution": {
+                                    "attempted": true,
+                                    "status": "failed",
+                                    "error": error.message
+                                },
+                            }));
+                            continue;
+                        }
+                    }
+                }
                 let promoted = state
                     .automate_agent_release_decision(
                         release.agent_id,
@@ -4433,6 +4492,7 @@ async fn execute_due_agent_release_promotions(
                     "agent_id": promoted.agent_id,
                     "status": "promoted",
                     "reason": "auto_approved",
+                    "controller_execution": controller_execution,
                 }));
                 state
                     .append_audit_log(new_audit_log(
@@ -4447,6 +4507,8 @@ async fn execute_due_agent_release_promotions(
                             "environment": promoted.environment,
                             "eval_score": promoted.eval_score,
                             "min_score": promoted.min_score,
+                            "controller_configured": controller_configured,
+                            "controller_execution": controller_execution,
                         }),
                     ))
                     .await?;
@@ -4468,6 +4530,9 @@ async fn execute_due_agent_release_promotions(
         promoted_count,
         rejected_count,
         skipped_count,
+        controller_configured,
+        controller_execution_count,
+        controller_failed_count,
         results,
     };
     state
@@ -4484,6 +4549,9 @@ async fn execute_due_agent_release_promotions(
                 "promoted_count": run.promoted_count,
                 "rejected_count": run.rejected_count,
                 "skipped_count": run.skipped_count,
+                "controller_configured": run.controller_configured,
+                "controller_execution_count": run.controller_execution_count,
+                "controller_failed_count": run.controller_failed_count,
                 "results": run.results.clone(),
             }),
         ))
@@ -4500,6 +4568,79 @@ fn agent_release_automation_run_status(run: &AgentReleaseAutomationRun) -> Strin
         "no_pending"
     }
     .to_string()
+}
+
+fn agent_release_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_agent_release_controller<F>(
+    lookup: &F,
+    release: &AgentRelease,
+    requested_at: DateTime<Utc>,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_AGENT_RELEASE_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_AGENT_RELEASE_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.agent_release_rollout",
+        "release_id": release.id,
+        "agent_id": release.agent_id,
+        "agent_version_id": release.agent_version_id,
+        "environment": release.environment,
+        "eval_run_id": release.eval_run_id,
+        "eval_score": release.eval_score,
+        "min_score": release.min_score,
+        "automation_policy": release.automation_policy,
+        "requested_at": requested_at,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "agent release controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("promoted");
+    let promoted = matches!(controller_status, "promoted" | "applied" | "success" | "ok");
+    Ok(json!({
+        "attempted": true,
+        "status": if promoted { "promoted" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 fn build_agent_release_automation_run_summary(
@@ -27305,6 +27446,68 @@ not json
         controller_server.abort();
     }
 
+    #[tokio::test]
+    async fn agent_release_controller_executes_external_rollout_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("release controller listener");
+        let controller_addr = listener.local_addr().expect("release controller addr");
+        let controller = Router::new()
+            .route("/agent-release", post(mock_agent_release_controller))
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock agent release controller");
+        });
+        let release = AgentRelease {
+            id: Uuid::new_v4(),
+            agent_id: Uuid::new_v4(),
+            agent_version_id: Uuid::new_v4(),
+            environment: "prod".to_string(),
+            status: "pending_approval".to_string(),
+            eval_run_id: Some(Uuid::new_v4()),
+            eval_score: Some(1.0),
+            min_score: 1.0,
+            requested_by: Some("release-requester".to_string()),
+            requested_at: Some(Utc::now()),
+            request_reason: Some("controller test".to_string()),
+            approver_subject: Some("system".to_string()),
+            decision_by: None,
+            decided_at: None,
+            decision_reason: None,
+            promoted_by: None,
+            promoted_at: None,
+            automation_policy: json!({"auto_approve": true}),
+            created_at: Utc::now(),
+        };
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/agent-release"))
+            }
+            "MANDOFORGE_AGENT_RELEASE_CONTROLLER_TOKEN" => Some("release-token".to_string()),
+            _ => None,
+        };
+
+        let execution = execute_agent_release_controller(&lookup, &release, Utc::now())
+            .await
+            .expect("agent release controller execution");
+
+        assert_eq!(execution["status"], "promoted");
+        assert_eq!(execution["deployment_id"], "agent-release-1");
+        assert_eq!(execution["steps"].as_array().expect("steps").len(), 3);
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.agent_release_rollout");
+        assert_eq!(payloads[0]["release_id"], release.id.to_string());
+        assert_eq!(payloads[0]["agent_id"], release.agent_id.to_string());
+        assert_eq!(payloads[0]["environment"], "prod");
+        assert_eq!(payloads[0]["eval_score"], 1.0);
+
+        controller_server.abort();
+    }
+
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {
         let state = test_state_with_worker(execution_worker);
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -28024,6 +28227,30 @@ not json
             "steps": [
                 {"name": "preflight", "status": "passed"},
                 {"name": "apply", "status": "applied"},
+                {"name": "verify", "status": "passed"}
+            ]
+        }))
+    }
+
+    async fn mock_agent_release_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer release-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "promoted",
+            "deployment_id": "agent-release-1",
+            "message": "release controller promoted agent version",
+            "steps": [
+                {"name": "preflight", "status": "passed"},
+                {"name": "promote", "status": "promoted"},
                 {"name": "verify", "status": "passed"}
             ]
         }))
@@ -35746,6 +35973,9 @@ not json
         assert_eq!(automation_run.promoted_count, 1);
         assert_eq!(automation_run.rejected_count, 1);
         assert_eq!(automation_run.skipped_count, 0);
+        assert!(!automation_run.controller_configured);
+        assert_eq!(automation_run.controller_execution_count, 0);
+        assert_eq!(automation_run.controller_failed_count, 0);
 
         let automation_runs: AgentReleaseAutomationRunSummary = request_json(
             app.clone(),
