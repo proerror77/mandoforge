@@ -29681,6 +29681,39 @@ not json
     }
 
     #[tokio::test]
+    async fn worker_readiness_reports_jetstream_reserved_backend_fail_closed() {
+        let config = BrokerQueueConfig {
+            kind: BrokerQueueKind::NatsJetstream,
+            endpoint: "nats://127.0.0.1:4222".to_string(),
+            stream: "MANDOFORGE_EXECUTION_JOBS".to_string(),
+            consumer_group: "mandoforge-workers".to_string(),
+        };
+        let mut state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+        state.execution_queue =
+            ExecutionQueue::broker(Arc::new(BrokerExecutionQueue::nats_jetstream(config)));
+
+        let worker_readiness = build_worker_readiness(&state)
+            .await
+            .expect("jetstream readiness should report reserved backend instead of 500");
+
+        assert_eq!(worker_readiness.status, "critical");
+        assert_eq!(worker_readiness.queue_backend.kind, "nats_jetstream");
+        assert!(worker_readiness.queue_backend.jetstream_enabled);
+        assert!(
+            worker_readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "nats_jetstream_reserved" && item.severity == "critical")
+        );
+        assert!(
+            worker_readiness
+                .runbook_actions
+                .iter()
+                .any(|action| action.contains("durable pull consumer drain"))
+        );
+    }
+
+    #[tokio::test]
     async fn queue_backed_worker_auto_assigns_active_remote_computer_lease() {
         let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
         let agents: Vec<Agent> = request_json(
