@@ -134,7 +134,7 @@ cargo run -p mandoforge-api
 
 `shell.exec` still requires approval. Docker mode runs approved commands with `--network none`, a workspace mount, and basic CPU/memory limits.
 Approved shell and Codex execution outputs are truncated before entering `tool_calls`, `session_events`, and artifacts. Set `MANDOFORGE_EXECUTION_OUTPUT_LIMIT_BYTES` to tune the per-field limit.
-Approved execution also enters an execution queue facade before it is drained. The queue is Postgres-backed when `DATABASE_URL` is set and in-memory otherwise. Set `MANDOFORGE_EXECUTION_QUEUE_BACKEND=memory|postgres|redis|nats|auto` to choose explicitly. Redis mode enqueues approved jobs to a Redis Stream through `MANDOFORGE_REDIS_URL`, drains with `XREADGROUP`, and acknowledges completion/failure with `XACK`. NATS mode publishes approved jobs to `MANDOFORGE_NATS_SUBJECT` through `MANDOFORGE_NATS_URL` and drains with a Core NATS queue subscription; it is a broker handoff boundary, not a JetStream durability claim. The default worker is `InlineExecutionWorker`; set `MANDOFORGE_EXECUTION_WORKER=queue` to enqueue approved jobs for an external worker loop, then drain a job through `POST /api/execution-jobs/:id/run`. Queue claims record `worker_id` and a short lease so stale `running` jobs can be reclaimed for memory/Postgres queues.
+Approved execution also enters an execution queue facade before it is drained. The queue is Postgres-backed when `DATABASE_URL` is set and in-memory otherwise. Set `MANDOFORGE_EXECUTION_QUEUE_BACKEND=memory|postgres|redis|nats|auto` to choose explicitly. Redis mode enqueues approved jobs to a Redis Stream through `MANDOFORGE_REDIS_URL`, drains with `XREADGROUP`, and acknowledges completion/failure with `XACK`. NATS mode publishes approved jobs to `MANDOFORGE_NATS_SUBJECT` through `MANDOFORGE_NATS_URL` and drains with a Core NATS queue subscription; it is a broker handoff boundary, not a JetStream durability claim. The default worker is `InlineExecutionWorker`; set `MANDOFORGE_EXECUTION_WORKER=queue` to enqueue approved jobs for an external worker loop, then drain a job through `POST /api/execution-jobs/:id/run`. Queue claims record `worker_id` and a short lease so stale `running` jobs can be reclaimed for memory/Postgres queues. `GET /api/execution-jobs/worker-readiness` reports the active queue semantics, worker mode, job pressure, stale leases, K8s worker manifest coverage, missing autoscaling manifest, attention items, and runbook actions without claiming full production hardening.
 
 Run the external worker loop against an API started with `MANDOFORGE_EXECUTION_WORKER=queue`:
 
@@ -238,6 +238,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `POST /api/agents/:id/releases`
 - `POST /api/agents/:id/releases/:release_id/rollback`
 - `GET /api/execution-jobs`
+- `GET /api/execution-jobs/worker-readiness`
 - `POST /api/execution-jobs/:id/run`
 - `POST /api/sessions`
 - `POST /api/sessions/:id/run`

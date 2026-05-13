@@ -23,6 +23,10 @@ impl Default for ExecutionQueue {
 }
 
 impl ExecutionQueue {
+    pub(crate) fn backend_kind(&self) -> &'static str {
+        self.backend.backend_kind()
+    }
+
     pub(crate) fn postgres(pool: PgPool, tenant_id: Uuid) -> Self {
         Self {
             backend: Arc::new(PostgresExecutionQueue { pool, tenant_id }),
@@ -77,6 +81,8 @@ impl ExecutionQueue {
 
 #[async_trait]
 pub(crate) trait ExecutionQueueBackend: Send + Sync {
+    fn backend_kind(&self) -> &'static str;
+
     async fn enqueue(&self, request: ExecutionJobRequest) -> Result<ExecutionJob, AppError>;
 
     async fn start(&self, job_id: Uuid, worker_id: &str) -> Result<ExecutionJob, AppError>;
@@ -219,6 +225,10 @@ fn execution_job_from_row(row: PgRow) -> Result<ExecutionJob, AppError> {
 
 #[async_trait]
 impl ExecutionQueueBackend for MemoryExecutionQueue {
+    fn backend_kind(&self) -> &'static str {
+        "memory"
+    }
+
     async fn enqueue(&self, request: ExecutionJobRequest) -> Result<ExecutionJob, AppError> {
         let job = new_execution_job(request);
         self.inner.write().await.jobs.push(job.clone());
@@ -315,6 +325,10 @@ impl MemoryExecutionQueue {
 
 #[async_trait]
 impl ExecutionQueueBackend for PostgresExecutionQueue {
+    fn backend_kind(&self) -> &'static str {
+        "postgres"
+    }
+
     async fn enqueue(&self, request: ExecutionJobRequest) -> Result<ExecutionJob, AppError> {
         let job = new_execution_job(request);
         sqlx::query(

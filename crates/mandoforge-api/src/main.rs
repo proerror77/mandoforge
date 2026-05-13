@@ -1028,6 +1028,79 @@ struct ObservabilityCollectorAttentionItem {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerReadinessReport {
+    generated_at: DateTime<Utc>,
+    status: String,
+    readiness_score: i64,
+    queue_backend: WorkerQueueBackendReadiness,
+    worker_mode: WorkerModeReadiness,
+    job_summary: WorkerJobSummary,
+    lease_summary: WorkerLeaseSummary,
+    k8s: WorkerK8sReadiness,
+    autoscaling: WorkerAutoscalingReadiness,
+    attention_items: Vec<WorkerReadinessAttentionItem>,
+    runbook_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerQueueBackendReadiness {
+    kind: String,
+    durable: bool,
+    broker_handoff: bool,
+    jetstream_enabled: bool,
+    semantics: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerModeReadiness {
+    mode: String,
+    external_worker_required: bool,
+    api_inline_execution: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerJobSummary {
+    total_jobs: usize,
+    queued_jobs: usize,
+    running_jobs: usize,
+    completed_jobs: usize,
+    failed_jobs: usize,
+    retryable_jobs: usize,
+    oldest_queued_job_age_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerLeaseSummary {
+    running_jobs: usize,
+    leased_jobs: usize,
+    stale_leases: usize,
+    oldest_stale_lease_age_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerK8sReadiness {
+    worker_manifest_present: bool,
+    worker_manifest_path: String,
+    scheduler_manifest_present: bool,
+    scheduler_manifest_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerAutoscalingReadiness {
+    autoscaling_manifest_present: bool,
+    autoscaling_manifest_paths: Vec<String>,
+    configured_min_replicas: Option<i64>,
+    configured_max_replicas: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerReadinessAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ProviderUsageSummary {
     request_count: usize,
@@ -2528,6 +2601,10 @@ fn build_router(state: AppState) -> Router {
             get(list_approval_escalation_rules).post(create_approval_escalation_rule),
         )
         .route("/api/execution-jobs", get(list_execution_jobs))
+        .route(
+            "/api/execution-jobs/worker-readiness",
+            get(get_worker_readiness),
+        )
         .route(
             "/api/execution-jobs/{id}/run",
             post(run_execution_job_route),
@@ -14346,6 +14423,298 @@ async fn list_execution_jobs(
     Ok(Json(state.execution_queue.list().await?))
 }
 
+async fn get_worker_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<WorkerReadinessReport>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "execution_jobs", None).await?;
+    Ok(Json(build_worker_readiness(&state).await?))
+}
+
+async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessReport, AppError> {
+    let generated_at = Utc::now();
+    let jobs = state.execution_queue.list().await?;
+    let queue_backend = worker_queue_backend_readiness(state.execution_queue.backend_kind());
+    let worker_mode = WorkerModeReadiness {
+        mode: state.execution_worker.mode().to_string(),
+        external_worker_required: state.execution_worker.mode() == "queue",
+        api_inline_execution: state.execution_worker.mode() == "inline",
+    };
+    let mut queued_jobs = 0usize;
+    let mut running_jobs = 0usize;
+    let mut completed_jobs = 0usize;
+    let mut failed_jobs = 0usize;
+    let mut retryable_jobs = 0usize;
+    let mut leased_jobs = 0usize;
+    let mut stale_leases = 0usize;
+    let mut oldest_queued_at = None;
+    let mut oldest_stale_lease_at = None;
+
+    for job in &jobs {
+        match job.status {
+            ExecutionJobStatus::Queued => {
+                queued_jobs += 1;
+                oldest_queued_at = Some(match oldest_queued_at {
+                    Some(oldest) if oldest <= job.enqueued_at => oldest,
+                    _ => job.enqueued_at,
+                });
+            }
+            ExecutionJobStatus::Running => running_jobs += 1,
+            ExecutionJobStatus::Completed => completed_jobs += 1,
+            ExecutionJobStatus::Failed => failed_jobs += 1,
+        }
+        if job.attempt_count > 0
+            && job.attempt_count < job.max_attempts
+            && job.status != ExecutionJobStatus::Completed
+        {
+            retryable_jobs += 1;
+        }
+        if job.lease_expires_at.is_some() {
+            leased_jobs += 1;
+        }
+        if job.status == ExecutionJobStatus::Running
+            && job
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at < generated_at)
+        {
+            stale_leases += 1;
+            if let Some(lease_expires_at) = job.lease_expires_at {
+                oldest_stale_lease_at = Some(match oldest_stale_lease_at {
+                    Some(oldest) if oldest <= lease_expires_at => oldest,
+                    _ => lease_expires_at,
+                });
+            }
+        }
+    }
+
+    let oldest_queued_job_age_seconds = oldest_queued_at.map(|queued_at| {
+        generated_at
+            .signed_duration_since(queued_at)
+            .num_seconds()
+            .max(0)
+    });
+    let oldest_stale_lease_age_seconds = oldest_stale_lease_at.map(|lease_at| {
+        generated_at
+            .signed_duration_since(lease_at)
+            .num_seconds()
+            .max(0)
+    });
+    let job_summary = WorkerJobSummary {
+        total_jobs: jobs.len(),
+        queued_jobs,
+        running_jobs,
+        completed_jobs,
+        failed_jobs,
+        retryable_jobs,
+        oldest_queued_job_age_seconds,
+    };
+    let lease_summary = WorkerLeaseSummary {
+        running_jobs,
+        leased_jobs,
+        stale_leases,
+        oldest_stale_lease_age_seconds,
+    };
+    let k8s = WorkerK8sReadiness {
+        worker_manifest_present: std::path::Path::new("deploy/k8s/worker.yaml").exists(),
+        worker_manifest_path: "deploy/k8s/worker.yaml".to_string(),
+        scheduler_manifest_present: std::path::Path::new("deploy/k8s/scheduler.yaml").exists(),
+        scheduler_manifest_path: "deploy/k8s/scheduler.yaml".to_string(),
+    };
+    let autoscaling_manifest_paths = [
+        "deploy/k8s/worker-hpa.yaml",
+        "deploy/k8s/worker-keda.yaml",
+        "deploy/k8s/keda.yaml",
+    ]
+    .into_iter()
+    .filter(|path| std::path::Path::new(path).exists())
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let autoscaling = WorkerAutoscalingReadiness {
+        autoscaling_manifest_present: !autoscaling_manifest_paths.is_empty(),
+        autoscaling_manifest_paths,
+        configured_min_replicas: env_i64("MANDOFORGE_WORKER_MIN_REPLICAS"),
+        configured_max_replicas: env_i64("MANDOFORGE_WORKER_MAX_REPLICAS"),
+    };
+    let mut attention_items = Vec::new();
+    if worker_mode.api_inline_execution {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "inline_worker_mode".to_string(),
+            severity: "warning".to_string(),
+            message: "approved tools still execute in the API process; use MANDOFORGE_EXECUTION_WORKER=queue for production drains".to_string(),
+        });
+    }
+    if queue_backend.kind == "memory" {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "process_local_queue".to_string(),
+            severity: "warning".to_string(),
+            message: "memory queue is process-local and does not survive API restart".to_string(),
+        });
+    }
+    if queue_backend.kind == "nats" && !queue_backend.jetstream_enabled {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "core_nats_non_jetstream".to_string(),
+            severity: "warning".to_string(),
+            message:
+                "NATS backend is Core NATS broker handoff; JetStream durability is not enabled"
+                    .to_string(),
+        });
+    }
+    if queued_jobs > 0 {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "queued_jobs_present".to_string(),
+            severity: "warning".to_string(),
+            message: format!("{queued_jobs} execution job(s) are waiting for a worker drain"),
+        });
+    }
+    if retryable_jobs > 0 {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "retryable_jobs_present".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "{retryable_jobs} execution job(s) can retry before exhausting attempts"
+            ),
+        });
+    }
+    if failed_jobs > 0 {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "failed_jobs_present".to_string(),
+            severity: "critical".to_string(),
+            message: format!(
+                "{failed_jobs} execution job(s) exhausted attempts and require triage"
+            ),
+        });
+    }
+    if stale_leases > 0 {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "stale_worker_leases".to_string(),
+            severity: "critical".to_string(),
+            message: format!("{stale_leases} running execution job lease(s) are expired"),
+        });
+    }
+    if !k8s.worker_manifest_present {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_manifest_missing".to_string(),
+            severity: "warning".to_string(),
+            message: "deploy/k8s/worker.yaml is not present in this runtime package".to_string(),
+        });
+    }
+    if !autoscaling.autoscaling_manifest_present {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_autoscaling_missing".to_string(),
+            severity: "warning".to_string(),
+            message: "no worker HPA/KEDA manifest is present; autoscaling remains a production gap"
+                .to_string(),
+        });
+    }
+
+    let mut runbook_actions = Vec::new();
+    if worker_mode.api_inline_execution {
+        runbook_actions
+            .push("set MANDOFORGE_EXECUTION_WORKER=queue before production pilot".to_string());
+    }
+    if queued_jobs > 0 || retryable_jobs > 0 {
+        runbook_actions.push(
+            "run mandoforge-worker or POST /api/execution-jobs/:id/run for claimable jobs"
+                .to_string(),
+        );
+    }
+    if stale_leases > 0 {
+        runbook_actions.push(
+            "restart or reclaim stale worker leases before resuming high-risk actions".to_string(),
+        );
+    }
+    if failed_jobs > 0 {
+        runbook_actions.push(
+            "inspect failed execution job last_error and related tool/audit logs".to_string(),
+        );
+    }
+    if !autoscaling.autoscaling_manifest_present {
+        runbook_actions.push(
+            "add HPA/KEDA worker autoscaling before declaring production hardening complete"
+                .to_string(),
+        );
+    }
+    if queue_backend.kind == "nats" && !queue_backend.jetstream_enabled {
+        runbook_actions.push(
+            "replace Core NATS handoff with JetStream before claiming durable NATS queues"
+                .to_string(),
+        );
+    }
+
+    let critical_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "critical")
+        .count() as i64;
+    let warning_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "warning")
+        .count() as i64;
+    let readiness_score = (100_i64 - critical_count * 25 - warning_count * 10).clamp(0, 100);
+    let status = if critical_count > 0 {
+        "critical"
+    } else if warning_count > 0 {
+        "attention"
+    } else {
+        "ready"
+    }
+    .to_string();
+
+    Ok(WorkerReadinessReport {
+        generated_at,
+        status,
+        readiness_score,
+        queue_backend,
+        worker_mode,
+        job_summary,
+        lease_summary,
+        k8s,
+        autoscaling,
+        attention_items,
+        runbook_actions,
+    })
+}
+
+fn worker_queue_backend_readiness(kind: &str) -> WorkerQueueBackendReadiness {
+    match kind {
+        "postgres" => WorkerQueueBackendReadiness {
+            kind: "postgres".to_string(),
+            durable: true,
+            broker_handoff: false,
+            jetstream_enabled: false,
+            semantics: "Postgres-backed durable execution_jobs table with lease/retry semantics"
+                .to_string(),
+        },
+        "redis" => WorkerQueueBackendReadiness {
+            kind: "redis".to_string(),
+            durable: true,
+            broker_handoff: true,
+            jetstream_enabled: false,
+            semantics: "Redis Streams broker-backed queue with XADD/XREADGROUP/XACK handoff"
+                .to_string(),
+        },
+        "nats" => WorkerQueueBackendReadiness {
+            kind: "nats".to_string(),
+            durable: false,
+            broker_handoff: true,
+            jetstream_enabled: false,
+            semantics: "Core NATS queue subscription handoff; not JetStream durable".to_string(),
+        },
+        _ => WorkerQueueBackendReadiness {
+            kind: "memory".to_string(),
+            durable: false,
+            broker_handoff: false,
+            jetstream_enabled: false,
+            semantics: "process-local in-memory queue for local demo and tests".to_string(),
+        },
+    }
+}
+
+fn env_i64(key: &str) -> Option<i64> {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+}
+
 async fn run_execution_job_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -25036,6 +25405,34 @@ not json
             .expect("execution job queued");
         assert_eq!(job.status, ExecutionJobStatus::Queued);
         let job_id = job.id;
+
+        let worker_readiness: WorkerReadinessReport = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs/worker-readiness")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(worker_readiness.status, "attention");
+        assert_eq!(worker_readiness.worker_mode.mode, "queue");
+        assert_eq!(worker_readiness.queue_backend.kind, "memory");
+        assert_eq!(worker_readiness.job_summary.queued_jobs, 1);
+        assert_eq!(worker_readiness.lease_summary.stale_leases, 0);
+        assert!(
+            worker_readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "queued_jobs_present")
+        );
+        assert!(
+            worker_readiness
+                .runbook_actions
+                .iter()
+                .any(|action| action.contains("mandoforge-worker"))
+        );
 
         let (status, error) = request_value(
             app.clone(),

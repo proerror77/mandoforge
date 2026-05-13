@@ -40,6 +40,7 @@ const state = {
   mcpRolloutRun: null,
   mcpRolloutSummary: null,
   executionJobs: [],
+  workerReadiness: null,
   usageRollups: [],
   usageTrend: null,
   usageFinanceSummary: null,
@@ -129,6 +130,7 @@ const agentReleaseRoot = document.querySelector("#agent-releases");
 const runDueAgentReleasesButton = document.querySelector("#run-due-agent-releases");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
+const workerReadinessRoot = document.querySelector("#worker-readiness");
 const usageRoot = document.querySelector("#usage-summary");
 const observabilityRoot = document.querySelector("#observability-summary");
 const runObservabilityRemediationButton = document.querySelector("#run-observability-remediation");
@@ -1283,7 +1285,13 @@ async function editMcpServer(serverId) {
 }
 
 async function refreshExecutionJobs() {
-  state.executionJobs = await api("/api/execution-jobs");
+  const [executionJobs, workerReadiness] = await Promise.all([
+    api("/api/execution-jobs"),
+    api("/api/execution-jobs/worker-readiness"),
+  ]);
+  state.executionJobs = executionJobs;
+  state.workerReadiness = workerReadiness;
+  renderWorkerReadiness();
   renderExecutionJobs();
 }
 
@@ -1343,6 +1351,7 @@ async function refreshOps() {
     costAlertRoutes,
     organizations,
     executionJobs,
+    workerReadiness,
     approvalGroups,
     approvalEscalationRules,
     approvalNotificationRouting,
@@ -1373,6 +1382,7 @@ async function refreshOps() {
       api("/api/usage/alert-routes"),
       api("/api/organizations"),
       api("/api/execution-jobs"),
+      api("/api/execution-jobs/worker-readiness"),
       api("/api/approval-groups"),
       api("/api/approval-escalation-rules"),
       api("/api/approvals/notification-routing/summary"),
@@ -1402,6 +1412,7 @@ async function refreshOps() {
   state.costAlertRoutes = costAlertRoutes;
   state.organizations = organizations;
   state.executionJobs = executionJobs;
+  state.workerReadiness = workerReadiness;
   state.approvalGroups = approvalGroups;
   state.approvalEscalationRules = approvalEscalationRules;
   state.approvalNotificationRouting = approvalNotificationRouting;
@@ -1554,6 +1565,7 @@ function renderOps() {
   renderEvalRuns();
   renderAgentReleases();
   renderMcpServers();
+  renderWorkerReadiness();
   renderExecutionJobs();
   renderCodexAppServer();
   governanceRoot.innerHTML = `
@@ -1760,6 +1772,83 @@ function summarizeCodexRuns(runs) {
     }
   });
   return summary;
+}
+
+function renderWorkerReadiness() {
+  const report = state.workerReadiness;
+  if (!report) {
+    workerReadinessRoot.innerHTML = `<div class="muted">Worker readiness not loaded</div>`;
+    return;
+  }
+  const jobSummary = report.job_summary || {};
+  const leaseSummary = report.lease_summary || {};
+  const queueBackend = report.queue_backend || {};
+  const workerMode = report.worker_mode || {};
+  const k8s = report.k8s || {};
+  const autoscaling = report.autoscaling || {};
+  const attentionItems = report.attention_items || [];
+  const runbookActions = report.runbook_actions || [];
+  workerReadinessRoot.innerHTML = `
+    <div class="metrics compact-metrics">
+      <div class="metric">
+        <span>Status</span>
+        <strong>${escapeHtml(report.status || "unknown")}</strong>
+      </div>
+      <div class="metric">
+        <span>Score</span>
+        <strong>${formatInteger(report.readiness_score || 0)}</strong>
+      </div>
+      <div class="metric">
+        <span>Queue Backend</span>
+        <strong>${escapeHtml(queueBackend.kind || "unknown")}</strong>
+      </div>
+      <div class="metric">
+        <span>Worker Mode</span>
+        <strong>${escapeHtml(workerMode.mode || "unknown")}</strong>
+      </div>
+    </div>
+    <div class="item">
+      <strong>QUEUE DURABILITY</strong>
+      <div class="muted">${escapeHtml(queueBackend.semantics || "not reported")}</div>
+      <div class="muted">Durable: ${queueBackend.durable ? "yes" : "no"} · Broker handoff: ${queueBackend.broker_handoff ? "yes" : "no"} · JetStream: ${queueBackend.jetstream_enabled ? "yes" : "no"}</div>
+    </div>
+    <div class="item">
+      <strong>JOB PRESSURE</strong>
+      <div class="muted">Queued ${formatInteger(jobSummary.queued_jobs || 0)} · Running ${formatInteger(jobSummary.running_jobs || 0)} · Retryable ${formatInteger(jobSummary.retryable_jobs || 0)} · Failed ${formatInteger(jobSummary.failed_jobs || 0)}</div>
+      <div class="muted">Oldest queued age: ${formatOptionalSeconds(jobSummary.oldest_queued_job_age_seconds)}</div>
+    </div>
+    <div class="item">
+      <strong>LEASES / AUTOSCALING</strong>
+      <div class="muted">Leased ${formatInteger(leaseSummary.leased_jobs || 0)} · Stale leases ${formatInteger(leaseSummary.stale_leases || 0)} · Oldest stale lease ${formatOptionalSeconds(leaseSummary.oldest_stale_lease_age_seconds)}</div>
+      <div class="muted">K8s worker manifest: ${k8s.worker_manifest_present ? "present" : "missing"} · Autoscaling manifest: ${autoscaling.autoscaling_manifest_present ? "present" : "missing"}</div>
+    </div>
+    <div class="item">
+      <strong>ATTENTION ITEMS</strong>
+      ${
+        attentionItems.length
+          ? attentionItems
+              .map(
+                (item) =>
+                  `<div class="muted">${escapeHtml(item.severity)} · ${escapeHtml(item.kind)} · ${escapeHtml(item.message)}</div>`,
+              )
+              .join("")
+          : `<div class="muted">No worker readiness attention items</div>`
+      }
+    </div>
+    <div class="item">
+      <strong>WORKER RUNBOOK ACTIONS</strong>
+      ${
+        runbookActions.length
+          ? runbookActions.map((action) => `<div class="muted">${escapeHtml(action)}</div>`).join("")
+          : `<div class="muted">No worker runbook actions</div>`
+      }
+    </div>
+  `;
+}
+
+function formatOptionalSeconds(value) {
+  if (value === null || value === undefined) return "none";
+  return `${formatInteger(value)}s`;
 }
 
 function renderExecutionJobs() {

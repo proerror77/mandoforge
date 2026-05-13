@@ -40,6 +40,8 @@ fn default_sandbox() -> String {
 
 #[async_trait]
 pub(crate) trait ExecutionWorker: Send + Sync {
+    fn mode(&self) -> &'static str;
+
     async fn execute_approved_tool(
         &self,
         state: &AppState,
@@ -57,6 +59,10 @@ pub(crate) struct InlineExecutionWorker;
 
 #[async_trait]
 impl ExecutionWorker for InlineExecutionWorker {
+    fn mode(&self) -> &'static str {
+        "inline"
+    }
+
     async fn execute_approved_tool(
         &self,
         state: &AppState,
@@ -74,6 +80,10 @@ pub(crate) struct QueueBackedExecutionWorker;
 
 #[async_trait]
 impl ExecutionWorker for QueueBackedExecutionWorker {
+    fn mode(&self) -> &'static str {
+        "queue"
+    }
+
     async fn execute_approved_tool(
         &self,
         state: &AppState,

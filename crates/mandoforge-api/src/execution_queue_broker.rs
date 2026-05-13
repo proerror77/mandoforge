@@ -728,6 +728,13 @@ impl BrokerExecutionQueue {
 
 #[async_trait]
 impl ExecutionQueueBackend for BrokerExecutionQueue {
+    fn backend_kind(&self) -> &'static str {
+        match self.kind {
+            BrokerQueueKind::Redis => "redis",
+            BrokerQueueKind::Nats => "nats",
+        }
+    }
+
     async fn enqueue(&self, request: ExecutionJobRequest) -> Result<ExecutionJob, AppError> {
         let job = ExecutionJob {
             id: Uuid::new_v4(),
