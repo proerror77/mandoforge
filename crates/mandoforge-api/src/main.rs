@@ -2909,6 +2909,10 @@ struct McpServerRolloutDueRun {
     skipped_count: usize,
     expired_count: usize,
     failed_count: usize,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution_count: usize,
+    controller_failed_count: usize,
     results: Vec<Value>,
     checked_at: DateTime<Utc>,
 }
@@ -2979,6 +2983,10 @@ struct McpServerRolloutRunRecord {
     skipped_count: usize,
     expired_count: usize,
     failed_count: usize,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution_count: usize,
+    controller_failed_count: usize,
     ran_at: DateTime<Utc>,
 }
 
@@ -13025,12 +13033,27 @@ async fn execute_due_mcp_server_rollouts(
     state: &AppState,
     team_id: Uuid,
 ) -> Result<McpServerRolloutDueRun, AppError> {
+    execute_due_mcp_server_rollouts_with_lookup(state, team_id, |key| std::env::var(key).ok()).await
+}
+
+async fn execute_due_mcp_server_rollouts_with_lookup<F>(
+    state: &AppState,
+    team_id: Uuid,
+    lookup: F,
+) -> Result<McpServerRolloutDueRun, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let checked_at = Utc::now();
     let servers = state.list_mcp_servers(team_id).await?;
     let mut applied_count = 0usize;
     let mut skipped_count = 0usize;
     let mut expired_count = 0usize;
     let mut failed_count = 0usize;
+    let controller_required = mcp_server_rollout_controller_required(&lookup);
+    let controller_configured = mcp_server_rollout_controller_configured(&lookup);
+    let mut controller_execution_count = 0usize;
+    let mut controller_failed_count = 0usize;
     let mut results = Vec::new();
     for server in servers {
         let Some(rollout) = mcp_pending_rollout(&server).cloned() else {
@@ -13071,6 +13094,60 @@ async fn execute_due_mcp_server_rollouts(
             }));
             continue;
         }
+        let mut controller_execution = json!({
+            "attempted": false,
+            "status": "skipped",
+            "reason": "controller_not_configured"
+        });
+        if controller_required && !controller_configured {
+            skipped_count += 1;
+            results.push(json!({
+                "server_id": server.id,
+                "rollout_id": rollout_id,
+                "status": "skipped",
+                "reason": "controller_required_not_configured",
+                "controller_execution": controller_execution,
+            }));
+            continue;
+        }
+        if controller_configured {
+            controller_execution_count += 1;
+            match execute_mcp_server_rollout_controller(
+                &lookup, team_id, &server, &rollout, checked_at,
+            )
+            .await
+            {
+                Ok(execution) => {
+                    controller_execution = execution;
+                    if controller_execution.get("status").and_then(Value::as_str)
+                        != Some("approved")
+                    {
+                        skipped_count += 1;
+                        controller_failed_count += 1;
+                        results.push(json!({
+                            "server_id": server.id,
+                            "rollout_id": rollout_id,
+                            "status": "skipped",
+                            "reason": "controller_not_approved",
+                            "controller_execution": controller_execution,
+                        }));
+                        continue;
+                    }
+                }
+                Err(error) => {
+                    failed_count += 1;
+                    controller_failed_count += 1;
+                    results.push(json!({
+                        "server_id": server.id,
+                        "rollout_id": rollout_id,
+                        "status": "failed",
+                        "reason": "controller_failed",
+                        "error": error.message,
+                    }));
+                    continue;
+                }
+            }
+        }
         match apply_mcp_server_rollout_inner(&state, team_id, server.id, rollout_id, "system").await
         {
             Ok(response) => {
@@ -13080,6 +13157,7 @@ async fn execute_due_mcp_server_rollouts(
                     "rollout_id": rollout_id,
                     "status": "applied",
                     "rollout": response.rollout,
+                    "controller_execution": controller_execution,
                 }));
             }
             Err(error) => {
@@ -13099,6 +13177,10 @@ async fn execute_due_mcp_server_rollouts(
         skipped_count,
         expired_count,
         failed_count,
+        controller_required,
+        controller_configured,
+        controller_execution_count,
+        controller_failed_count,
         results,
         checked_at,
     };
@@ -13117,11 +13199,105 @@ async fn execute_due_mcp_server_rollouts(
                 "skipped_count": run.skipped_count,
                 "expired_count": run.expired_count,
                 "failed_count": run.failed_count,
+                "controller_required": run.controller_required,
+                "controller_configured": run.controller_configured,
+                "controller_execution_count": run.controller_execution_count,
+                "controller_failed_count": run.controller_failed_count,
                 "results": run.results.clone(),
             }),
         ))
         .await?;
     Ok(run)
+}
+
+fn mcp_server_rollout_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_MCP_ROLLOUT_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn mcp_server_rollout_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_MCP_ROLLOUT_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_mcp_server_rollout_controller<F>(
+    lookup: &F,
+    team_id: Uuid,
+    server: &McpServerRecord,
+    rollout: &Value,
+    checked_at: DateTime<Utc>,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_MCP_ROLLOUT_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_MCP_ROLLOUT_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_MCP_ROLLOUT_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_MCP_ROLLOUT_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.mcp_connector_rollout",
+        "team_id": team_id,
+        "server_id": server.id,
+        "server_name": server.name.clone(),
+        "transport": server.transport.clone(),
+        "tool_allowlist": server.tool_allowlist.clone(),
+        "rollout": rollout,
+        "checked_at": checked_at,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "MCP rollout controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("approved");
+    let approved = matches!(
+        controller_status,
+        "approved" | "applied" | "validated" | "success" | "ok"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if approved { "approved" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 fn mcp_server_rollout_run_status(run: &McpServerRolloutDueRun) -> String {
@@ -13492,6 +13668,18 @@ fn mcp_server_rollout_run_from_audit_log(log: &AuditLog) -> Option<McpServerRoll
     let expired_count = json_usize(&log.details, "expired_count");
     let failed_count = json_usize(&log.details, "failed_count");
     let skipped_count = json_usize(&log.details, "skipped_count");
+    let controller_required = log
+        .details
+        .get("controller_required")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let controller_configured = log
+        .details
+        .get("controller_configured")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let controller_execution_count = json_usize(&log.details, "controller_execution_count");
+    let controller_failed_count = json_usize(&log.details, "controller_failed_count");
     let status = log
         .details
         .get("status")
@@ -13518,6 +13706,10 @@ fn mcp_server_rollout_run_from_audit_log(log: &AuditLog) -> Option<McpServerRoll
         skipped_count,
         expired_count,
         failed_count,
+        controller_required,
+        controller_configured,
+        controller_execution_count,
+        controller_failed_count,
         ran_at: log.created_at,
     })
 }
@@ -28948,6 +29140,93 @@ not json
             .await
             .expect("pending releases");
         assert!(pending.iter().any(|candidate| candidate.id == release.id));
+    }
+
+    #[tokio::test]
+    async fn mcp_rollout_required_controller_skips_due_apply_when_missing() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let organization = state
+            .create_organization(
+                CreateOrganization {
+                    name: "MCP Required Controller Org".to_string(),
+                    slug: "mcp-required-controller-org".to_string(),
+                },
+                Some("admin-1".to_string()),
+            )
+            .await
+            .expect("create org");
+        let team = state
+            .create_team(
+                organization.id,
+                CreateTeam {
+                    name: "MCP Required Controller Team".to_string(),
+                    slug: "mcp-required-controller-team".to_string(),
+                },
+            )
+            .await
+            .expect("create team");
+        let server = state
+            .create_mcp_server(
+                team.id,
+                CreateMcpServerRecord {
+                    name: "docs".to_string(),
+                    transport: "http".to_string(),
+                    config: json!({"source": "current"}),
+                    tool_allowlist: vec!["search".to_string()],
+                },
+            )
+            .await
+            .expect("create mcp server");
+        let activate_after = (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let mut input = RequestMcpServerRollout {
+            transport: Some("http".to_string()),
+            config: Some(json!({"source": "candidate"})),
+            tool_allowlist: Some(vec!["search".to_string()]),
+            status: Some("disabled".to_string()),
+            activate_after: Some(activate_after),
+            activate_before: None,
+            reason: Some("controller required".to_string()),
+        };
+        let built = build_mcp_server_rollout(&state, &server, "admin-1", &mut input)
+            .await
+            .expect("build rollout");
+        let mut config = server.config.as_object().cloned().unwrap_or_default();
+        config.insert("pending_rollout".to_string(), built.rollout.clone());
+        state
+            .update_mcp_server(
+                team.id,
+                server.id,
+                UpdateMcpServerRecord {
+                    transport: None,
+                    config: Some(Value::Object(config)),
+                    tool_allowlist: None,
+                },
+            )
+            .await
+            .expect("persist pending rollout");
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_MCP_ROLLOUT_CONTROLLER_REQUIRED" => Some("true".to_string()),
+            _ => None,
+        };
+
+        let run = execute_due_mcp_server_rollouts_with_lookup(&state, team.id, lookup)
+            .await
+            .expect("run due rollouts");
+
+        assert!(run.controller_required);
+        assert!(!run.controller_configured);
+        assert_eq!(run.applied_count, 0);
+        assert_eq!(run.skipped_count, 1);
+        assert_eq!(
+            run.results[0]["reason"],
+            "controller_required_not_configured"
+        );
+        let unchanged = state
+            .get_mcp_server(team.id, server.id)
+            .await
+            .expect("get server");
+        assert_eq!(unchanged.config["source"], "current");
+        assert!(unchanged.config.get("pending_rollout").is_some());
     }
 
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {

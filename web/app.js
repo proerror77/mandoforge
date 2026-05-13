@@ -5041,6 +5041,7 @@ function renderMcpRolloutRuns(runs) {
     <div class="nested-item">
       <strong>MCP ROLLOUT RUNS</strong>
       <div class="muted">Runs ${formatInteger(runs.run_count)} · processed ${formatInteger(runs.processed_run_count)} · failed ${formatInteger(runs.failed_run_count)}</div>
+      <div class="muted">Latest controller ${runs.latest_run?.controller_configured ? "configured" : "not configured"} · required ${runs.latest_run?.controller_required ? "yes" : "no"} · executions ${formatInteger(runs.latest_run?.controller_execution_count || 0)} · failed ${formatInteger(runs.latest_run?.controller_failed_count || 0)}</div>
       <div class="muted">Production rollout: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · pending ${formatInteger(productionOps.pending_rollout_count || 0)} · due ${formatInteger(productionOps.due_pending_count || 0)} · failed preflight ${formatInteger(productionOps.failed_preflight_count || 0)}</div>
       <div class="muted">${escapeHtml(productionOps.message || "MCP production rollout ops are not reported")}</div>
       <div class="muted">Production orchestration: ${escapeHtml(productionOrchestration.status || "unknown")} · scheduler fresh ${productionOrchestration.scheduler_supervision_fresh ? "yes" : "no"} · pending clear ${productionOrchestration.pending_clear ? "yes" : "no"} · failed runs clear ${productionOrchestration.failed_runs_clear ? "yes" : "no"} · manual apply ${formatInteger(productionOrchestration.manual_apply_required_count || 0)}</div>
