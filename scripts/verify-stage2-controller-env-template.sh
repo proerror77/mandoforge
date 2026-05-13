@@ -3,6 +3,7 @@ set -euo pipefail
 
 template="deploy/stage2-evidence/stage2-production-controllers.env.example"
 job_manifest="deploy/stage2-evidence/stage2-evidence-gate-job.yaml"
+api_source="crates/mandoforge-api/src/main.rs"
 
 required_template_vars=(
   RUN_STAGE2_PRODUCTION_VALIDATIONS
@@ -26,6 +27,8 @@ required_template_vars=(
   MANDOFORGE_KMS_PROVIDER
   MANDOFORGE_KMS_KEY_ID
   MANDOFORGE_KMS_ROTATION_POLICY
+  MANDOFORGE_KMS_VALIDATION_MODE
+  MANDOFORGE_KMS_TIMEOUT_SECONDS
   MANDOFORGE_KMS_ENDPOINT
   MANDOFORGE_KMS_TOKEN
   MANDOFORGE_KMS_RECOVERY_CONTROLLER_REQUIRED
@@ -123,6 +126,16 @@ for var in "${required_template_vars[@]}"; do
     exit 1
   fi
 done
+
+while IFS= read -r var; do
+  if [[ -z "$var" || "$var" == *_TIMEOUT_SECONDS ]]; then
+    continue
+  fi
+  if ! grep -q "^${var}=" "$template"; then
+    echo "Stage 2 controller env template is missing source-referenced env $var" >&2
+    exit 1
+  fi
+done < <(grep -Eho 'MANDOFORGE_[A-Z0-9_]*(CONTROLLER|KMS)[A-Z0-9_]*' "$api_source" | sort -u)
 
 if grep -E '(_TOKEN|_KEY_ID|MANDOFORGE_STAGE2_TEAM_ID)=.+' "$template" >/dev/null; then
   echo "Stage 2 controller env template must not contain real token, key, or team id values" >&2
