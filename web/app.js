@@ -50,6 +50,7 @@ const state = {
   observabilityCollectorReadiness: null,
   observabilityRemediationPlan: null,
   observabilityRemediation: null,
+  usageFinanceOperationsRun: null,
   schedulerSummary: null,
   schedulerDuePlan: null,
   schedulerDueRun: null,
@@ -171,6 +172,7 @@ const loadEvalCasesButton = document.querySelector("#load-eval-cases");
 const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jobs");
 const createUsageRollupButton = document.querySelector("#create-usage-rollup");
 const deliverCostAlertsButton = document.querySelector("#deliver-cost-alerts");
+const runFinanceOperationsButton = document.querySelector("#run-finance-operations");
 const exportUsageCsvButton = document.querySelector("#export-usage-csv");
 const deliverUsageExportButton = document.querySelector("#deliver-usage-export");
 const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
@@ -222,6 +224,7 @@ loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
+runFinanceOperationsButton.addEventListener("click", runFinanceOperations);
 exportUsageCsvButton.addEventListener("click", exportUsageCsv);
 deliverUsageExportButton.addEventListener("click", deliverUsageExport);
 runObservabilityRemediationButton.addEventListener("click", runObservabilityRemediation);
@@ -861,6 +864,13 @@ async function createUsageRollup() {
 
 async function deliverCostAlerts() {
   state.costAlertDelivery = await api("/api/usage/alerts/deliver", {
+    method: "POST",
+  });
+  await refreshOps();
+}
+
+async function runFinanceOperations() {
+  state.usageFinanceOperationsRun = await api("/api/usage/finance-operations/run", {
     method: "POST",
   });
   await refreshOps();
@@ -2307,6 +2317,7 @@ function renderUsage() {
   const usageExportDelivery = state.usageExportDelivery;
   const financeSummary = state.usageFinanceSummary;
   const financeOperations = state.usageFinanceOperations;
+  const financeOperationsRun = state.usageFinanceOperationsRun;
   const financeAttention = financeSummary?.attention_items || [];
   const financeOperationsAttention = financeOperations?.attention_items || [];
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
@@ -2368,6 +2379,16 @@ function renderUsage() {
                 : `<div class="muted">No finance operations attention items.</div>`
             }
             <div class="muted">Generated: ${escapeHtml(financeOperations.generated_at)}</div>
+          </div>`
+        : ""
+    }
+    ${
+      financeOperationsRun
+        ? `<div class="item">
+            <strong>Finance operations run: ${escapeHtml(financeOperationsRun.status)}</strong>
+            <div class="muted">${escapeHtml(financeOperationsRun.ran_at)} · ${(financeOperationsRun.actions || []).map(escapeHtml).join(" · ") || "no action"}</div>
+            <div class="muted">Before ${escapeHtml(financeOperationsRun.before?.status || "unknown")} → after ${escapeHtml(financeOperationsRun.after?.status || "unknown")}</div>
+            <div class="muted">Rollup ${escapeHtml(financeOperationsRun.rollup_created ? "created" : "not created")} · alerts ${escapeHtml(financeOperationsRun.cost_alert_delivery?.status || "not run")} · export ${escapeHtml(financeOperationsRun.finance_export_delivery?.status || "not run")}</div>
           </div>`
         : ""
     }

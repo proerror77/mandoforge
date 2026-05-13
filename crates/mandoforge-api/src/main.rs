@@ -1219,6 +1219,18 @@ struct UsageFinanceOperationsSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageFinanceOperationsRun {
+    status: String,
+    ran_at: DateTime<Utc>,
+    actions: Vec<String>,
+    before: UsageFinanceOperationsSummary,
+    after: UsageFinanceOperationsSummary,
+    rollup_created: Option<UsageRollup>,
+    cost_alert_delivery: Option<CostAlertDelivery>,
+    finance_export_delivery: Option<UsageFinanceExportDelivery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageFinanceOperationAudit {
     action: String,
     status: String,
@@ -2458,6 +2470,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/usage/finance-operations/summary",
             get(get_usage_finance_operations_summary),
+        )
+        .route(
+            "/api/usage/finance-operations/run",
+            post(run_usage_finance_operations),
         )
         .route("/api/usage/export.csv", get(export_usage_csv))
         .route("/api/usage/export/deliver", post(deliver_usage_export))
@@ -10471,6 +10487,24 @@ async fn get_usage_finance_operations_summary(
     Ok(Json(build_usage_finance_operations_summary(&state).await?))
 }
 
+async fn run_usage_finance_operations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<UsageFinanceOperationsRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "usage_finance_operations".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(
+        execute_usage_finance_operations(&state, Some(principal.subject_id.as_str())).await?,
+    ))
+}
+
 async fn build_usage_finance_dashboard_summary(
     state: &AppState,
 ) -> Result<UsageFinanceDashboardSummary, AppError> {
@@ -10516,6 +10550,87 @@ async fn build_usage_finance_operations_summary(
         &audit_logs,
         generated_at,
     ))
+}
+
+async fn execute_usage_finance_operations(
+    state: &AppState,
+    subject: Option<&str>,
+) -> Result<UsageFinanceOperationsRun, AppError> {
+    let ran_at = Utc::now();
+    let before = build_usage_finance_operations_summary(state).await?;
+    let mut actions = Vec::new();
+    let mut rollup_created = None;
+    let mut cost_alert_delivery = None;
+    let mut finance_export_delivery = None;
+
+    if before.rollup_status != "fresh" {
+        let period_end = ran_at;
+        let period_start = period_end - chrono::Duration::hours(24);
+        let summary = serde_json::to_value(build_usage_summary(state).await?)?;
+        let rollup = state
+            .create_usage_rollup(period_start, period_end, summary)
+            .await?;
+        actions.push("usage_rollup_created".to_string());
+        rollup_created = Some(rollup);
+    }
+
+    if before.open_alert_count > 0
+        && before.active_alert_route_count > 0
+        && before.alert_delivery_status != "delivered"
+    {
+        let delivery = execute_cost_alert_delivery(state, ran_at).await?;
+        actions.push("cost_alert_delivery_processed".to_string());
+        cost_alert_delivery = Some(delivery);
+    }
+
+    if before.export_status != "target_missing"
+        && before
+            .last_finance_export
+            .as_ref()
+            .is_none_or(|audit| (ran_at - audit.created_at).num_hours() >= 20)
+    {
+        let delivery = execute_usage_finance_export_delivery(state, false, "user", subject).await?;
+        actions.push("usage_finance_export_processed".to_string());
+        finance_export_delivery = Some(delivery);
+    }
+
+    let after = build_usage_finance_operations_summary(state).await?;
+    let run = UsageFinanceOperationsRun {
+        status: if actions.is_empty() {
+            "no_action".to_string()
+        } else {
+            "completed".to_string()
+        },
+        ran_at,
+        actions,
+        before,
+        after,
+        rollup_created,
+        cost_alert_delivery,
+        finance_export_delivery,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "usage.finance_operations_run",
+            "usage_finance_operations",
+            None,
+            json!({
+                "subject": subject,
+                "status": run.status,
+                "actions": run.actions,
+                "rollup_created": run.rollup_created.is_some(),
+                "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
+                "finance_export_delivery_status": run.finance_export_delivery.as_ref().map(|delivery| delivery.status.clone()),
+                "before_status": run.before.status,
+                "after_status": run.after.status,
+                "ran_at": run.ran_at,
+            }),
+        ))
+        .await?;
+    Ok(run)
 }
 
 fn build_usage_finance_dashboard_summary_from_parts(
@@ -11899,8 +12014,14 @@ async fn deliver_cost_alerts(
     headers: HeaderMap,
 ) -> Result<Json<CostAlertDelivery>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "usage_alerts", None).await?;
-    let delivered_at = Utc::now();
-    let summary = build_usage_summary(&state).await?;
+    Ok(Json(execute_cost_alert_delivery(&state, Utc::now()).await?))
+}
+
+async fn execute_cost_alert_delivery(
+    state: &AppState,
+    delivered_at: DateTime<Utc>,
+) -> Result<CostAlertDelivery, AppError> {
+    let summary = build_usage_summary(state).await?;
     let alerts = build_cost_alerts(&summary.provider_budgets, delivered_at);
     if alerts.is_empty() {
         let delivery = CostAlertDelivery {
@@ -11912,8 +12033,8 @@ async fn deliver_cost_alerts(
             route_deliveries: vec![],
             delivered_at,
         };
-        audit_cost_alert_delivery(&state, &delivery).await?;
-        return Ok(Json(delivery));
+        audit_cost_alert_delivery(state, &delivery).await?;
+        return Ok(delivery);
     }
     let routes: Vec<_> = state
         .list_cost_alert_routes()
@@ -11925,7 +12046,7 @@ async fn deliver_cost_alerts(
         let mut route_deliveries = Vec::new();
         for route in routes {
             route_deliveries
-                .push(deliver_cost_alert_route(&state, &route, &alerts, delivered_at).await?);
+                .push(deliver_cost_alert_route(state, &route, &alerts, delivered_at).await?);
         }
         let delivered = route_deliveries.iter().any(|delivery| delivery.delivered);
         let delivery = CostAlertDelivery {
@@ -11937,8 +12058,8 @@ async fn deliver_cost_alerts(
             route_deliveries,
             delivered_at,
         };
-        audit_cost_alert_delivery(&state, &delivery).await?;
-        return Ok(Json(delivery));
+        audit_cost_alert_delivery(state, &delivery).await?;
+        return Ok(delivery);
     }
     let Some(webhook_url) = state.cost_alert_webhook_url.as_ref() else {
         let delivery = CostAlertDelivery {
@@ -11950,8 +12071,8 @@ async fn deliver_cost_alerts(
             route_deliveries: vec![],
             delivered_at,
         };
-        audit_cost_alert_delivery(&state, &delivery).await?;
-        return Ok(Json(delivery));
+        audit_cost_alert_delivery(state, &delivery).await?;
+        return Ok(delivery);
     };
     let response = tokio::time::timeout(
         Duration::from_secs(10),
@@ -11989,8 +12110,8 @@ async fn deliver_cost_alerts(
         }],
         delivered_at,
     };
-    audit_cost_alert_delivery(&state, &delivery).await?;
-    Ok(Json(delivery))
+    audit_cost_alert_delivery(state, &delivery).await?;
+    Ok(delivery)
 }
 
 async fn audit_cost_alert_delivery(
@@ -15107,7 +15228,7 @@ not json
         );
 
         let operations: UsageFinanceOperationsSummary = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/usage/finance-operations/summary")
                 .header("x-mandoforge-subject", "admin-1")
@@ -15123,6 +15244,43 @@ not json
                 .runbook_actions
                 .iter()
                 .any(|action| action == "create_daily_usage_rollup")
+        );
+
+        let run: UsageFinanceOperationsRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/usage/finance-operations/run")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run.status, "completed");
+        assert!(run.rollup_created.is_some());
+        assert!(
+            run.actions
+                .iter()
+                .any(|action| action == "usage_rollup_created")
+        );
+        assert_eq!(run.before.rollup_status, "missing");
+        assert_eq!(run.after.rollup_status, "fresh");
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "usage.finance_operations_run")
         );
     }
 

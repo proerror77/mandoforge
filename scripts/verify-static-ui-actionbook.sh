@@ -53,7 +53,7 @@ wait_for_static_ui() {
     hasProviderBreakdown: text.includes('PROVIDER COST BREAKDOWN'),
     hasToolBreakdown: text.includes('TOOL RUNTIME BREAKDOWN'),
     hasProviderBudgetForecast: text.includes('PROVIDER BUDGET FORECAST'),
-    hasFinanceOperations: text.includes('FINANCE OPERATIONS') && text.includes('OPERATIONS STATUS') && text.includes('RUNBOOK ACTIONS'),
+    hasFinanceOperations: text.includes('Run Finance Ops') && text.includes('FINANCE OPERATIONS') && text.includes('OPERATIONS STATUS') && text.includes('RUNBOOK ACTIONS'),
     hasObservabilityDashboard: text.includes('Observability') && text.includes('Telemetry / Backpressure / Error Events') && text.includes('Run Remediation') && Boolean(document.querySelector('#observability-summary')),
     hasCollectorReadiness: text.includes('COLLECTOR READINESS') && text.includes('COLLECTOR ENDPOINT') && text.includes('HEALTH MESSAGE'),
     hasCostAlertRoutes: text.includes('Create Alert Route') && Array.from(document.querySelectorAll('#cost-alert-route-form input')).some((input) => input.placeholder.includes('SMTP recipient email')) && text.includes('No cost alert routes'),
