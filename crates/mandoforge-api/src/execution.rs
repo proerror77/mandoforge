@@ -26,6 +26,8 @@ use crate::{
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const MAX_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
+const REMOTE_CODEX_FINAL_BEGIN: &str = "__MANDOFORGE_CODEX_FINAL_BEGIN__";
+const REMOTE_CODEX_FINAL_END: &str = "__MANDOFORGE_CODEX_FINAL_END__";
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -205,6 +207,20 @@ pub(crate) async fn run_execution_job(
             .await
         }
         "shell.exec" => execute_approved_shell(state, &approval, &tool_call).await,
+        "codex.exec"
+            if remote_computer_assignment.is_some()
+                && remote_computer_pod_execution_requested() =>
+        {
+            execute_approved_remote_computer_codex(
+                state,
+                &approval,
+                &tool_call,
+                remote_computer_assignment
+                    .as_ref()
+                    .expect("checked assignment"),
+            )
+            .await
+        }
         "codex.exec" => execute_approved_codex(state, &approval, &tool_call).await,
         _ => {
             state
@@ -743,6 +759,241 @@ async fn execute_approved_remote_computer_shell(
     Ok(())
 }
 
+async fn execute_approved_remote_computer_codex(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+    assignment: &crate::RemoteComputerJobAssignment,
+) -> Result<(), AppError> {
+    let request: CodexRequest = serde_json::from_value(tool_call.args.clone())?;
+    if request.sandbox_mode != "read-only" && request.sandbox_mode != "workspace-write" {
+        return Err(AppError::bad_request(
+            "codex sandbox mode requires approval",
+        ));
+    }
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == assignment.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    let pod_name = remote_computer
+        .pod_name
+        .clone()
+        .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
+    let command = remote_codex_exec_command(&request);
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = remote_computer_runner_for_config(&config);
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "codex.task.started",
+            json!({
+                "task": &request.task,
+                "sandbox_mode": &request.sandbox_mode,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "lease_id": assignment.lease_id,
+                "namespace": remote_computer.namespace,
+                "pod_name": pod_name,
+            }),
+        )
+        .await?;
+    let response = runner
+        .mutate(
+            &config,
+            RemoteComputerRunnerDryRunRequest {
+                operation: Some("live_exec".to_string()),
+                remote_computer_id: Some(remote_computer.id),
+                session_id: Some(approval.session_id),
+                pod_name: Some(pod_name.clone()),
+                metadata: Some(json!({"command": command, "tool_call_id": tool_call.id})),
+            },
+        )
+        .await;
+    let exec_result = response.exec_result.clone().ok_or_else(|| {
+        AppError::bad_request(format!(
+            "Remote Computer Codex exec did not return output: {}",
+            response.message
+        ))
+    })?;
+    if response.status != "exec_ok" || !response.execution_enabled {
+        return Err(AppError::bad_request(response.message));
+    }
+
+    let stdout_full = exec_result
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stderr_full = exec_result
+        .get("stderr")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let remote_output = split_remote_codex_output(stdout_full);
+    for event in parse_codex_jsonl(&remote_output.jsonl_stdout) {
+        state
+            .append_event(
+                "tool",
+                Some(tool_call.id),
+                approval.session_id,
+                "codex.event",
+                json!({"codex_event_type": codex_jsonl_event_type(&event), "event": event, "runner": "remote_computer_pod_exec"}),
+            )
+            .await?;
+    }
+
+    let limit = execution_output_limit_bytes();
+    let stdout = truncate_output(&remote_output.jsonl_stdout, limit);
+    let stderr = truncate_output(stderr_full, limit);
+    let final_output = truncate_output(&remote_output.final_message, limit);
+    let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
+    let stdout_truncated = stdout.truncated
+        || exec_result
+            .get("stdout_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let stderr_truncated = stderr.truncated
+        || exec_result
+            .get("stderr_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+    if !remote_output.final_message.trim().is_empty() {
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id: approval.session_id,
+            artifact_type: "markdown".to_string(),
+            name: "codex-final-message.md".to_string(),
+            path: Some("codex-final-message.md".to_string()),
+            content: json!({
+                "markdown": final_output.text.clone(),
+                "markdown_bytes": final_output.original_bytes,
+                "markdown_truncated": final_output.truncated,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+            }),
+            created_at: Utc::now(),
+        };
+        let artifact = state.insert_artifact(artifact).await?;
+        state
+            .append_event(
+                "system",
+                Some(artifact.id),
+                approval.session_id,
+                "artifact.created",
+                json!({"artifact_id": artifact.id, "name": artifact.name, "path": artifact.path, "artifact_type": artifact.artifact_type, "runner": "remote_computer_pod_exec"}),
+            )
+            .await?;
+    }
+
+    let event_type = if kubernetes_exec_status_succeeded(&status) {
+        "codex.task.completed"
+    } else {
+        "codex.task.failed"
+    };
+    state
+        .append_event(
+            "worker",
+            Some(tool_call.id),
+            approval.session_id,
+            "remote_computer.execution_transport_completed",
+            json!({
+                "tool_call_id": tool_call.id,
+                "assignment_id": assignment.id,
+                "remote_computer_id": remote_computer.id,
+                "lease_id": assignment.lease_id,
+                "pod_name": pod_name,
+                "tool": tool_call.tool_name,
+                "stdout_bytes": stdout.original_bytes,
+                "stderr_bytes": stderr.original_bytes,
+                "status": status,
+                "execution_enabled": true,
+            }),
+        )
+        .await?;
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            event_type,
+            json!({
+                "status": status,
+                "stdout": stdout.text,
+                "stdout_bytes": stdout.original_bytes,
+                "stdout_truncated": stdout_truncated,
+                "stderr": stderr.text,
+                "stderr_bytes": stderr.original_bytes,
+                "stderr_truncated": stderr_truncated,
+                "final_message": final_output.text,
+                "final_message_bytes": final_output.original_bytes,
+                "final_message_truncated": final_output.truncated,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "lease_id": assignment.lease_id,
+            }),
+        )
+        .await?;
+    let result = json!({
+        "runner": "remote_computer_pod_exec",
+        "remote_computer_id": remote_computer.id,
+        "assignment_id": assignment.id,
+        "lease_id": assignment.lease_id,
+        "namespace": remote_computer.namespace,
+        "pod_name": pod_name,
+        "status": status,
+        "stdout": stdout.text,
+        "stdout_bytes": stdout.original_bytes,
+        "stdout_truncated": stdout_truncated,
+        "stderr": stderr.text,
+        "stderr_bytes": stderr.original_bytes,
+        "stderr_truncated": stderr_truncated,
+        "final_message": final_output.text,
+        "final_message_bytes": final_output.original_bytes,
+        "final_message_truncated": final_output.truncated,
+    });
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+        )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "tool.completed",
+            "tool_call",
+            Some(tool_call.id),
+            json!({
+                "tool": tool_call.tool_name,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "pod_name": pod_name,
+                "status": status,
+                "stdout_chars": stdout.text.chars().count(),
+                "stderr_chars": stderr.text.chars().count(),
+                "final_message_chars": final_output.text.chars().count(),
+                "resumed_after_approval": true
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
 async fn execute_approved_codex(
     state: &AppState,
     approval: &Approval,
@@ -892,6 +1143,59 @@ fn codex_execution_strategy(request: &CodexRequest) -> Result<CodexExecutionStra
             "unsupported Codex execution strategy: {other}"
         ))),
     }
+}
+
+struct RemoteCodexOutput {
+    jsonl_stdout: String,
+    final_message: String,
+}
+
+fn remote_codex_exec_command(request: &CodexRequest) -> String {
+    let final_path = "/workspace/.mandoforge/codex-final-message.md";
+    format!(
+        "set -u\nmkdir -p /workspace/.mandoforge\ncd /workspace\ncodex exec --sandbox {} --json --output-last-message {} --cd /workspace {}\ncode=$?\nprintf '\\n{}\\n'\ncat {} 2>/dev/null || true\nprintf '\\n{}\\n'\nexit $code",
+        shell_single_quote(&request.sandbox_mode),
+        shell_single_quote(final_path),
+        shell_single_quote(&request.task),
+        REMOTE_CODEX_FINAL_BEGIN,
+        shell_single_quote(final_path),
+        REMOTE_CODEX_FINAL_END
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn split_remote_codex_output(stdout: &str) -> RemoteCodexOutput {
+    let Some((jsonl_stdout, rest)) = stdout.split_once(REMOTE_CODEX_FINAL_BEGIN) else {
+        return RemoteCodexOutput {
+            jsonl_stdout: stdout.to_string(),
+            final_message: String::new(),
+        };
+    };
+    let final_message = rest
+        .split_once(REMOTE_CODEX_FINAL_END)
+        .map(|(message, _)| message)
+        .unwrap_or(rest)
+        .trim_matches('\n')
+        .to_string();
+    RemoteCodexOutput {
+        jsonl_stdout: jsonl_stdout.trim_end_matches('\n').to_string(),
+        final_message,
+    }
+}
+
+fn kubernetes_exec_status_succeeded(status: &Value) -> bool {
+    if status.is_null() {
+        return true;
+    }
+    let status_text = status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let exit_code = status.get("exitCode").and_then(Value::as_i64).unwrap_or(0);
+    status_text.eq_ignore_ascii_case("success") && exit_code == 0
 }
 
 async fn run_codex_app_server(
@@ -1342,5 +1646,52 @@ pub(crate) fn truncate_output(value: &str, max_bytes: usize) -> TruncatedOutput 
         text: value[..boundary].to_string(),
         original_bytes,
         truncated: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_codex_command_quotes_task_and_emits_final_markers() {
+        let request = CodexRequest {
+            task: "inspect README && echo 'done'".to_string(),
+            sandbox_mode: "workspace-write".to_string(),
+            execution_strategy: None,
+            poll_attempts: None,
+            poll_interval_ms: None,
+        };
+        let command = remote_codex_exec_command(&request);
+
+        assert!(command.contains("cd /workspace"));
+        assert!(command.contains("codex exec --sandbox 'workspace-write'"));
+        assert!(command.contains("'inspect README && echo '\"'\"'done'\"'\"''"));
+        assert!(command.contains(REMOTE_CODEX_FINAL_BEGIN));
+        assert!(command.contains(REMOTE_CODEX_FINAL_END));
+        assert!(command.contains("exit $code"));
+    }
+
+    #[test]
+    fn remote_codex_output_splits_jsonl_from_final_message() {
+        let output = split_remote_codex_output(&format!(
+            "{{\"type\":\"session.started\"}}\n{}\n# Report\n\nDone\n{}\nignored",
+            REMOTE_CODEX_FINAL_BEGIN, REMOTE_CODEX_FINAL_END
+        ));
+
+        assert_eq!(output.jsonl_stdout, "{\"type\":\"session.started\"}");
+        assert_eq!(output.final_message, "# Report\n\nDone");
+        assert_eq!(parse_codex_jsonl(&output.jsonl_stdout).len(), 1);
+    }
+
+    #[test]
+    fn kubernetes_exec_status_defaults_and_failure_are_explicit() {
+        assert!(kubernetes_exec_status_succeeded(&Value::Null));
+        assert!(kubernetes_exec_status_succeeded(
+            &json!({"status": "Success", "exitCode": 0})
+        ));
+        assert!(!kubernetes_exec_status_succeeded(
+            &json!({"status": "Failure", "exitCode": 2})
+        ));
     }
 }

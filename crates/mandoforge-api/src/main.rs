@@ -17302,7 +17302,7 @@ async fn build_remote_computer_readiness(
         );
     }
     runbook_actions.push(
-        "keep shell.exec and codex.exec on the existing approved worker path until remote computer leases are implemented"
+        "keep file.write and unassigned jobs on the existing approved worker path until Remote Computer lease assignment is production-hardened"
             .to_string(),
     );
     runbook_actions.push(
@@ -17310,11 +17310,11 @@ async fn build_remote_computer_readiness(
             .to_string(),
     );
     runbook_actions.push(
-        "attach sessions to remote computer leases only as control-plane state until Pod telemetry and artifact sync are implemented"
+        "attach sessions to remote computer leases only as controlled pilot state until general Pod workspace artifact sync is implemented"
             .to_string(),
     );
     runbook_actions.push(
-        "implement Kubernetes Pod exec streaming, result capture, and artifact sync before enabling MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED"
+        "enable MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED only for explicit Kubernetes Pod exec pilots with approved shell.exec/codex.exec jobs"
             .to_string(),
     );
     runbook_actions.push(
@@ -17392,18 +17392,18 @@ async fn build_remote_computer_execution_transport_readiness(
         supported_operations: vec![
             "plan_pod_exec_intent".to_string(),
             "runner_live_exec_websocket".to_string(),
+            "assigned_shell_exec".to_string(),
+            "assigned_codex_exec".to_string(),
             "audit_handoff".to_string(),
             "fail_closed".to_string(),
         ],
         required_implementation: vec![
-            "bind Kubernetes exec WebSocket client to approved execution jobs".to_string(),
-            "persist stdout/stderr/status capture into tool results".to_string(),
-            "workspace artifact sync from Pod to Artifact Store".to_string(),
-            "session event replay for Pod execution output".to_string(),
+            "bind file.write to Remote Computer workspace semantics".to_string(),
+            "general workspace artifact sync from Pod filesystem to Artifact Store".to_string(),
             "cancellation propagation".to_string(),
         ],
         message:
-            "Remote Computer runner has a gated Kubernetes exec WebSocket client boundary, but approved tools still execute on the existing worker path"
+            "Remote Computer runner can route assigned shell.exec and codex.exec jobs through gated Kubernetes Pod exec, while file.write and general artifact sync remain on the existing worker path"
                 .to_string(),
     })
 }
@@ -30401,7 +30401,14 @@ not json
                 .execution_transport
                 .required_implementation
                 .iter()
-                .any(|item| item.contains("Kubernetes exec WebSocket client"))
+                .any(|item| item.contains("file.write"))
+        );
+        assert!(
+            remote_computer_readiness
+                .execution_transport
+                .required_implementation
+                .iter()
+                .any(|item| item.contains("artifact sync"))
         );
         assert!(
             remote_computer_readiness
