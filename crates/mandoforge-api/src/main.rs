@@ -2580,7 +2580,21 @@ struct McpServerRolloutRunSummary {
     failed_run_count: usize,
     latest_run: Option<McpServerRolloutRunRecord>,
     recent_runs: Vec<McpServerRolloutRunRecord>,
+    production_ops: McpServerRolloutProductionOpsReadiness,
     attention_items: Vec<McpServerRolloutRunAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerRolloutProductionOpsReadiness {
+    status: String,
+    production_blocked: bool,
+    latest_run_status: Option<String>,
+    latest_run_age_hours: Option<i64>,
+    pending_rollout_count: usize,
+    due_pending_count: usize,
+    expired_pending_count: usize,
+    failed_preflight_count: usize,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11205,10 +11219,16 @@ async fn get_mcp_server_rollout_runs(
 ) -> Result<Json<McpServerRolloutRunSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
     let audit_logs = state.list_audit_logs(None).await?;
+    let rollout_summary = build_mcp_server_rollout_summary(
+        team_id,
+        state.list_mcp_servers(team_id).await?,
+        Utc::now(),
+    );
     Ok(Json(build_mcp_server_rollout_run_summary(
         team_id,
         &audit_logs,
         Utc::now(),
+        &rollout_summary,
     )))
 }
 
@@ -11334,6 +11354,7 @@ fn build_mcp_server_rollout_run_summary(
     team_id: Uuid,
     audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
+    rollout_summary: &McpServerRolloutSummary,
 ) -> McpServerRolloutRunSummary {
     let mut recent_runs: Vec<_> = audit_logs
         .iter()
@@ -11390,6 +11411,19 @@ fn build_mcp_server_rollout_run_summary(
         }
         _ => {}
     }
+    let production_ops =
+        build_mcp_server_rollout_production_ops(latest_run.as_ref(), rollout_summary, generated_at);
+    if production_ops.production_blocked {
+        attention_items.push(McpServerRolloutRunAttentionItem {
+            kind: "mcp_rollout_production_blocked".to_string(),
+            severity: if production_ops.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: production_ops.message.clone(),
+        });
+    }
     recent_runs.truncate(10);
     McpServerRolloutRunSummary {
         team_id,
@@ -11399,7 +11433,80 @@ fn build_mcp_server_rollout_run_summary(
         failed_run_count,
         latest_run,
         recent_runs,
+        production_ops,
         attention_items,
+    }
+}
+
+fn build_mcp_server_rollout_production_ops(
+    latest_run: Option<&McpServerRolloutRunRecord>,
+    rollout_summary: &McpServerRolloutSummary,
+    generated_at: DateTime<Utc>,
+) -> McpServerRolloutProductionOpsReadiness {
+    let latest_run_age_hours = latest_run.map(|run| (generated_at - run.ran_at).num_hours());
+    let latest_run_status = latest_run.map(|run| run.status.clone());
+    let (status, production_blocked, message) = if rollout_summary.failed_preflight_count > 0 {
+        (
+            "blocked",
+            true,
+            "MCP connector production rollout is blocked by failed preflight checks".to_string(),
+        )
+    } else if rollout_summary.expired_pending_count > 0 {
+        (
+            "blocked",
+            true,
+            "MCP connector production rollout is blocked by expired pending rollout(s)".to_string(),
+        )
+    } else {
+        match latest_run {
+            None => (
+                "blocked",
+                true,
+                "MCP connector production rollout is blocked until a rollout due-run is recorded"
+                    .to_string(),
+            ),
+            Some(run) if run.failed_count > 0 || run.status == "failed" => (
+                "blocked",
+                true,
+                "MCP connector production rollout is blocked by the latest failed due-run"
+                    .to_string(),
+            ),
+            Some(run) if (generated_at - run.ran_at).num_hours() >= 24 => (
+                "stale",
+                true,
+                "MCP connector production rollout is blocked until due-run supervision is refreshed"
+                    .to_string(),
+            ),
+            Some(_) if rollout_summary.due_pending_count > 0 => (
+                "blocked",
+                true,
+                "MCP connector production rollout is blocked while rollout(s) are due for activation"
+                    .to_string(),
+            ),
+            Some(_) if rollout_summary.pending_rollout_count > 0 => (
+                "attention",
+                true,
+                "MCP connector production rollout requires attention because rollout(s) are still pending"
+                    .to_string(),
+            ),
+            Some(_) => (
+                "ready",
+                false,
+                "MCP connector rollout due-run supervision is fresh and no rollout is pending"
+                    .to_string(),
+            ),
+        }
+    };
+    McpServerRolloutProductionOpsReadiness {
+        status: status.to_string(),
+        production_blocked,
+        latest_run_status,
+        latest_run_age_hours,
+        pending_rollout_count: rollout_summary.pending_rollout_count,
+        due_pending_count: rollout_summary.due_pending_count,
+        expired_pending_count: rollout_summary.expired_pending_count,
+        failed_preflight_count: rollout_summary.failed_preflight_count,
+        message,
     }
 }
 
@@ -26568,6 +26675,9 @@ not json
         assert_eq!(rollout_runs.run_count, 1);
         assert_eq!(rollout_runs.processed_run_count, 1);
         assert_eq!(rollout_runs.failed_run_count, 0);
+        assert_eq!(rollout_runs.production_ops.status, "ready");
+        assert!(!rollout_runs.production_ops.production_blocked);
+        assert_eq!(rollout_runs.production_ops.pending_rollout_count, 0);
         assert_eq!(
             rollout_runs
                 .latest_run

@@ -4746,10 +4746,13 @@ function renderMcpRolloutRuns(runs) {
   }
   const recentRuns = runs.recent_runs || [];
   const attentionItems = runs.attention_items || [];
+  const productionOps = runs.production_ops || {};
   return `
     <div class="nested-item">
       <strong>MCP ROLLOUT RUNS</strong>
       <div class="muted">Runs ${formatInteger(runs.run_count)} · processed ${formatInteger(runs.processed_run_count)} · failed ${formatInteger(runs.failed_run_count)}</div>
+      <div class="muted">Production rollout: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · pending ${formatInteger(productionOps.pending_rollout_count || 0)} · due ${formatInteger(productionOps.due_pending_count || 0)} · failed preflight ${formatInteger(productionOps.failed_preflight_count || 0)}</div>
+      <div class="muted">${escapeHtml(productionOps.message || "MCP production rollout ops are not reported")}</div>
       ${
         recentRuns.length
           ? `<table class="usage-table">
