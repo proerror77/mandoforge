@@ -50,6 +50,7 @@ collect_readiness() {
   fetch_json GET /api/providers/policy-gate >/dev/null
   fetch_json GET /api/providers/policy-gate/runs >/dev/null
   fetch_json GET /api/vault/readiness >/dev/null
+  fetch_json GET /api/vault/health >/dev/null
   fetch_json GET /api/execution-jobs/worker-readiness >/dev/null
   fetch_json GET /api/remote-computers/readiness >/dev/null
   fetch_json GET /api/remote-computers/runner/readiness >/dev/null
@@ -57,6 +58,7 @@ collect_readiness() {
   fetch_json GET /api/approvals/notifications/runs >/dev/null
   fetch_json GET /api/codex-app-server/control-plane/summary >/dev/null
   fetch_json GET /api/usage/finance-operations/summary >/dev/null
+  fetch_json GET /api/observability >/dev/null
   fetch_json GET /api/observability/collector-readiness >/dev/null
   fetch_json GET /api/scheduler/summary >/dev/null
   fetch_json GET /api/policy/rollout/orchestration/readiness >/dev/null
@@ -112,6 +114,46 @@ run_controller_validations() {
   fi
 }
 
+resolve_requirement_endpoint() {
+  local endpoint="$1"
+  if [[ "$endpoint" == ./* ]]; then
+    return 1
+  fi
+  if [[ "$endpoint" == *"{team_id}"* ]]; then
+    if [[ -z "$TEAM_ID" ]]; then
+      return 1
+    fi
+    endpoint="${endpoint//\{team_id\}/$TEAM_ID}"
+  fi
+  printf '%s\n' "$endpoint"
+}
+
+verify_readiness_inventory_coverage() {
+  local readiness_file="$EVIDENCE_DIR/api-stage2-readiness.json"
+  local missing=()
+  local endpoint
+  local resolved
+  local expected_file
+
+  while IFS= read -r endpoint; do
+    if [[ -z "$endpoint" ]]; then
+      continue
+    fi
+    if ! resolved="$(resolve_requirement_endpoint "$endpoint")"; then
+      continue
+    fi
+    expected_file="$EVIDENCE_DIR/$(slugify "$resolved").json"
+    if [[ ! -s "$expected_file" ]]; then
+      missing+=("$resolved")
+    fi
+  done < <(jq -r '.evidence_requirements[]?.readiness_endpoints[]?' "$readiness_file" | sort -u)
+
+  if (( ${#missing[@]} > 0 )); then
+    printf 'stage2 evidence gate did not collect declared readiness endpoint: %s\n' "${missing[@]}" >&2
+    exit 1
+  fi
+}
+
 write_summary() {
   local readiness_file="$EVIDENCE_DIR/api-stage2-readiness.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
@@ -152,10 +194,12 @@ mkdir -p "$EVIDENCE_DIR"
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
 collect_readiness
+verify_readiness_inventory_coverage
 
 if [[ "$RUN_VALIDATIONS" == "1" ]]; then
   run_controller_validations
   collect_readiness
+  verify_readiness_inventory_coverage
 else
   echo "controller validations skipped; set RUN_STAGE2_PRODUCTION_VALIDATIONS=1 to execute validation endpoints" >&2
 fi
