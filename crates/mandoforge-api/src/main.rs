@@ -2090,6 +2090,10 @@ struct UsageFinanceProductionCloseReadiness {
     alert_delivery_ready: bool,
     critical_alerts_acknowledged: bool,
     failed_delivery_evidence: bool,
+    close_controller_required: bool,
+    close_controller_configured: bool,
+    latest_close_controller_status: Option<String>,
+    latest_close_controller_closed: bool,
     blocking_reasons: Vec<String>,
     message: String,
 }
@@ -14846,6 +14850,20 @@ where
         .unwrap_or(false)
 }
 
+fn usage_finance_close_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_FINANCE_CLOSE_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
 async fn execute_usage_finance_close_controller<F>(
     lookup: &F,
     subject: Option<&str>,
@@ -15170,6 +15188,8 @@ fn build_usage_finance_operations_summary_from_parts(
         last_finance_export.as_ref(),
         last_alert_delivery.as_ref(),
         generated_at,
+        usage_finance_close_controller_required(&|key| std::env::var(key).ok()),
+        usage_finance_close_controller_configured(&|key| std::env::var(key).ok()),
     );
     if production_close.production_blocked {
         attention_items.push(UsageFinanceAttentionItem {
@@ -15232,6 +15252,8 @@ fn build_usage_finance_production_close_readiness(
     last_finance_export: Option<&UsageFinanceOperationAudit>,
     last_alert_delivery: Option<&UsageFinanceOperationAudit>,
     generated_at: DateTime<Utc>,
+    close_controller_required: bool,
+    close_controller_configured: bool,
 ) -> UsageFinanceProductionCloseReadiness {
     let acknowledgement_cutoff = generated_at - chrono::Duration::hours(24);
     let critical_alerts_acknowledged = alerts
@@ -15261,6 +15283,16 @@ fn build_usage_finance_production_close_readiness(
         || last_alert_delivery
             .as_ref()
             .is_some_and(|audit| audit.status == "failed");
+    let latest_close_controller_status = audit_logs
+        .iter()
+        .filter(|log| log.action == "usage.finance_operations_run")
+        .max_by_key(|log| log.created_at)
+        .and_then(|log| log.details["close_controller_execution"]["status"].as_str())
+        .map(str::to_string);
+    let latest_close_controller_closed = latest_close_controller_status
+        .as_deref()
+        .map(|status| status == "closed")
+        .unwrap_or(false);
     let rollup_fresh = rollup_status == "fresh";
     let mut blocking_reasons = Vec::new();
 
@@ -15281,6 +15313,13 @@ fn build_usage_finance_production_close_readiness(
     }
     if failed_delivery_evidence {
         blocking_reasons.push("failed finance or alert delivery evidence is present".to_string());
+    }
+    if close_controller_required && !close_controller_configured {
+        blocking_reasons
+            .push("finance close controller is required but not configured".to_string());
+    }
+    if close_controller_required && !latest_close_controller_closed {
+        blocking_reasons.push("finance close controller has no recent closed evidence".to_string());
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -15308,6 +15347,10 @@ fn build_usage_finance_production_close_readiness(
         alert_delivery_ready,
         critical_alerts_acknowledged,
         failed_delivery_evidence,
+        close_controller_required,
+        close_controller_configured,
+        latest_close_controller_status,
+        latest_close_controller_closed,
         blocking_reasons,
         message,
     }
@@ -24525,6 +24568,107 @@ not json
         controller_server.abort();
     }
 
+    #[test]
+    fn finance_production_close_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let mut dashboard = UsageFinanceDashboardSummary {
+            generated_at,
+            current_cost_cents: 0.0,
+            current_total_tokens: 0,
+            current_tool_calls: 0,
+            comparison_basis: "current".to_string(),
+            budget_pressure_status: "normal".to_string(),
+            budget_pressure_count: 0,
+            critical_budget_count: 0,
+            warning_budget_count: 0,
+            alert_count: 0,
+            critical_alert_count: 0,
+            warning_alert_count: 0,
+            alert_route_count: 1,
+            active_alert_route_count: 1,
+            rollup_count: 1,
+            latest_rollup_at: Some(generated_at),
+            latest_rollup_age_hours: Some(0),
+            finance_export_target_configured: true,
+            finance_export_schedule_enabled: true,
+            forecast_7d_cost_cents: Some(0.0),
+            forecast_30d_cost_cents: Some(0.0),
+            top_provider_by_cost: None,
+            recommendations: vec![],
+            attention_items: vec![],
+        };
+        let export = UsageFinanceOperationAudit {
+            action: "usage.finance_export_delivered".to_string(),
+            status: "delivered".to_string(),
+            subject: Some("admin-1".to_string()),
+            created_at: generated_at,
+        };
+        let delivery = UsageFinanceOperationAudit {
+            action: "usage.cost_alerts_delivered".to_string(),
+            status: "delivered".to_string(),
+            subject: Some("admin-1".to_string()),
+            created_at: generated_at,
+        };
+
+        let missing_controller = build_usage_finance_production_close_readiness(
+            &dashboard,
+            &[],
+            &[],
+            "fresh",
+            "no_alerts",
+            Some(&export),
+            Some(&delivery),
+            generated_at,
+            true,
+            false,
+        );
+        assert_eq!(missing_controller.status, "blocked");
+        assert!(missing_controller.production_blocked);
+        assert!(
+            missing_controller.blocking_reasons.iter().any(|reason| {
+                reason == "finance close controller is required but not configured"
+            })
+        );
+
+        let audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "usage.finance_operations_run",
+            "usage_finance_operations",
+            None,
+            json!({
+                "status": "completed",
+                "close_controller_configured": true,
+                "close_controller_execution": {
+                    "attempted": true,
+                    "status": "closed",
+                    "close_id": "finance-close-1"
+                }
+            }),
+        );
+        dashboard.attention_items.clear();
+        let ready = build_usage_finance_production_close_readiness(
+            &dashboard,
+            &[],
+            &[audit],
+            "fresh",
+            "no_alerts",
+            Some(&export),
+            Some(&delivery),
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert!(ready.latest_close_controller_closed);
+        assert_eq!(
+            ready.latest_close_controller_status.as_deref(),
+            Some("closed")
+        );
+    }
+
     #[tokio::test]
     async fn observability_remediation_controller_executes_external_boundary() {
         let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -24809,6 +24953,10 @@ not json
                 alert_delivery_ready: true,
                 critical_alerts_acknowledged: true,
                 failed_delivery_evidence: false,
+                close_controller_required: false,
+                close_controller_configured: false,
+                latest_close_controller_status: None,
+                latest_close_controller_closed: false,
                 blocking_reasons: vec![],
                 message: "ready".to_string(),
             },

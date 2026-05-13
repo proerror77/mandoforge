@@ -3114,7 +3114,9 @@ function renderUsage() {
               <dt>Production close gate</dt>
               <dd>${escapeHtml(financeProductionClose.message || "finance production close gate is not reported")}</dd>
               <dt>Production close evidence</dt>
-              <dd>rollup ${financeProductionClose.rollup_fresh ? "fresh" : "not fresh"} · export target ${financeProductionClose.export_target_configured ? "ready" : "missing"} · export recent ${financeProductionClose.export_recent ? "yes" : "no"} · alerts delivered ${financeProductionClose.alert_delivery_ready ? "yes" : "no"} · critical ack ${financeProductionClose.critical_alerts_acknowledged ? "yes" : "no"}</dd>
+              <dd>rollup ${financeProductionClose.rollup_fresh ? "fresh" : "not fresh"} · export target ${financeProductionClose.export_target_configured ? "ready" : "missing"} · export recent ${financeProductionClose.export_recent ? "yes" : "no"} · alerts delivered ${financeProductionClose.alert_delivery_ready ? "yes" : "no"} · critical ack ${financeProductionClose.critical_alerts_acknowledged ? "yes" : "no"} · controller ${financeProductionClose.close_controller_configured ? "configured" : "missing"}</dd>
+              <dt>Close controller</dt>
+              <dd>required ${financeProductionClose.close_controller_required ? "yes" : "no"} · status ${escapeHtml(financeProductionClose.latest_close_controller_status || "none")} · closed ${financeProductionClose.latest_close_controller_closed ? "yes" : "no"}</dd>
               <dt>Last finance export</dt>
               <dd>${renderFinanceOperationAudit(financeOperations.last_finance_export)}</dd>
               <dt>Last alert delivery</dt>
