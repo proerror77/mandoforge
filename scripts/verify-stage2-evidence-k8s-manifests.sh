@@ -9,6 +9,7 @@ fi
 manifests=(
   deploy/stage2-evidence/stage2-controller-env-secret.example.yaml
   deploy/stage2-evidence/stage2-evidence-gate-job.yaml
+  deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml
   deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml
 )
 
@@ -46,8 +47,18 @@ if ! grep -q "name: mandoforge-stage2-production-evidence-gate" deploy/stage2-ev
   exit 1
 fi
 
+if ! grep -q "name: mandoforge-stage2-production-evidence" deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml; then
+  echo "Stage 2 production evidence PVC example has the wrong name" >&2
+  exit 1
+fi
+
 if ! grep -q "name: mandoforge-stage2-controller-env" deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml; then
   echo "Stage 2 production evidence Job example does not consume the controller env Secret" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml; then
+  echo "Stage 2 production evidence Job example does not persist evidence to the production evidence PVC" >&2
   exit 1
 fi
 

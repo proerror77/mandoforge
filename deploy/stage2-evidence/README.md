@@ -9,6 +9,7 @@ Stage 2 is complete only when `/api/stage2/readiness` reports no open gaps and t
 - `stage2-evidence-gate-job.yaml` runs the default blocked inventory gate. It keeps `ALLOW_BLOCKED=1` and leaves production validations disabled, so it is useful for collecting current readiness evidence without claiming completion.
 - `stage2-production-controllers.env.example` lists the controller and KMS environment contract required for strict production validation. It intentionally contains placeholder URLs and empty token/team/key values.
 - `stage2-controller-env-secret.example.yaml` is the Kubernetes Secret shape for those controller settings. Replace placeholders through your secret manager or deployment pipeline; do not commit real values.
+- `stage2-production-evidence-pvc.example.yaml` is the persistent evidence volume shape for strict production runs.
 - `stage2-production-evidence-gate-job.example.yaml` runs the strict production gate and reads validation flags from `mandoforge-stage2-controller-env`.
 
 ## Local Manifest Verification
@@ -42,12 +43,13 @@ Use this only after real validation controllers and credentials are configured:
 ```bash
 kubectl create namespace agent-os --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -n agent-os -f deploy/stage2-evidence/stage2-controller-env-secret.example.yaml
+kubectl apply -n agent-os -f deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml
 kubectl create -n agent-os -f deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml
 kubectl wait --for=condition=complete job/mandoforge-stage2-production-evidence-gate -n agent-os --timeout=30m
 kubectl logs job/mandoforge-stage2-production-evidence-gate -n agent-os
 ```
 
-For a real run, create `mandoforge-stage2-controller-env` from the same keys but with production controller URLs, tokens, team id, and KMS settings supplied outside git. The strict Job sets `ALLOW_BLOCKED=0` through that Secret and fails closed if required controller evidence is missing, stale, or unhealthy.
+For a real run, create `mandoforge-stage2-controller-env` from the same keys but with production controller URLs, tokens, team id, and KMS settings supplied outside git. The strict Job sets `ALLOW_BLOCKED=0` through that Secret and fails closed if required controller evidence is missing, stale, or unhealthy. Keep the `mandoforge-stage2-production-evidence` PVC until the evidence directory has been archived with the release record.
 
 ## Completion Rule
 
