@@ -2364,6 +2364,8 @@ struct VaultKmsReadiness {
     configured: bool,
     key_id_configured: bool,
     rotation_policy_configured: bool,
+    endpoint_configured: bool,
+    validation_mode: String,
     issues: Vec<String>,
 }
 
@@ -9965,7 +9967,17 @@ where
     let rotation_policy_configured = lookup("MANDOFORGE_KMS_ROTATION_POLICY")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    let configured = provider != "reserved" && key_id_configured && rotation_policy_configured;
+    let endpoint_configured = lookup("MANDOFORGE_KMS_ENDPOINT")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let validation_mode = lookup("MANDOFORGE_KMS_VALIDATION_MODE")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "health-check".to_string());
+    let configured = provider != "reserved"
+        && key_id_configured
+        && rotation_policy_configured
+        && endpoint_configured;
     let mut issues = Vec::new();
     if provider == "reserved" {
         issues.push("external KMS/HSM provider is not configured".to_string());
@@ -9976,12 +9988,19 @@ where
     if !rotation_policy_configured {
         issues.push("MANDOFORGE_KMS_ROTATION_POLICY is not configured".to_string());
     }
+    if !endpoint_configured {
+        issues.push(
+            "MANDOFORGE_KMS_ENDPOINT is not configured for external KMS validation".to_string(),
+        );
+    }
     VaultKmsReadiness {
         provider,
         status: if configured { "ready" } else { "reserved" }.to_string(),
         configured,
         key_id_configured,
         rotation_policy_configured,
+        endpoint_configured,
+        validation_mode,
         issues,
     }
 }
@@ -24688,6 +24707,8 @@ not json
         assert_eq!(report.mcp_secret_ref_count, 1);
         assert_eq!(report.unresolved_ref_count, 1);
         assert_eq!(report.kms.status, "reserved");
+        assert!(!report.kms.endpoint_configured);
+        assert_eq!(report.kms.validation_mode, "health-check");
         assert!(report.checks.iter().any(|check| {
             check.resource_type == "provider"
                 && check.resource_id == Some(provider.id)
@@ -24701,6 +24722,12 @@ not json
                 && item
                     .message
                     .contains("external KMS/HSM provider is not configured")
+        }));
+        assert!(report.attention_items.iter().any(|item| {
+            item.resource_type == "kms"
+                && item
+                    .message
+                    .contains("MANDOFORGE_KMS_ENDPOINT is not configured")
         }));
         let rotation_run: VaultKmsRotationRun = request_json(
             app.clone(),

@@ -3962,7 +3962,7 @@ function renderVaultReadiness() {
     <div class="item">
       <strong>Secret provider: ${escapeHtml(readiness.secret_provider?.status || "unknown")}</strong>
       <div class="muted">${escapeHtml(readiness.secret_provider?.provider_kind || "unknown")} · ${escapeHtml(readiness.secret_provider?.healthy ? "healthy" : "unhealthy")}</div>
-      <div class="muted">KMS ${escapeHtml(readiness.kms?.provider || "reserved")} · key ${escapeHtml(readiness.kms?.key_id_configured ? "configured" : "missing")} · rotation ${escapeHtml(readiness.kms?.rotation_policy_configured ? "configured" : "missing")}</div>
+      <div class="muted">KMS ${escapeHtml(readiness.kms?.provider || "reserved")} · key ${escapeHtml(readiness.kms?.key_id_configured ? "configured" : "missing")} · rotation ${escapeHtml(readiness.kms?.rotation_policy_configured ? "configured" : "missing")} · endpoint ${escapeHtml(readiness.kms?.endpoint_configured ? "configured" : "missing")} · validation ${escapeHtml(readiness.kms?.validation_mode || "health-check")}</div>
     </div>
     <div class="item">
       <strong>KMS ROTATION GATE</strong>
