@@ -31,6 +31,7 @@ const state = {
   evalDrifts: {},
   agentReleases: {},
   agentReleaseSummary: null,
+  agentReleaseAutomationRuns: null,
   agentReleaseAutomationRun: null,
   mcpServers: [],
   mcpTeamId: "",
@@ -1463,13 +1464,15 @@ async function refreshOps() {
 }
 
 async function refreshAgentReleases(render = true) {
-  const [summary, releaseEntries] = await Promise.all([
+  const [summary, automationRuns, releaseEntries] = await Promise.all([
     api("/api/agents/releases/summary"),
+    api("/api/agents/releases/automation-runs"),
     Promise.all(
       state.agents.map(async (agent) => [agent.id, await api(`/api/agents/${agent.id}/releases`)]),
     ),
   ]);
   state.agentReleaseSummary = summary;
+  state.agentReleaseAutomationRuns = automationRuns;
   state.agentReleases = Object.fromEntries(releaseEntries);
   if (render) {
     renderAgentReleases();
@@ -3866,6 +3869,9 @@ function renderAgentReleases() {
         <div class="muted">${formatInteger(automationRun.pending_count)} pending · ${formatInteger(automationRun.promoted_count)} promoted · ${formatInteger(automationRun.rejected_count)} rejected · ${formatInteger(automationRun.skipped_count)} skipped · ${escapeHtml(automationRun.checked_at)}</div>
       </div>`
     : "";
+  const automationRunHistory = renderAgentReleaseAutomationRuns(
+    state.agentReleaseAutomationRuns,
+  );
   const releaseGroups = state.agents
     .map((agent) => ({
       agent,
@@ -3873,7 +3879,7 @@ function renderAgentReleases() {
     }))
     .filter((group) => group.releases.length);
   agentReleaseRoot.innerHTML = releaseGroups.length
-    ? `${summaryPanel}${automationSummary}${releaseGroups
+    ? `${summaryPanel}${automationSummary}${automationRunHistory}${releaseGroups
         .map(
           ({ agent, releases }) => `
             <div class="item">
@@ -3909,7 +3915,7 @@ function renderAgentReleases() {
           `,
         )
         .join("")}`
-    : `${summaryPanel}${automationSummary}<div class="muted">No promoted or rolled back releases</div>`;
+    : `${summaryPanel}${automationSummary}${automationRunHistory}<div class="muted">No promoted or rolled back releases</div>`;
   agentReleaseRoot.querySelectorAll("[data-release-rollback]").forEach((button) => {
     button.addEventListener("click", () =>
       rollbackAgentRelease(button.dataset.releaseAgent, button.dataset.releaseRollback),
@@ -3925,6 +3931,63 @@ function renderAgentReleases() {
       rejectAgentRelease(button.dataset.releaseAgent, button.dataset.releaseReject),
     );
   });
+}
+
+function renderAgentReleaseAutomationRuns(runs) {
+  if (!runs) {
+    return `<div class="muted">Release automation runs are not loaded.</div>`;
+  }
+  const recentRuns = runs.recent_runs || [];
+  const attentionItems = runs.attention_items || [];
+  return `
+    <div class="nested-item">
+      <strong>RELEASE AUTOMATION RUNS</strong>
+      <div class="muted">Runs ${formatInteger(runs.run_count)} · processed ${formatInteger(runs.processed_run_count)} · skipped ${formatInteger(runs.skipped_run_count)}</div>
+      ${
+        recentRuns.length
+          ? `<table class="usage-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Pending</th>
+                  <th>Promoted</th>
+                  <th>Rejected</th>
+                  <th>Skipped</th>
+                  <th>Ran</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${recentRuns
+                  .slice(0, 5)
+                  .map(
+                    (run) => `
+                      <tr>
+                        <td>${escapeHtml(run.status)}</td>
+                        <td>${formatInteger(run.pending_count)}</td>
+                        <td>${formatInteger(run.promoted_count)}</td>
+                        <td>${formatInteger(run.rejected_count)}</td>
+                        <td>${formatInteger(run.skipped_count)}</td>
+                        <td>${escapeHtml(run.ran_at)}</td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>`
+          : `<div class="muted">No release automation runs</div>`
+      }
+      ${
+        attentionItems.length
+          ? attentionItems
+              .map(
+                (item) =>
+                  `<div class="muted">${escapeHtml(item.severity)} · ${escapeHtml(item.kind)} · ${escapeHtml(item.message)}</div>`,
+              )
+              .join("")
+          : `<div class="muted">No release automation run attention items.</div>`
+      }
+    </div>
+  `;
 }
 
 function renderReleaseAttention(items) {

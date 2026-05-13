@@ -295,6 +295,35 @@ struct AgentReleaseAutomationRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReleaseAutomationRunSummary {
+    generated_at: DateTime<Utc>,
+    run_count: usize,
+    processed_run_count: usize,
+    skipped_run_count: usize,
+    latest_run: Option<AgentReleaseAutomationRunRecord>,
+    recent_runs: Vec<AgentReleaseAutomationRunRecord>,
+    attention_items: Vec<AgentReleaseAutomationRunAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReleaseAutomationRunRecord {
+    id: Uuid,
+    status: String,
+    pending_count: usize,
+    promoted_count: usize,
+    rejected_count: usize,
+    skipped_count: usize,
+    ran_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReleaseAutomationRunAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentReleaseRolloutSummary {
     generated_at: DateTime<Utc>,
     release_count: usize,
@@ -2334,6 +2363,10 @@ fn build_router(state: AppState) -> Router {
             get(get_agent_release_rollout_summary),
         )
         .route(
+            "/api/agents/releases/automation-runs",
+            get(get_agent_release_automation_runs),
+        )
+        .route(
             "/api/agents/{id}/releases",
             get(list_agent_releases).post(create_agent_release),
         )
@@ -3140,6 +3173,18 @@ async fn get_agent_release_rollout_summary(
     )))
 }
 
+async fn get_agent_release_automation_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AgentReleaseAutomationRunSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "agent_release", None).await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    Ok(Json(build_agent_release_automation_run_summary(
+        &audit_logs,
+        Utc::now(),
+    )))
+}
+
 async fn create_agent_release(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -3328,14 +3373,120 @@ async fn execute_due_agent_release_promotions(
             "agent_release",
             None,
             json!({
+                "status": agent_release_automation_run_status(&run),
                 "pending_count": run.pending_count,
                 "promoted_count": run.promoted_count,
                 "rejected_count": run.rejected_count,
                 "skipped_count": run.skipped_count,
+                "results": run.results.clone(),
             }),
         ))
         .await?;
     Ok(run)
+}
+
+fn agent_release_automation_run_status(run: &AgentReleaseAutomationRun) -> String {
+    if run.promoted_count > 0 || run.rejected_count > 0 {
+        "processed"
+    } else if run.skipped_count > 0 {
+        "skipped"
+    } else {
+        "no_pending"
+    }
+    .to_string()
+}
+
+fn build_agent_release_automation_run_summary(
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> AgentReleaseAutomationRunSummary {
+    let mut recent_runs: Vec<_> = audit_logs
+        .iter()
+        .filter_map(agent_release_automation_run_from_audit_log)
+        .collect();
+    recent_runs.sort_by(|left, right| right.ran_at.cmp(&left.ran_at));
+    let run_count = recent_runs.len();
+    let processed_run_count = recent_runs
+        .iter()
+        .filter(|run| run.promoted_count > 0 || run.rejected_count > 0)
+        .count();
+    let skipped_run_count = recent_runs
+        .iter()
+        .filter(|run| run.status == "skipped")
+        .count();
+    let latest_run = recent_runs.first().cloned();
+    let mut attention_items = Vec::new();
+    match latest_run.as_ref() {
+        Some(run) if run.status == "skipped" && run.pending_count > 0 => {
+            attention_items.push(AgentReleaseAutomationRunAttentionItem {
+                kind: "latest_run_skipped_pending".to_string(),
+                severity: "warning".to_string(),
+                message: format!(
+                    "latest release automation run skipped {} pending release(s)",
+                    run.skipped_count
+                ),
+            });
+        }
+        Some(run) if (generated_at - run.ran_at).num_hours() >= 24 => {
+            attention_items.push(AgentReleaseAutomationRunAttentionItem {
+                kind: "stale_release_automation_run".to_string(),
+                severity: "warning".to_string(),
+                message: "release automation has not been run in the last 24 hours".to_string(),
+            });
+        }
+        None => {
+            attention_items.push(AgentReleaseAutomationRunAttentionItem {
+                kind: "missing_release_automation_run".to_string(),
+                severity: "warning".to_string(),
+                message: "release automation has not been run yet".to_string(),
+            });
+        }
+        _ => {}
+    }
+    recent_runs.truncate(10);
+    AgentReleaseAutomationRunSummary {
+        generated_at,
+        run_count,
+        processed_run_count,
+        skipped_run_count,
+        latest_run,
+        recent_runs,
+        attention_items,
+    }
+}
+
+fn agent_release_automation_run_from_audit_log(
+    log: &AuditLog,
+) -> Option<AgentReleaseAutomationRunRecord> {
+    if log.action != "agent.release_promotion_due_run" {
+        return None;
+    }
+    let promoted_count = json_usize(&log.details, "promoted_count");
+    let rejected_count = json_usize(&log.details, "rejected_count");
+    let skipped_count = json_usize(&log.details, "skipped_count");
+    let status = log
+        .details
+        .get("status")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            if promoted_count > 0 || rejected_count > 0 {
+                "processed".to_string()
+            } else if skipped_count > 0 {
+                "skipped".to_string()
+            } else {
+                "no_pending".to_string()
+            }
+        });
+    Some(AgentReleaseAutomationRunRecord {
+        id: log.id,
+        status,
+        pending_count: json_usize(&log.details, "pending_count"),
+        promoted_count,
+        rejected_count,
+        skipped_count,
+        ran_at: log.created_at,
+    })
 }
 
 enum ReleaseAutomationDecision {
@@ -25069,6 +25220,35 @@ not json
         assert_eq!(automation_run.promoted_count, 1);
         assert_eq!(automation_run.rejected_count, 1);
         assert_eq!(automation_run.skipped_count, 0);
+
+        let automation_runs: AgentReleaseAutomationRunSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents/releases/automation-runs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(automation_runs.run_count, 1);
+        assert_eq!(automation_runs.processed_run_count, 1);
+        assert_eq!(
+            automation_runs
+                .latest_run
+                .as_ref()
+                .expect("latest automation run")
+                .status,
+            "processed"
+        );
+        assert_eq!(
+            automation_runs
+                .latest_run
+                .as_ref()
+                .expect("latest automation run")
+                .promoted_count,
+            1
+        );
 
         let releases: Vec<AgentRelease> = request_json(
             app.clone(),

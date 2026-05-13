@@ -235,6 +235,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/agents/:id/versions`
 - `GET /api/agents/:id/versions/:version`
 - `GET /api/agents/:id/releases`
+- `GET /api/agents/releases/automation-runs`
 - `POST /api/agents/:id/releases`
 - `POST /api/agents/:id/releases/:release_id/rollback`
 - `GET /api/execution-jobs`
