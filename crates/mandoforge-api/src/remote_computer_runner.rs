@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -967,6 +967,7 @@ mod tests {
         http::HeaderMap,
         routing::{delete, get, post},
     };
+    use futures_util::SinkExt;
 
     fn test_pod_template_path() -> String {
         Path::new(env!("CARGO_MANIFEST_DIR"))
