@@ -10,5 +10,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: azure/setup-kubectl@v4
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace
+      - run: cargo test -p mandoforge-api
+      - run: node --check web/app.js
+      - run: bash -n scripts/stage1-final-gate.sh
+      - run: bash -n scripts/stage2-production-evidence-gate.sh
+      - run: kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out
+      - run: kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out && wc -l /tmp/mandoforge-stage2-evidence-kustomize.out
