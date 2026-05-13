@@ -25,6 +25,7 @@ const state = {
   policyRevisionGates: {},
   policyScheduledRolloutRun: null,
   policyRollback: null,
+  approvalNotificationOpsValidation: null,
   evalDatasets: [],
   evalCases: [],
   evalRuns: [],
@@ -191,6 +192,7 @@ const approvalNotificationChannelPolicyForm = document.querySelector(
 const runDueApprovalEscalationsButton = document.querySelector("#run-due-approval-escalations");
 const runApprovalNotificationsButton = document.querySelector("#run-approval-notifications");
 const validateApprovalNotificationsButton = document.querySelector("#validate-approval-notifications");
+const validateApprovalNotificationOpsButton = document.querySelector("#validate-approval-notification-ops");
 const approvalGovernanceRoot = document.querySelector("#approval-governance");
 const approvalNotificationRoutingRoot = document.querySelector("#approval-notification-routing");
 const approvalNotificationRunsRoot = document.querySelector("#approval-notification-runs");
@@ -253,6 +255,7 @@ approvalNotificationChannelPolicyForm.addEventListener(
 runDueApprovalEscalationsButton.addEventListener("click", runDueApprovalEscalations);
 runApprovalNotificationsButton.addEventListener("click", runApprovalNotifications);
 validateApprovalNotificationsButton.addEventListener("click", validateApprovalNotifications);
+validateApprovalNotificationOpsButton.addEventListener("click", validateApprovalNotificationOps);
 providerForm.addEventListener("submit", createProvider);
 providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
 runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
@@ -1789,6 +1792,17 @@ async function validateApprovalNotifications() {
   state.approvalNotificationRuns = await api("/api/approvals/notifications/runs");
   state.approvalNotificationRouting = await api("/api/approvals/notification-routing/summary");
   renderApprovalNotificationRouting();
+  renderApprovalNotificationRuns();
+}
+
+async function validateApprovalNotificationOps() {
+  state.approvalNotificationOpsValidation = await api(
+    "/api/approvals/notifications/ops/validate",
+    {
+      method: "POST",
+    },
+  );
+  state.approvalNotificationRuns = await api("/api/approvals/notifications/runs");
   renderApprovalNotificationRuns();
 }
 
@@ -4561,11 +4575,13 @@ function renderApprovalNotificationRuns() {
   const productionOps = runs.production_ops || {};
   const deploymentReadiness = runs.deployment_readiness || {};
   const deploymentValidation = state.approvalNotificationDeploymentValidation;
+  const opsValidation = state.approvalNotificationOpsValidation;
   approvalNotificationRunsRoot.innerHTML = `
     <div class="item">
       <strong>NOTIFICATION RUNS</strong>
       <div class="muted">Runs ${formatInteger(runs.run_count)} · delivered ${formatInteger(runs.delivered_run_count)} · reserved ${formatInteger(runs.reserved_run_count)} · failed ${formatInteger(runs.failed_run_count)}</div>
       <div class="muted">Production ops: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · routing ${escapeHtml(productionOps.routing_status || "unknown")} · channels ${formatInteger(productionOps.channel_count || 0)} · unroutable ${formatInteger(productionOps.unroutable_pending_count || 0)}</div>
+      <div class="muted">Ops controller: required ${productionOps.controller_required ? "yes" : "no"} · configured ${productionOps.controller_configured ? "yes" : "no"} · latest ${escapeHtml(productionOps.latest_controller_status || "none")} · validated ${productionOps.latest_controller_validated ? "yes" : "no"}</div>
       <div class="muted">${escapeHtml(productionOps.message || "Production approval notification ops are not reported")}</div>
       <div class="muted">Deployment validation: ${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · channels ${formatInteger(deploymentReadiness.channel_count || 0)} · policies ${formatInteger(deploymentReadiness.active_policy_count || 0)} / ${formatInteger(deploymentReadiness.persisted_policy_count || 0)} · unroutable ${formatInteger(deploymentReadiness.unroutable_pending_count || 0)}</div>
       <div class="muted">Deployment controller: required ${deploymentReadiness.controller_required ? "yes" : "no"} · configured ${deploymentReadiness.controller_configured ? "yes" : "no"} · latest ${escapeHtml(deploymentReadiness.latest_controller_status || "none")} · executions ${formatInteger(deploymentReadiness.controller_execution_count || 0)} · failed ${formatInteger(deploymentReadiness.controller_failed_count || 0)}</div>
@@ -4579,6 +4595,11 @@ function renderApprovalNotificationRuns() {
         deploymentValidation
           ? `<div class="muted">Latest validation: ${escapeHtml(deploymentValidation.status)} · pending ${formatInteger(deploymentValidation.pending_approval_count)} · routable ${formatInteger(deploymentValidation.routable_pending_count)} · unroutable ${formatInteger(deploymentValidation.unroutable_pending_count)} · controller ${escapeHtml(deploymentValidation.controller_execution?.status || "skipped")} · checked ${escapeHtml(deploymentValidation.checked_at)}</div>`
           : `<div class="muted">No notification deployment validation triggered in this browser session</div>`
+      }
+      ${
+        opsValidation
+          ? `<div class="muted">Latest ops validation: ${escapeHtml(opsValidation.status)} · routing ${escapeHtml(opsValidation.routing_status)} · latest run ${escapeHtml(opsValidation.latest_run_status || "none")} · controller ${escapeHtml(opsValidation.controller_execution?.status || "skipped")} · checked ${escapeHtml(opsValidation.checked_at)}</div>`
+          : `<div class="muted">No notification ops validation triggered in this browser session</div>`
       }
     </div>
     ${
