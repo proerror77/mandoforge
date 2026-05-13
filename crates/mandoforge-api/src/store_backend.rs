@@ -9,8 +9,8 @@ use crate::{
     ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun, CostAlertRoute,
     EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization, PolicyRevision,
     Project, ProviderAccess, ProviderRecord, RemoteComputer, RemoteComputerAttachment,
-    RemoteComputerJobAssignment, RemoteComputerLease, SecretRecord, Session, SessionEvent, Team,
-    TenantInvitation, ToolCall, UsageRollup,
+    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerStateLock, SecretRecord,
+    Session, SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup,
 };
 
 #[derive(Default)]
@@ -48,6 +48,7 @@ pub(crate) struct MemoryStore {
     pub(crate) remote_computer_leases: HashMap<Uuid, RemoteComputerLease>,
     pub(crate) remote_computer_attachments: HashMap<Uuid, RemoteComputerAttachment>,
     pub(crate) remote_computer_job_assignments: HashMap<Uuid, RemoteComputerJobAssignment>,
+    pub(crate) remote_computer_state_locks: HashMap<Uuid, RemoteComputerStateLock>,
 }
 
 #[derive(Clone)]

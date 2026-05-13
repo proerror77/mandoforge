@@ -1460,6 +1460,22 @@ struct RemoteComputerJobAssignment {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerStateLock {
+    id: Uuid,
+    lock_key: String,
+    status: String,
+    remote_computer_id: Option<Uuid>,
+    lease_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    owner: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    released_at: Option<DateTime<Utc>>,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct CreateRemoteComputer {
     name: String,
@@ -1497,6 +1513,23 @@ struct CreateRemoteComputerAttachment {
 struct CreateRemoteComputerJobAssignment {
     lease_id: Uuid,
     assigned_by: Option<String>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateRemoteComputerStateLock {
+    lock_key: String,
+    remote_computer_id: Option<Uuid>,
+    lease_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    owner: Option<String>,
+    lease_seconds: Option<i64>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReleaseRemoteComputerStateLock {
+    reason: Option<String>,
     metadata: Option<Value>,
 }
 
@@ -3193,6 +3226,14 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/reclaim-stale",
             post(reclaim_stale_remote_computers),
+        )
+        .route(
+            "/api/remote-computers/state-locks",
+            get(list_remote_computer_state_locks).post(acquire_remote_computer_state_lock),
+        )
+        .route(
+            "/api/remote-computers/state-locks/{id}/release",
+            post(release_remote_computer_state_lock),
         )
         .route(
             "/api/remote-computers",
@@ -5899,6 +5940,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "remote_computer_leases",
         "remote_computer_session_attachments",
         "remote_computer_job_assignments",
+        "remote_computer_state_locks",
         "mcp_servers",
         "eval_datasets",
         "eval_cases",
@@ -17278,6 +17320,60 @@ async fn list_remote_computer_job_assignments(
     Ok(Json(state.list_remote_computer_job_assignments().await?))
 }
 
+async fn list_remote_computer_state_locks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputerStateLock>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_state_locks",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computer_state_locks().await?))
+}
+
+async fn acquire_remote_computer_state_lock(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputerStateLock>,
+) -> Result<Json<RemoteComputerStateLock>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ExecutionJobsRun,
+        "remote_computer_state_lock",
+        None,
+    )
+    .await?;
+    let lock = state.acquire_remote_computer_state_lock(input).await?;
+    record_remote_computer_state_lock_event(&state, &lock, "remote_computer.state_lock_acquired")
+        .await?;
+    Ok(Json(lock))
+}
+
+async fn release_remote_computer_state_lock(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReleaseRemoteComputerStateLock>,
+) -> Result<Json<RemoteComputerStateLock>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ExecutionJobsRun,
+        "remote_computer_state_lock",
+        Some(id),
+    )
+    .await?;
+    let lock = state.release_remote_computer_state_lock(id, input).await?;
+    record_remote_computer_state_lock_event(&state, &lock, "remote_computer.state_lock_released")
+        .await?;
+    Ok(Json(lock))
+}
+
 async fn list_stale_remote_computer_attachments(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -17452,6 +17548,42 @@ pub(crate) async fn record_remote_computer_job_assignment_event(
     Ok(())
 }
 
+async fn record_remote_computer_state_lock_event(
+    state: &AppState,
+    lock: &RemoteComputerStateLock,
+    event_type: &str,
+) -> Result<(), AppError> {
+    let details = json!({
+        "lock_id": lock.id,
+        "lock_key": lock.lock_key,
+        "status": lock.status,
+        "remote_computer_id": lock.remote_computer_id,
+        "lease_id": lock.lease_id,
+        "session_id": lock.session_id,
+        "owner": lock.owner,
+        "expires_at": lock.expires_at,
+        "released_at": lock.released_at,
+        "metadata": lock.metadata,
+    });
+    if let Some(session_id) = lock.session_id {
+        state
+            .append_event("system", None, session_id, event_type, details.clone())
+            .await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            lock.session_id,
+            "system",
+            None,
+            event_type,
+            "remote_computer_state_lock",
+            Some(lock.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
 async fn build_remote_computer_readiness(
     state: &AppState,
 ) -> Result<RemoteComputerReadinessReport, AppError> {
@@ -17591,6 +17723,8 @@ async fn build_remote_computer_readiness(
         "remote_computer.execution_handoff_released".to_string(),
         "remote_computer.execution_handoff_failed".to_string(),
         "remote_computer.execution_handoff_canceled".to_string(),
+        "remote_computer.state_lock_acquired".to_string(),
+        "remote_computer.state_lock_released".to_string(),
         "remote_computer.execution_transport_planned".to_string(),
         "remote_computer.execution_transport_completed".to_string(),
         "remote_computer.runner_dry_run".to_string(),
@@ -20056,6 +20190,7 @@ not json
         assert!(names.contains(&"0022_approval_notification_channel_policies.sql"));
         assert!(names.contains(&"0023_approval_notification_retries.sql"));
         assert!(names.contains(&"0024_tenant_rls_policies.sql"));
+        assert!(names.contains(&"0025_remote_computer_state_locks.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -20064,7 +20199,11 @@ not json
 
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
-        let migration = include_str!("../../../db/migrations/0024_tenant_rls_policies.sql");
+        let migration = format!(
+            "{}\n{}",
+            include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
+            include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql")
+        );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
         for table in tenant_isolation_tracked_tables() {
@@ -20480,6 +20619,168 @@ not json
         }));
 
         let _ = tokio::fs::remove_dir_all(&workspace_path).await;
+    }
+
+    #[tokio::test]
+    async fn remote_computer_state_locks_prevent_concurrent_state_writes() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "remote state lock"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "state-lock-remote-computer",
+                        "profile": "workspace-write"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let lease: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computers/{}/leases", computer.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "worker_id": "state-lock-worker"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let lock: RemoteComputerStateLock = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/state-locks")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "lock_key": "memory/session-notes.md",
+                        "remote_computer_id": computer.id,
+                        "lease_id": lease.id,
+                        "session_id": session.id,
+                        "owner": "state-lock-worker",
+                        "lease_seconds": 60
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(lock.status, "held");
+        assert_eq!(lock.lock_key, "memory/session-notes.md");
+
+        let (status, value) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/state-locks")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "lock_key": "memory/session-notes.md",
+                        "session_id": session.id,
+                        "owner": "other-worker"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            value["error"],
+            json!("Remote Computer state lock is already held")
+        );
+
+        let released: RemoteComputerStateLock = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/remote-computers/state-locks/{}/release",
+                    lock.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(json!({"reason": "done"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(released.status, "released");
+        assert_eq!(released.released_at.is_some(), true);
+
+        let locks: Vec<RemoteComputerStateLock> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computers/state-locks")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(locks.iter().any(|existing| existing.id == lock.id));
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "remote_computer.state_lock_acquired"
+                && event.payload["lock_key"] == json!("memory/session-notes.md")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "remote_computer.state_lock_released"
+                && event.payload["lock_id"] == json!(lock.id)
+        }));
     }
 
     #[tokio::test]

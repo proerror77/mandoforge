@@ -7,8 +7,9 @@ use uuid::Uuid;
 use crate::store_backend::StoreBackend;
 use crate::{
     AppError, AppState, CreateRemoteComputer, CreateRemoteComputerAttachment,
-    CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, RemoteComputer,
-    RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
+    CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, CreateRemoteComputerStateLock,
+    ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerAttachment,
+    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerStateLock,
     UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
 
@@ -512,6 +513,198 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn list_remote_computer_state_locks(
+        &self,
+    ) -> Result<Vec<RemoteComputerStateLock>, AppError> {
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut locks: Vec<_> = inner
+                    .read()
+                    .await
+                    .remote_computer_state_locks
+                    .values()
+                    .cloned()
+                    .collect();
+                for lock in &mut locks {
+                    if lock.status == "held"
+                        && lock.expires_at.is_some_and(|expires| expires <= now)
+                    {
+                        lock.status = "expired".to_string();
+                    }
+                }
+                locks.sort_by_key(|lock| lock.created_at);
+                locks.reverse();
+                Ok(locks)
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE remote_computer_state_locks
+                     SET status = 'expired', updated_at = $1
+                     WHERE tenant_id = $2 AND status = 'held' AND expires_at IS NOT NULL AND expires_at <= $1",
+                )
+                .bind(now)
+                .bind(self.tenant_id)
+                .execute(pool)
+                .await?;
+                let rows = sqlx::query(
+                    "SELECT id, lock_key, status, remote_computer_id, lease_id, session_id, owner, expires_at, released_at, metadata, created_at, updated_at
+                     FROM remote_computer_state_locks
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(remote_computer_state_lock_from_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn acquire_remote_computer_state_lock(
+        &self,
+        input: CreateRemoteComputerStateLock,
+    ) -> Result<RemoteComputerStateLock, AppError> {
+        let now = Utc::now();
+        let lock_key = normalize_remote_computer_lock_key(&input.lock_key)?;
+        let lease_seconds = input.lease_seconds.unwrap_or(900).clamp(30, 86_400);
+        let lock = RemoteComputerStateLock {
+            id: Uuid::new_v4(),
+            lock_key: lock_key.clone(),
+            status: "held".to_string(),
+            remote_computer_id: input.remote_computer_id,
+            lease_id: input.lease_id,
+            session_id: input.session_id,
+            owner: input
+                .owner
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            expires_at: Some(now + chrono::Duration::seconds(lease_seconds)),
+            released_at: None,
+            metadata: input.metadata.unwrap_or_else(|| json!({})),
+            created_at: now,
+            updated_at: now,
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let active_conflict = store.remote_computer_state_locks.values().any(|existing| {
+                    existing.lock_key == lock_key
+                        && existing.status == "held"
+                        && !existing.expires_at.is_some_and(|expires| expires <= now)
+                });
+                if active_conflict {
+                    return Err(AppError::bad_request(
+                        "Remote Computer state lock is already held",
+                    ));
+                }
+                store
+                    .remote_computer_state_locks
+                    .insert(lock.id, lock.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE remote_computer_state_locks
+                     SET status = 'expired', updated_at = $1
+                     WHERE tenant_id = $2 AND status = 'held' AND expires_at IS NOT NULL AND expires_at <= $1",
+                )
+                .bind(now)
+                .bind(self.tenant_id)
+                .execute(pool)
+                .await?;
+                let existing: Option<(Uuid,)> = sqlx::query_as(
+                    "SELECT id
+                     FROM remote_computer_state_locks
+                     WHERE tenant_id = $1 AND lock_key = $2 AND status = 'held'
+                     LIMIT 1",
+                )
+                .bind(self.tenant_id)
+                .bind(&lock.lock_key)
+                .fetch_optional(pool)
+                .await?;
+                if existing.is_some() {
+                    return Err(AppError::bad_request(
+                        "Remote Computer state lock is already held",
+                    ));
+                }
+                sqlx::query(
+                    "INSERT INTO remote_computer_state_locks
+                        (id, tenant_id, lock_key, status, remote_computer_id, lease_id, session_id, owner, expires_at, released_at, metadata, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                )
+                .bind(lock.id)
+                .bind(self.tenant_id)
+                .bind(&lock.lock_key)
+                .bind(&lock.status)
+                .bind(lock.remote_computer_id)
+                .bind(lock.lease_id)
+                .bind(lock.session_id)
+                .bind(&lock.owner)
+                .bind(lock.expires_at)
+                .bind(lock.released_at)
+                .bind(&lock.metadata)
+                .bind(lock.created_at)
+                .bind(lock.updated_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(lock)
+    }
+
+    pub(crate) async fn release_remote_computer_state_lock(
+        &self,
+        lock_id: Uuid,
+        input: ReleaseRemoteComputerStateLock,
+    ) -> Result<RemoteComputerStateLock, AppError> {
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let lock = store
+                    .remote_computer_state_locks
+                    .get_mut(&lock_id)
+                    .ok_or_else(|| AppError::not_found("Remote Computer state lock not found"))?;
+                lock.status = "released".to_string();
+                lock.released_at = Some(now);
+                lock.updated_at = now;
+                if let Some(metadata) = input.metadata {
+                    lock.metadata = metadata;
+                }
+                if let Some(reason) = input.reason {
+                    lock.metadata["release_reason"] = json!(reason);
+                }
+                Ok(lock.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let metadata = input.metadata.unwrap_or_else(|| json!({}));
+                let row = sqlx::query(
+                    "UPDATE remote_computer_state_locks
+                     SET status = 'released',
+                         released_at = $1,
+                         updated_at = $1,
+                         metadata = CASE
+                             WHEN $2::jsonb = '{}'::jsonb THEN metadata
+                             ELSE $2::jsonb
+                         END
+                     WHERE tenant_id = $3 AND id = $4
+                     RETURNING id, lock_key, status, remote_computer_id, lease_id, session_id, owner, expires_at, released_at, metadata, created_at, updated_at",
+                )
+                .bind(now)
+                .bind(&metadata)
+                .bind(self.tenant_id)
+                .bind(lock_id)
+                .fetch_optional(pool)
+                .await?;
+                row.map(remote_computer_state_lock_from_row)
+                    .transpose()?
+                    .ok_or_else(|| AppError::not_found("Remote Computer state lock not found"))
+            }
+        }
+    }
+
     pub(crate) async fn list_stale_remote_computer_attachments(
         &self,
     ) -> Result<Vec<RemoteComputerAttachment>, AppError> {
@@ -826,6 +1019,47 @@ fn remote_computer_job_assignment_from_row(
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn remote_computer_state_lock_from_row(row: PgRow) -> Result<RemoteComputerStateLock, AppError> {
+    Ok(RemoteComputerStateLock {
+        id: row.try_get("id")?,
+        lock_key: row.try_get("lock_key")?,
+        status: row.try_get("status")?,
+        remote_computer_id: row.try_get("remote_computer_id")?,
+        lease_id: row.try_get("lease_id")?,
+        session_id: row.try_get("session_id")?,
+        owner: row.try_get("owner")?,
+        expires_at: row.try_get("expires_at")?,
+        released_at: row.try_get("released_at")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn normalize_remote_computer_lock_key(lock_key: &str) -> Result<String, AppError> {
+    let lock_key = lock_key.trim();
+    if lock_key.is_empty() {
+        return Err(AppError::bad_request(
+            "Remote Computer state lock key is required",
+        ));
+    }
+    if lock_key.starts_with('/') || lock_key.split('/').any(|segment| segment == "..") {
+        return Err(AppError::bad_request(
+            "Remote Computer state lock key must be relative and stay inside /agent-state",
+        ));
+    }
+    let allowed_prefix = ["memory/", "notes/", "skills/", "artifacts/", ".mandoforge/"];
+    if !allowed_prefix
+        .iter()
+        .any(|prefix| lock_key.starts_with(prefix))
+    {
+        return Err(AppError::bad_request(
+            "Remote Computer state lock key must target memory, notes, skills, artifacts, or .mandoforge state",
+        ));
+    }
+    Ok(lock_key.to_string())
 }
 
 fn merge_remote_computer_assignment_metadata(
