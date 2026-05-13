@@ -31,6 +31,24 @@ spec:
               value: "1"
             - name: RUN_STAGE2_PRODUCTION_VALIDATIONS
               value: "0"
+            - name: RUN_STAGE2_SECRET_LIFECYCLE
+              value: "0"
+            - name: RUN_STAGE2_PROVIDER_ROLLOUT
+              value: "0"
+            - name: RUN_STAGE2_REMOTE_SIDECAR_RECOVERY
+              value: "0"
+            - name: RUN_STAGE2_APPROVAL_DELIVERY
+              value: "0"
+            - name: RUN_STAGE2_CODEX_STALE_POLL
+              value: "0"
+            - name: RUN_STAGE2_EVAL_RELEASE_AUTOMATION
+              value: "0"
+            - name: RUN_STAGE2_OBSERVABILITY_REMEDIATION
+              value: "0"
+            - name: RUN_STAGE2_FINANCE_CONTROLLERS
+              value: "0"
+            - name: VERIFY_STAGE2_VALIDATION_COVERAGE
+              value: "0"
             - name: EVIDENCE_DIR
               value: /evidence
             - name: MANDOFORGE_STAGE2_GATE_SUBJECT
