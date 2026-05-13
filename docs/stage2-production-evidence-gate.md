@@ -25,7 +25,12 @@ This mode calls the bounded validation endpoints for tenant routing, provider de
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.
+- `RUN_STAGE2_PROVIDER_ROLLOUT=1` runs provider production rollout and rollback endpoints.
 - `RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1` runs the Remote Computer sidecar recovery endpoint.
+- `RUN_STAGE2_APPROVAL_DELIVERY=1` runs approval notification delivery.
+- `RUN_STAGE2_CODEX_STALE_POLL=1` runs Codex App Server stale-run supervision.
+- `RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1` bootstraps the Stage 2 regression suite and runs due release automation.
+- `RUN_STAGE2_OBSERVABILITY_REMEDIATION=1` runs observability remediation supervision.
 - `RUN_STAGE2_FINANCE_CONTROLLERS=1` runs finance close and accounting reconciliation endpoints.
 - `VERIFY_STAGE2_VALIDATION_COVERAGE=1` fails the gate when any declared validation endpoint from `/api/stage2/readiness` is missing from the collected evidence. Leave this off for read-only inventory or partial validation runs.
 

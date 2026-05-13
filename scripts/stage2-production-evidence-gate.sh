@@ -32,15 +32,28 @@ fetch_json() {
   local label
   label="$(slugify "$path")"
   local target="$EVIDENCE_DIR/$label.json"
+  local response_body
+  local http_status
+  response_body="$(mktemp)"
 
   if [[ "$method" == "GET" ]]; then
-    curl -fsS "${auth_headers[@]}" "$BASE_URL$path" | tee "$target" >/dev/null
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "${auth_headers[@]}" "$BASE_URL$path")"
   else
-    curl -fsS -X "$method" "${auth_headers[@]}" \
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" -X "$method" "${auth_headers[@]}" \
       -H "content-type: application/json" \
       -d '{}' \
-      "$BASE_URL$path" | tee "$target" >/dev/null
+      "$BASE_URL$path")"
   fi
+
+  if [[ "$http_status" != 2* ]]; then
+    echo "stage2 evidence gate request failed: $method $path returned HTTP $http_status" >&2
+    sed -n '1,40p' "$response_body" >&2
+    rm -f "$response_body"
+    exit 1
+  fi
+
+  tee "$target" <"$response_body" >/dev/null
+  rm -f "$response_body"
   echo "$target"
 }
 
@@ -101,10 +114,42 @@ run_controller_validations() {
     echo "skipping KMS rotation run; set RUN_STAGE2_SECRET_LIFECYCLE=1 to include secret lifecycle evidence" >&2
   fi
 
+  if [[ "${RUN_STAGE2_PROVIDER_ROLLOUT:-0}" == "1" ]]; then
+    fetch_json POST /api/providers/production-rollout/run >/dev/null
+    fetch_json POST /api/providers/production-rollout/rollback >/dev/null
+  else
+    echo "skipping provider production rollout/rollback; set RUN_STAGE2_PROVIDER_ROLLOUT=1 to include provider rollout evidence" >&2
+  fi
+
   if [[ "${RUN_STAGE2_REMOTE_SIDECAR_RECOVERY:-0}" == "1" ]]; then
     fetch_json POST /api/remote-computers/sidecars/recovery/run >/dev/null
   else
     echo "skipping Remote Computer sidecar recovery; set RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 to include replacement evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_APPROVAL_DELIVERY:-0}" == "1" ]]; then
+    fetch_json POST /api/approvals/notifications/run >/dev/null
+  else
+    echo "skipping approval notification delivery; set RUN_STAGE2_APPROVAL_DELIVERY=1 to include delivery evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_CODEX_STALE_POLL:-0}" == "1" ]]; then
+    fetch_json POST /api/codex-app-server/runs/poll-stale >/dev/null
+  else
+    echo "skipping Codex App Server stale poll; set RUN_STAGE2_CODEX_STALE_POLL=1 to include stale-run supervision evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_EVAL_RELEASE_AUTOMATION:-0}" == "1" ]]; then
+    fetch_json POST /api/eval/suites/stage2-regression >/dev/null
+    fetch_json POST /api/agents/releases/run-due >/dev/null
+  else
+    echo "skipping eval/release automation; set RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 to include regression and release due-run evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_OBSERVABILITY_REMEDIATION:-0}" == "1" ]]; then
+    fetch_json POST /api/observability/remediation/run >/dev/null
+  else
+    echo "skipping observability remediation run; set RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 to include remediation evidence" >&2
   fi
 
   if [[ "${RUN_STAGE2_FINANCE_CONTROLLERS:-0}" == "1" ]]; then
