@@ -676,6 +676,7 @@ struct SchedulerDueRun {
     mcp_health_runs: Vec<McpServerScheduledHealthRun>,
     mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
     codex_app_server_stale_polls: CodexAppServerStalePollRun,
+    cost_alert_delivery: Option<CostAlertDelivery>,
     usage_finance_export: UsageFinanceExportDelivery,
     remote_computer_reclaim: RemoteComputerReclaimRun,
 }
@@ -12332,6 +12333,39 @@ async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, 
     }
     actions.push(usage_item);
 
+    let usage = build_usage_summary(state).await?;
+    let cost_alerts = build_cost_alerts(&usage.provider_budgets, generated_at);
+    let alert_routes = state.list_cost_alert_routes().await?;
+    let active_alert_route_count = alert_routes
+        .iter()
+        .filter(|route| route.status == "active")
+        .count();
+    let alert_delivery_ready =
+        active_alert_route_count > 0 || state.cost_alert_webhook_url.is_some();
+    let mut alert_delivery_item = scheduler_due_plan_item(
+        "usage",
+        "usage_cost_alert_delivery",
+        "auto",
+        usize::from(!cost_alerts.is_empty()),
+        usize::from(cost_alerts.is_empty()),
+        cost_alerts.len().max(1),
+        if !cost_alerts.is_empty() && alert_delivery_ready {
+            "deliver current provider budget alerts through active alert routes or fallback webhook"
+        } else if !cost_alerts.is_empty() {
+            "current provider budget alerts exist but no active alert route or fallback webhook is configured"
+        } else {
+            "no current provider budget alert requires delivery"
+        },
+    );
+    if cost_alerts.is_empty() {
+        alert_delivery_item.status = "idle".to_string();
+        alert_delivery_item.severity = "info".to_string();
+    } else if !alert_delivery_ready {
+        alert_delivery_item.status = "blocked".to_string();
+        alert_delivery_item.severity = "critical".to_string();
+    }
+    actions.push(alert_delivery_item);
+
     let actionable_count = actions
         .iter()
         .filter(|item| item.due_count > 0 && item.status != "blocked")
@@ -12400,6 +12434,21 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
         "system",
     )
     .await?;
+    let usage = build_usage_summary(state).await?;
+    let cost_alerts = build_cost_alerts(&usage.provider_budgets, checked_at);
+    let active_alert_route_count = state
+        .list_cost_alert_routes()
+        .await?
+        .iter()
+        .filter(|route| route.status == "active")
+        .count();
+    let cost_alert_delivery = if !cost_alerts.is_empty()
+        && (active_alert_route_count > 0 || state.cost_alert_webhook_url.is_some())
+    {
+        Some(execute_cost_alert_delivery(state, checked_at).await?)
+    } else {
+        None
+    };
     let usage_finance_export =
         execute_usage_finance_export_delivery(state, true, "system", Some("system")).await?;
     let remote_computer_reclaim = execute_remote_computer_stale_reclaim(state).await?;
@@ -12450,6 +12499,9 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     {
         actions.push("codex_app_server_stale_polls_processed".to_string());
     }
+    if cost_alert_delivery.is_some() {
+        actions.push("usage_cost_alert_delivery_processed".to_string());
+    }
     if usage_finance_export.status != "disabled" {
         actions.push("usage_finance_export_processed".to_string());
     }
@@ -12476,6 +12528,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
         mcp_health_runs,
         mcp_rollout_runs,
         codex_app_server_stale_polls,
+        cost_alert_delivery,
         usage_finance_export,
         remote_computer_reclaim,
     };
@@ -12492,6 +12545,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
                 "team_count": run.team_count,
                 "actions": run.actions,
                 "provider_policy_gate_status": run.provider_policy_gate.as_ref().map(|gate| gate.status.clone()),
+                "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
                 "checked_at": run.checked_at,
             }),
         ))
@@ -25777,6 +25831,96 @@ not json
                 .expect("valid request"),
         )
         .await;
+        let _provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "scheduler-alert-mock",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {
+                            "budget": {"daily_request_limit": 1},
+                            "pricing": {"per_request_cents": 1.0}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let alert_agent: Agent = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "scheduler alert agent",
+                        "kind": "orchestrator",
+                        "provider": "scheduler-alert-mock",
+                        "model": "gpt-5.4-mini",
+                        "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let alert_session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": alert_agent.id, "title": "scheduler alert session"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _alert_run: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", alert_session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let _alert_route: CostAlertRoute = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/usage/alert-routes")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "scheduler-critical-email",
+                        "channel": "email",
+                        "target": "ops@example.com",
+                        "severity_filter": "critical"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
 
         let plan: SchedulerDuePlan = request_json(
             app.clone(),
@@ -25809,6 +25953,14 @@ not json
         assert_eq!(remote_computer_plan.area, "remote_computers");
         assert_eq!(remote_computer_plan.status, "due");
         assert_eq!(remote_computer_plan.due_count, 2);
+        let cost_alert_plan = plan
+            .actions
+            .iter()
+            .find(|item| item.action == "usage_cost_alert_delivery")
+            .expect("cost alert delivery plan item");
+        assert_eq!(cost_alert_plan.area, "usage");
+        assert_eq!(cost_alert_plan.status, "due");
+        assert_eq!(cost_alert_plan.due_count, 1);
 
         let run: SchedulerDueRun = request_json(
             app.clone(),
@@ -25828,6 +25980,16 @@ not json
         assert_eq!(run.mcp_health_runs[0].due_count, 1);
         assert_eq!(run.mcp_rollout_runs.len(), 1);
         assert_eq!(run.codex_app_server_stale_polls.candidate_count, 0);
+        let cost_alert_delivery = run
+            .cost_alert_delivery
+            .as_ref()
+            .expect("scheduler cost alert delivery");
+        assert_eq!(cost_alert_delivery.status, "reserved");
+        assert_eq!(cost_alert_delivery.channel, "routes");
+        assert_eq!(
+            cost_alert_delivery.alerts[0].provider_name,
+            "scheduler-alert-mock"
+        );
         assert_eq!(run.remote_computer_reclaim.status, "completed");
         assert_eq!(run.remote_computer_reclaim.reclaimed_attachment_count, 1);
         assert_eq!(run.remote_computer_reclaim.reclaimed_lease_count, 1);
@@ -25843,6 +26005,11 @@ not json
             run.actions
                 .iter()
                 .any(|action| action == "remote_computer_reclaim_processed")
+        );
+        assert!(
+            run.actions
+                .iter()
+                .any(|action| action == "usage_cost_alert_delivery_processed")
         );
 
         let summary: SchedulerOrchestrationSummary = request_json(
@@ -25870,6 +26037,12 @@ not json
                 .iter()
                 .any(|action| action == "remote_computer_reclaim_processed")
         );
+        assert!(
+            summary.recent_runs[0]
+                .actions
+                .iter()
+                .any(|action| action == "usage_cost_alert_delivery_processed")
+        );
 
         let audit_logs: Vec<AuditLog> = request_json(
             app,
@@ -25885,6 +26058,7 @@ not json
             log.action == "scheduler.run_due"
                 && log.details["team_count"] == 1
                 && log.details["status"] == "completed"
+                && log.details["cost_alert_delivery_status"] == "reserved"
         }));
     }
 

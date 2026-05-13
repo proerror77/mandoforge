@@ -2603,6 +2603,7 @@ function renderObservability() {
                   mcp_health_runs: schedulerDueRun.mcp_health_runs,
                   mcp_rollout_runs: schedulerDueRun.mcp_rollout_runs,
                   codex_app_server_stale_polls: schedulerDueRun.codex_app_server_stale_polls,
+                  cost_alert_delivery: schedulerDueRun.cost_alert_delivery,
                   usage_finance_export: schedulerDueRun.usage_finance_export,
                 },
                 null,
