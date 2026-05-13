@@ -4005,6 +4005,7 @@ function renderVaultReadiness() {
   }
   const attentionItems = readiness.attention_items || [];
   const checks = readiness.checks || [];
+  const productionRotation = readiness.production_rotation || {};
   const kmsRotationRun = state.vaultKmsRotationRun;
   vaultReadinessRoot.innerHTML = `
     <div class="metric-grid">
@@ -4014,11 +4015,17 @@ function renderVaultReadiness() {
       <div class="metric"><span>Unresolved</span><strong>${formatInteger(readiness.unresolved_ref_count)}</strong></div>
       <div class="metric"><span>Stale Rotations</span><strong>${formatInteger(readiness.stale_rotation_count)}</strong></div>
       <div class="metric"><span>KMS</span><strong>${escapeHtml(readiness.kms?.status || "unknown")}</strong></div>
+      <div class="metric"><span>Prod Rotation</span><strong>${escapeHtml(productionRotation.status || "unknown")}</strong></div>
     </div>
     <div class="item">
       <strong>Secret provider: ${escapeHtml(readiness.secret_provider?.status || "unknown")}</strong>
       <div class="muted">${escapeHtml(readiness.secret_provider?.provider_kind || "unknown")} · ${escapeHtml(readiness.secret_provider?.healthy ? "healthy" : "unhealthy")}</div>
       <div class="muted">KMS ${escapeHtml(readiness.kms?.provider || "reserved")} · key ${escapeHtml(readiness.kms?.key_id_configured ? "configured" : "missing")} · rotation ${escapeHtml(readiness.kms?.rotation_policy_configured ? "configured" : "missing")} · endpoint ${escapeHtml(readiness.kms?.endpoint_configured ? "configured" : "missing")} · validation ${escapeHtml(readiness.kms?.validation_mode || "health-check")}</div>
+    </div>
+    <div class="item">
+      <strong>PRODUCTION ROTATION GATE</strong>
+      <div class="muted">${escapeHtml(productionRotation.message || "Vault production rotation gate is not reported")}</div>
+      <div class="muted">Vault ${productionRotation.vault_healthy ? "healthy" : "not ready"} · KMS ${productionRotation.kms_ready ? "ready" : "not ready"} · refs ${productionRotation.unresolved_refs_clear ? "resolved" : "unresolved"} · stale ${productionRotation.stale_rotations_clear ? "clear" : "present"} · latest run ${escapeHtml(productionRotation.latest_rotation_run_status || "none")}</div>
     </div>
     <div class="item">
       <strong>KMS ROTATION GATE</strong>

@@ -2487,6 +2487,7 @@ struct VaultReadinessReport {
     status: String,
     secret_provider: SecretProviderHealth,
     kms: VaultKmsReadiness,
+    production_rotation: VaultProductionRotationReadiness,
     secret_record_count: usize,
     active_secret_record_count: usize,
     provider_ref_count: usize,
@@ -2496,6 +2497,21 @@ struct VaultReadinessReport {
     stale_rotation_count: usize,
     checks: Vec<VaultReadinessCheck>,
     attention_items: Vec<VaultReadinessAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultProductionRotationReadiness {
+    status: String,
+    production_blocked: bool,
+    vault_healthy: bool,
+    kms_ready: bool,
+    unresolved_refs_clear: bool,
+    stale_rotations_clear: bool,
+    latest_rotation_validated: bool,
+    latest_rotation_run_at: Option<DateTime<Utc>>,
+    latest_rotation_run_status: Option<String>,
+    blocking_reasons: Vec<String>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8506,11 +8522,13 @@ async fn get_vault_readiness(
             mcp_servers.extend(state.list_mcp_servers(team.id).await?);
         }
     }
+    let audit_logs = state.list_audit_logs(None).await?;
     Ok(Json(build_vault_readiness_report(
         secret_provider,
         &secret_records,
         &providers,
         &mcp_servers,
+        &audit_logs,
         |key| std::env::var(key).ok(),
     )))
 }
@@ -10131,6 +10149,7 @@ fn build_vault_readiness_report<F>(
     secret_records: &[SecretRecord],
     providers: &[ProviderRecord],
     mcp_servers: &[McpServerRecord],
+    audit_logs: &[AuditLog],
     lookup: F,
 ) -> VaultReadinessReport
 where
@@ -10353,6 +10372,29 @@ where
         }
     }
 
+    let stale_rotation_count = secret_records
+        .iter()
+        .filter(|record| record.updated_at < stale_cutoff)
+        .count();
+    let production_rotation = build_vault_production_rotation_readiness(
+        &secret_provider,
+        &kms,
+        unresolved_refs.len(),
+        stale_rotation_count,
+        audit_logs,
+        generated_at,
+    );
+    if production_rotation.production_blocked {
+        attention_items.push(VaultReadinessAttentionItem {
+            resource_type: "vault".to_string(),
+            resource_id: None,
+            resource_name: "production_rotation".to_string(),
+            kind: "production_rotation_blocked".to_string(),
+            severity: "critical".to_string(),
+            message: production_rotation.message.clone(),
+        });
+    }
+
     let failed_count = checks
         .iter()
         .filter(|check| check.status == "failed")
@@ -10375,6 +10417,7 @@ where
         status,
         secret_provider,
         kms,
+        production_rotation,
         secret_record_count: secret_records.len(),
         active_secret_record_count: secret_records
             .iter()
@@ -10384,12 +10427,84 @@ where
         mcp_secret_ref_count,
         eval_judge_secret_ref_count,
         unresolved_ref_count: unresolved_refs.len(),
-        stale_rotation_count: secret_records
-            .iter()
-            .filter(|record| record.updated_at < stale_cutoff)
-            .count(),
+        stale_rotation_count,
         checks,
         attention_items,
+    }
+}
+
+fn build_vault_production_rotation_readiness(
+    secret_provider: &SecretProviderHealth,
+    kms: &VaultKmsReadiness,
+    unresolved_ref_count: usize,
+    stale_rotation_count: usize,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> VaultProductionRotationReadiness {
+    let latest_rotation_run = audit_logs
+        .iter()
+        .filter(|log| log.action == "vault.kms_rotation_run")
+        .max_by_key(|log| log.created_at);
+    let latest_rotation_run_status = latest_rotation_run
+        .and_then(|log| log.details.get("status").and_then(Value::as_str))
+        .map(ToString::to_string);
+    let latest_rotation_validated = latest_rotation_run.is_some_and(|log| {
+        latest_rotation_run_status.as_deref() == Some("validated")
+            && (generated_at - log.created_at).num_hours() < 30
+    });
+    let vault_healthy = secret_provider.healthy && secret_provider.provider_kind == "vault";
+    let kms_ready = kms.status == "ready" && kms.configured;
+    let unresolved_refs_clear = unresolved_ref_count == 0;
+    let stale_rotations_clear = stale_rotation_count == 0;
+    let mut blocking_reasons = Vec::new();
+
+    if !vault_healthy {
+        blocking_reasons.push("Vault secret provider is not healthy and selected".to_string());
+    }
+    if !kms_ready {
+        blocking_reasons
+            .push("external KMS/HSM readiness is not configured and validated".to_string());
+    }
+    if !unresolved_refs_clear {
+        blocking_reasons
+            .push("registered consumers reference secrets missing from the catalog".to_string());
+    }
+    if !stale_rotations_clear {
+        blocking_reasons
+            .push("one or more active secret refs are past the rotation window".to_string());
+    }
+    if !latest_rotation_validated {
+        blocking_reasons.push("no recent validated KMS rotation gate run exists".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Vault production rotation is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Vault production rotation has healthy Vault, ready KMS/HSM, resolved refs, fresh rotations, and recent validated gate evidence".to_string()
+    };
+
+    VaultProductionRotationReadiness {
+        status,
+        production_blocked,
+        vault_healthy,
+        kms_ready,
+        unresolved_refs_clear,
+        stale_rotations_clear,
+        latest_rotation_validated,
+        latest_rotation_run_at: latest_rotation_run.map(|log| log.created_at),
+        latest_rotation_run_status,
+        blocking_reasons,
+        message,
     }
 }
 
@@ -26062,6 +26177,13 @@ not json
         assert_eq!(report.kms.status, "reserved");
         assert!(!report.kms.endpoint_configured);
         assert_eq!(report.kms.validation_mode, "health-check");
+        assert_eq!(report.production_rotation.status, "blocked");
+        assert!(report.production_rotation.production_blocked);
+        assert!(!report.production_rotation.vault_healthy);
+        assert!(!report.production_rotation.kms_ready);
+        assert!(!report.production_rotation.unresolved_refs_clear);
+        assert!(report.production_rotation.stale_rotations_clear);
+        assert!(!report.production_rotation.latest_rotation_validated);
         assert!(report.checks.iter().any(|check| {
             check.resource_type == "provider"
                 && check.resource_id == Some(provider.id)
@@ -26081,6 +26203,9 @@ not json
                 && item
                     .message
                     .contains("MANDOFORGE_KMS_ENDPOINT is not configured")
+        }));
+        assert!(report.attention_items.iter().any(|item| {
+            item.kind == "production_rotation_blocked" && item.severity == "critical"
         }));
         let rotation_run: VaultKmsRotationRun = request_json(
             app.clone(),
