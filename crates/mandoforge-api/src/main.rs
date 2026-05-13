@@ -2004,11 +2004,25 @@ struct TenantIsolationReadinessReport {
     runtime_tenant_mode: String,
     header_fail_closed: bool,
     membership_scope_enforced: bool,
+    production_routing: TenantProductionRoutingReadiness,
     scoped_counts: TenantIsolationScopedCounts,
     table_coverage: Vec<TenantIsolationTableCoverage>,
     rls: TenantIsolationRlsReadiness,
     attention_items: Vec<TenantIsolationAttentionItem>,
     runbook_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantProductionRoutingReadiness {
+    status: String,
+    production_blocked: bool,
+    cross_tenant_routing_supported: bool,
+    runtime_tenant_mode: String,
+    header_fail_closed: bool,
+    membership_scope_enforced: bool,
+    rls_ready: bool,
+    message: String,
+    blocking_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6147,11 +6161,24 @@ async fn build_tenant_isolation_readiness(
     let header_fail_closed = true;
     let membership_scope_enforced = true;
     let mut attention_items = Vec::new();
+    let production_routing = build_tenant_production_routing_readiness(
+        "single_runtime_tenant",
+        header_fail_closed,
+        membership_scope_enforced,
+        &rls,
+    );
     attention_items.push(TenantIsolationAttentionItem {
         kind: "single_runtime_tenant".to_string(),
         severity: "warning".to_string(),
         message: "runtime currently binds every request to one configured tenant_id; cross-tenant serving is intentionally disabled".to_string(),
     });
+    if production_routing.production_blocked {
+        attention_items.push(TenantIsolationAttentionItem {
+            kind: "tenant_production_routing_blocked".to_string(),
+            severity: "critical".to_string(),
+            message: production_routing.message.clone(),
+        });
+    }
     if !rls.enabled || !rls.forced || !rls.tenant_context_configured {
         attention_items.push(TenantIsolationAttentionItem {
             kind: "postgres_rls_incomplete".to_string(),
@@ -6170,15 +6197,21 @@ async fn build_tenant_isolation_readiness(
         "run cross-tenant access tests for agents, sessions, tools, approvals, jobs, audit, and governance resources"
             .to_string(),
     ];
+    let critical_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "critical")
+        .count() as i64;
     let warning_count = attention_items
         .iter()
         .filter(|item| item.severity == "warning")
         .count() as i64;
-    let readiness_score = (100_i64 - warning_count * 15).clamp(0, 100);
+    let readiness_score = (100_i64 - critical_count * 25 - warning_count * 15).clamp(0, 100);
 
     Ok(TenantIsolationReadinessReport {
         generated_at: Utc::now(),
-        status: if warning_count > 0 {
+        status: if critical_count > 0 {
+            "critical"
+        } else if warning_count > 0 {
             "attention"
         } else {
             "ready"
@@ -6189,6 +6222,7 @@ async fn build_tenant_isolation_readiness(
         runtime_tenant_mode: "single_runtime_tenant".to_string(),
         header_fail_closed,
         membership_scope_enforced,
+        production_routing,
         scoped_counts: TenantIsolationScopedCounts {
             organizations: organizations.len(),
             teams: teams_count,
@@ -6201,6 +6235,59 @@ async fn build_tenant_isolation_readiness(
         attention_items,
         runbook_actions,
     })
+}
+
+fn build_tenant_production_routing_readiness(
+    runtime_tenant_mode: &str,
+    header_fail_closed: bool,
+    membership_scope_enforced: bool,
+    rls: &TenantIsolationRlsReadiness,
+) -> TenantProductionRoutingReadiness {
+    let cross_tenant_routing_supported = runtime_tenant_mode == "tenant_routed";
+    let rls_ready = rls.enabled && rls.forced && rls.tenant_context_configured;
+    let mut blocking_reasons = Vec::new();
+    if !cross_tenant_routing_supported {
+        blocking_reasons.push(
+            "runtime still serves one configured tenant instead of routing per tenant".to_string(),
+        );
+    }
+    if !header_fail_closed {
+        blocking_reasons.push("tenant header mismatch is not fail-closed".to_string());
+    }
+    if !membership_scope_enforced {
+        blocking_reasons.push("membership scope enforcement is missing".to_string());
+    }
+    if !rls_ready {
+        blocking_reasons.push(
+            "Postgres RLS is not fully enabled, forced, and tenant-context configured".to_string(),
+        );
+    }
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Tenant production routing is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Tenant production routing has runtime tenant routing, fail-closed headers, membership scope, and RLS ready".to_string()
+    };
+    TenantProductionRoutingReadiness {
+        status,
+        production_blocked,
+        cross_tenant_routing_supported,
+        runtime_tenant_mode: runtime_tenant_mode.to_string(),
+        header_fail_closed,
+        membership_scope_enforced,
+        rls_ready,
+        message,
+        blocking_reasons,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -28618,10 +28705,16 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(readiness.status, "attention");
+        assert_eq!(readiness.status, "critical");
         assert_eq!(readiness.runtime_tenant_mode, "single_runtime_tenant");
         assert!(readiness.header_fail_closed);
         assert!(readiness.membership_scope_enforced);
+        assert_eq!(readiness.production_routing.status, "blocked");
+        assert!(readiness.production_routing.production_blocked);
+        assert!(!readiness.production_routing.cross_tenant_routing_supported);
+        assert!(readiness.production_routing.header_fail_closed);
+        assert!(readiness.production_routing.membership_scope_enforced);
+        assert!(!readiness.production_routing.rls_ready);
         assert_eq!(readiness.rls.status, "migration_ready");
         assert!(!readiness.rls.enabled);
         assert!(!readiness.rls.forced);
@@ -28639,6 +28732,9 @@ not json
                 .iter()
                 .any(|item| item.kind == "postgres_rls_incomplete")
         );
+        assert!(readiness.attention_items.iter().any(|item| {
+            item.kind == "tenant_production_routing_blocked" && item.severity == "critical"
+        }));
     }
 
     #[tokio::test]

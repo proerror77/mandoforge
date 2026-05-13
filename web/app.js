@@ -2491,6 +2491,7 @@ function renderTenantIsolationReadiness() {
   }
   const counts = report.scoped_counts || {};
   const rls = report.rls || {};
+  const productionRouting = report.production_routing || {};
   const attentionItems = report.attention_items || [];
   const tableCoverage = report.table_coverage || [];
   tenantIsolationReadinessRoot.innerHTML = `
@@ -2498,12 +2499,18 @@ function renderTenantIsolationReadiness() {
       <div class="metric"><span>Status</span><strong>${escapeHtml(report.status || "unknown")}</strong></div>
       <div class="metric"><span>Score</span><strong>${formatInteger(report.readiness_score || 0)}</strong></div>
       <div class="metric"><span>Runtime Tenant</span><strong>${escapeHtml(report.runtime_tenant_mode || "unknown")}</strong></div>
+      <div class="metric"><span>Prod Routing</span><strong>${escapeHtml(productionRouting.status || "unknown")}</strong></div>
       <div class="metric"><span>RLS</span><strong>${escapeHtml(rls.status || "unknown")}</strong></div>
     </div>
     <div class="item">
       <strong>TENANT BOUNDARY</strong>
       <div class="muted">Runtime tenant ${escapeHtml(report.runtime_tenant_id || "unknown")} · header fail-closed ${report.header_fail_closed ? "yes" : "no"} · membership scope ${report.membership_scope_enforced ? "enforced" : "missing"}</div>
       <div class="muted">Organizations ${formatInteger(counts.organizations || 0)} · Teams ${formatInteger(counts.teams || 0)} · Projects ${formatInteger(counts.projects || 0)} · Memberships ${formatInteger(counts.memberships || 0)} · Invitations ${formatInteger(counts.invitations || 0)}</div>
+    </div>
+    <div class="item">
+      <strong>PRODUCTION ROUTING GATE</strong>
+      <div class="muted">${escapeHtml(productionRouting.message || "tenant production routing gate is not reported")}</div>
+      <div class="muted">cross-tenant routing ${productionRouting.cross_tenant_routing_supported ? "ready" : "missing"} · header fail-closed ${productionRouting.header_fail_closed ? "yes" : "no"} · membership scope ${productionRouting.membership_scope_enforced ? "yes" : "no"} · RLS ready ${productionRouting.rls_ready ? "yes" : "no"}</div>
     </div>
     <div class="item">
       <strong>TABLE COVERAGE</strong>
