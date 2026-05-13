@@ -2681,12 +2681,15 @@ struct VaultKmsRotationRun {
     checked_at: DateTime<Utc>,
     kms_provider: String,
     kms_status: String,
+    kms_endpoint_configured: bool,
     secret_provider_status: String,
     secret_record_count: usize,
     stale_rotation_count: usize,
     rotated_count: usize,
+    catalog_updated_count: usize,
     blocked_count: usize,
     actions: Vec<String>,
+    external_execution: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9083,9 +9086,19 @@ async fn rotate_secret_record(
 }
 
 async fn execute_vault_kms_rotation(state: &AppState) -> Result<VaultKmsRotationRun, AppError> {
+    execute_vault_kms_rotation_with_lookup(state, |key| std::env::var(key).ok()).await
+}
+
+async fn execute_vault_kms_rotation_with_lookup<F>(
+    state: &AppState,
+    lookup: F,
+) -> Result<VaultKmsRotationRun, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let checked_at = Utc::now();
-    let secret_provider = secret_provider_health_from_lookup(|key| std::env::var(key).ok()).await;
-    let kms = kms_readiness_from_lookup(&|key| std::env::var(key).ok());
+    let secret_provider = secret_provider_health_from_lookup(&lookup).await;
+    let kms = kms_readiness_from_lookup(&lookup);
     let secret_records = state.list_secret_records().await?;
     let stale_cutoff = checked_at - ChronoDuration::days(90);
     let stale_rotation_count = secret_records
@@ -9103,25 +9116,78 @@ async fn execute_vault_kms_rotation(state: &AppState) -> Result<VaultKmsRotation
         actions.push("rotate_stale_secret_values_with_new_vault_versions".to_string());
     }
     let blocked_count = usize::from(!secret_provider.healthy) + usize::from(!kms.configured);
+    let mut rotated_count = 0;
+    let mut catalog_updated_count = 0;
+    let mut external_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": "blocked_before_external_execution"
+    });
     let status = if blocked_count > 0 {
-        "blocked"
-    } else if stale_rotation_count > 0 {
-        "attention"
+        "blocked".to_string()
     } else {
-        "validated"
+        match execute_external_kms_rotation(
+            &lookup,
+            &kms,
+            &secret_records,
+            stale_rotation_count,
+            checked_at,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                external_execution = outcome.summary.clone();
+                rotated_count = outcome.rotated_count;
+                for record_id in outcome.rotated_secret_record_ids {
+                    if let Some(record) =
+                        secret_records.iter().find(|record| record.id == record_id)
+                    {
+                        let input = RotateSecretRecord {
+                            path: record.path.clone(),
+                            key: record.key.clone(),
+                            value: None,
+                        };
+                        state.rotate_secret_record(record.id, input).await?;
+                        catalog_updated_count += 1;
+                    }
+                }
+                actions.extend(outcome.actions);
+                if outcome.status == "validated" && stale_rotation_count == 0 {
+                    "validated".to_string()
+                } else if outcome.status == "validated" {
+                    "attention".to_string()
+                } else {
+                    "blocked".to_string()
+                }
+            }
+            Err(error) => {
+                actions.push("fix_external_kms_rotation_endpoint".to_string());
+                external_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+                "blocked".to_string()
+            }
+        }
+    };
+    if catalog_updated_count > 0 {
+        actions.push("verify_downstream_consumers_after_external_rotation".to_string());
     }
-    .to_string();
     let run = VaultKmsRotationRun {
         status,
         checked_at,
         kms_provider: kms.provider,
         kms_status: kms.status,
+        kms_endpoint_configured: kms.endpoint_configured,
         secret_provider_status: secret_provider.status,
         secret_record_count: secret_records.len(),
         stale_rotation_count,
-        rotated_count: 0,
+        rotated_count,
+        catalog_updated_count,
         blocked_count,
         actions,
+        external_execution,
     };
     state
         .append_audit_log(new_audit_log(
@@ -9135,17 +9201,151 @@ async fn execute_vault_kms_rotation(state: &AppState) -> Result<VaultKmsRotation
                 "status": run.status,
                 "kms_provider": run.kms_provider,
                 "kms_status": run.kms_status,
+                "kms_endpoint_configured": run.kms_endpoint_configured,
                 "secret_provider_status": run.secret_provider_status,
                 "secret_record_count": run.secret_record_count,
                 "stale_rotation_count": run.stale_rotation_count,
                 "rotated_count": run.rotated_count,
+                "catalog_updated_count": run.catalog_updated_count,
                 "blocked_count": run.blocked_count,
                 "actions": run.actions,
+                "external_execution": run.external_execution,
                 "checked_at": run.checked_at,
             }),
         ))
         .await?;
     Ok(run)
+}
+
+struct ExternalKmsRotationOutcome {
+    status: String,
+    rotated_count: usize,
+    rotated_secret_record_ids: Vec<Uuid>,
+    actions: Vec<String>,
+    summary: Value,
+}
+
+async fn execute_external_kms_rotation<F>(
+    lookup: &F,
+    kms: &VaultKmsReadiness,
+    secret_records: &[SecretRecord],
+    stale_rotation_count: usize,
+    checked_at: DateTime<Utc>,
+) -> Result<ExternalKmsRotationOutcome, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_KMS_ENDPOINT")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("MANDOFORGE_KMS_ENDPOINT is required"))?;
+    let key_id = lookup("MANDOFORGE_KMS_KEY_ID")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("MANDOFORGE_KMS_KEY_ID is required"))?;
+    let rotation_policy = lookup("MANDOFORGE_KMS_ROTATION_POLICY")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("MANDOFORGE_KMS_ROTATION_POLICY is required"))?;
+    let timeout_seconds = lookup("MANDOFORGE_KMS_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=60).contains(seconds))
+        .unwrap_or(10);
+    let token = lookup("MANDOFORGE_KMS_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.kms_rotation_validation",
+        "provider": kms.provider,
+        "key_id": key_id,
+        "rotation_policy": rotation_policy,
+        "validation_mode": kms.validation_mode,
+        "secret_record_count": secret_records.len(),
+        "stale_rotation_count": stale_rotation_count,
+        "secret_records": secret_records.iter().map(|record| {
+            json!({
+                "id": record.id,
+                "name": record.name,
+                "ref": secret_record_ref(record),
+                "scope_type": record.scope_type,
+                "scope_id": record.scope_id,
+                "version": record.version,
+                "status": record.status,
+                "updated_at": record.updated_at,
+            })
+        }).collect::<Vec<_>>(),
+        "checked_at": checked_at,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client
+        .post(endpoint.clone())
+        .header("x-mandoforge-kms-provider", kms.provider.as_str())
+        .json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let response_body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "external KMS rotation endpoint failed with status {http_status}"
+        )));
+    }
+    let response_status = response_body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(response_status, "validated" | "rotated" | "ok" | "success");
+    let rotated_secret_record_ids = response_body
+        .get("rotated_secret_record_ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .filter_map(|value| Uuid::parse_str(value).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let rotated_count = response_body
+        .get("rotated_count")
+        .and_then(Value::as_u64)
+        .map(|count| count as usize)
+        .unwrap_or(rotated_secret_record_ids.len());
+    let actions = response_body
+        .get("actions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(ExternalKmsRotationOutcome {
+        status: if validated { "validated" } else { "blocked" }.to_string(),
+        rotated_count,
+        rotated_secret_record_ids,
+        actions,
+        summary: json!({
+            "attempted": true,
+            "status": if validated { "validated" } else { "blocked" },
+            "http_status": http_status.as_u16(),
+            "provider_status": response_status,
+            "rotated_count": rotated_count,
+            "returned_rotated_secret_record_ids": response_body
+                .get("rotated_secret_record_ids")
+                .and_then(Value::as_array)
+                .map(|ids| ids.len())
+                .unwrap_or(0),
+            "message": response_body.get("message").and_then(Value::as_str),
+            "endpoint_configured": true,
+        }),
+    })
 }
 
 fn validate_secret_record_input(
@@ -27553,6 +27753,38 @@ not json
         Json(json!({"data": {"data": {"api_key": "vault-backed-provider-key"}}}))
     }
 
+    async fn mock_kms_rotation_endpoint(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("x-mandoforge-kms-provider")
+                .and_then(|value| value.to_str().ok()),
+            Some("mock-kms")
+        );
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-kms-token")
+        );
+        let first_secret_record_id = payload["secret_records"]
+            .as_array()
+            .and_then(|records| records.first())
+            .and_then(|record| record["id"].as_str())
+            .expect("secret record id")
+            .to_string();
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "rotated",
+            "rotated_count": 1,
+            "rotated_secret_record_ids": [first_secret_record_id],
+            "actions": ["external_kms_rotation_confirmed"]
+        }))
+    }
+
     #[tokio::test]
     async fn provider_health_resolves_vault_api_key_ref_for_external_probe() {
         let vault_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -27790,6 +28022,133 @@ not json
         assert!(audit_logs.iter().any(|log| {
             log.action == "vault.kms_rotation_run" && log.details["status"] == "blocked"
         }));
+    }
+
+    #[tokio::test]
+    async fn vault_kms_rotation_executes_external_endpoint_and_updates_catalog_metadata() {
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(InlineExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: None,
+            mcp_gateway_client: Arc::new(ReservedMcpGatewayClient),
+            codex_app_server_config: None,
+            codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
+            cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
+            approval_webhook_url: None,
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            policy: runtime_policy(PolicyConfig::default()),
+        };
+        let record = state
+            .create_secret_record(CreateSecretRecord {
+                name: "kms-backed-provider".to_string(),
+                path: "providers/openai".to_string(),
+                key: "api_key".to_string(),
+                scope_type: "tenant".to_string(),
+                scope_id: None,
+                value: None,
+            })
+            .await
+            .expect("create secret record");
+
+        let vault_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("vault listener");
+        let vault_addr = vault_listener.local_addr().expect("vault addr");
+        let vault = Router::new().route("/v1/sys/health", get(mock_vault_health));
+        let vault_server = tokio::spawn(async move {
+            axum::serve(vault_listener, vault)
+                .await
+                .expect("mock vault");
+        });
+
+        let kms_payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let kms_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("kms listener");
+        let kms_addr = kms_listener.local_addr().expect("kms addr");
+        let kms = Router::new()
+            .route("/rotate", post(mock_kms_rotation_endpoint))
+            .with_state(kms_payloads.clone());
+        let kms_server = tokio::spawn(async move {
+            axum::serve(kms_listener, kms).await.expect("mock kms");
+        });
+
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_SECRET_PROVIDER" => Some("vault".to_string()),
+            "MANDOFORGE_VAULT_ADDR" => Some(format!("http://{vault_addr}")),
+            "MANDOFORGE_VAULT_MOUNT" => Some("kv".to_string()),
+            "MANDOFORGE_VAULT_TOKEN" => Some("test-vault-token".to_string()),
+            "MANDOFORGE_KMS_PROVIDER" => Some("mock-kms".to_string()),
+            "MANDOFORGE_KMS_KEY_ID" => Some("key-1".to_string()),
+            "MANDOFORGE_KMS_ROTATION_POLICY" => Some("manual-confirmed".to_string()),
+            "MANDOFORGE_KMS_ENDPOINT" => Some(format!("http://{kms_addr}/rotate")),
+            "MANDOFORGE_KMS_TOKEN" => Some("test-kms-token".to_string()),
+            _ => None,
+        };
+
+        let run = execute_vault_kms_rotation_with_lookup(&state, lookup)
+            .await
+            .expect("kms rotation run");
+
+        assert_eq!(run.status, "validated");
+        assert_eq!(run.kms_status, "ready");
+        assert!(run.kms_endpoint_configured);
+        assert_eq!(run.rotated_count, 1);
+        assert_eq!(run.catalog_updated_count, 1);
+        assert_eq!(run.external_execution["attempted"], true);
+        assert_eq!(run.external_execution["status"], "validated");
+        assert!(
+            run.actions
+                .iter()
+                .any(|action| action == "external_kms_rotation_confirmed")
+        );
+
+        let updated_record = state
+            .list_secret_records()
+            .await
+            .expect("list secret records")
+            .into_iter()
+            .find(|secret| secret.id == record.id)
+            .expect("updated secret record");
+        assert_eq!(updated_record.version, 2);
+        assert_eq!(updated_record.path, "providers/openai");
+        assert_eq!(updated_record.key, "api_key");
+
+        let payloads = kms_payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.kms_rotation_validation");
+        assert_eq!(payloads[0]["provider"], "mock-kms");
+        assert_eq!(payloads[0]["key_id"], "key-1");
+        assert!(
+            payloads[0]
+                .to_string()
+                .contains("vault:providers/openai#api_key")
+        );
+
+        let audit_logs = state.list_audit_logs(None).await.expect("audit logs");
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "vault.kms_rotation_run"
+                && log.details["status"] == "validated"
+                && log.details["rotated_count"] == 1
+                && log.details["catalog_updated_count"] == 1
+                && log.details["external_execution"]["status"] == "validated"
+        }));
+
+        vault_server.abort();
+        kms_server.abort();
     }
 
     #[tokio::test]

@@ -4216,7 +4216,9 @@ function renderVaultReadiness() {
       <strong>KMS ROTATION GATE</strong>
       ${
         kmsRotationRun
-          ? `<div class="muted">${escapeHtml(kmsRotationRun.status)} · KMS ${escapeHtml(kmsRotationRun.kms_status)} · secret provider ${escapeHtml(kmsRotationRun.secret_provider_status)} · stale refs ${formatInteger(kmsRotationRun.stale_rotation_count || 0)} · rotated ${formatInteger(kmsRotationRun.rotated_count || 0)}</div><pre>${escapeHtml(JSON.stringify(kmsRotationRun, null, 2))}</pre>`
+          ? `<div class="muted">${escapeHtml(kmsRotationRun.status)} · KMS ${escapeHtml(kmsRotationRun.kms_status)} · endpoint ${escapeHtml(kmsRotationRun.kms_endpoint_configured ? "configured" : "missing")} · secret provider ${escapeHtml(kmsRotationRun.secret_provider_status)} · stale refs ${formatInteger(kmsRotationRun.stale_rotation_count || 0)} · rotated ${formatInteger(kmsRotationRun.rotated_count || 0)} · catalog updates ${formatInteger(kmsRotationRun.catalog_updated_count || 0)}</div>
+             <div class="muted">External execution: ${escapeHtml(kmsRotationRun.external_execution?.status || "unknown")} · attempted ${escapeHtml(kmsRotationRun.external_execution?.attempted ? "yes" : "no")} · HTTP ${escapeHtml(kmsRotationRun.external_execution?.http_status || "n/a")}</div>
+             <pre>${escapeHtml(JSON.stringify(kmsRotationRun, null, 2))}</pre>`
           : `<div class="muted">No KMS rotation gate run in this console session</div>`
       }
     </div>
