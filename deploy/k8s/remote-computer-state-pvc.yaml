@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mandoforge-remote-computer-state
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi

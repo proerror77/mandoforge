@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mandoforge-agent-remote-computer-template
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: mandoforge-agent-remote-computer
+  template:
+    metadata:
+      labels:
+        app: mandoforge-agent-remote-computer
+    spec:
+      serviceAccountName: mandoforge-remote-computer
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: remote-computer
+          image: ghcr.io/proerror77/mandoforge-remote-computer:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+          env:
+            - name: MANDOFORGE_REMOTE_COMPUTER_MODE
+              value: "skeleton"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: state
+              mountPath: /agent-state
+            - name: workspace
+              mountPath: /workspace
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: mandoforge-remote-computer-state
+        - name: workspace
+          emptyDir: {}

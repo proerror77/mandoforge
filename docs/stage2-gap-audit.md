@@ -21,7 +21,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 ## Next Stage 2 Slices
 
-1. Add the Agent Remote Computer readiness skeleton described in [Agent Remote Computer Plan](agent-remote-computer-plan.md): Pod template, PVC/RWX state mount placeholder, readiness API, UI readiness panel, and explicit blockers for distributed state, NetworkPolicy, warm pool, and queue-depth autoscaling.
+1. Add the Agent Remote Computer lease store described in [Agent Remote Computer Plan](agent-remote-computer-plan.md): `remote_computers`, `remote_computer_leases`, lifecycle events, heartbeat/reclaim state, and operator list/detail APIs without moving tool execution into Pods yet.
 2. Add production multi-step rollout orchestration beyond the current policy/release summary dashboards.
 3. Add production finance close workflow automation beyond the current bounded close run, static readiness, forecast, pressure, acknowledgement, audit-evidence, and scheduled export delivery surfaces.
 4. Add broader remediation automation beyond safe approval/Codex due-runs and production collector-specific OTLP hardening beyond readiness checks.

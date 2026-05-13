@@ -1215,6 +1215,63 @@ struct WorkerReadinessAttentionItem {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerReadinessReport {
+    generated_at: DateTime<Utc>,
+    status: String,
+    readiness_score: i64,
+    pod_template: RemoteComputerManifestReadiness,
+    service_account: RemoteComputerManifestReadiness,
+    state_filesystem: RemoteComputerStateFilesystemReadiness,
+    network_policy: RemoteComputerManifestReadiness,
+    autoscaling: RemoteComputerAutoscalingReadiness,
+    warm_pool: RemoteComputerWarmPoolReadiness,
+    event_types: Vec<String>,
+    attention_items: Vec<RemoteComputerAttentionItem>,
+    runbook_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerManifestReadiness {
+    present: bool,
+    path: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerStateFilesystemReadiness {
+    pvc_present: bool,
+    pvc_path: String,
+    access_mode: String,
+    mount_path: String,
+    distributed_filesystem_configured: bool,
+    provider: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerAutoscalingReadiness {
+    worker_hpa_present: bool,
+    keda_manifest_present: bool,
+    queue_depth_scaling_present: bool,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerWarmPoolReadiness {
+    configured: bool,
+    manifest_present: bool,
+    manifest_path: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ProviderUsageSummary {
     request_count: usize,
@@ -2765,6 +2822,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/execution-jobs/worker-readiness",
             get(get_worker_readiness),
+        )
+        .route(
+            "/api/remote-computers/readiness",
+            get(get_remote_computer_readiness),
         )
         .route(
             "/api/execution-jobs/{id}/run",
@@ -15257,6 +15318,237 @@ async fn get_worker_readiness(
     Ok(Json(build_worker_readiness(&state).await?))
 }
 
+async fn get_remote_computer_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RemoteComputerReadinessReport>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computers",
+        None,
+    )
+    .await?;
+    Ok(Json(build_remote_computer_readiness()))
+}
+
+fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
+    let pod_template =
+        remote_computer_manifest_readiness("deploy/k8s/agent-remote-computer.yaml", "pod_template");
+    let service_account = remote_computer_manifest_readiness(
+        "deploy/k8s/remote-computer-serviceaccount.yaml",
+        "service_account",
+    );
+    let network_policy = remote_computer_manifest_readiness(
+        "deploy/k8s/remote-computer-networkpolicy.yaml",
+        "network_policy",
+    );
+    let pvc_path = "deploy/k8s/remote-computer-state-pvc.yaml";
+    let pvc_present = project_file_path(pvc_path).is_some();
+    let distributed_filesystem_configured =
+        std::env::var("MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER")
+            .ok()
+            .map(|provider| {
+                let provider = provider.trim();
+                !provider.is_empty() && provider != "pvc-placeholder"
+            })
+            .unwrap_or(false);
+    let state_provider = std::env::var("MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER")
+        .ok()
+        .filter(|provider| !provider.trim().is_empty())
+        .unwrap_or_else(|| "pvc-placeholder".to_string());
+    let state_filesystem = RemoteComputerStateFilesystemReadiness {
+        pvc_present,
+        pvc_path: pvc_path.to_string(),
+        access_mode: "ReadWriteMany".to_string(),
+        mount_path: "/agent-state".to_string(),
+        distributed_filesystem_configured,
+        provider: state_provider,
+        status: if pvc_present && distributed_filesystem_configured {
+            "configured"
+        } else if pvc_present {
+            "skeleton"
+        } else {
+            "missing"
+        }
+        .to_string(),
+    };
+    let autoscaling = RemoteComputerAutoscalingReadiness {
+        worker_hpa_present: project_file_path("deploy/k8s/worker-hpa.yaml").is_some(),
+        keda_manifest_present: project_file_path("deploy/k8s/keda.yaml").is_some()
+            || project_file_path("deploy/k8s/worker-keda.yaml").is_some(),
+        queue_depth_scaling_present: project_file_path("deploy/k8s/worker-keda.yaml").is_some(),
+        status: if project_file_path("deploy/k8s/worker-keda.yaml").is_some() {
+            "queue_depth_scaling_present"
+        } else if project_file_path("deploy/k8s/worker-hpa.yaml").is_some() {
+            "hpa_skeleton"
+        } else {
+            "missing"
+        }
+        .to_string(),
+    };
+    let warm_pool_path = "deploy/k8s/remote-computer-warm-pool.yaml";
+    let warm_pool_manifest_present = project_file_path(warm_pool_path).is_some();
+    let warm_pool = RemoteComputerWarmPoolReadiness {
+        configured: std::env::var("MANDOFORGE_REMOTE_COMPUTER_WARM_POOL")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
+        manifest_present: warm_pool_manifest_present,
+        manifest_path: warm_pool_path.to_string(),
+        status: if warm_pool_manifest_present {
+            "skeleton"
+        } else {
+            "missing"
+        }
+        .to_string(),
+    };
+
+    let event_types = vec![
+        "remote_computer.requested".to_string(),
+        "remote_computer.leased".to_string(),
+        "remote_computer.started".to_string(),
+        "remote_computer.heartbeat".to_string(),
+        "remote_computer.released".to_string(),
+        "remote_computer.failed".to_string(),
+    ];
+    let mut attention_items = Vec::new();
+    if !pod_template.present {
+        attention_items.push(remote_computer_attention(
+            "pod_template_missing",
+            "critical",
+            "deploy/k8s/agent-remote-computer.yaml is required before Pod-based session leases can be piloted",
+        ));
+    }
+    if !service_account.present {
+        attention_items.push(remote_computer_attention(
+            "service_account_missing",
+            "critical",
+            "remote computer Pods need a restricted service account before execution moves into Pods",
+        ));
+    }
+    if state_filesystem.status == "missing" {
+        attention_items.push(remote_computer_attention(
+            "state_pvc_missing",
+            "critical",
+            "remote computer state PVC placeholder is missing",
+        ));
+    } else if !state_filesystem.distributed_filesystem_configured {
+        attention_items.push(remote_computer_attention(
+            "distributed_state_filesystem_missing",
+            "warning",
+            "state mount is a PVC/RWX placeholder; JuiceFS/CephFS/Longhorn or another distributed state provider is not configured",
+        ));
+    }
+    if !network_policy.present {
+        attention_items.push(remote_computer_attention(
+            "network_policy_missing",
+            "warning",
+            "remote computer Pods need a NetworkPolicy before shared-cluster sandbox execution",
+        ));
+    }
+    if !autoscaling.queue_depth_scaling_present {
+        attention_items.push(remote_computer_attention(
+            "queue_depth_scaling_missing",
+            "warning",
+            "worker HPA is present as a skeleton, but KEDA/queue-depth scaling for remote computer pools is not configured",
+        ));
+    }
+    if !warm_pool.manifest_present {
+        attention_items.push(remote_computer_attention(
+            "warm_pool_missing",
+            "warning",
+            "no remote computer warm-pool manifest is present; first Pod lease will still cold start",
+        ));
+    }
+
+    let mut runbook_actions = Vec::new();
+    if state_filesystem.status == "skeleton" {
+        runbook_actions.push(
+            "select a real RWX/distributed state provider before running multi-Pod Memory/Notes/Skills sync"
+                .to_string(),
+        );
+    }
+    if !autoscaling.queue_depth_scaling_present {
+        runbook_actions.push(
+            "add KEDA or another queue-depth scaler before claiming remote computer pool autoscaling"
+                .to_string(),
+        );
+    }
+    if !warm_pool.manifest_present {
+        runbook_actions.push(
+            "add a warm-pool controller only after the Pod lease lifecycle and state sync are observable"
+                .to_string(),
+        );
+    }
+    runbook_actions.push(
+        "keep shell.exec and codex.exec on the existing approved worker path until remote computer leases are implemented"
+            .to_string(),
+    );
+
+    let critical_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "critical")
+        .count() as i64;
+    let warning_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "warning")
+        .count() as i64;
+    let readiness_score = (100_i64 - critical_count * 25 - warning_count * 10).clamp(0, 100);
+    let status = if critical_count > 0 {
+        "critical"
+    } else if warning_count > 0 {
+        "attention"
+    } else {
+        "ready"
+    }
+    .to_string();
+
+    RemoteComputerReadinessReport {
+        generated_at: Utc::now(),
+        status,
+        readiness_score,
+        pod_template,
+        service_account,
+        state_filesystem,
+        network_policy,
+        autoscaling,
+        warm_pool,
+        event_types,
+        attention_items,
+        runbook_actions,
+    }
+}
+
+fn remote_computer_manifest_readiness(
+    path: &str,
+    configured_status: &str,
+) -> RemoteComputerManifestReadiness {
+    let present = project_file_path(path).is_some();
+    RemoteComputerManifestReadiness {
+        present,
+        path: path.to_string(),
+        status: if present {
+            configured_status
+        } else {
+            "missing"
+        }
+        .to_string(),
+    }
+}
+
+fn remote_computer_attention(
+    kind: &str,
+    severity: &str,
+    message: &str,
+) -> RemoteComputerAttentionItem {
+    RemoteComputerAttentionItem {
+        kind: kind.to_string(),
+        severity: severity.to_string(),
+        message: message.to_string(),
+    }
+}
+
 async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessReport, AppError> {
     let generated_at = Utc::now();
     let jobs = state.execution_queue.list().await?;
@@ -26463,6 +26755,44 @@ not json
                 .runbook_actions
                 .iter()
                 .any(|action| action.contains("mandoforge-worker"))
+        );
+
+        let remote_computer_readiness: RemoteComputerReadinessReport = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computers/readiness")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(remote_computer_readiness.status, "attention");
+        assert!(remote_computer_readiness.pod_template.present);
+        assert!(remote_computer_readiness.service_account.present);
+        assert!(remote_computer_readiness.state_filesystem.pvc_present);
+        assert_eq!(
+            remote_computer_readiness.state_filesystem.status,
+            "skeleton"
+        );
+        assert!(remote_computer_readiness.network_policy.present);
+        assert!(
+            remote_computer_readiness
+                .event_types
+                .iter()
+                .any(|event_type| event_type == "remote_computer.leased")
+        );
+        assert!(
+            remote_computer_readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "distributed_state_filesystem_missing")
+        );
+        assert!(
+            remote_computer_readiness
+                .runbook_actions
+                .iter()
+                .any(|action| action.contains("existing approved worker path"))
         );
 
         let (status, error) = request_value(

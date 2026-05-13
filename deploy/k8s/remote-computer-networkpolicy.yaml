@@ -1,0 +1,11 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mandoforge-remote-computer-deny-by-default
+spec:
+  podSelector:
+    matchLabels:
+      app: mandoforge-agent-remote-computer
+  policyTypes:
+    - Ingress
+    - Egress

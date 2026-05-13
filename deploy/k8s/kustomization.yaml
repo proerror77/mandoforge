@@ -10,3 +10,7 @@ resources:
   - worker.yaml
   - worker-hpa.yaml
   - scheduler.yaml
+  - remote-computer-serviceaccount.yaml
+  - remote-computer-state-pvc.yaml
+  - agent-remote-computer.yaml
+  - remote-computer-networkpolicy.yaml

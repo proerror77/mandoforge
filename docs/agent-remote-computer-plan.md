@@ -1,6 +1,6 @@
 # Agent Remote Computer Plan
 
-This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. It is not implemented yet. The current repo has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, and a worker readiness gate. It does not yet create a dedicated Pod per agent session or mount a shared distributed state filesystem.
+This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a readiness skeleton for this direction, not a production execution substrate. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, deny-by-default NetworkPolicy, and `GET /api/remote-computers/readiness`. It does not yet create a dedicated Pod per agent session or mount a real shared distributed state filesystem.
 
 ## Objective
 
@@ -47,13 +47,15 @@ Covered today:
 - Docker Compose and Kubernetes skeletons exist.
 - Approved `shell.exec` can run through an optional Docker sandbox runner.
 - Codex App Server and Codex CLI execution remain governed by approval and queue paths.
+- Remote Computer readiness is API/UI-visible.
+- K8s Remote Computer manifests exist for the Pod template, service account, state PVC placeholder, and NetworkPolicy skeleton.
 
 Not covered today:
 
 - No `remote_computers` store or API.
 - No session-to-Pod lease lifecycle.
-- No Pod template for an agent remote computer.
-- No shared Memory/Notes/Skills mount.
+- No actual Remote Computer execution path.
+- No real distributed Memory/Notes/Skills mount.
 - No distributed filesystem integration such as JuiceFS, CephFS, Longhorn RWX, or object-backed sync.
 - No warm pool of prestarted agent Pods.
 - No artifact/state sync daemon inside the Pod.
@@ -129,20 +131,27 @@ Initial scaling should be conservative:
 
 Stage 2 should add this as a governed pilot, not as a full production platform.
 
-1. Document the Remote Computer control-plane contract.
-2. Add `remote_computers` and `remote_computer_leases` tables.
-3. Add read-only readiness API: `GET /api/remote-computers/readiness`.
-4. Add Kubernetes Pod template under `deploy/k8s/agent-remote-computer.yaml`.
-5. Add PVC/RWX mount placeholders for state and workspace.
-6. Add Admin UI readiness panel showing missing storage, Pod template, NetworkPolicy, warm-pool, and autoscaling blockers.
-7. Add event types:
+Completed Stage 2 readiness skeleton:
+
+- Document the Remote Computer control-plane contract.
+- Add read-only readiness API: `GET /api/remote-computers/readiness`.
+- Add Kubernetes Pod template under `deploy/k8s/agent-remote-computer.yaml`.
+- Add PVC/RWX mount placeholders for state and workspace.
+- Add Admin UI readiness panel showing storage, Pod template, NetworkPolicy, warm-pool, and autoscaling blockers.
+- Add planned event types to readiness output:
    - `remote_computer.requested`
    - `remote_computer.leased`
    - `remote_computer.started`
    - `remote_computer.heartbeat`
    - `remote_computer.released`
    - `remote_computer.failed`
-8. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
+
+Remaining Stage 2 pilot work:
+
+1. Add `remote_computers` and `remote_computer_leases` tables.
+2. Add session-to-Pod lease state transitions without moving tool execution yet.
+3. Add heartbeat/release/reclaim APIs or worker hooks.
+4. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
 
 Stage 2 acceptance for this slice:
 
@@ -190,19 +199,16 @@ Stage 3 acceptance:
 
 ## Immediate Next Slice
 
-After the current worker autoscaling readiness slice is finished, the next coherent implementation slice should be:
+After the Remote Computer readiness skeleton, the next coherent implementation slice should be:
 
 ```text
-Add Remote Computer readiness skeleton
+Add Remote Computer lease store
 ```
 
 Concrete deliverables:
 
-- `docs/agent-remote-computer-plan.md`
-- `deploy/k8s/agent-remote-computer.yaml`
-- `deploy/k8s/remote-computer-state-pvc.yaml`
-- `GET /api/remote-computers/readiness`
-- Static UI readiness panel
-- API test for readiness output
-- Actionbook static UI check
-- Honest Stage 2 audit update
+- `remote_computers` and `remote_computer_leases` migrations.
+- Store APIs for requested, leased, heartbeat, released, and failed states.
+- Session/event/audit records for lease lifecycle changes.
+- Read-only list/detail APIs for operators.
+- Tests proving leases do not execute tools or bypass approval yet.

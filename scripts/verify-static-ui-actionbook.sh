@@ -6,6 +6,7 @@ GATE_ADDR="${GATE_ADDR:-127.0.0.1:8791}"
 ACTIONBOOK_CDP_PORT="${ACTIONBOOK_CDP_PORT:-9324}"
 ACTIONBOOK_SCREENSHOT="${ACTIONBOOK_SCREENSHOT:-/tmp/mandoforge-actionbook-smoke.png}"
 ACTIONBOOK_EVAL_JSON="${ACTIONBOOK_EVAL_JSON:-/tmp/mandoforge-actionbook-eval.json}"
+ACTIONBOOK_SMOKE_URL="${ACTIONBOOK_SMOKE_URL:-$BASE_URL/?actionbook_smoke=$(date +%s)}"
 CHROME_PATH="${CHROME_PATH:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 CHROME_USER_DATA_DIR="${CHROME_USER_DATA_DIR:-/tmp/mandoforge-actionbook-chrome}"
 API_PID=""
@@ -76,6 +77,7 @@ wait_for_static_ui() {
     hasReleasePromotionWorkflow: (text.includes('Request Prod Approval') || text.includes('No eval runs')) && Boolean(document.querySelector('#agent-releases')) && text.includes('RELEASE AUTOMATION RUNS'),
     hasAgentReleases: text.includes('AGENT RELEASES') && Boolean(document.querySelector('#agent-releases')),
     hasWorkerDashboard: text.includes('Worker Dashboard') && text.includes('Queue readiness') && text.includes('QUEUE DURABILITY') && text.includes('AUTOSCALING SKELETON') && text.includes('WORKER RUNBOOK ACTIONS') && Boolean(document.querySelector('#worker-readiness')),
+    hasRemoteComputerReadiness: text.includes('Remote Computers') && text.includes('REMOTE COMPUTER READINESS') && text.includes('STATE FILESYSTEM') && text.includes('REMOTE COMPUTER RUNBOOK') && Boolean(document.querySelector('#remote-computer-readiness')),
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
     metricCards: document.querySelectorAll('.metric').length,
     hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
@@ -108,6 +110,7 @@ wait_for_static_ui() {
     && result.hasReleasePromotionWorkflow
     && result.hasAgentReleases
     && result.hasWorkerDashboard
+    && result.hasRemoteComputerReadiness
     && result.hasProviderHealthAction
     && result.metricCards >= 4
     && result.hasUsageRoot
@@ -169,6 +172,7 @@ grep -q "approvalNotificationRuns" /tmp/mandoforge-actionbook-app.js
 grep -q "approval-notification-runs" /tmp/mandoforge-actionbook-index.html
 grep -q "workerReadiness" /tmp/mandoforge-actionbook-app.js
 grep -q "worker-readiness" /tmp/mandoforge-actionbook-index.html
+grep -q "remote-computer-readiness" /tmp/mandoforge-actionbook-index.html
 curl -fsS "$BASE_URL/api/usage" \
   -H 'x-mandoforge-subject: actionbook-smoke' \
   -H 'x-mandoforge-roles: admin' \
@@ -193,7 +197,7 @@ if ! curl -fsS "http://127.0.0.1:$ACTIONBOOK_CDP_PORT/json/version" >/dev/null 2
 fi
 
 actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser connect "$ACTIONBOOK_CDP_PORT" --json >/tmp/mandoforge-actionbook-connect.json
-actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser open "$BASE_URL" --json >/tmp/mandoforge-actionbook-open.json
+actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser open "$ACTIONBOOK_SMOKE_URL" --json >/tmp/mandoforge-actionbook-open.json
 
 wait_for_static_ui
 

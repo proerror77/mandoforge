@@ -43,6 +43,7 @@ const state = {
   mcpRolloutRuns: null,
   executionJobs: [],
   workerReadiness: null,
+  remoteComputerReadiness: null,
   usageRollups: [],
   usageTrend: null,
   usageFinanceSummary: null,
@@ -135,6 +136,7 @@ const runDueAgentReleasesButton = document.querySelector("#run-due-agent-release
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
 const workerReadinessRoot = document.querySelector("#worker-readiness");
+const remoteComputerReadinessRoot = document.querySelector("#remote-computer-readiness");
 const usageRoot = document.querySelector("#usage-summary");
 const observabilityRoot = document.querySelector("#observability-summary");
 const runObservabilityRemediationButton = document.querySelector("#run-observability-remediation");
@@ -1361,6 +1363,7 @@ async function refreshOps() {
     organizations,
     executionJobs,
     workerReadiness,
+    remoteComputerReadiness,
     approvalGroups,
     approvalEscalationRules,
     approvalNotificationRouting,
@@ -1393,6 +1396,7 @@ async function refreshOps() {
       api("/api/organizations"),
       api("/api/execution-jobs"),
       api("/api/execution-jobs/worker-readiness"),
+      api("/api/remote-computers/readiness"),
       api("/api/approval-groups"),
       api("/api/approval-escalation-rules"),
       api("/api/approvals/notification-routing/summary"),
@@ -1424,6 +1428,7 @@ async function refreshOps() {
   state.organizations = organizations;
   state.executionJobs = executionJobs;
   state.workerReadiness = workerReadiness;
+  state.remoteComputerReadiness = remoteComputerReadiness;
   state.approvalGroups = approvalGroups;
   state.approvalEscalationRules = approvalEscalationRules;
   state.approvalNotificationRouting = approvalNotificationRouting;
@@ -1593,6 +1598,7 @@ function renderOps() {
   renderAgentReleases();
   renderMcpServers();
   renderWorkerReadiness();
+  renderRemoteComputerReadiness();
   renderExecutionJobs();
   renderCodexAppServer();
   governanceRoot.innerHTML = `
@@ -1870,6 +1876,83 @@ function renderWorkerReadiness() {
         runbookActions.length
           ? runbookActions.map((action) => `<div class="muted">${escapeHtml(action)}</div>`).join("")
           : `<div class="muted">No worker runbook actions</div>`
+      }
+    </div>
+  `;
+}
+
+function renderRemoteComputerReadiness() {
+  const report = state.remoteComputerReadiness;
+  if (!report) {
+    remoteComputerReadinessRoot.innerHTML = `<div class="muted">Remote computer readiness not loaded</div>`;
+    return;
+  }
+  const podTemplate = report.pod_template || {};
+  const serviceAccount = report.service_account || {};
+  const stateFs = report.state_filesystem || {};
+  const networkPolicy = report.network_policy || {};
+  const autoscaling = report.autoscaling || {};
+  const warmPool = report.warm_pool || {};
+  const attentionItems = report.attention_items || [];
+  const runbookActions = report.runbook_actions || [];
+  remoteComputerReadinessRoot.innerHTML = `
+    <div class="metrics compact-metrics">
+      <div class="metric">
+        <span>Status</span>
+        <strong>${escapeHtml(report.status || "unknown")}</strong>
+      </div>
+      <div class="metric">
+        <span>Score</span>
+        <strong>${formatInteger(report.readiness_score || 0)}</strong>
+      </div>
+      <div class="metric">
+        <span>Pod Template</span>
+        <strong>${podTemplate.present ? "present" : "missing"}</strong>
+      </div>
+      <div class="metric">
+        <span>State FS</span>
+        <strong>${escapeHtml(stateFs.status || "unknown")}</strong>
+      </div>
+    </div>
+    <div class="item">
+      <strong>REMOTE COMPUTER READINESS</strong>
+      <div class="muted">Pod: ${escapeHtml(podTemplate.path || "unknown")} · ${podTemplate.present ? "present" : "missing"}</div>
+      <div class="muted">Service account: ${escapeHtml(serviceAccount.path || "unknown")} · ${serviceAccount.present ? "present" : "missing"}</div>
+      <div class="muted">NetworkPolicy: ${escapeHtml(networkPolicy.path || "unknown")} · ${networkPolicy.present ? "present" : "missing"}</div>
+    </div>
+    <div class="item">
+      <strong>STATE FILESYSTEM</strong>
+      <div class="muted">${escapeHtml(stateFs.provider || "unknown")} · ${escapeHtml(stateFs.access_mode || "unknown")} · ${escapeHtml(stateFs.mount_path || "unknown")}</div>
+      <div class="muted">PVC: ${escapeHtml(stateFs.pvc_path || "unknown")} · ${stateFs.pvc_present ? "present" : "missing"} · distributed state: ${stateFs.distributed_filesystem_configured ? "configured" : "not configured"}</div>
+    </div>
+    <div class="item">
+      <strong>WARM POOL / SCALING</strong>
+      <div class="muted">Warm pool: ${escapeHtml(warmPool.status || "unknown")} · manifest ${warmPool.manifest_present ? "present" : "missing"}</div>
+      <div class="muted">Worker HPA ${autoscaling.worker_hpa_present ? "present" : "missing"} · KEDA ${autoscaling.keda_manifest_present ? "present" : "missing"} · queue-depth scaling ${autoscaling.queue_depth_scaling_present ? "present" : "missing"}</div>
+    </div>
+    <div class="item">
+      <strong>REMOTE COMPUTER EVENTS</strong>
+      <div class="muted">${escapeHtml((report.event_types || []).join(", ") || "none")}</div>
+    </div>
+    <div class="item">
+      <strong>REMOTE COMPUTER ATTENTION</strong>
+      ${
+        attentionItems.length
+          ? attentionItems
+              .map(
+                (item) =>
+                  `<div class="muted">${escapeHtml(item.severity)} · ${escapeHtml(item.kind)} · ${escapeHtml(item.message)}</div>`,
+              )
+              .join("")
+          : `<div class="muted">No remote computer attention items</div>`
+      }
+    </div>
+    <div class="item">
+      <strong>REMOTE COMPUTER RUNBOOK</strong>
+      ${
+        runbookActions.length
+          ? runbookActions.map((action) => `<div class="muted">${escapeHtml(action)}</div>`).join("")
+          : `<div class="muted">No remote computer runbook actions</div>`
       }
     </div>
   `;
