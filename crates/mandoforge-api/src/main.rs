@@ -17950,7 +17950,7 @@ async fn build_remote_computer_execution_transport_readiness(
             "fail_closed".to_string(),
         ],
         required_implementation: vec![
-            "automatic artifact discovery sidecar for continuous Pod filesystem sync".to_string(),
+            "automatic artifact discovery sidecar ID injection and production supervision".to_string(),
         ],
         message:
             "Remote Computer runner can route assigned file.write, shell.exec, and codex.exec jobs through gated Kubernetes Pod exec, propagate cancellation through Pod deletion, accept push-based artifact sync, and discover artifacts from a shared Remote Computer workspace"

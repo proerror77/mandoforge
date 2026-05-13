@@ -429,7 +429,7 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             && config.kube_api_url.is_some()
             && config.bearer_token_path.is_some();
         let mutation_result = if gates_open && (operation_is_create || operation_is_delete) {
-            Some(call_kubernetes_mutation(config, operation_is_create, &pod_name).await)
+            Some(call_kubernetes_mutation(config, operation_is_create, &pod_name, &request).await)
         } else {
             None
         };
@@ -567,6 +567,7 @@ async fn call_kubernetes_mutation(
     config: &RemoteComputerRunnerConfig,
     create: bool,
     pod_name: &str,
+    request: &RemoteComputerRunnerDryRunRequest,
 ) -> Result<(u16, Value), String> {
     let api_url = config
         .kube_api_url
@@ -595,7 +596,7 @@ async fn call_kubernetes_mutation(
         client
             .post(url)
             .bearer_auth(token.trim())
-            .json(&build_kubernetes_pod_request(config, pod_name))
+            .json(&build_kubernetes_pod_request(config, pod_name, request))
     } else {
         client.delete(url).bearer_auth(token.trim())
     };
@@ -795,7 +796,33 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
-fn build_kubernetes_pod_request(config: &RemoteComputerRunnerConfig, pod_name: &str) -> Value {
+fn build_kubernetes_pod_request(
+    config: &RemoteComputerRunnerConfig,
+    pod_name: &str,
+    request: &RemoteComputerRunnerDryRunRequest,
+) -> Value {
+    let session_id = request
+        .session_id
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    let remote_computer_id = request
+        .remote_computer_id
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    let assignment_id = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("assignment_id"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let artifact_discovery_enabled = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("artifact_discovery_enabled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        .to_string();
     json!({
         "apiVersion": "v1",
         "kind": "Pod",
@@ -818,31 +845,63 @@ fn build_kubernetes_pod_request(config: &RemoteComputerRunnerConfig, pod_name: &
                 "runAsNonRoot": true,
                 "seccompProfile": {"type": "RuntimeDefault"}
             },
-            "containers": [{
-                "name": "remote-computer",
-                "image": "ghcr.io/proerror77/mandoforge-remote-computer:latest",
-                "imagePullPolicy": "IfNotPresent",
-                "command": ["sleep", "infinity"],
-                "env": [{"name": "MANDOFORGE_REMOTE_COMPUTER_MODE", "value": "skeleton"}],
-                "securityContext": {
-                    "allowPrivilegeEscalation": false,
-                    "readOnlyRootFilesystem": false,
-                    "capabilities": {"drop": ["ALL"]}
+            "containers": [
+                {
+                    "name": "remote-computer",
+                    "image": "ghcr.io/proerror77/mandoforge-remote-computer:latest",
+                    "imagePullPolicy": "IfNotPresent",
+                    "command": ["sleep", "infinity"],
+                    "env": [{"name": "MANDOFORGE_REMOTE_COMPUTER_MODE", "value": "skeleton"}],
+                    "securityContext": {
+                        "allowPrivilegeEscalation": false,
+                        "readOnlyRootFilesystem": false,
+                        "capabilities": {"drop": ["ALL"]}
+                    },
+                    "volumeMounts": [
+                        {"name": "state", "mountPath": "/agent-state"},
+                        {"name": "state-contract", "mountPath": "/agent-state/.mandoforge/contract", "readOnly": true},
+                        {"name": "workspace", "mountPath": "/workspace"}
+                    ],
+                    "resources": {
+                        "requests": {"cpu": "100m", "memory": "256Mi"},
+                        "limits": {"cpu": "1", "memory": "1Gi"}
+                    }
                 },
-                "volumeMounts": [
-                    {"name": "state", "mountPath": "/agent-state"},
-                    {"name": "state-contract", "mountPath": "/agent-state/.mandoforge/contract", "readOnly": true},
-                    {"name": "workspace", "mountPath": "/workspace"}
-                ],
-                "resources": {
-                    "requests": {"cpu": "100m", "memory": "256Mi"},
-                    "limits": {"cpu": "1", "memory": "1Gi"}
+                {
+                    "name": "artifact-discovery",
+                    "image": "python:3.12-alpine",
+                    "imagePullPolicy": "IfNotPresent",
+                    "command": ["python", "/opt/mandoforge/discover-artifacts.py"],
+                    "env": [
+                        {"name": "MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED", "value": artifact_discovery_enabled},
+                        {"name": "MANDOFORGE_API_URL", "value": "http://mandoforge-api:8080"},
+                        {"name": "MANDOFORGE_SESSION_ID", "value": session_id},
+                        {"name": "MANDOFORGE_REMOTE_COMPUTER_ID", "value": remote_computer_id},
+                        {"name": "MANDOFORGE_ASSIGNMENT_ID", "value": assignment_id},
+                        {"name": "MANDOFORGE_ARTIFACT_DIR", "value": "/workspace/artifacts"},
+                        {"name": "MANDOFORGE_ARTIFACT_DISCOVERY_INTERVAL_SECONDS", "value": "30"},
+                        {"name": "MANDOFORGE_ARTIFACT_DISCOVERY_MAX_FILES", "value": "50"}
+                    ],
+                    "securityContext": {
+                        "allowPrivilegeEscalation": false,
+                        "readOnlyRootFilesystem": true,
+                        "capabilities": {"drop": ["ALL"]}
+                    },
+                    "volumeMounts": [
+                        {"name": "workspace", "mountPath": "/workspace", "readOnly": true},
+                        {"name": "artifact-discovery", "mountPath": "/opt/mandoforge", "readOnly": true}
+                    ],
+                    "resources": {
+                        "requests": {"cpu": "25m", "memory": "64Mi"},
+                        "limits": {"cpu": "100m", "memory": "128Mi"}
+                    }
                 }
-            }],
+            ],
             "volumes": [
                 {"name": "state", "persistentVolumeClaim": {"claimName": "mandoforge-remote-computer-state"}},
                 {"name": "state-contract", "configMap": {"name": "mandoforge-remote-computer-state-contract"}},
-                {"name": "workspace", "emptyDir": {}}
+                {"name": "workspace", "emptyDir": {}},
+                {"name": "artifact-discovery", "configMap": {"name": "mandoforge-remote-computer-artifact-discovery"}}
             ]
         }
     })
@@ -1361,6 +1420,28 @@ mod tests {
                         && mount["mountPath"] == "/agent-state/.mandoforge/contract"
                         && mount["readOnly"] == json!(true))
             );
+            let sidecar = body["spec"]["containers"]
+                .as_array()
+                .expect("containers")
+                .iter()
+                .find(|container| container["name"] == "artifact-discovery")
+                .expect("artifact discovery sidecar");
+            assert_eq!(sidecar["image"], "python:3.12-alpine");
+            let sidecar_env = sidecar["env"].as_array().expect("sidecar env");
+            assert!(sidecar_env.iter().any(|env| {
+                env["name"] == "MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED" && env["value"] == "true"
+            }));
+            assert!(sidecar_env.iter().any(|env| {
+                env["name"] == "MANDOFORGE_SESSION_ID"
+                    && env["value"] == "00000000-0000-0000-0000-000000000000"
+            }));
+            assert!(sidecar_env.iter().any(|env| {
+                env["name"] == "MANDOFORGE_REMOTE_COMPUTER_ID"
+                    && env["value"] == "00000000-0000-0000-0000-000000000001"
+            }));
+            assert!(sidecar_env.iter().any(|env| {
+                env["name"] == "MANDOFORGE_ASSIGNMENT_ID" && env["value"] == "assignment-1"
+            }));
             assert!(
                 body["spec"]["volumes"]
                     .as_array()
@@ -1428,10 +1509,13 @@ mod tests {
                 &config,
                 RemoteComputerRunnerDryRunRequest {
                     operation: Some("live_create".to_string()),
-                    remote_computer_id: None,
-                    session_id: None,
+                    remote_computer_id: Some(Uuid::from_u128(1)),
+                    session_id: Some(Uuid::nil()),
                     pod_name: Some("agent-remote-computer-test".to_string()),
-                    metadata: None,
+                    metadata: Some(json!({
+                        "artifact_discovery_enabled": true,
+                        "assignment_id": "assignment-1"
+                    })),
                 },
             )
             .await;
