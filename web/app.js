@@ -227,6 +227,7 @@ const deliverUsageExportButton = document.querySelector("#deliver-usage-export")
 const costAlertRouteForm = document.querySelector("#cost-alert-route-form");
 const checkCodexHealthButton = document.querySelector("#check-codex-health");
 const validateCodexDeploymentButton = document.querySelector("#validate-codex-deployment");
+const validateCodexOpsButton = document.querySelector("#validate-codex-ops");
 const loadCodexRunsButton = document.querySelector("#load-codex-runs");
 const pollStaleCodexRunsButton = document.querySelector("#poll-stale-codex-runs");
 const codexThreadForm = document.querySelector("#codex-thread-form");
@@ -301,6 +302,7 @@ runSchedulerDueButton.addEventListener("click", runSchedulerDueTasks);
 costAlertRouteForm.addEventListener("submit", createCostAlertRoute);
 checkCodexHealthButton.addEventListener("click", checkCodexAppServerHealth);
 validateCodexDeploymentButton.addEventListener("click", validateCodexDeployment);
+validateCodexOpsButton.addEventListener("click", validateCodexOps);
 loadCodexRunsButton.addEventListener("click", loadCodexAppServerRuns);
 pollStaleCodexRunsButton.addEventListener("click", pollStaleCodexRuns);
 codexThreadForm.addEventListener("submit", createCodexThread);
@@ -1102,6 +1104,15 @@ async function checkCodexAppServerHealth() {
 async function validateCodexDeployment() {
   await captureCodexAppServer("deploymentValidation", async () => {
     state.codexAppServer.deploymentValidation = await api("/api/codex-app-server/deployment/validate", {
+      method: "POST",
+    });
+    state.codexAppServer.controlSummary = await api("/api/codex-app-server/control-plane/summary");
+  });
+}
+
+async function validateCodexOps() {
+  await captureCodexAppServer("opsValidation", async () => {
+    state.codexAppServer.opsValidation = await api("/api/codex-app-server/ops/validate", {
       method: "POST",
     });
     state.codexAppServer.controlSummary = await api("/api/codex-app-server/control-plane/summary");
@@ -2015,10 +2026,16 @@ function renderCodexAppServer() {
       </div>
       <div class="muted">Configured: ${escapeHtml(controlSummary.configured ? "yes" : "no")} · timeout ${escapeHtml(controlSummary.timeout_seconds ?? "n/a")}s · latest ${escapeHtml(controlSummary.latest_seen_at || "none")}</div>
       <div class="muted">Production ops: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · stale candidates ${formatInteger(productionOps.stale_candidate_count || 0)} · failed turns ${formatInteger(productionOps.failed_turn_count || 0)} · latest supervision ${escapeHtml(productionOps.latest_stale_poll_at || "none")}</div>
+      <div class="muted">Ops controller: required ${productionOps.controller_required ? "yes" : "no"} · configured ${productionOps.controller_configured ? "yes" : "no"} · latest ${escapeHtml(productionOps.latest_controller_status || "none")} · validated ${productionOps.latest_controller_validated ? "yes" : "no"}</div>
       <div class="muted">${escapeHtml(productionOps.message || "Codex App Server production ops are not reported")}</div>
       <div class="muted">Deployment validation: ${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · validated ${deploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${deploymentReadiness.latest_validation_healthy ? "yes" : "no"} · latest ${escapeHtml(deploymentReadiness.latest_validation_at || "none")}</div>
       <div class="muted">Deployment controller: required ${deploymentReadiness.controller_required ? "yes" : "no"} · configured ${deploymentReadiness.controller_configured ? "yes" : "no"} · latest ${escapeHtml(deploymentReadiness.latest_controller_status || "none")} · executions ${formatInteger(deploymentReadiness.controller_execution_count || 0)} · failed ${formatInteger(deploymentReadiness.controller_failed_count || 0)}</div>
       <div class="muted">${escapeHtml(deploymentReadiness.message || "Codex App Server deployment validation is not reported")}</div>
+      ${
+        codex.opsValidation
+          ? `<div class="muted">Latest ops validation: ${escapeHtml(codex.opsValidation.status)} · production ops ${escapeHtml(codex.opsValidation.production_ops_status || "unknown")} · controller ${escapeHtml(codex.opsValidation.controller_execution?.status || "skipped")} · checked ${escapeHtml(codex.opsValidation.checked_at)}</div>`
+          : ""
+      }
       ${
         controlAttention.length
           ? `<table class="usage-table">

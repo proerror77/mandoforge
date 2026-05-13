@@ -1126,7 +1126,22 @@ struct CodexAppServerProductionOpsReadiness {
     latest_stale_poll_age_hours: Option<i64>,
     latest_stale_poll_candidate_count: usize,
     latest_stale_poll_failed_count: usize,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAppServerOpsValidationRun {
+    status: String,
+    configured: bool,
+    production_ops_status: String,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
+    checked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3731,6 +3746,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/codex-app-server/deployment/validate",
             post(validate_codex_app_server_deployment),
+        )
+        .route(
+            "/api/codex-app-server/ops/validate",
+            post(validate_codex_app_server_ops),
         )
         .route(
             "/api/codex-app-server/runs",
@@ -11297,6 +11316,118 @@ async fn validate_codex_app_server_deployment(
     Ok(Json(result))
 }
 
+async fn validate_codex_app_server_ops(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CodexAppServerOpsValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "codex_app_server".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let checked_at = Utc::now();
+    let runs = state.list_codex_app_server_runs().await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let summary = build_codex_app_server_control_plane_summary(
+        state.codex_app_server_config.as_ref(),
+        &runs,
+        &audit_logs,
+        checked_at,
+    );
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = codex_app_server_ops_controller_required(&lookup);
+    let controller_configured = codex_app_server_ops_controller_configured(&lookup);
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "controller_not_attempted"
+        } else {
+            "codex_app_server_ops_controller_not_configured"
+        }
+    });
+    let mut issues = Vec::new();
+    if summary.production_ops.production_blocked {
+        issues.push(summary.production_ops.message.clone());
+    }
+    if controller_configured {
+        match execute_codex_app_server_ops_controller(
+            &lookup,
+            Some(principal.subject_id.as_str()),
+            checked_at,
+            &summary,
+        )
+        .await
+        {
+            Ok(execution) => {
+                if execution.get("status").and_then(Value::as_str) != Some("validated") {
+                    issues.push("Codex App Server ops controller did not validate".to_string());
+                }
+                controller_execution = execution;
+            }
+            Err(error) => {
+                issues.push("Codex App Server ops controller failed".to_string());
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    } else if controller_required {
+        issues.push("Codex App Server ops controller is required but not configured".to_string());
+    }
+    if controller_required
+        && controller_execution.get("status").and_then(Value::as_str) != Some("validated")
+    {
+        issues.push(
+            "Codex App Server ops controller evidence is missing or not validated".to_string(),
+        );
+    }
+    dedupe_strings(&mut issues);
+    let status = if issues.is_empty() {
+        "validated"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    let run = CodexAppServerOpsValidationRun {
+        status,
+        configured: summary.configured,
+        production_ops_status: summary.production_ops.status,
+        controller_required,
+        controller_configured,
+        controller_execution,
+        checked_at,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "codex_app_server.ops_validation",
+            "codex_app_server",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": run.status,
+                "configured": run.configured,
+                "production_ops_status": run.production_ops_status,
+                "controller_required": run.controller_required,
+                "controller_configured": run.controller_configured,
+                "controller_execution": run.controller_execution,
+                "issues": issues,
+                "checked_at": run.checked_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
 async fn create_codex_thread(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -11928,14 +12059,16 @@ fn build_codex_app_server_control_plane_summary(
     }
 
     let timeout_seconds = config.map(|config| config.timeout_seconds);
+    let lookup = |key: &str| std::env::var(key).ok();
     let production_ops = build_codex_app_server_production_ops_readiness(
         config.is_some(),
         &trace_summary,
         stale_candidate_count,
         audit_logs,
         generated_at,
+        codex_app_server_ops_controller_required(&lookup),
+        codex_app_server_ops_controller_configured(&lookup),
     );
-    let lookup = |key: &str| std::env::var(key).ok();
     let deployment_readiness = build_codex_app_server_deployment_readiness(
         config.is_some(),
         audit_logs,
@@ -12010,6 +12143,8 @@ fn build_codex_app_server_production_ops_readiness(
     stale_candidate_count: usize,
     audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
 ) -> CodexAppServerProductionOpsReadiness {
     let latest_stale_poll = audit_logs
         .iter()
@@ -12026,61 +12161,62 @@ fn build_codex_app_server_production_ops_readiness(
         .and_then(|log| log.details.get("failed_count"))
         .and_then(|value| value.as_u64())
         .unwrap_or(0) as usize;
-    let (status, production_blocked, message) = if !configured {
-        (
-            "blocked",
-            true,
-            "Codex App Server production ops are blocked until the adapter endpoint is configured"
-                .to_string(),
-        )
-    } else if trace_summary.failed_turn_count > 0 {
-        (
-            "blocked",
-            true,
-            "Codex App Server production ops are blocked by failed/interrupted turn traces"
-                .to_string(),
-        )
-    } else if stale_candidate_count > 0 {
-        (
-            "blocked",
-            true,
-            "Codex App Server production ops are blocked by stale non-terminal turns".to_string(),
-        )
-    } else if latest_stale_poll.is_none() {
-        (
-            "blocked",
-            true,
-            "Codex App Server production ops are blocked until stale-turn supervision has run"
-                .to_string(),
-        )
-    } else if latest_stale_poll_failed_count > 0 {
-        (
-            "blocked",
-            true,
-            "Codex App Server production ops are blocked by the latest failed stale-turn poll run"
-                .to_string(),
-        )
-    } else if latest_stale_poll_age_hours.is_some_and(|hours| hours >= 24) {
-        (
-            "stale",
-            true,
-            "Codex App Server production ops are blocked until stale-turn supervision is refreshed"
-                .to_string(),
+    let latest_controller_status = audit_logs
+        .iter()
+        .filter(|log| log.action == "codex_app_server.ops_validation")
+        .max_by_key(|log| log.created_at)
+        .and_then(|log| {
+            log.details["controller_execution"]["status"]
+                .as_str()
+                .or_else(|| log.details["status"].as_str())
+        })
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
+    let mut blocking_reasons = Vec::new();
+    if !configured {
+        blocking_reasons.push("adapter endpoint is not configured".to_string());
+    }
+    if trace_summary.failed_turn_count > 0 {
+        blocking_reasons.push("failed/interrupted turn traces are present".to_string());
+    }
+    if stale_candidate_count > 0 {
+        blocking_reasons.push("stale non-terminal turns are present".to_string());
+    }
+    if latest_stale_poll.is_none() {
+        blocking_reasons.push("stale-turn supervision has not run".to_string());
+    }
+    if latest_stale_poll_failed_count > 0 {
+        blocking_reasons.push("latest stale-turn poll run failed".to_string());
+    }
+    if latest_stale_poll_age_hours.is_some_and(|hours| hours >= 24) {
+        blocking_reasons.push("stale-turn supervision is stale".to_string());
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons
+            .push("Codex App Server ops controller is required but not configured".to_string());
+    }
+    if controller_required && !latest_controller_validated {
+        blocking_reasons.push(
+            "Codex App Server ops controller evidence is missing or not validated".to_string(),
+        );
+    }
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else if trace_summary.active_turn_count > 0 {
+        "attention"
+    } else {
+        "ready"
+    };
+    let message = if production_blocked {
+        format!(
+            "Codex App Server production ops are blocked: {}",
+            blocking_reasons.join("; ")
         )
     } else if trace_summary.active_turn_count > 0 {
-        (
-            "attention",
-            false,
-            "Codex App Server has active non-terminal turns, but stale-turn supervision is fresh"
-                .to_string(),
-        )
+        "Codex App Server has active non-terminal turns, but stale-turn supervision and required ops controller evidence are fresh".to_string()
     } else {
-        (
-            "ready",
-            false,
-            "Codex App Server stale-turn supervision is fresh and no failed or stale turns remain"
-                .to_string(),
-        )
+        "Codex App Server stale-turn supervision, turn traces, and required ops controller evidence are ready".to_string()
     };
     CodexAppServerProductionOpsReadiness {
         status: status.to_string(),
@@ -12094,6 +12230,10 @@ fn build_codex_app_server_production_ops_readiness(
         latest_stale_poll_age_hours,
         latest_stale_poll_candidate_count,
         latest_stale_poll_failed_count,
+        controller_required,
+        controller_configured,
+        latest_controller_status,
+        latest_controller_validated,
         message,
     }
 }
@@ -12233,6 +12373,101 @@ where
     lookup("MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
+}
+
+fn codex_app_server_ops_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn codex_app_server_ops_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_codex_app_server_ops_controller<F>(
+    lookup: &F,
+    subject: Option<&str>,
+    checked_at: DateTime<Utc>,
+    summary: &CodexAppServerControlPlaneSummary,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_CODEX_APP_SERVER_OPS_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.codex_app_server_ops",
+        "subject": subject,
+        "checked_at": checked_at,
+        "control_plane": {
+            "configured": summary.configured,
+            "status": summary.status,
+            "endpoint_configured": summary.endpoint_configured,
+            "timeout_seconds": summary.timeout_seconds,
+            "run_count": summary.run_count,
+            "turn_count": summary.turn_count,
+            "active_turn_count": summary.active_turn_count,
+            "failed_turn_count": summary.failed_turn_count,
+            "stale_candidate_count": summary.stale_candidate_count,
+            "pollable_turn_count": summary.pollable_turn_count,
+            "production_ops": summary.production_ops,
+            "deployment_readiness": summary.deployment_readiness,
+        },
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "Codex App Server ops controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(controller_status, "validated" | "success" | "ok");
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "ops_id": body.get("ops_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "checks": body.get("checks").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 async fn execute_codex_app_server_deployment_controller<F>(
@@ -28460,6 +28695,53 @@ not json
         }
     }
 
+    fn ready_codex_app_server_control_summary(
+        generated_at: DateTime<Utc>,
+    ) -> CodexAppServerControlPlaneSummary {
+        let config = CodexAppServerConfig {
+            endpoint: "http://codex-app-server.test".to_string(),
+            timeout_seconds: 5,
+        };
+        let stale_poll_audit = AuditLog {
+            id: Uuid::new_v4(),
+            session_id: None,
+            actor_type: "system".to_string(),
+            actor_id: None,
+            action: "codex_app_server.stale_poll_due_run".to_string(),
+            resource_type: "codex_app_server".to_string(),
+            resource_id: None,
+            details: json!({
+                "candidate_count": 0,
+                "failed_count": 0
+            }),
+            created_at: generated_at,
+        };
+        let deployment_audit = AuditLog {
+            id: Uuid::new_v4(),
+            session_id: None,
+            actor_type: "user".to_string(),
+            actor_id: None,
+            action: "codex_app_server.deployment_validation".to_string(),
+            resource_type: "codex_app_server".to_string(),
+            resource_id: None,
+            details: json!({
+                "status": "healthy",
+                "healthy": true,
+                "configured": true,
+                "endpoint_configured": true,
+                "timeout_seconds": 5,
+                "issues": []
+            }),
+            created_at: generated_at,
+        };
+        build_codex_app_server_control_plane_summary(
+            Some(&config),
+            &[],
+            &[stale_poll_audit, deployment_audit],
+            generated_at,
+        )
+    }
+
     #[test]
     fn builds_codex_app_server_turn_trace_summary() {
         let base_time = "2026-05-13T00:00:00Z"
@@ -28612,7 +28894,7 @@ not json
             without_supervision
                 .production_ops
                 .message
-                .contains("stale-turn supervision has run")
+                .contains("stale-turn supervision has not run")
         );
         assert_eq!(without_supervision.deployment_readiness.status, "blocked");
         assert!(
@@ -28729,6 +29011,131 @@ not json
         );
 
         controller_server.abort();
+    }
+
+    #[tokio::test]
+    async fn codex_app_server_ops_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("codex app server ops listener");
+        let controller_addr = listener.local_addr().expect("codex ops addr");
+        let controller = Router::new()
+            .route(
+                "/codex-app-server-ops",
+                post(mock_codex_app_server_ops_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock codex app server ops controller");
+        });
+        let checked_at = Utc::now();
+        let summary = ready_codex_app_server_control_summary(checked_at);
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/codex-app-server-ops"))
+            }
+            "MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN" => {
+                Some("codex-ops-token".to_string())
+            }
+            _ => None,
+        };
+
+        let execution =
+            execute_codex_app_server_ops_controller(&lookup, Some("admin-1"), checked_at, &summary)
+                .await
+                .expect("codex app server ops controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(execution["ops_id"], "codex-ops-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.codex_app_server_ops");
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["control_plane"]["configured"], true);
+        assert!(payloads[0]["control_plane"]["endpoint"].is_null());
+        assert!(payloads[0]["secret"].is_null());
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn codex_app_server_production_ops_requires_controller_when_configured() {
+        let base_time = "2026-05-13T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid time");
+        let runs = vec![CodexAppServerRun {
+            id: Uuid::new_v4(),
+            operation: "turn.poll".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            turn_id: Some("turn-ready".to_string()),
+            command_id: None,
+            status: "completed".to_string(),
+            request: json!({}),
+            response: json!({"status": "completed"}),
+            error: None,
+            created_at: base_time,
+        }];
+        let trace_summary = build_codex_app_server_trace_summary(&runs);
+        let stale_poll_audit = AuditLog {
+            id: Uuid::new_v4(),
+            session_id: None,
+            actor_type: "system".to_string(),
+            actor_id: None,
+            action: "codex_app_server.stale_poll_due_run".to_string(),
+            resource_type: "codex_app_server".to_string(),
+            resource_id: None,
+            details: json!({
+                "candidate_count": 0,
+                "failed_count": 0
+            }),
+            created_at: base_time + chrono::Duration::minutes(1),
+        };
+        let missing = build_codex_app_server_production_ops_readiness(
+            true,
+            &trace_summary,
+            0,
+            &[stale_poll_audit.clone()],
+            base_time + chrono::Duration::minutes(5),
+            true,
+            false,
+        );
+        assert_eq!(missing.status, "blocked");
+        assert!(missing.production_blocked);
+        assert!(missing.message.contains("ops controller is required"));
+
+        let validated_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "codex_app_server.ops_validation",
+            "codex_app_server",
+            None,
+            json!({
+                "status": "validated",
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "ops_id": "codex-ops-1"
+                }
+            }),
+        );
+        let ready = build_codex_app_server_production_ops_readiness(
+            true,
+            &trace_summary,
+            0,
+            &[stale_poll_audit, validated_audit],
+            base_time + chrono::Duration::minutes(5),
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert!(ready.latest_controller_validated);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
     }
 
     #[test]
@@ -34298,6 +34705,30 @@ not json
             "steps": [
                 {"name": "health", "status": "passed"},
                 {"name": "turn-control", "status": "passed"}
+            ]
+        }))
+    }
+
+    async fn mock_codex_app_server_ops_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer codex-ops-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "ops_id": "codex-ops-1",
+            "message": "Codex App Server production ops validated",
+            "checks": [
+                {"name": "stale_poll_supervision", "status": "passed"},
+                {"name": "turn_trace_health", "status": "passed"},
+                {"name": "artifact_sync_ops", "status": "passed"}
             ]
         }))
     }
