@@ -322,6 +322,14 @@
                   Risk filter
                   <input name="risk_filter" value="all" />
                 </label>
+                <label>
+                  Max attempts
+                  <input name="max_attempts" type="number" min="1" max="5" value="2" />
+                </label>
+                <label>
+                  Backoff seconds
+                  <input name="backoff_seconds" type="number" min="0" max="60" value="0" />
+                </label>
                 <button type="submit">Create Notification Policy</button>
               </form>
               <div id="approval-notification-routing" class="list"></div>

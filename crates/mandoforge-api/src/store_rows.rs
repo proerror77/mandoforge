@@ -196,6 +196,8 @@ pub(crate) fn approval_notification_channel_policy_from_row(
         channel: row.try_get("channel")?,
         target_env: row.try_get("target_env")?,
         risk_filter: row.try_get("risk_filter")?,
+        max_attempts: row.try_get("max_attempts")?,
+        backoff_seconds: row.try_get("backoff_seconds")?,
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })

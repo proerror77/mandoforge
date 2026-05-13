@@ -27,7 +27,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, name, channel, target_env, risk_filter, status, created_at
+                    "SELECT id, name, channel, target_env, risk_filter, max_attempts, backoff_seconds, status, created_at
                      FROM approval_notification_channel_policies
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
@@ -52,6 +52,8 @@ impl AppState {
             channel: input.channel,
             target_env: input.target_env,
             risk_filter: input.risk_filter,
+            max_attempts: input.max_attempts,
+            backoff_seconds: input.backoff_seconds,
             status: "active".to_string(),
             created_at: Utc::now(),
         };
@@ -74,8 +76,8 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
                     "INSERT INTO approval_notification_channel_policies
-                     (id, tenant_id, name, channel, target_env, risk_filter, status, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                     (id, tenant_id, name, channel, target_env, risk_filter, max_attempts, backoff_seconds, status, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 )
                 .bind(policy.id)
                 .bind(self.tenant_id)
@@ -83,6 +85,8 @@ impl AppState {
                 .bind(&policy.channel)
                 .bind(&policy.target_env)
                 .bind(&policy.risk_filter)
+                .bind(policy.max_attempts)
+                .bind(policy.backoff_seconds)
                 .bind(&policy.status)
                 .bind(policy.created_at)
                 .execute(pool)
@@ -110,7 +114,7 @@ impl AppState {
                     "UPDATE approval_notification_channel_policies
                      SET status = 'archived'
                      WHERE tenant_id = $1 AND id = $2
-                     RETURNING id, name, channel, target_env, risk_filter, status, created_at",
+                     RETURNING id, name, channel, target_env, risk_filter, max_attempts, backoff_seconds, status, created_at",
                 )
                 .bind(self.tenant_id)
                 .bind(id)

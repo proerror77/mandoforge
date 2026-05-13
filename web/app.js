@@ -510,6 +510,8 @@ async function createApprovalNotificationChannelPolicy(event) {
       channel: String(form.get("channel") || "").trim(),
       target_env: String(form.get("target_env") || "").trim() || null,
       risk_filter: String(form.get("risk_filter") || "").trim() || "all",
+      max_attempts: Number(form.get("max_attempts") || 1),
+      backoff_seconds: Number(form.get("backoff_seconds") || 0),
     }),
   });
   await refreshOps();
@@ -3846,6 +3848,7 @@ function renderApprovalNotificationRouting() {
                 <th>Policy</th>
                 <th>Channel</th>
                 <th>Risk</th>
+                <th>Retry</th>
                 <th>Target Env</th>
                 <th>Status</th>
               </tr>
@@ -3859,6 +3862,7 @@ function renderApprovalNotificationRouting() {
                       <td>${escapeHtml(policy.name)}</td>
                       <td>${escapeHtml(policy.channel)}</td>
                       <td>${escapeHtml(policy.risk_filter)}</td>
+                      <td>${formatInteger(policy.max_attempts)} attempts · ${formatInteger(policy.backoff_seconds)}s</td>
                       <td>${escapeHtml(policy.target_env || "default env boundary")}</td>
                       <td>${escapeHtml(policy.status)}</td>
                     </tr>

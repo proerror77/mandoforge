@@ -540,6 +540,9 @@ struct ApprovalNotificationChannelDelivery {
     status: String,
     delivered: bool,
     target_configured: bool,
+    attempt_count: usize,
+    max_attempts: usize,
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -630,6 +633,8 @@ struct ApprovalNotificationChannelPolicy {
     channel: String,
     target_env: Option<String>,
     risk_filter: String,
+    max_attempts: i32,
+    backoff_seconds: i32,
     status: String,
     created_at: DateTime<Utc>,
 }
@@ -642,6 +647,10 @@ struct CreateApprovalNotificationChannelPolicy {
     target_env: Option<String>,
     #[serde(default = "default_approval_notification_risk_filter")]
     risk_filter: String,
+    #[serde(default = "default_approval_notification_max_attempts")]
+    max_attempts: i32,
+    #[serde(default)]
+    backoff_seconds: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14316,6 +14325,10 @@ fn default_approval_notification_risk_filter() -> String {
     "all".to_string()
 }
 
+fn default_approval_notification_max_attempts() -> i32 {
+    1
+}
+
 fn validate_approval_notification_channel_policy_input(
     mut input: CreateApprovalNotificationChannelPolicy,
 ) -> Result<CreateApprovalNotificationChannelPolicy, AppError> {
@@ -14344,6 +14357,8 @@ fn validate_approval_notification_channel_policy_input(
             "approval notification channel policy risk_filter must be all, low, medium, high, or critical",
         ));
     }
+    input.max_attempts = input.max_attempts.clamp(1, 5);
+    input.backoff_seconds = input.backoff_seconds.clamp(0, 60);
     Ok(input)
 }
 
@@ -14910,6 +14925,8 @@ async fn create_approval_notification_channel_policy(
                 "channel": policy.channel,
                 "target_env": policy.target_env,
                 "risk_filter": policy.risk_filter,
+                "max_attempts": policy.max_attempts,
+                "backoff_seconds": policy.backoff_seconds,
                 "status": policy.status,
             }),
         ))
@@ -14948,6 +14965,8 @@ async fn archive_approval_notification_channel_policy(
                 "channel": policy.channel,
                 "target_env": policy.target_env,
                 "risk_filter": policy.risk_filter,
+                "max_attempts": policy.max_attempts,
+                "backoff_seconds": policy.backoff_seconds,
                 "status": policy.status,
             }),
         ))
@@ -15437,6 +15456,8 @@ struct ApprovalNotificationChannelConfig {
     policy_id: Option<Uuid>,
     policy_name: Option<String>,
     url: Option<String>,
+    max_attempts: usize,
+    backoff_seconds: u64,
 }
 
 async fn approval_notification_channel_configs(
@@ -15458,6 +15479,8 @@ async fn approval_notification_channel_configs(
                 policy_id: Some(policy.id),
                 policy_name: Some(policy.name.clone()),
                 url: approval_notification_policy_url(state, &policy),
+                max_attempts: policy.max_attempts.max(1) as usize,
+                backoff_seconds: policy.backoff_seconds.max(0) as u64,
             })
             .collect());
     }
@@ -15468,6 +15491,8 @@ async fn approval_notification_channel_configs(
             policy_id: None,
             policy_name: None,
             url: Some(url),
+            max_attempts: 1,
+            backoff_seconds: 0,
         });
     }
     if let Some(url) = approval_slack_webhook_url_from_env() {
@@ -15476,6 +15501,8 @@ async fn approval_notification_channel_configs(
             policy_id: None,
             policy_name: None,
             url: Some(url),
+            max_attempts: 1,
+            backoff_seconds: 0,
         });
     }
     if let Some(url) = approval_email_relay_url_from_env() {
@@ -15484,6 +15511,8 @@ async fn approval_notification_channel_configs(
             policy_id: None,
             policy_name: None,
             url: Some(url),
+            max_attempts: 1,
+            backoff_seconds: 0,
         });
     }
     Ok(configs)
@@ -15568,6 +15597,9 @@ async fn deliver_approval_notification_channel(
             status: "reserved".to_string(),
             delivered: false,
             target_configured: false,
+            attempt_count: 0,
+            max_attempts: config.max_attempts,
+            last_error: None,
         });
     };
     let payload = match config.channel.as_str() {
@@ -15592,26 +15624,55 @@ async fn deliver_approval_notification_channel(
             "delivered_at": delivered_at,
         }),
     };
-    let response = tokio::time::timeout(
-        Duration::from_secs(10),
-        reqwest::Client::new().post(url).json(&payload).send(),
-    )
-    .await??;
-    if !response.status().is_success() {
-        return Err(AppError::bad_request(format!(
-            "approval {} notification returned status {}",
-            config.channel,
-            response.status()
-        )));
+    let client = reqwest::Client::new();
+    let mut last_error = None;
+    for attempt in 1..=config.max_attempts {
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            client.post(url).json(&payload).send(),
+        )
+        .await
+        {
+            Ok(Ok(response)) if response.status().is_success() => {
+                return Ok(ApprovalNotificationChannelDelivery {
+                    channel: config.channel.to_string(),
+                    policy_id: config.policy_id,
+                    policy_name: config.policy_name.clone(),
+                    status: "delivered".to_string(),
+                    delivered: true,
+                    target_configured: true,
+                    attempt_count: attempt,
+                    max_attempts: config.max_attempts,
+                    last_error: None,
+                });
+            }
+            Ok(Ok(response)) => {
+                last_error = Some(format!(
+                    "approval {} notification returned status {}",
+                    config.channel,
+                    response.status()
+                ));
+            }
+            Ok(Err(error)) => {
+                last_error = Some(format!(
+                    "approval {} notification request failed: {error}",
+                    config.channel
+                ));
+            }
+            Err(_) => {
+                last_error = Some(format!(
+                    "approval {} notification timed out after 10 seconds",
+                    config.channel
+                ));
+            }
+        }
+        if attempt < config.max_attempts && config.backoff_seconds > 0 {
+            tokio::time::sleep(Duration::from_secs(config.backoff_seconds)).await;
+        }
     }
-    Ok(ApprovalNotificationChannelDelivery {
-        channel: config.channel.to_string(),
-        policy_id: config.policy_id,
-        policy_name: config.policy_name.clone(),
-        status: "delivered".to_string(),
-        delivered: true,
-        target_configured: true,
-    })
+    Err(AppError::bad_request(last_error.unwrap_or_else(|| {
+        format!("approval {} notification failed", config.channel)
+    })))
 }
 
 fn slack_approval_notification_payload(
@@ -18449,6 +18510,7 @@ not json
         assert!(names.contains(&"0020_remote_computer_attachments.sql"));
         assert!(names.contains(&"0021_remote_computer_job_assignments.sql"));
         assert!(names.contains(&"0022_approval_notification_channel_policies.sql"));
+        assert!(names.contains(&"0023_approval_notification_retries.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -21065,6 +21127,22 @@ not json
         assert!(payload["approval"]["id"].as_str().is_some());
         assert!(payload["target_count"].as_u64().unwrap_or_default() >= 1);
         Json(json!({"accepted": true}))
+    }
+
+    async fn flaky_approval_webhook(
+        State(counter): State<Arc<std::sync::atomic::AtomicUsize>>,
+        Json(payload): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        assert_eq!(payload["type"], "mandoforge.approval_requested");
+        let attempt = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attempt == 0 {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"accepted": false})),
+            )
+        } else {
+            (StatusCode::OK, Json(json!({"accepted": true})))
+        }
     }
 
     async fn mock_provider_models(headers: HeaderMap) -> Json<Value> {
@@ -24766,6 +24844,103 @@ not json
                 .iter()
                 .any(|log| log.action == "approval.notification_channel_policy_archived")
         );
+    }
+
+    #[tokio::test]
+    async fn approval_notification_channel_policy_retries_transient_delivery_failure() {
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let webhook = Router::new()
+            .route("/approval", post(flaky_approval_webhook))
+            .with_state(counter.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, webhook)
+                .await
+                .expect("mock approval webhook");
+        });
+        let app = test_app_with_approval_webhook(format!("http://{addr}/approval")).await;
+
+        let policy: ApprovalNotificationChannelPolicy = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/approvals/notification-channel-policies",
+                json!({
+                    "name": "retrying-webhook-policy",
+                    "channel": "webhook",
+                    "risk_filter": "high",
+                    "max_attempts": 2,
+                    "backoff_seconds": 0
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(policy.max_attempts, 2);
+
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "approval retry"}),
+            ),
+        )
+        .await;
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/approval.request/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "action": "manual.retry_review",
+                        "risk_level": "high",
+                        "reason": "Retry a transient notification failure.",
+                        "approver_subject": "approver-1"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+
+        let delivery: ApprovalNotificationDelivery = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/deliver"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(delivery.status, "delivered");
+        assert_eq!(delivery.channel_deliveries.len(), 1);
+        assert_eq!(delivery.channel_deliveries[0].attempt_count, 2);
+        assert_eq!(delivery.channel_deliveries[0].max_attempts, 2);
+        assert_eq!(delivery.channel_deliveries[0].last_error, None);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+        server.abort();
     }
 
     #[tokio::test]
