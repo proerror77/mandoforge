@@ -69,10 +69,20 @@ pub(crate) struct RedisStreamClient;
 #[allow(dead_code)]
 pub(crate) struct NatsCoreClient;
 
+#[allow(dead_code)]
+pub(crate) struct NatsJetStreamClient;
+
 #[derive(Debug, Clone)]
 struct BrokerPendingExecutionJob {
     message_id: String,
     job: ExecutionJob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NatsProtocolMessage {
+    subject: String,
+    reply: Option<String>,
+    payload: String,
 }
 
 #[allow(dead_code)]
@@ -456,6 +466,173 @@ impl NatsCoreClient {
     }
 }
 
+#[allow(dead_code)]
+impl NatsJetStreamClient {
+    pub(crate) async fn publish(
+        config: &BrokerQueueConfig,
+        payload: &RedisExecutionJobPayload,
+    ) -> Result<(), AppError> {
+        let command = NatsJetStreamCommand::publish_job(config, payload)?;
+        let response = Self::request_json(config, &command).await?;
+        ensure_jetstream_response_ok(&response, "publish job")
+    }
+
+    pub(crate) async fn ensure_stream_and_consumer(
+        config: &BrokerQueueConfig,
+    ) -> Result<(), AppError> {
+        match Self::request_json(config, &NatsJetStreamCommand::stream_info(config)?).await {
+            Ok(response) => ensure_jetstream_response_ok(&response, "stream info")?,
+            Err(error) if error.message.contains("JetStream error 404") => {
+                let response =
+                    Self::request_json(config, &NatsJetStreamCommand::stream_create(config)?)
+                        .await?;
+                ensure_jetstream_response_ok(&response, "stream create")?;
+            }
+            Err(error) => return Err(error),
+        }
+
+        match Self::request_json(config, &NatsJetStreamCommand::consumer_info(config)?).await {
+            Ok(response) => ensure_jetstream_response_ok(&response, "consumer info"),
+            Err(error) if error.message.contains("JetStream error 404") => {
+                let response =
+                    Self::request_json(config, &NatsJetStreamCommand::consumer_create(config)?)
+                        .await?;
+                ensure_jetstream_response_ok(&response, "consumer create")
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) async fn drain_once(
+        config: &BrokerQueueConfig,
+    ) -> Result<Vec<(String, RedisExecutionJobPayload)>, AppError> {
+        ensure_jetstream_config(config)?;
+        Self::ensure_stream_and_consumer(config).await?;
+        let inbox = nats_inbox_subject();
+        let addr = nats_tcp_addr(&config.endpoint)?;
+        let mut stream = TcpStream::connect(addr).await?;
+        let mut buffer = vec![0; 64 * 1024];
+        let _ = timeout(Duration::from_millis(250), stream.read(&mut buffer)).await;
+        stream.write_all(b"CONNECT {\"verbose\":false}\r\n").await?;
+        let sub = format!("SUB {inbox} 1\r\n");
+        stream.write_all(sub.as_bytes()).await?;
+        let request_payload = json!({
+            "batch": 10,
+            "expires": 1_000_000u64,
+        })
+        .to_string();
+        let request = format!(
+            "PUB $JS.API.CONSUMER.MSG.NEXT.{}.{} {} {}\r\n{}\r\nPING\r\n",
+            config.stream,
+            config.consumer_group,
+            inbox,
+            request_payload.len(),
+            request_payload
+        );
+        stream.write_all(request.as_bytes()).await?;
+        stream.flush().await?;
+
+        let mut response = String::new();
+        for _ in 0..8 {
+            let bytes = timeout(Duration::from_millis(500), stream.read(&mut buffer))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(0);
+            if bytes == 0 {
+                break;
+            }
+            response.push_str(&String::from_utf8_lossy(&buffer[..bytes]));
+        }
+
+        let mut jobs = Vec::new();
+        for message in parse_nats_protocol_messages(&response)? {
+            if message.subject != inbox || message.payload.trim().is_empty() {
+                continue;
+            }
+            let ack_subject = message.reply.ok_or_else(|| {
+                AppError::bad_request("JetStream pull message missing ack reply subject")
+            })?;
+            let job = serde_json::from_str::<RedisExecutionJobPayload>(&message.payload).map_err(
+                |error| AppError::bad_request(format!("invalid JetStream job payload: {error}")),
+            )?;
+            jobs.push((ack_subject, job));
+        }
+        Ok(jobs)
+    }
+
+    pub(crate) async fn ack(
+        config: &BrokerQueueConfig,
+        ack_subject: impl AsRef<str>,
+    ) -> Result<(), AppError> {
+        ensure_jetstream_config(config)?;
+        let addr = nats_tcp_addr(&config.endpoint)?;
+        let mut stream = TcpStream::connect(addr).await?;
+        let mut buffer = vec![0; 4096];
+        let _ = timeout(Duration::from_millis(250), stream.read(&mut buffer)).await;
+        stream.write_all(b"CONNECT {\"verbose\":false}\r\n").await?;
+        let command = format!("PUB {} 0\r\n\r\nPING\r\n", ack_subject.as_ref());
+        stream.write_all(command.as_bytes()).await?;
+        stream.flush().await?;
+        let _ = timeout(Duration::from_millis(250), stream.read(&mut buffer)).await;
+        Ok(())
+    }
+
+    async fn request_json(
+        config: &BrokerQueueConfig,
+        command: &NatsJetStreamCommand,
+    ) -> Result<Value, AppError> {
+        ensure_jetstream_config(config)?;
+        let inbox = nats_inbox_subject();
+        let addr = nats_tcp_addr(&config.endpoint)?;
+        let mut stream = TcpStream::connect(addr).await?;
+        let mut buffer = vec![0; 64 * 1024];
+        let _ = timeout(Duration::from_millis(250), stream.read(&mut buffer)).await;
+        stream.write_all(b"CONNECT {\"verbose\":false}\r\n").await?;
+        let sub = format!("SUB {inbox} 1\r\n");
+        stream.write_all(sub.as_bytes()).await?;
+        let payload = command.payload.to_string();
+        let request = format!(
+            "PUB {} {} {}\r\n{}\r\nPING\r\n",
+            command.subject,
+            inbox,
+            payload.len(),
+            payload
+        );
+        stream.write_all(request.as_bytes()).await?;
+        stream.flush().await?;
+
+        let mut response = String::new();
+        for _ in 0..8 {
+            let bytes = timeout(Duration::from_millis(500), stream.read(&mut buffer))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(0);
+            if bytes == 0 {
+                break;
+            }
+            response.push_str(&String::from_utf8_lossy(&buffer[..bytes]));
+            for message in parse_nats_protocol_messages(&response)? {
+                if message.subject == inbox {
+                    let payload =
+                        serde_json::from_str::<Value>(&message.payload).map_err(|error| {
+                            AppError::bad_request(format!(
+                                "invalid JetStream API response payload: {error}"
+                            ))
+                        })?;
+                    ensure_jetstream_response_ok(&payload, &command.subject)?;
+                    return Ok(payload);
+                }
+            }
+        }
+        Err(AppError::bad_request(format!(
+            "JetStream API request timed out for {}",
+            command.subject
+        )))
+    }
+}
+
 fn redis_tcp_addr(endpoint: &str) -> Result<String, AppError> {
     let trimmed = endpoint.trim();
     let without_scheme = trimmed
@@ -506,30 +683,129 @@ fn parse_nats_messages(
     response: &str,
 ) -> Result<Vec<(String, RedisExecutionJobPayload)>, AppError> {
     let mut jobs = Vec::new();
-    let mut rest = response;
-    while let Some(index) = rest.find("MSG ") {
-        rest = &rest[index..];
-        let Some((header, after_header)) = rest.split_once("\r\n") else {
-            break;
-        };
-        let parts: Vec<_> = header.split_whitespace().collect();
-        let Some(size_part) = parts.last() else {
-            break;
-        };
-        let size = size_part
-            .parse::<usize>()
-            .map_err(|_| AppError::bad_request("invalid NATS message size"))?;
-        if after_header.len() < size + 2 {
-            break;
-        }
-        let payload = &after_header[..size];
-        let job = serde_json::from_str::<RedisExecutionJobPayload>(payload)
+    for message in parse_nats_protocol_messages(response)? {
+        let job = serde_json::from_str::<RedisExecutionJobPayload>(&message.payload)
             .map_err(|error| AppError::bad_request(format!("invalid NATS job payload: {error}")))?;
         let message_id = format!("nats:{}", job.job_id.unwrap_or_else(Uuid::new_v4));
         jobs.push((message_id, job));
-        rest = &after_header[size + 2..];
     }
     Ok(jobs)
+}
+
+fn parse_nats_protocol_messages(response: &str) -> Result<Vec<NatsProtocolMessage>, AppError> {
+    let mut messages = Vec::new();
+    let mut rest = response;
+    while let Some(index) = next_nats_frame_index(rest) {
+        rest = &rest[index..];
+        if rest.starts_with("MSG ") {
+            let Some((header, after_header)) = rest.split_once("\r\n") else {
+                break;
+            };
+            let parts: Vec<_> = header.split_whitespace().collect();
+            let (subject, reply, size) = match parts.as_slice() {
+                ["MSG", subject, _sid, size] => (*subject, None, *size),
+                ["MSG", subject, _sid, reply, size] => {
+                    (*subject, Some((*reply).to_string()), *size)
+                }
+                _ => return Err(AppError::bad_request("invalid NATS MSG header")),
+            };
+            let size = size
+                .parse::<usize>()
+                .map_err(|_| AppError::bad_request("invalid NATS message size"))?;
+            if after_header.len() < size + 2 {
+                break;
+            }
+            let payload = after_header[..size].to_string();
+            messages.push(NatsProtocolMessage {
+                subject: subject.to_string(),
+                reply,
+                payload,
+            });
+            rest = &after_header[size + 2..];
+            continue;
+        }
+        if rest.starts_with("HMSG ") {
+            let Some((header, after_header)) = rest.split_once("\r\n") else {
+                break;
+            };
+            let parts: Vec<_> = header.split_whitespace().collect();
+            let (subject, reply, header_size, total_size) = match parts.as_slice() {
+                ["HMSG", subject, _sid, header_size, total_size] => {
+                    (*subject, None, *header_size, *total_size)
+                }
+                ["HMSG", subject, _sid, reply, header_size, total_size] => (
+                    *subject,
+                    Some((*reply).to_string()),
+                    *header_size,
+                    *total_size,
+                ),
+                _ => return Err(AppError::bad_request("invalid NATS HMSG header")),
+            };
+            let header_size = header_size
+                .parse::<usize>()
+                .map_err(|_| AppError::bad_request("invalid NATS header size"))?;
+            let total_size = total_size
+                .parse::<usize>()
+                .map_err(|_| AppError::bad_request("invalid NATS total message size"))?;
+            if after_header.len() < total_size + 2 {
+                break;
+            }
+            if header_size > total_size {
+                return Err(AppError::bad_request(
+                    "invalid NATS header size larger than total message size",
+                ));
+            }
+            let payload = after_header[header_size..total_size].to_string();
+            messages.push(NatsProtocolMessage {
+                subject: subject.to_string(),
+                reply,
+                payload,
+            });
+            rest = &after_header[total_size + 2..];
+            continue;
+        }
+        break;
+    }
+    Ok(messages)
+}
+
+fn next_nats_frame_index(response: &str) -> Option<usize> {
+    let msg = if response.starts_with("MSG ") {
+        Some(0)
+    } else {
+        response.find("\r\nMSG ").map(|index| index + 2)
+    };
+    let hmsg = if response.starts_with("HMSG ") {
+        Some(0)
+    } else {
+        response.find("\r\nHMSG ").map(|index| index + 2)
+    };
+    match (msg, hmsg) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(index), None) | (None, Some(index)) => Some(index),
+        (None, None) => None,
+    }
+}
+
+fn nats_inbox_subject() -> String {
+    format!("_INBOX.{}", Uuid::new_v4().simple())
+}
+
+fn ensure_jetstream_response_ok(response: &Value, context: &str) -> Result<(), AppError> {
+    if let Some(error) = response.get("error") {
+        let code = error
+            .get("code")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let description = error
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown JetStream error");
+        return Err(AppError::bad_request(format!(
+            "JetStream error {code} during {context}: {description}"
+        )));
+    }
+    Ok(())
 }
 
 fn encode_resp_array(args: &[String]) -> String {
@@ -824,6 +1100,21 @@ impl BrokerExecutionQueue {
         RedisStreamClient::execute(config, &command).await?;
         Ok(())
     }
+
+    async fn ack_jetstream_job(
+        &self,
+        config: &BrokerQueueConfig,
+        job_id: Uuid,
+    ) -> Result<(), AppError> {
+        let ack_subject = {
+            let pending = self.pending.read().await;
+            pending
+                .get(&job_id)
+                .map(|pending| pending.message_id.clone())
+                .ok_or_else(|| AppError::not_found("execution job not found"))?
+        };
+        NatsJetStreamClient::ack(config, ack_subject).await
+    }
 }
 
 #[async_trait]
@@ -864,15 +1155,15 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
                 let config = self.broker_config().await?;
                 NatsCoreClient::publish(config, &payload).await?;
             }
-            BrokerQueueKind::NatsJetstream => return Err(self.reserved_error()),
+            BrokerQueueKind::NatsJetstream => {
+                let config = self.broker_config().await?;
+                NatsJetStreamClient::publish(config, &payload).await?;
+            }
         }
         Ok(job)
     }
 
     async fn start(&self, job_id: Uuid, worker_id: &str) -> Result<ExecutionJob, AppError> {
-        if self.kind == BrokerQueueKind::NatsJetstream {
-            return Err(self.reserved_error());
-        }
         self.broker_config().await?;
         let mut pending = self.pending.write().await;
         let pending_job = pending
@@ -895,7 +1186,10 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             BrokerQueueKind::Nats => {
                 self.broker_config().await?;
             }
-            BrokerQueueKind::NatsJetstream => return Err(self.reserved_error()),
+            BrokerQueueKind::NatsJetstream => {
+                let config = self.broker_config().await?;
+                self.ack_jetstream_job(config, job_id).await?;
+            }
         }
         let mut pending = self.pending.write().await;
         let pending_job = pending
@@ -916,7 +1210,10 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             BrokerQueueKind::Nats => {
                 self.broker_config().await?;
             }
-            BrokerQueueKind::NatsJetstream => return Err(self.reserved_error()),
+            BrokerQueueKind::NatsJetstream => {
+                let config = self.broker_config().await?;
+                self.ack_jetstream_job(config, job_id).await?;
+            }
         }
         let mut pending = self.pending.write().await;
         let pending_job = pending
@@ -929,9 +1226,6 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
     }
 
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
-        if self.kind == BrokerQueueKind::NatsJetstream {
-            return Err(self.reserved_error());
-        }
         let (job, message_id) = {
             let mut pending = self.pending.write().await;
             let pending_job = pending
@@ -956,10 +1250,17 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             }
         };
         if let Some(message_id) = message_id {
-            if self.kind == BrokerQueueKind::Redis {
-                let config = self.redis_config().await?;
-                let command = RedisStreamCommand::xack(config, message_id)?;
-                RedisStreamClient::execute(config, &command).await?;
+            match self.kind {
+                BrokerQueueKind::Redis => {
+                    let config = self.redis_config().await?;
+                    let command = RedisStreamCommand::xack(config, message_id)?;
+                    RedisStreamClient::execute(config, &command).await?;
+                }
+                BrokerQueueKind::NatsJetstream => {
+                    let config = self.broker_config().await?;
+                    NatsJetStreamClient::ack(config, message_id).await?;
+                }
+                BrokerQueueKind::Nats => {}
             }
         }
         Ok(job)
@@ -978,7 +1279,10 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
                 let config = self.broker_config().await?;
                 NatsCoreClient::drain_once(config).await?
             }
-            BrokerQueueKind::NatsJetstream => return Err(self.reserved_error()),
+            BrokerQueueKind::NatsJetstream => {
+                let config = self.broker_config().await?;
+                NatsJetStreamClient::drain_once(config).await?
+            }
         };
         {
             let mut pending = self.pending.write().await;
@@ -1015,7 +1319,8 @@ mod tests {
         BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind,
         NatsJetStreamCommand, RedisExecutionJobPayload, RedisStreamClient, RedisStreamCommand,
         ReservedBrokerQueueHealthCheck, encode_resp_array, nats_tcp_addr, parse_nats_messages,
-        parse_redis_response, parse_xreadgroup_execution_jobs, redis_tcp_addr,
+        parse_nats_protocol_messages, parse_redis_response, parse_xreadgroup_execution_jobs,
+        redis_tcp_addr,
     };
     use crate::execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
     use tokio::{
@@ -1279,31 +1584,230 @@ mod tests {
         assert_eq!(publish.payload["tool_name"], "codex.exec");
     }
 
+    #[test]
+    fn nats_protocol_parser_handles_msg_and_hmsg_reply_frames() {
+        let payload = "{\"tool_name\":\"file.write\"}";
+        let msg = format!(
+            "INFO {{}}\r\nMSG _INBOX.test 1 $JS.ACK.stream.consumer.1 {}\r\n{}\r\n",
+            payload.len(),
+            payload
+        );
+        let frames = parse_nats_protocol_messages(&msg).expect("msg frame");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].subject, "_INBOX.test");
+        assert_eq!(
+            frames[0].reply.as_deref(),
+            Some("$JS.ACK.stream.consumer.1")
+        );
+        assert_eq!(frames[0].payload, payload);
+
+        let headers = "NATS/1.0\r\nNats-Stream: MDF\r\n\r\n";
+        let hmsg = format!(
+            "HMSG _INBOX.test 1 $JS.ACK.stream.consumer.2 {} {}\r\n{}{}\r\n",
+            headers.len(),
+            headers.len() + payload.len(),
+            headers,
+            payload
+        );
+        let frames = parse_nats_protocol_messages(&hmsg).expect("hmsg frame");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].reply.as_deref(),
+            Some("$JS.ACK.stream.consumer.2")
+        );
+        assert_eq!(frames[0].payload, payload);
+    }
+
     #[tokio::test]
-    async fn broker_execution_queue_jetstream_fails_closed_until_client_is_implemented() {
+    async fn broker_execution_queue_enqueues_to_jetstream_with_publish_ack() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind jetstream");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept jetstream");
+            socket
+                .write_all(b"INFO {\"server_id\":\"test\"}\r\n")
+                .await
+                .expect("write info");
+            let mut command = String::new();
+            let mut buffer = vec![0; 4096];
+            for _ in 0..8 {
+                let bytes = socket.read(&mut buffer).await.expect("read command");
+                if bytes == 0 {
+                    break;
+                }
+                command.push_str(&String::from_utf8_lossy(&buffer[..bytes]));
+                if command.contains("\"tool_name\":\"file.write\"") {
+                    break;
+                }
+            }
+            let inbox = command
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .windows(5)
+                .find_map(|parts| {
+                    if parts[0] == "PUB" && parts[1] == "mandoforge_execution_jobs.jobs" {
+                        Some(parts[2].to_string())
+                    } else {
+                        None
+                    }
+                })
+                .expect("publish inbox");
+            let ack = "{\"stream\":\"MANDOFORGE_EXECUTION_JOBS\",\"seq\":1}";
+            let response = format!("MSG {inbox} 1 {}\r\n{}\r\n", ack.len(), ack);
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write ack");
+            command
+        });
         let config =
             BrokerQueueConfig::from_lookup(BrokerQueueKind::NatsJetstream, |key| match key {
-                "MANDOFORGE_NATS_URL" => Some("nats://127.0.0.1:4222".to_string()),
+                "MANDOFORGE_NATS_URL" => Some(format!("nats://{addr}")),
                 _ => None,
             })
             .expect("jetstream config");
         let queue = BrokerExecutionQueue::nats_jetstream(config);
-        let request = ExecutionJobRequest {
-            session_id: Uuid::new_v4(),
-            approval_id: Uuid::new_v4(),
-            tool_call_id: Uuid::new_v4(),
-            tool_name: "file.write".to_string(),
-            max_attempts: None,
-        };
 
-        let error = queue
-            .enqueue(request)
+        let job = queue
+            .enqueue(ExecutionJobRequest {
+                session_id: Uuid::new_v4(),
+                approval_id: Uuid::new_v4(),
+                tool_call_id: Uuid::new_v4(),
+                tool_name: "file.write".to_string(),
+                max_attempts: Some(2),
+            })
             .await
-            .expect_err("jetstream reserved");
+            .expect("enqueue jetstream job");
+        let command = server.await.expect("server command");
 
-        assert!(error.message.contains("NatsJetstream"));
-        assert!(error.message.contains("reserved"));
-        assert!(queue.list().await.is_err());
+        assert_eq!(job.status, ExecutionJobStatus::Queued);
+        assert!(command.contains("CONNECT"));
+        assert!(command.contains("SUB _INBOX."));
+        assert!(command.contains("PUB mandoforge_execution_jobs.jobs _INBOX."));
+        assert!(command.contains("\"tool_name\":\"file.write\""));
+    }
+
+    #[tokio::test]
+    async fn broker_execution_queue_drains_and_acks_jetstream_jobs() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind jetstream");
+        let addr = listener.local_addr().expect("addr");
+        let payload = "{\"job_id\":\"00000000-0000-4000-8000-000000000004\",\"session_id\":\"00000000-0000-4000-8000-000000000001\",\"approval_id\":\"00000000-0000-4000-8000-000000000002\",\"tool_call_id\":\"00000000-0000-4000-8000-000000000003\",\"tool_name\":\"file.write\"}";
+        let server = tokio::spawn(async move {
+            let mut captured = Vec::new();
+            for step in 0..4 {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                socket
+                    .write_all(b"INFO {\"server_id\":\"test\"}\r\n")
+                    .await
+                    .expect("write info");
+                let mut command = String::new();
+                let mut buffer = vec![0; 8192];
+                for _ in 0..8 {
+                    let bytes = socket.read(&mut buffer).await.expect("read command");
+                    if bytes == 0 {
+                        break;
+                    }
+                    command.push_str(&String::from_utf8_lossy(&buffer[..bytes]));
+                    match step {
+                        0 if command.contains("$JS.API.STREAM.INFO.MDF_EXECUTION") => break,
+                        1 if command
+                            .contains("$JS.API.CONSUMER.INFO.MDF_EXECUTION.runtime-workers") =>
+                        {
+                            break;
+                        }
+                        2 if command.contains(
+                            "$JS.API.CONSUMER.MSG.NEXT.MDF_EXECUTION.runtime-workers",
+                        ) =>
+                        {
+                            break;
+                        }
+                        3 if command.contains("PUB $JS.ACK.MDF_EXECUTION.runtime-workers.1 0") => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                let inbox = command
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .windows(5)
+                    .find_map(|parts| {
+                        if parts[0] == "PUB" {
+                            Some(parts[2].to_string())
+                        } else {
+                            None
+                        }
+                    });
+                match step {
+                    0 => {
+                        let inbox = inbox.expect("stream info inbox");
+                        let body = "{\"config\":{\"name\":\"MDF_EXECUTION\"}}";
+                        let response = format!("MSG {inbox} 1 {}\r\n{}\r\n", body.len(), body);
+                        socket
+                            .write_all(response.as_bytes())
+                            .await
+                            .expect("write stream info");
+                    }
+                    1 => {
+                        let inbox = inbox.expect("consumer info inbox");
+                        let body = "{\"name\":\"runtime-workers\"}";
+                        let response = format!("MSG {inbox} 1 {}\r\n{}\r\n", body.len(), body);
+                        socket
+                            .write_all(response.as_bytes())
+                            .await
+                            .expect("write consumer info");
+                    }
+                    2 => {
+                        let inbox = inbox.expect("pull inbox");
+                        let headers = "NATS/1.0\r\nNats-Stream: MDF_EXECUTION\r\n\r\n";
+                        let response = format!(
+                            "HMSG {inbox} 1 $JS.ACK.MDF_EXECUTION.runtime-workers.1 {} {}\r\n{}{}\r\n",
+                            headers.len(),
+                            headers.len() + payload.len(),
+                            headers,
+                            payload
+                        );
+                        socket
+                            .write_all(response.as_bytes())
+                            .await
+                            .expect("write pull message");
+                    }
+                    _ => {}
+                }
+                captured.push(command);
+            }
+            captured
+        });
+        let config =
+            BrokerQueueConfig::from_lookup(BrokerQueueKind::NatsJetstream, |key| match key {
+                "MANDOFORGE_NATS_URL" => Some(format!("nats://{addr}")),
+                "MANDOFORGE_NATS_STREAM" => Some("MDF_EXECUTION".to_string()),
+                "MANDOFORGE_EXECUTION_QUEUE_CONSUMER_GROUP" => Some("runtime-workers".to_string()),
+                _ => None,
+            })
+            .expect("jetstream config");
+        let queue = BrokerExecutionQueue::nats_jetstream(config);
+
+        let jobs = queue.list().await.expect("drain jetstream");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].tool_name, "file.write");
+        let running = queue
+            .start(jobs[0].id, "worker-1")
+            .await
+            .expect("start job");
+        assert_eq!(running.status, ExecutionJobStatus::Running);
+        let completed = queue.complete(jobs[0].id).await.expect("ack complete");
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        let captured = server.await.expect("captured commands");
+
+        assert!(captured[0].contains("$JS.API.STREAM.INFO.MDF_EXECUTION"));
+        assert!(captured[1].contains("$JS.API.CONSUMER.INFO.MDF_EXECUTION.runtime-workers"));
+        assert!(captured[2].contains("$JS.API.CONSUMER.MSG.NEXT.MDF_EXECUTION.runtime-workers"));
+        assert!(captured[3].contains("PUB $JS.ACK.MDF_EXECUTION.runtime-workers.1 0"));
     }
 
     #[test]

@@ -16916,15 +16916,7 @@ fn remote_computer_attention(
 async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessReport, AppError> {
     let generated_at = Utc::now();
     let queue_backend = worker_queue_backend_readiness(state.execution_queue.backend_kind());
-    let mut queue_backend_error = None;
-    let jobs = match state.execution_queue.list().await {
-        Ok(jobs) => jobs,
-        Err(error) if queue_backend.kind == "nats_jetstream" => {
-            queue_backend_error = Some(error.message);
-            Vec::new()
-        }
-        Err(error) => return Err(error),
-    };
+    let jobs = state.execution_queue.list().await?;
     let worker_mode = WorkerModeReadiness {
         mode: state.execution_worker.mode().to_string(),
         external_worker_required: state.execution_worker.mode() == "queue",
@@ -17039,15 +17031,6 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
                     .to_string(),
         });
     }
-    if let Some(error) = queue_backend_error {
-        attention_items.push(WorkerReadinessAttentionItem {
-            kind: "nats_jetstream_reserved".to_string(),
-            severity: "critical".to_string(),
-            message: format!(
-                "NATS JetStream backend is configured, but publish/drain/ack are reserved and fail closed: {error}"
-            ),
-        });
-    }
     if queued_jobs > 0 {
         attention_items.push(WorkerReadinessAttentionItem {
             kind: "queued_jobs_present".to_string(),
@@ -17140,12 +17123,6 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
                 .to_string(),
         );
     }
-    if queue_backend.kind == "nats_jetstream" {
-        runbook_actions.push(
-            "implement and validate JetStream publish, durable pull consumer drain, explicit ack, and redelivery handling before using this backend for production workers"
-                .to_string(),
-        );
-    }
 
     let critical_count = attention_items
         .iter()
@@ -17207,10 +17184,10 @@ fn worker_queue_backend_readiness(kind: &str) -> WorkerQueueBackendReadiness {
         },
         "nats_jetstream" => WorkerQueueBackendReadiness {
             kind: "nats_jetstream".to_string(),
-            durable: false,
+            durable: true,
             broker_handoff: true,
             jetstream_enabled: true,
-            semantics: "Reserved NATS JetStream command/config boundary; real publish/drain/ack fail closed until implemented".to_string(),
+            semantics: "NATS JetStream durable stream with request/reply publish ack, durable pull-consumer drain, explicit ack, and redelivery semantics".to_string(),
         },
         _ => WorkerQueueBackendReadiness {
             kind: "memory".to_string(),
@@ -29680,37 +29657,15 @@ not json
         assert!(matches!(completed_session.status, SessionStatus::Completed));
     }
 
-    #[tokio::test]
-    async fn worker_readiness_reports_jetstream_reserved_backend_fail_closed() {
-        let config = BrokerQueueConfig {
-            kind: BrokerQueueKind::NatsJetstream,
-            endpoint: "nats://127.0.0.1:4222".to_string(),
-            stream: "MANDOFORGE_EXECUTION_JOBS".to_string(),
-            consumer_group: "mandoforge-workers".to_string(),
-        };
-        let mut state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
-        state.execution_queue =
-            ExecutionQueue::broker(Arc::new(BrokerExecutionQueue::nats_jetstream(config)));
+    #[test]
+    fn worker_queue_backend_readiness_reports_jetstream_durable_semantics() {
+        let worker_readiness = worker_queue_backend_readiness("nats_jetstream");
 
-        let worker_readiness = build_worker_readiness(&state)
-            .await
-            .expect("jetstream readiness should report reserved backend instead of 500");
-
-        assert_eq!(worker_readiness.status, "critical");
-        assert_eq!(worker_readiness.queue_backend.kind, "nats_jetstream");
-        assert!(worker_readiness.queue_backend.jetstream_enabled);
-        assert!(
-            worker_readiness
-                .attention_items
-                .iter()
-                .any(|item| item.kind == "nats_jetstream_reserved" && item.severity == "critical")
-        );
-        assert!(
-            worker_readiness
-                .runbook_actions
-                .iter()
-                .any(|action| action.contains("durable pull consumer drain"))
-        );
+        assert_eq!(worker_readiness.kind, "nats_jetstream");
+        assert!(worker_readiness.durable);
+        assert!(worker_readiness.broker_handoff);
+        assert!(worker_readiness.jetstream_enabled);
+        assert!(worker_readiness.semantics.contains("durable pull-consumer"));
     }
 
     #[tokio::test]
