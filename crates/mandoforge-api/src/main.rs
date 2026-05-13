@@ -2716,6 +2716,17 @@ struct McpServerScheduledHealthRun {
     checked_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct McpServerDeploymentValidationRun {
+    team_id: Uuid,
+    server_count: usize,
+    healthy_count: usize,
+    unhealthy_count: usize,
+    results: Vec<McpServerHealth>,
+    checked_at: DateTime<Utc>,
+    status: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateMcpServerRecord {
     name: String,
@@ -2789,6 +2800,7 @@ struct McpServerRolloutRunSummary {
     recent_runs: Vec<McpServerRolloutRunRecord>,
     production_ops: McpServerRolloutProductionOpsReadiness,
     production_orchestration: McpServerRolloutProductionOrchestrationReadiness,
+    deployment_readiness: McpServerDeploymentReadiness,
     attention_items: Vec<McpServerRolloutRunAttentionItem>,
 }
 
@@ -2815,6 +2827,21 @@ struct McpServerRolloutProductionOrchestrationReadiness {
     failed_preflight_clear: bool,
     failed_runs_clear: bool,
     manual_apply_required_count: usize,
+    blocking_reasons: Vec<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerDeploymentReadiness {
+    status: String,
+    production_blocked: bool,
+    latest_validation_at: Option<DateTime<Utc>>,
+    latest_validation_age_hours: Option<i64>,
+    latest_validation_status: Option<String>,
+    server_count: usize,
+    healthy_count: usize,
+    unhealthy_count: usize,
+    deployment_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
 }
@@ -3325,6 +3352,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{team_id}/mcp-servers/health/run-due",
             post(run_due_mcp_server_health_checks),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/deployment/validate",
+            post(validate_mcp_server_deployment),
         )
         .route(
             "/api/teams/{team_id}/mcp-servers/rollouts/run-due",
@@ -11788,6 +11819,65 @@ async fn run_due_mcp_server_health_checks(
     ))
 }
 
+async fn validate_mcp_server_deployment(
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerDeploymentValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(team_id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+
+    let checked_at = Utc::now();
+    let servers = state.list_mcp_servers(team_id).await?;
+    let mut results = Vec::with_capacity(servers.len());
+    for server in servers {
+        results.push(mcp_server_health(&state, &server).await);
+    }
+    let healthy_count = results.iter().filter(|health| health.healthy).count();
+    let unhealthy_count = results.len().saturating_sub(healthy_count);
+    let status = if !results.is_empty() && unhealthy_count == 0 {
+        "healthy"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    let run = McpServerDeploymentValidationRun {
+        team_id,
+        server_count: results.len(),
+        healthy_count,
+        unhealthy_count,
+        results,
+        checked_at,
+        status,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "mcp.server_deployment_validation_run",
+            "team",
+            Some(team_id),
+            json!({
+                "team_id": team_id,
+                "subject": principal.subject_id,
+                "server_count": run.server_count,
+                "healthy_count": run.healthy_count,
+                "unhealthy_count": run.unhealthy_count,
+                "status": run.status,
+            }),
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
 async fn execute_due_mcp_server_health_checks(
     state: &AppState,
     team_id: Uuid,
@@ -12260,6 +12350,8 @@ fn build_mcp_server_rollout_run_summary(
         failed_run_count,
         generated_at,
     );
+    let deployment_readiness =
+        build_mcp_server_deployment_readiness(team_id, audit_logs, generated_at);
     if production_ops.production_blocked {
         attention_items.push(McpServerRolloutRunAttentionItem {
             kind: "mcp_rollout_production_blocked".to_string(),
@@ -12282,6 +12374,17 @@ fn build_mcp_server_rollout_run_summary(
             message: production_orchestration.message.clone(),
         });
     }
+    if deployment_readiness.production_blocked {
+        attention_items.push(McpServerRolloutRunAttentionItem {
+            kind: "mcp_deployment_validation_blocked".to_string(),
+            severity: if deployment_readiness.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: deployment_readiness.message.clone(),
+        });
+    }
     recent_runs.truncate(10);
     McpServerRolloutRunSummary {
         team_id,
@@ -12293,6 +12396,7 @@ fn build_mcp_server_rollout_run_summary(
         recent_runs,
         production_ops,
         production_orchestration,
+        deployment_readiness,
         attention_items,
     }
 }
@@ -12428,6 +12532,89 @@ fn build_mcp_server_rollout_production_orchestration(
         failed_preflight_clear,
         failed_runs_clear,
         manual_apply_required_count,
+        blocking_reasons,
+        message,
+    }
+}
+
+fn build_mcp_server_deployment_readiness(
+    team_id: Uuid,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> McpServerDeploymentReadiness {
+    let latest_validation = audit_logs
+        .iter()
+        .filter(|log| log.action == "mcp.server_deployment_validation_run")
+        .filter(|log| {
+            log.details
+                .get("team_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                == Some(team_id)
+        })
+        .max_by_key(|log| log.created_at);
+    let latest_validation_at = latest_validation.map(|log| log.created_at);
+    let latest_validation_age_hours =
+        latest_validation_at.map(|created_at| (generated_at - created_at).num_hours());
+    let latest_validation_status = latest_validation
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let server_count = latest_validation
+        .and_then(|log| log.details.get("server_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let healthy_count = latest_validation
+        .and_then(|log| log.details.get("healthy_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let unhealthy_count = latest_validation
+        .and_then(|log| log.details.get("unhealthy_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let mut blocking_reasons = Vec::new();
+
+    if latest_validation.is_none() {
+        blocking_reasons.push("MCP connector deployment validation has not run".to_string());
+    }
+    if latest_validation.is_some() && server_count == 0 {
+        blocking_reasons
+            .push("MCP connector deployment validation covered no connectors".to_string());
+    }
+    if unhealthy_count > 0 {
+        blocking_reasons
+            .push("MCP connector deployment validation found unhealthy connectors".to_string());
+    }
+    if latest_validation_age_hours.is_some_and(|hours| hours >= 24) {
+        blocking_reasons.push("MCP connector deployment validation evidence is stale".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "MCP connector deployment validation is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "MCP connector deployment has a recent healthy validation run".to_string()
+    };
+
+    McpServerDeploymentReadiness {
+        status,
+        production_blocked,
+        latest_validation_at,
+        latest_validation_age_hours,
+        latest_validation_status,
+        server_count,
+        healthy_count,
+        unhealthy_count,
+        deployment_validated: !production_blocked,
         blocking_reasons,
         message,
     }
@@ -28622,6 +28809,25 @@ not json
         assert_eq!(rollout_run.applied_count, 1);
         assert_eq!(rollout_run.failed_count, 0);
 
+        let deployment_validation: McpServerDeploymentValidationRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/teams/{}/mcp-servers/deployment/validate",
+                    team.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(deployment_validation.status, "healthy");
+        assert_eq!(deployment_validation.server_count, 1);
+        assert_eq!(deployment_validation.healthy_count, 1);
+        assert_eq!(deployment_validation.unhealthy_count, 0);
+
         let rollout_runs: McpServerRolloutRunSummary = request_json(
             app.clone(),
             Request::builder()
@@ -28655,6 +28861,11 @@ not json
                 .manual_apply_required_count,
             0
         );
+        assert_eq!(rollout_runs.deployment_readiness.status, "ready");
+        assert!(!rollout_runs.deployment_readiness.production_blocked);
+        assert!(rollout_runs.deployment_readiness.deployment_validated);
+        assert_eq!(rollout_runs.deployment_readiness.server_count, 1);
+        assert_eq!(rollout_runs.deployment_readiness.unhealthy_count, 0);
         assert_eq!(
             rollout_runs
                 .latest_run
@@ -29049,6 +29260,11 @@ not json
                 .iter()
                 .any(|log| log.action == "mcp.server_rollout_due_run")
         );
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "mcp.server_deployment_validation_run"
+                && log.details["healthy_count"] == 1
+                && log.details["unhealthy_count"] == 0
+        }));
         assert!(
             audit_logs
                 .iter()

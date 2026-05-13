@@ -40,6 +40,7 @@ const state = {
   mcpHealth: {},
   mcpHealthRun: null,
   mcpScheduledHealthRun: null,
+  mcpDeploymentValidation: null,
   mcpRolloutRun: null,
   mcpRolloutSummary: null,
   mcpRolloutRuns: null,
@@ -200,6 +201,7 @@ const mcpForm = document.querySelector("#mcp-form");
 const loadMcpButton = document.querySelector("#load-mcp");
 const runMcpHealthButton = document.querySelector("#run-mcp-health");
 const runDueMcpHealthButton = document.querySelector("#run-due-mcp-health");
+const validateMcpDeploymentButton = document.querySelector("#validate-mcp-deployment");
 const runDueMcpRolloutsButton = document.querySelector("#run-due-mcp-rollouts");
 const loadEvalCasesButton = document.querySelector("#load-eval-cases");
 const refreshExecutionJobsButton = document.querySelector("#refresh-execution-jobs");
@@ -260,6 +262,7 @@ mcpForm.addEventListener("submit", createMcpServer);
 loadMcpButton.addEventListener("click", loadMcpServers);
 runMcpHealthButton.addEventListener("click", runMcpHealth);
 runDueMcpHealthButton.addEventListener("click", runDueMcpHealth);
+validateMcpDeploymentButton.addEventListener("click", validateMcpDeployment);
 runDueMcpRolloutsButton.addEventListener("click", runDueMcpRollouts);
 loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
@@ -1289,6 +1292,19 @@ async function runDueMcpHealth() {
   });
   state.mcpScheduledHealthRun = run;
   state.mcpHealth = Object.fromEntries((run.results || []).map((health) => [health.server_id, health]));
+  await loadMcpServers();
+}
+
+async function validateMcpDeployment() {
+  if (!state.mcpTeamId) {
+    const form = new FormData(mcpForm);
+    state.mcpTeamId = String(form.get("team_id") || "").trim();
+  }
+  if (!state.mcpTeamId) return;
+  state.mcpDeploymentValidation = await api(`/api/teams/${state.mcpTeamId}/mcp-servers/deployment/validate`, {
+    method: "POST",
+  });
+  state.mcpHealth = Object.fromEntries((state.mcpDeploymentValidation.results || []).map((health) => [health.server_id, health]));
   await loadMcpServers();
 }
 
@@ -4790,10 +4806,17 @@ function renderMcpServers() {
         <div class="muted">${formatInteger(rolloutRun.applied_count)} applied · ${formatInteger(rolloutRun.skipped_count)} skipped · ${formatInteger(rolloutRun.expired_count)} expired · ${formatInteger(rolloutRun.failed_count)} failed · ${escapeHtml(rolloutRun.checked_at)}</div>
       </div>`
     : "";
+  const deploymentValidation = state.mcpDeploymentValidation;
+  const deploymentValidationSummary = deploymentValidation
+    ? `<div class="item">
+        <strong>Deployment validation</strong>
+        <div class="muted">${escapeHtml(deploymentValidation.status || "unknown")} · ${formatInteger(deploymentValidation.healthy_count)} healthy · ${formatInteger(deploymentValidation.unhealthy_count)} unhealthy · ${formatInteger(deploymentValidation.server_count)} servers · ${escapeHtml(deploymentValidation.checked_at)}</div>
+      </div>`
+    : "";
   const rolloutSummary = renderMcpRolloutSummary(state.mcpRolloutSummary);
   const rolloutRuns = renderMcpRolloutRuns(state.mcpRolloutRuns);
   mcpServerRoot.innerHTML = state.mcpServers.length
-    ? `${rolloutSummary}${rolloutRuns}${runSummary}${scheduledRunSummary}${rolloutRunSummary}${state.mcpServers
+    ? `${rolloutSummary}${rolloutRuns}${runSummary}${scheduledRunSummary}${deploymentValidationSummary}${rolloutRunSummary}${state.mcpServers
         .map((server) => {
           const health = state.mcpHealth[server.id];
           const pendingRollout = server.config?.pending_rollout;
@@ -4825,7 +4848,7 @@ function renderMcpServers() {
         })
         .join("")}`
     : state.mcpTeamId
-      ? `${rolloutSummary}${rolloutRuns}${runSummary}${scheduledRunSummary}${rolloutRunSummary}<div class="muted">No MCP servers for this team</div>`
+      ? `${rolloutSummary}${rolloutRuns}${runSummary}${scheduledRunSummary}${deploymentValidationSummary}${rolloutRunSummary}<div class="muted">No MCP servers for this team</div>`
       : `<div class="muted">MCP ROLLOUT RUNS require a team ID</div><div class="muted">Enter a team ID to manage MCP servers</div>`;
   mcpServerRoot.querySelectorAll("[data-discover-mcp]").forEach((button) => {
     button.addEventListener("click", () => discoverMcpTools(button.dataset.discoverMcp));
@@ -4863,6 +4886,8 @@ function renderMcpRolloutRuns(runs) {
   const recentRuns = runs.recent_runs || [];
   const attentionItems = runs.attention_items || [];
   const productionOps = runs.production_ops || {};
+  const productionOrchestration = runs.production_orchestration || {};
+  const deploymentReadiness = runs.deployment_readiness || {};
   return `
     <div class="nested-item">
       <strong>MCP ROLLOUT RUNS</strong>
@@ -4871,6 +4896,8 @@ function renderMcpRolloutRuns(runs) {
       <div class="muted">${escapeHtml(productionOps.message || "MCP production rollout ops are not reported")}</div>
       <div class="muted">Production orchestration: ${escapeHtml(productionOrchestration.status || "unknown")} · scheduler fresh ${productionOrchestration.scheduler_supervision_fresh ? "yes" : "no"} · pending clear ${productionOrchestration.pending_clear ? "yes" : "no"} · failed runs clear ${productionOrchestration.failed_runs_clear ? "yes" : "no"} · manual apply ${formatInteger(productionOrchestration.manual_apply_required_count || 0)}</div>
       <div class="muted">${escapeHtml(productionOrchestration.message || "MCP production orchestration is not reported")}</div>
+      <div class="muted">Deployment validation: ${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · validated ${deploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${formatInteger(deploymentReadiness.healthy_count || 0)}/${formatInteger(deploymentReadiness.server_count || 0)} · latest ${escapeHtml(deploymentReadiness.latest_validation_at || "none")}</div>
+      <div class="muted">${escapeHtml(deploymentReadiness.message || "MCP deployment validation is not reported")}</div>
       ${
         recentRuns.length
           ? `<table class="usage-table">
