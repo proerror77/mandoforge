@@ -1165,6 +1165,33 @@ struct UsageFinanceAttentionItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageFinanceOperationsSummary {
+    generated_at: DateTime<Utc>,
+    status: String,
+    readiness_score: i64,
+    open_alert_count: usize,
+    acknowledged_alert_count: usize,
+    unacknowledged_alert_count: usize,
+    active_alert_route_count: usize,
+    rollup_status: String,
+    export_status: String,
+    alert_delivery_status: String,
+    last_finance_export: Option<UsageFinanceOperationAudit>,
+    last_alert_delivery: Option<UsageFinanceOperationAudit>,
+    last_alert_acknowledgement: Option<UsageFinanceOperationAudit>,
+    runbook_actions: Vec<String>,
+    attention_items: Vec<UsageFinanceAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageFinanceOperationAudit {
+    action: String,
+    status: String,
+    subject: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Organization {
     id: Uuid,
     name: String,
@@ -2346,6 +2373,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/usage", get(get_usage_summary))
         .route("/api/usage/trends", get(get_usage_trends))
         .route("/api/usage/finance-summary", get(get_usage_finance_summary))
+        .route(
+            "/api/usage/finance-operations/summary",
+            get(get_usage_finance_operations_summary),
+        )
         .route("/api/usage/export.csv", get(export_usage_csv))
         .route("/api/usage/export/deliver", post(deliver_usage_export))
         .route("/api/usage/alerts", get(get_cost_alerts))
@@ -10137,6 +10168,21 @@ async fn get_usage_finance_summary(
     Ok(Json(build_usage_finance_dashboard_summary(&state).await?))
 }
 
+async fn get_usage_finance_operations_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<UsageFinanceOperationsSummary>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "usage_finance_operations",
+        None,
+    )
+    .await?;
+    Ok(Json(build_usage_finance_operations_summary(&state).await?))
+}
+
 async fn build_usage_finance_dashboard_summary(
     state: &AppState,
 ) -> Result<UsageFinanceDashboardSummary, AppError> {
@@ -10153,6 +10199,33 @@ async fn build_usage_finance_dashboard_summary(
         &alerts,
         usage_finance_export_webhook_url().is_some(),
         usage_finance_export_schedule_enabled(),
+        generated_at,
+    ))
+}
+
+async fn build_usage_finance_operations_summary(
+    state: &AppState,
+) -> Result<UsageFinanceOperationsSummary, AppError> {
+    let generated_at = Utc::now();
+    let usage = build_usage_summary(state).await?;
+    let rollups = state.list_usage_rollups().await?;
+    let alerts = build_cost_alerts(&usage.provider_budgets, generated_at);
+    let trend = build_usage_trend_from_parts(usage, &rollups, generated_at);
+    let alert_routes = state.list_cost_alert_routes().await?;
+    let dashboard = build_usage_finance_dashboard_summary_from_parts(
+        trend,
+        &rollups,
+        &alert_routes,
+        &alerts,
+        usage_finance_export_webhook_url().is_some(),
+        usage_finance_export_schedule_enabled(),
+        generated_at,
+    );
+    let audit_logs = state.list_audit_logs(None).await?;
+    Ok(build_usage_finance_operations_summary_from_parts(
+        dashboard,
+        &alerts,
+        &audit_logs,
         generated_at,
     ))
 }
@@ -10288,6 +10361,186 @@ fn build_usage_finance_dashboard_summary_from_parts(
         recommendations: trend.recommendations,
         attention_items,
     }
+}
+
+fn build_usage_finance_operations_summary_from_parts(
+    dashboard: UsageFinanceDashboardSummary,
+    alerts: &[CostAlert],
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> UsageFinanceOperationsSummary {
+    let acknowledgement_cutoff = generated_at - chrono::Duration::hours(24);
+    let acknowledged_alert_count = alerts
+        .iter()
+        .filter(|alert| {
+            audit_logs.iter().any(|log| {
+                log.action == "usage.alert_acknowledged"
+                    && log.created_at >= acknowledgement_cutoff
+                    && log.details.get("provider_name").and_then(Value::as_str)
+                        == Some(alert.provider_name.as_str())
+                    && log.details.get("severity").and_then(Value::as_str)
+                        == Some(alert.severity.as_str())
+            })
+        })
+        .count();
+    let unacknowledged_alert_count = alerts.len().saturating_sub(acknowledged_alert_count);
+    let last_finance_export =
+        latest_usage_finance_audit(audit_logs, "usage.finance_export_delivered");
+    let last_alert_delivery = latest_usage_finance_audit(audit_logs, "usage.cost_alerts_delivered");
+    let last_alert_acknowledgement =
+        latest_usage_finance_audit(audit_logs, "usage.alert_acknowledged");
+    let mut attention_items = dashboard.attention_items.clone();
+    let mut runbook_actions = dashboard.recommendations.clone();
+
+    if unacknowledged_alert_count > 0 {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "cost_alert_acknowledgement_missing".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "{unacknowledged_alert_count} current budget alert(s) have no recent acknowledgement"
+            ),
+            provider_name: None,
+        });
+        runbook_actions.push("acknowledge_or_escalate_cost_alerts".to_string());
+    }
+    if dashboard.finance_export_schedule_enabled && !dashboard.finance_export_target_configured {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "scheduled_finance_export_blocked".to_string(),
+            severity: "critical".to_string(),
+            message: "scheduled finance export is enabled but no delivery target is configured"
+                .to_string(),
+            provider_name: None,
+        });
+        runbook_actions.push("configure_finance_export_webhook".to_string());
+    }
+    if dashboard.finance_export_schedule_enabled
+        && last_finance_export
+            .as_ref()
+            .is_none_or(|audit| (generated_at - audit.created_at).num_hours() >= 30)
+    {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "finance_export_not_recent".to_string(),
+            severity: "warning".to_string(),
+            message: "scheduled finance export has no delivery audit in the last 30 hours"
+                .to_string(),
+            provider_name: None,
+        });
+        runbook_actions.push("run_or_debug_scheduled_finance_export".to_string());
+    }
+    if !alerts.is_empty() && last_alert_delivery.is_none() {
+        attention_items.push(UsageFinanceAttentionItem {
+            kind: "cost_alert_delivery_missing".to_string(),
+            severity: "warning".to_string(),
+            message: "current budget alerts have not been delivered through an alert route"
+                .to_string(),
+            provider_name: None,
+        });
+        runbook_actions.push("deliver_cost_alerts".to_string());
+    }
+    if dashboard.rollup_count == 0 {
+        runbook_actions.push("create_daily_usage_rollup".to_string());
+    }
+
+    dedupe_strings(&mut runbook_actions);
+    let critical_attention_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "critical")
+        .count();
+    let warning_attention_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "warning")
+        .count();
+    let status = if critical_attention_count > 0 {
+        "critical"
+    } else if warning_attention_count > 0 {
+        "attention"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let readiness_score = (100_i64
+        - (critical_attention_count as i64 * 25)
+        - (warning_attention_count as i64 * 10)
+        - (unacknowledged_alert_count as i64 * 5))
+        .clamp(0, 100);
+    let rollup_status = if dashboard.rollup_count == 0 {
+        "missing"
+    } else if dashboard
+        .latest_rollup_age_hours
+        .is_some_and(|hours| hours >= 30)
+    {
+        "stale"
+    } else {
+        "fresh"
+    }
+    .to_string();
+    let export_status = if !dashboard.finance_export_target_configured {
+        "target_missing"
+    } else if dashboard.finance_export_schedule_enabled {
+        "scheduled"
+    } else {
+        "manual_ready"
+    }
+    .to_string();
+    let alert_delivery_status = if alerts.is_empty() {
+        "no_alerts"
+    } else if dashboard.active_alert_route_count == 0 {
+        "route_missing"
+    } else if last_alert_delivery.is_none() {
+        "pending_delivery"
+    } else {
+        "delivered"
+    }
+    .to_string();
+
+    UsageFinanceOperationsSummary {
+        generated_at,
+        status,
+        readiness_score,
+        open_alert_count: alerts.len(),
+        acknowledged_alert_count,
+        unacknowledged_alert_count,
+        active_alert_route_count: dashboard.active_alert_route_count,
+        rollup_status,
+        export_status,
+        alert_delivery_status,
+        last_finance_export,
+        last_alert_delivery,
+        last_alert_acknowledgement,
+        runbook_actions,
+        attention_items,
+    }
+}
+
+fn latest_usage_finance_audit(
+    audit_logs: &[AuditLog],
+    action: &str,
+) -> Option<UsageFinanceOperationAudit> {
+    audit_logs
+        .iter()
+        .filter(|log| log.action == action)
+        .max_by_key(|log| log.created_at)
+        .map(|log| UsageFinanceOperationAudit {
+            action: log.action.clone(),
+            status: log
+                .details
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("recorded")
+                .to_string(),
+            subject: log
+                .details
+                .get("subject")
+                .and_then(Value::as_str)
+                .or_else(|| log.details.get("acknowledged_by").and_then(Value::as_str))
+                .map(ToString::to_string),
+            created_at: log.created_at,
+        })
+}
+
+fn dedupe_strings(values: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 async fn export_usage_csv(
@@ -11249,7 +11502,7 @@ async fn deliver_cost_alerts(
     let summary = build_usage_summary(&state).await?;
     let alerts = build_cost_alerts(&summary.provider_budgets, delivered_at);
     if alerts.is_empty() {
-        return Ok(Json(CostAlertDelivery {
+        let delivery = CostAlertDelivery {
             status: "no_alerts".to_string(),
             delivered: false,
             channel: "webhook".to_string(),
@@ -11257,7 +11510,9 @@ async fn deliver_cost_alerts(
             alerts,
             route_deliveries: vec![],
             delivered_at,
-        }));
+        };
+        audit_cost_alert_delivery(&state, &delivery).await?;
+        return Ok(Json(delivery));
     }
     let routes: Vec<_> = state
         .list_cost_alert_routes()
@@ -11272,7 +11527,7 @@ async fn deliver_cost_alerts(
                 .push(deliver_cost_alert_route(&state, &route, &alerts, delivered_at).await?);
         }
         let delivered = route_deliveries.iter().any(|delivery| delivery.delivered);
-        return Ok(Json(CostAlertDelivery {
+        let delivery = CostAlertDelivery {
             status: if delivered { "delivered" } else { "reserved" }.to_string(),
             delivered,
             channel: "routes".to_string(),
@@ -11280,10 +11535,12 @@ async fn deliver_cost_alerts(
             alerts,
             route_deliveries,
             delivered_at,
-        }));
+        };
+        audit_cost_alert_delivery(&state, &delivery).await?;
+        return Ok(Json(delivery));
     }
     let Some(webhook_url) = state.cost_alert_webhook_url.as_ref() else {
-        return Ok(Json(CostAlertDelivery {
+        let delivery = CostAlertDelivery {
             status: "reserved".to_string(),
             delivered: false,
             channel: "webhook".to_string(),
@@ -11291,7 +11548,9 @@ async fn deliver_cost_alerts(
             alerts,
             route_deliveries: vec![],
             delivered_at,
-        }));
+        };
+        audit_cost_alert_delivery(&state, &delivery).await?;
+        return Ok(Json(delivery));
     };
     let response = tokio::time::timeout(
         Duration::from_secs(10),
@@ -11312,7 +11571,7 @@ async fn deliver_cost_alerts(
         )));
     }
     let alert_count = alerts.len();
-    Ok(Json(CostAlertDelivery {
+    let delivery = CostAlertDelivery {
         status: "delivered".to_string(),
         delivered: true,
         channel: "webhook".to_string(),
@@ -11328,7 +11587,35 @@ async fn deliver_cost_alerts(
             target: Some(webhook_url.clone()),
         }],
         delivered_at,
-    }))
+    };
+    audit_cost_alert_delivery(&state, &delivery).await?;
+    Ok(Json(delivery))
+}
+
+async fn audit_cost_alert_delivery(
+    state: &AppState,
+    delivery: &CostAlertDelivery,
+) -> Result<(), AppError> {
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "usage.cost_alerts_delivered",
+            "usage_alert",
+            None,
+            json!({
+                "status": delivery.status,
+                "delivered": delivery.delivered,
+                "channel": delivery.channel,
+                "webhook_configured": delivery.webhook_configured,
+                "alert_count": delivery.alerts.len(),
+                "route_delivery_count": delivery.route_deliveries.len(),
+                "delivered_at": delivery.delivered_at,
+            }),
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn deliver_cost_alert_route(
@@ -14281,6 +14568,102 @@ not json
         }));
     }
 
+    #[test]
+    fn builds_usage_finance_operations_summary_from_audit_history() {
+        let generated_at = "2026-05-13T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid time");
+        let alert = CostAlert {
+            provider_name: "finance-mock".to_string(),
+            severity: "critical".to_string(),
+            message: "daily provider budget is critical".to_string(),
+            messages: vec!["budget exceeded".to_string()],
+            window_hours: 24,
+            request_budget_used_percent: Some(110.0),
+            cost_budget_used_percent: None,
+            estimated_cost_cents: 42.0,
+            created_at: generated_at,
+        };
+        let dashboard = UsageFinanceDashboardSummary {
+            generated_at,
+            current_cost_cents: 42.0,
+            current_total_tokens: 1000,
+            current_tool_calls: 4,
+            comparison_basis: "current_only".to_string(),
+            budget_pressure_status: "critical".to_string(),
+            budget_pressure_count: 1,
+            critical_budget_count: 1,
+            warning_budget_count: 0,
+            alert_count: 1,
+            critical_alert_count: 1,
+            warning_alert_count: 0,
+            alert_route_count: 1,
+            active_alert_route_count: 1,
+            rollup_count: 1,
+            latest_rollup_at: Some(generated_at - chrono::Duration::hours(1)),
+            latest_rollup_age_hours: Some(1),
+            finance_export_target_configured: false,
+            finance_export_schedule_enabled: true,
+            forecast_7d_cost_cents: Some(294.0),
+            forecast_30d_cost_cents: Some(1260.0),
+            top_provider_by_cost: Some(UsageTrendProvider {
+                provider_name: "finance-mock".to_string(),
+                estimated_cost_cents: 42.0,
+                total_tokens: 1000,
+                request_count: 2,
+            }),
+            recommendations: vec!["critical_provider_budget_review".to_string()],
+            attention_items: vec![],
+        };
+        let audit_logs = vec![AuditLog {
+            id: Uuid::new_v4(),
+            session_id: None,
+            actor_type: "user".to_string(),
+            actor_id: None,
+            action: "usage.alert_acknowledged".to_string(),
+            resource_type: "usage_alert".to_string(),
+            resource_id: None,
+            details: json!({
+                "provider_name": "finance-mock",
+                "severity": "critical",
+                "acknowledged_by": "admin-1"
+            }),
+            created_at: generated_at - chrono::Duration::hours(2),
+        }];
+
+        let summary = build_usage_finance_operations_summary_from_parts(
+            dashboard,
+            &[alert],
+            &audit_logs,
+            generated_at,
+        );
+
+        assert_eq!(summary.status, "critical");
+        assert_eq!(summary.open_alert_count, 1);
+        assert_eq!(summary.acknowledged_alert_count, 1);
+        assert_eq!(summary.unacknowledged_alert_count, 0);
+        assert_eq!(summary.rollup_status, "fresh");
+        assert_eq!(summary.export_status, "target_missing");
+        assert_eq!(summary.alert_delivery_status, "pending_delivery");
+        assert_eq!(
+            summary
+                .last_alert_acknowledgement
+                .unwrap()
+                .subject
+                .as_deref(),
+            Some("admin-1")
+        );
+        assert!(
+            summary
+                .runbook_actions
+                .iter()
+                .any(|action| action == "configure_finance_export_webhook")
+        );
+        assert!(summary.attention_items.iter().any(|item| {
+            item.kind == "scheduled_finance_export_blocked" && item.severity == "critical"
+        }));
+    }
+
     #[tokio::test]
     async fn usage_finance_summary_requires_admin_and_reports_dashboard() {
         let app = test_app().await;
@@ -14303,7 +14686,7 @@ not json
         );
 
         let summary: UsageFinanceDashboardSummary = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/usage/finance-summary")
                 .header("x-mandoforge-subject", "admin-1")
@@ -14320,6 +14703,25 @@ not json
                 .attention_items
                 .iter()
                 .any(|item| item.kind == "missing_usage_rollup")
+        );
+
+        let operations: UsageFinanceOperationsSummary = request_json(
+            app,
+            Request::builder()
+                .uri("/api/usage/finance-operations/summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(operations.rollup_status, "missing");
+        assert_eq!(operations.export_status, "target_missing");
+        assert!(
+            operations
+                .runbook_actions
+                .iter()
+                .any(|action| action == "create_daily_usage_rollup")
         );
     }
 

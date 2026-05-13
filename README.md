@@ -196,7 +196,7 @@ MANDOFORGE_USAGE_EXPORT_SCHEDULE=enabled \
 cargo run -p mandoforge-api
 ```
 
-`GET /api/usage/export.csv` downloads the audited finance CSV. `POST /api/usage/export/deliver` sends the same CSV to the configured webhook and returns a reserved fail-closed status when no target is set. When `MANDOFORGE_USAGE_EXPORT_SCHEDULE` is enabled, `/api/scheduler/run-due` runs the same delivery boundary for cron/Kubernetes-driven finance exports.
+`GET /api/usage/export.csv` downloads the audited finance CSV. `POST /api/usage/export/deliver` sends the same CSV to the configured webhook and returns a reserved fail-closed status when no target is set. When `MANDOFORGE_USAGE_EXPORT_SCHEDULE` is enabled, `/api/scheduler/run-due` runs the same delivery boundary for cron/Kubernetes-driven finance exports. `GET /api/usage/finance-operations/summary` combines finance readiness, current alert acknowledgement coverage, latest finance export and cost-alert delivery audit evidence, rollup freshness, and runbook actions for operators.
 
 ## Docker
 
@@ -293,6 +293,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `GET /api/usage/alerts`
 - `POST /api/usage/alerts/ack`
 - `POST /api/usage/alerts/deliver`
+- `GET /api/usage/finance-operations/summary`
 - `GET /api/usage/alert-routes`
 - `POST /api/usage/alert-routes`
 - `GET /api/codex-app-server/health`

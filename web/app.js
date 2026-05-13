@@ -42,6 +42,7 @@ const state = {
   usageRollups: [],
   usageTrend: null,
   usageFinanceSummary: null,
+  usageFinanceOperations: null,
   costAlertRoutes: [],
   usage: null,
   observability: null,
@@ -1308,6 +1309,7 @@ async function refreshOps() {
     usage,
     usageTrend,
     usageFinanceSummary,
+    usageFinanceOperations,
     observability,
     observabilityRemediationPlan,
     schedulerSummary,
@@ -1335,6 +1337,7 @@ async function refreshOps() {
       api("/api/usage"),
       api("/api/usage/trends"),
       api("/api/usage/finance-summary"),
+      api("/api/usage/finance-operations/summary"),
       api("/api/observability"),
       api("/api/observability/remediation/plan"),
       api("/api/scheduler/summary"),
@@ -1361,6 +1364,7 @@ async function refreshOps() {
   state.usage = usage;
   state.usageTrend = usageTrend;
   state.usageFinanceSummary = usageFinanceSummary;
+  state.usageFinanceOperations = usageFinanceOperations;
   state.observability = observability;
   state.observabilityRemediationPlan = observabilityRemediationPlan;
   state.schedulerSummary = schedulerSummary;
@@ -2210,13 +2214,71 @@ function renderUsage() {
   const usageExportStatus = state.usageExportStatus;
   const usageExportDelivery = state.usageExportDelivery;
   const financeSummary = state.usageFinanceSummary;
+  const financeOperations = state.usageFinanceOperations;
   const financeAttention = financeSummary?.attention_items || [];
+  const financeOperationsAttention = financeOperations?.attention_items || [];
   const toolEntries = Object.entries(usage.by_tool || {}).sort(
     ([, left], [, right]) => Number(right.call_count || 0) - Number(left.call_count || 0),
   );
   const averageToolDurationMs =
     usage.tool_call_count > 0 ? usage.total_tool_duration_ms / usage.tool_call_count : 0;
   usageRoot.innerHTML = `
+    ${
+      financeOperations
+        ? `<div class="detail-panel">
+            <h4>Finance Operations</h4>
+            <div class="metric-grid compact-metrics">
+              <div class="metric"><span>Operations Status</span><strong>${escapeHtml(financeOperations.status || "unknown")}</strong></div>
+              <div class="metric"><span>Readiness</span><strong>${formatInteger(financeOperations.readiness_score)}%</strong></div>
+              <div class="metric"><span>Open Alerts</span><strong>${formatInteger(financeOperations.open_alert_count)}</strong></div>
+              <div class="metric"><span>Unacknowledged</span><strong>${formatInteger(financeOperations.unacknowledged_alert_count)}</strong></div>
+              <div class="metric"><span>Rollups</span><strong>${escapeHtml(financeOperations.rollup_status || "unknown")}</strong></div>
+              <div class="metric"><span>Export</span><strong>${escapeHtml(financeOperations.export_status || "unknown")}</strong></div>
+              <div class="metric"><span>Alert Delivery</span><strong>${escapeHtml(financeOperations.alert_delivery_status || "unknown")}</strong></div>
+              <div class="metric"><span>Routes</span><strong>${formatInteger(financeOperations.active_alert_route_count)}</strong></div>
+            </div>
+            <dl>
+              <dt>Last finance export</dt>
+              <dd>${renderFinanceOperationAudit(financeOperations.last_finance_export)}</dd>
+              <dt>Last alert delivery</dt>
+              <dd>${renderFinanceOperationAudit(financeOperations.last_alert_delivery)}</dd>
+              <dt>Last alert acknowledgement</dt>
+              <dd>${renderFinanceOperationAudit(financeOperations.last_alert_acknowledgement)}</dd>
+              <dt>Runbook actions</dt>
+              <dd>${escapeHtml((financeOperations.runbook_actions || []).join(" · ") || "No finance operations action required")}</dd>
+            </dl>
+            ${
+              financeOperationsAttention.length
+                ? `<table class="usage-table">
+                    <thead>
+                      <tr>
+                        <th>Severity</th>
+                        <th>Signal</th>
+                        <th>Provider</th>
+                        <th>Message</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${financeOperationsAttention
+                        .map(
+                          (item) => `
+                            <tr>
+                              <td><span class="budget-status ${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</span></td>
+                              <td>${escapeHtml(item.kind)}</td>
+                              <td>${escapeHtml(item.provider_name || "global")}</td>
+                              <td>${escapeHtml(item.message)}</td>
+                            </tr>
+                          `,
+                        )
+                        .join("")}
+                    </tbody>
+                  </table>`
+                : `<div class="muted">No finance operations attention items.</div>`
+            }
+            <div class="muted">Generated: ${escapeHtml(financeOperations.generated_at)}</div>
+          </div>`
+        : ""
+    }
     ${
       financeSummary
         ? `<div class="detail-panel">
@@ -2648,6 +2710,14 @@ function renderTrendPeriodRow(label, period) {
       <td>${formatInteger(period.tool_calls)}</td>
     </tr>
   `;
+}
+
+function renderFinanceOperationAudit(audit) {
+  if (!audit) {
+    return "none";
+  }
+  const subject = audit.subject ? ` · ${escapeHtml(audit.subject)}` : "";
+  return `${escapeHtml(audit.status || "recorded")} · ${escapeHtml(audit.created_at)}${subject}`;
 }
 
 function formatDurationMs(value) {
