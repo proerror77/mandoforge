@@ -2701,6 +2701,7 @@ function renderObservability() {
   const schedulerSummary = state.schedulerSummary;
   const schedulerAttention = schedulerSummary?.attention_items || [];
   const schedulerRuns = schedulerSummary?.recent_runs || [];
+  const schedulerDeployment = schedulerSummary?.deployment_readiness || {};
   const schedulerDuePlan = state.schedulerDuePlan;
   const schedulerDuePlanActions = schedulerDuePlan?.actions || [];
   const schedulerDueRun = state.schedulerDueRun;
@@ -2865,10 +2866,15 @@ function renderObservability() {
             <div class="metric"><span>Recent Runs</span><strong>${formatInteger(schedulerSummary.recent_run_count)}</strong></div>
             <div class="metric"><span>Last Actions</span><strong>${formatInteger(schedulerSummary.last_run_action_count)}</strong></div>
             <div class="metric"><span>Attention</span><strong>${formatInteger(schedulerAttention.length)}</strong></div>
+            <div class="metric"><span>Deploy</span><strong>${escapeHtml(schedulerDeployment.status || "unknown")}</strong></div>
           </div>
           <dl>
             <dt>Last run</dt>
             <dd>${escapeHtml(schedulerSummary.last_run_at || "none")} · ${escapeHtml(schedulerSummary.last_run_status || "none")}</dd>
+            <dt>Deployment readiness</dt>
+            <dd>${escapeHtml(schedulerDeployment.message || "scheduler deployment readiness is not reported")}</dd>
+            <dt>Scheduler auth</dt>
+            <dd>subject secret ${schedulerDeployment.subject_from_secret ? "yes" : "no"} · roles secret ${schedulerDeployment.roles_from_secret ? "yes" : "no"} · token secret ${schedulerDeployment.token_from_secret ? "yes" : "no"} · token runtime ${schedulerDeployment.shared_token_runtime_configured ? "yes" : "no"} · hardcoded demo headers ${schedulerDeployment.hardcoded_admin_headers_absent ? "absent" : "present"}</dd>
           </dl>
           ${
             schedulerAttention.length

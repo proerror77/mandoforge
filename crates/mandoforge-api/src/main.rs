@@ -799,6 +799,7 @@ struct SchedulerOrchestrationSummary {
     generated_at: DateTime<Utc>,
     status: String,
     plan: SchedulerDuePlan,
+    deployment_readiness: SchedulerDeploymentReadiness,
     recent_run_count: usize,
     last_run_at: Option<DateTime<Utc>>,
     last_run_status: Option<String>,
@@ -821,6 +822,24 @@ struct SchedulerRunHistoryItem {
 struct SchedulerAttentionItem {
     severity: String,
     kind: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchedulerDeploymentReadiness {
+    status: String,
+    production_blocked: bool,
+    scheduler_manifest_present: bool,
+    service_account_manifest_present: bool,
+    service_account_name: Option<String>,
+    automount_service_account_token_disabled: bool,
+    subject_from_secret: bool,
+    roles_from_secret: bool,
+    token_from_secret: bool,
+    token_header_present: bool,
+    hardcoded_admin_headers_absent: bool,
+    shared_token_runtime_configured: bool,
+    blocking_reasons: Vec<String>,
     message: String,
 }
 
@@ -14825,6 +14844,7 @@ async fn run_scheduler_due_tasks(
     headers: HeaderMap,
 ) -> Result<Json<SchedulerDueRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
+    validate_scheduler_shared_token(&headers)?;
     Ok(Json(execute_scheduler_due_tasks(&state).await?))
 }
 
@@ -14849,6 +14869,7 @@ async fn build_scheduler_orchestration_summary(
 ) -> Result<SchedulerOrchestrationSummary, AppError> {
     let generated_at = Utc::now();
     let plan = build_scheduler_due_plan(state).await?;
+    let deployment_readiness = scheduler_deployment_readiness_from_manifests();
     let mut recent_runs: Vec<_> = state
         .list_audit_logs(None)
         .await?
@@ -14887,6 +14908,13 @@ async fn build_scheduler_orchestration_summary(
             message: format!("last scheduler due-run ended with status {}", run.status),
         });
     }
+    if deployment_readiness.production_blocked {
+        attention_items.push(SchedulerAttentionItem {
+            severity: "critical".to_string(),
+            kind: "scheduler_deployment_blocked".to_string(),
+            message: deployment_readiness.message.clone(),
+        });
+    }
     let status = if attention_items
         .iter()
         .any(|item| item.severity == "critical")
@@ -14902,6 +14930,7 @@ async fn build_scheduler_orchestration_summary(
         generated_at,
         status,
         plan,
+        deployment_readiness,
         recent_run_count: recent_runs.len(),
         last_run_at: last_run.map(|run| run.created_at),
         last_run_status: last_run.map(|run| run.status.clone()),
@@ -14909,6 +14938,187 @@ async fn build_scheduler_orchestration_summary(
         recent_runs,
         attention_items,
     })
+}
+
+fn validate_scheduler_shared_token(headers: &HeaderMap) -> Result<(), AppError> {
+    let Some(expected_token) = scheduler_shared_token_from_env() else {
+        return Ok(());
+    };
+    let provided_token = header_value(headers, "x-mandoforge-scheduler-token")
+        .map(str::trim)
+        .unwrap_or_default();
+    if provided_token != expected_token {
+        return Err(AppError::forbidden("scheduler token is invalid"));
+    }
+    Ok(())
+}
+
+fn scheduler_shared_token_from_env() -> Option<String> {
+    std::env::var("MANDOFORGE_SCHEDULER_TOKEN")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+}
+
+fn scheduler_deployment_readiness_from_manifests() -> SchedulerDeploymentReadiness {
+    let scheduler_manifest_path = "deploy/k8s/scheduler.yaml";
+    let service_account_manifest_path = "deploy/k8s/scheduler-serviceaccount.yaml";
+    let secret_manifest_path = "deploy/k8s/secret.example.yaml";
+    let scheduler_manifest =
+        read_yaml_manifest_value(scheduler_manifest_path).and_then(|manifest| {
+            (manifest.get("kind").and_then(Value::as_str) == Some("CronJob")).then_some(manifest)
+        });
+    let scheduler_manifest_present = scheduler_manifest.is_some();
+    let service_account_name = scheduler_manifest
+        .as_ref()
+        .and_then(|manifest| {
+            manifest.pointer("/spec/jobTemplate/spec/template/spec/serviceAccountName")
+        })
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let service_account_manifest_present = service_account_name.as_deref().is_some_and(|name| {
+        manifest_has_kind_name(service_account_manifest_path, "ServiceAccount", name)
+    });
+    let automount_service_account_token_disabled = scheduler_manifest
+        .as_ref()
+        .and_then(|manifest| {
+            manifest.pointer("/spec/jobTemplate/spec/template/spec/automountServiceAccountToken")
+        })
+        .and_then(Value::as_bool)
+        == Some(false);
+    let scheduler_container = scheduler_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.pointer("/spec/jobTemplate/spec/template/spec/containers"))
+        .and_then(Value::as_array)
+        .and_then(|containers| {
+            containers.iter().find(|container| {
+                container.get("name").and_then(Value::as_str) == Some("scheduler")
+            })
+        });
+    let subject_from_secret =
+        scheduler_container_env_uses_secret(
+            scheduler_container,
+            "MANDOFORGE_SCHEDULER_SUBJECT",
+            "MANDOFORGE_SCHEDULER_SUBJECT",
+        ) && secret_manifest_defines_key(secret_manifest_path, "MANDOFORGE_SCHEDULER_SUBJECT");
+    let roles_from_secret =
+        scheduler_container_env_uses_secret(
+            scheduler_container,
+            "MANDOFORGE_SCHEDULER_ROLES",
+            "MANDOFORGE_SCHEDULER_ROLES",
+        ) && secret_manifest_defines_key(secret_manifest_path, "MANDOFORGE_SCHEDULER_ROLES");
+    let token_from_secret =
+        scheduler_container_env_uses_secret(
+            scheduler_container,
+            "MANDOFORGE_SCHEDULER_TOKEN",
+            "MANDOFORGE_SCHEDULER_TOKEN",
+        ) && secret_manifest_defines_key(secret_manifest_path, "MANDOFORGE_SCHEDULER_TOKEN");
+    let args_text = scheduler_container
+        .and_then(|container| container.get("args"))
+        .and_then(Value::as_array)
+        .map(|args| {
+            args.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let token_header_present = args_text.contains("x-mandoforge-scheduler-token")
+        && args_text.contains("MANDOFORGE_SCHEDULER_TOKEN");
+    let hardcoded_admin_headers_absent = !args_text.contains("x-mandoforge-roles: admin")
+        && !args_text.contains("x-mandoforge-subject: scheduler");
+    let shared_token_runtime_configured = scheduler_shared_token_from_env().is_some();
+    let mut blocking_reasons = Vec::new();
+
+    if !scheduler_manifest_present {
+        blocking_reasons.push("scheduler CronJob manifest is missing".to_string());
+    }
+    if !service_account_manifest_present {
+        blocking_reasons.push("scheduler ServiceAccount manifest is missing".to_string());
+    }
+    if !automount_service_account_token_disabled {
+        blocking_reasons
+            .push("scheduler ServiceAccount token automount is not disabled".to_string());
+    }
+    if !subject_from_secret {
+        blocking_reasons.push("scheduler subject is not sourced from Secret".to_string());
+    }
+    if !roles_from_secret {
+        blocking_reasons.push("scheduler roles are not sourced from Secret".to_string());
+    }
+    if !token_from_secret {
+        blocking_reasons.push("scheduler shared token is not sourced from Secret".to_string());
+    }
+    if !token_header_present {
+        blocking_reasons.push("scheduler token header is not sent by the CronJob".to_string());
+    }
+    if !hardcoded_admin_headers_absent {
+        blocking_reasons
+            .push("scheduler CronJob still contains hardcoded demo admin headers".to_string());
+    }
+    if !shared_token_runtime_configured {
+        blocking_reasons
+            .push("MANDOFORGE_SCHEDULER_TOKEN is not configured in the API runtime".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Scheduler deployment is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Scheduler deployment uses Secret-backed identity and shared-token auth".to_string()
+    };
+
+    SchedulerDeploymentReadiness {
+        status,
+        production_blocked,
+        scheduler_manifest_present,
+        service_account_manifest_present,
+        service_account_name,
+        automount_service_account_token_disabled,
+        subject_from_secret,
+        roles_from_secret,
+        token_from_secret,
+        token_header_present,
+        hardcoded_admin_headers_absent,
+        shared_token_runtime_configured,
+        blocking_reasons,
+        message,
+    }
+}
+
+fn scheduler_container_env_uses_secret(
+    container: Option<&Value>,
+    name: &str,
+    secret_key: &str,
+) -> bool {
+    container
+        .and_then(|container| container.get("env"))
+        .and_then(Value::as_array)
+        .and_then(|env| {
+            env.iter()
+                .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+        })
+        .and_then(|entry| entry.pointer("/valueFrom/secretKeyRef/key"))
+        .and_then(Value::as_str)
+        == Some(secret_key)
+}
+
+fn secret_manifest_defines_key(relative_path: &str, key: &str) -> bool {
+    read_yaml_manifest_value(relative_path)
+        .and_then(|manifest| manifest.pointer("/stringData").cloned())
+        .and_then(|string_data| string_data.as_object().cloned())
+        .is_some_and(|string_data| string_data.contains_key(key))
 }
 
 fn scheduler_run_history_item(log: AuditLog) -> Option<SchedulerRunHistoryItem> {
@@ -32426,6 +32636,32 @@ not json
         .await;
         assert_eq!(summary.last_run_status.as_deref(), Some("completed"));
         assert_eq!(summary.recent_run_count, 1);
+        assert_eq!(summary.deployment_readiness.status, "blocked");
+        assert!(summary.deployment_readiness.production_blocked);
+        assert!(summary.deployment_readiness.scheduler_manifest_present);
+        assert!(
+            summary
+                .deployment_readiness
+                .service_account_manifest_present
+        );
+        assert_eq!(
+            summary.deployment_readiness.service_account_name.as_deref(),
+            Some("mandoforge-scheduler")
+        );
+        assert!(
+            summary
+                .deployment_readiness
+                .automount_service_account_token_disabled
+        );
+        assert!(summary.deployment_readiness.subject_from_secret);
+        assert!(summary.deployment_readiness.roles_from_secret);
+        assert!(summary.deployment_readiness.token_from_secret);
+        assert!(summary.deployment_readiness.token_header_present);
+        assert!(summary.deployment_readiness.hardcoded_admin_headers_absent);
+        assert!(!summary.deployment_readiness.shared_token_runtime_configured);
+        assert!(summary.attention_items.iter().any(|item| {
+            item.kind == "scheduler_deployment_blocked" && item.severity == "critical"
+        }));
         assert_eq!(summary.recent_runs[0].team_count, 1);
         assert!(
             summary.recent_runs[0]

@@ -12,6 +12,7 @@ resources:
   - worker-networkpolicy.yaml
   - worker-hpa.yaml
   - worker-keda.yaml
+  - scheduler-serviceaccount.yaml
   - scheduler.yaml
   - remote-computer-serviceaccount.yaml
   - remote-computer-state-pvc.yaml

@@ -15,20 +15,39 @@ spec:
           labels:
             app: mandoforge-scheduler
         spec:
+          serviceAccountName: mandoforge-scheduler
+          automountServiceAccountToken: false
           restartPolicy: Never
           containers:
             - name: scheduler
               image: curlimages/curl:8.10.1
               imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -ec
               args:
-                - -fsS
-                - -X
-                - POST
-                - -H
-                - "x-mandoforge-subject: scheduler"
-                - -H
-                - "x-mandoforge-roles: admin"
-                - http://mandoforge-api:8787/api/scheduler/run-due
+                - |
+                  curl -fsS -X POST \
+                    -H "x-mandoforge-subject: ${MANDOFORGE_SCHEDULER_SUBJECT}" \
+                    -H "x-mandoforge-roles: ${MANDOFORGE_SCHEDULER_ROLES}" \
+                    -H "x-mandoforge-scheduler-token: ${MANDOFORGE_SCHEDULER_TOKEN}" \
+                    http://mandoforge-api:8787/api/scheduler/run-due
+              env:
+                - name: MANDOFORGE_SCHEDULER_SUBJECT
+                  valueFrom:
+                    secretKeyRef:
+                      name: mandoforge-secrets
+                      key: MANDOFORGE_SCHEDULER_SUBJECT
+                - name: MANDOFORGE_SCHEDULER_ROLES
+                  valueFrom:
+                    secretKeyRef:
+                      name: mandoforge-secrets
+                      key: MANDOFORGE_SCHEDULER_ROLES
+                - name: MANDOFORGE_SCHEDULER_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: mandoforge-secrets
+                      key: MANDOFORGE_SCHEDULER_TOKEN
               resources:
                 requests:
                   cpu: 10m

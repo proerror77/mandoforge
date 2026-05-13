@@ -15,7 +15,7 @@ It contains:
 - Remote Computer warm-pool example, kept outside the default kustomization.
 - Remote Computer KEDA ScaledObject example, kept outside the default kustomization.
 - Remote Computer pilot bundle at `../kustomization.yaml` that opts into JuiceFS, warm-pool, and Remote Computer KEDA examples together.
-- Scheduler CronJob for due policy, approval, release, and MCP automation.
+- Scheduler CronJob for due policy, approval, release, and MCP automation, using a dedicated ServiceAccount with token automount disabled and Secret-sourced scheduler subject, role, and shared token headers.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
 - Example Secret for local/dev credentials.
@@ -51,4 +51,4 @@ Production notes:
 - Treat `remote-computer-warm-pool.yaml` as an opt-in example. It keeps placeholder Pods warm but does not yet lease, assign, or attach sessions to them.
 - Treat `remote-computer-keda.yaml` as an opt-in example. It assumes Prometheus metrics that are not production-hardened yet.
 - Treat `../kustomization.yaml` as the reviewable bundle for enabling those examples together; do not apply it until storage credentials, Prometheus metrics, namespace policy, and state conflict rules have been reviewed.
-- Replace the scheduler's demo admin headers with a real service-account or gateway-auth path before production exposure.
+- Replace the scheduler example shared token before production exposure. If `MANDOFORGE_SCHEDULER_TOKEN` is set in the API runtime, `/api/scheduler/run-due` requires the CronJob to send the matching `x-mandoforge-scheduler-token` header in addition to Admin authorization.
