@@ -2013,6 +2013,37 @@ struct McpServerRolloutDueRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerRolloutRunSummary {
+    team_id: Uuid,
+    generated_at: DateTime<Utc>,
+    run_count: usize,
+    processed_run_count: usize,
+    failed_run_count: usize,
+    latest_run: Option<McpServerRolloutRunRecord>,
+    recent_runs: Vec<McpServerRolloutRunRecord>,
+    attention_items: Vec<McpServerRolloutRunAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerRolloutRunRecord {
+    id: Uuid,
+    team_id: Uuid,
+    status: String,
+    applied_count: usize,
+    skipped_count: usize,
+    expired_count: usize,
+    failed_count: usize,
+    ran_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpServerRolloutRunAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct McpServerRolloutSummary {
     team_id: Uuid,
     generated_at: DateTime<Utc>,
@@ -2487,6 +2518,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{team_id}/mcp-servers/rollouts/summary",
             get(get_mcp_server_rollout_summary),
+        )
+        .route(
+            "/api/teams/{team_id}/mcp-servers/rollouts/runs",
+            get(get_mcp_server_rollout_runs),
         )
         .route(
             "/api/teams/{team_id}/mcp-servers/{server_id}/rollouts",
@@ -9548,6 +9583,20 @@ async fn get_mcp_server_rollout_summary(
     )))
 }
 
+async fn get_mcp_server_rollout_runs(
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<McpServerRolloutRunSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    Ok(Json(build_mcp_server_rollout_run_summary(
+        team_id,
+        &audit_logs,
+        Utc::now(),
+    )))
+}
+
 async fn execute_due_mcp_server_rollouts(
     state: &AppState,
     team_id: Uuid,
@@ -9639,14 +9688,148 @@ async fn execute_due_mcp_server_rollouts(
             Some(team_id),
             json!({
                 "team_id": team_id,
+                "status": mcp_server_rollout_run_status(&run),
                 "applied_count": run.applied_count,
                 "skipped_count": run.skipped_count,
                 "expired_count": run.expired_count,
                 "failed_count": run.failed_count,
+                "results": run.results.clone(),
             }),
         ))
         .await?;
     Ok(run)
+}
+
+fn mcp_server_rollout_run_status(run: &McpServerRolloutDueRun) -> String {
+    if run.failed_count > 0 && (run.applied_count > 0 || run.expired_count > 0) {
+        "partial_failure"
+    } else if run.failed_count > 0 {
+        "failed"
+    } else if run.applied_count > 0 || run.expired_count > 0 {
+        "processed"
+    } else if run.skipped_count > 0 {
+        "skipped"
+    } else {
+        "no_pending"
+    }
+    .to_string()
+}
+
+fn build_mcp_server_rollout_run_summary(
+    team_id: Uuid,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> McpServerRolloutRunSummary {
+    let mut recent_runs: Vec<_> = audit_logs
+        .iter()
+        .filter_map(mcp_server_rollout_run_from_audit_log)
+        .filter(|run| run.team_id == team_id)
+        .collect();
+    recent_runs.sort_by(|left, right| right.ran_at.cmp(&left.ran_at));
+    let run_count = recent_runs.len();
+    let processed_run_count = recent_runs
+        .iter()
+        .filter(|run| run.applied_count > 0 || run.expired_count > 0)
+        .count();
+    let failed_run_count = recent_runs
+        .iter()
+        .filter(|run| run.failed_count > 0 || run.status == "failed")
+        .count();
+    let latest_run = recent_runs.first().cloned();
+    let mut attention_items = Vec::new();
+    match latest_run.as_ref() {
+        Some(run) if run.failed_count > 0 => {
+            attention_items.push(McpServerRolloutRunAttentionItem {
+                kind: "latest_rollout_run_failed".to_string(),
+                severity: "critical".to_string(),
+                message: format!(
+                    "latest MCP rollout due-run failed for {} connector(s)",
+                    run.failed_count
+                ),
+            });
+        }
+        Some(run) if run.status == "skipped" && run.skipped_count > 0 => {
+            attention_items.push(McpServerRolloutRunAttentionItem {
+                kind: "latest_rollout_run_skipped".to_string(),
+                severity: "warning".to_string(),
+                message: format!(
+                    "latest MCP rollout due-run skipped {} connector(s)",
+                    run.skipped_count
+                ),
+            });
+        }
+        Some(run) if (generated_at - run.ran_at).num_hours() >= 24 => {
+            attention_items.push(McpServerRolloutRunAttentionItem {
+                kind: "stale_rollout_run".to_string(),
+                severity: "warning".to_string(),
+                message: "MCP connector rollouts have not been checked in the last 24 hours"
+                    .to_string(),
+            });
+        }
+        None => {
+            attention_items.push(McpServerRolloutRunAttentionItem {
+                kind: "missing_rollout_run".to_string(),
+                severity: "warning".to_string(),
+                message: "MCP connector rollout due-run has not been run for this team".to_string(),
+            });
+        }
+        _ => {}
+    }
+    recent_runs.truncate(10);
+    McpServerRolloutRunSummary {
+        team_id,
+        generated_at,
+        run_count,
+        processed_run_count,
+        failed_run_count,
+        latest_run,
+        recent_runs,
+        attention_items,
+    }
+}
+
+fn mcp_server_rollout_run_from_audit_log(log: &AuditLog) -> Option<McpServerRolloutRunRecord> {
+    if log.action != "mcp.server_rollout_due_run" {
+        return None;
+    }
+    let team_id = log
+        .details
+        .get("team_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .or(log.resource_id)?;
+    let applied_count = json_usize(&log.details, "applied_count");
+    let expired_count = json_usize(&log.details, "expired_count");
+    let failed_count = json_usize(&log.details, "failed_count");
+    let skipped_count = json_usize(&log.details, "skipped_count");
+    let status = log
+        .details
+        .get("status")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            if failed_count > 0 && (applied_count > 0 || expired_count > 0) {
+                "partial_failure".to_string()
+            } else if failed_count > 0 {
+                "failed".to_string()
+            } else if applied_count > 0 || expired_count > 0 {
+                "processed".to_string()
+            } else if skipped_count > 0 {
+                "skipped".to_string()
+            } else {
+                "no_pending".to_string()
+            }
+        });
+    Some(McpServerRolloutRunRecord {
+        id: log.id,
+        team_id,
+        status,
+        applied_count,
+        skipped_count,
+        expired_count,
+        failed_count,
+        ran_at: log.created_at,
+    })
 }
 
 fn build_mcp_server_rollout_summary(
@@ -20511,6 +20694,29 @@ not json
         .await;
         assert_eq!(rollout_run.applied_count, 1);
         assert_eq!(rollout_run.failed_count, 0);
+
+        let rollout_runs: McpServerRolloutRunSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/teams/{}/mcp-servers/rollouts/runs", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(rollout_runs.team_id, team.id);
+        assert_eq!(rollout_runs.run_count, 1);
+        assert_eq!(rollout_runs.processed_run_count, 1);
+        assert_eq!(rollout_runs.failed_run_count, 0);
+        assert_eq!(
+            rollout_runs
+                .latest_run
+                .as_ref()
+                .expect("latest mcp rollout run")
+                .status,
+            "processed"
+        );
 
         let rolled_servers: Vec<McpServerRecord> = request_json(
             app.clone(),

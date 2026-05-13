@@ -67,7 +67,7 @@ wait_for_static_ui() {
     hasApprovalGovernance: text.includes('Approval Governance') && text.includes('Create Approval Group') && text.includes('Create Escalation Rule') && text.includes('Run Due Escalations'),
     hasApprovalNotificationRouting: Boolean(document.querySelector('#approval-notification-routing')) && Boolean(document.querySelector('#approval-notification-runs')) && text.includes('ROUTING') && text.includes('UNROUTABLE') && text.includes('Run Notifications') && text.includes('NOTIFICATION RUNS'),
     hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Load Codex Runs') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering') && text.includes('LONG-RUNNING STEERING'),
-    hasMcpLifecycle: text.includes('MCP Servers') && text.includes('Config JSON') && Array.from(document.querySelectorAll('#mcp-form textarea')).some((textarea) => textarea.value.includes('vault:mcp/docs#api_key')) && text.includes('Load Team Servers') && text.includes('Run Team Health') && text.includes('Run Due Health'),
+    hasMcpLifecycle: text.includes('MCP Servers') && text.includes('Config JSON') && Array.from(document.querySelectorAll('#mcp-form textarea')).some((textarea) => textarea.value.includes('vault:mcp/docs#api_key')) && text.includes('Load Team Servers') && text.includes('Run Team Health') && text.includes('Run Due Health') && text.includes('MCP ROLLOUT RUNS'),
     hasTenantGovernance: text.includes('Tenant Governance') && text.includes('Archive Organization') && text.includes('Delete Organization') && text.includes('Archive Team') && text.includes('Archive Project') && text.includes('Bootstrap Tenant') && text.includes('Transfer Ownership') && text.includes('Create Invitation') && (text.includes('No tenant invitations') || text.includes('Select an organization to manage invitations')),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
@@ -147,6 +147,7 @@ grep -q "checkMcpHealth" /tmp/mandoforge-actionbook-app.js
 grep -q "data-health-mcp" /tmp/mandoforge-actionbook-app.js
 grep -q "runMcpHealth" /tmp/mandoforge-actionbook-app.js
 grep -q "runDueMcpHealth" /tmp/mandoforge-actionbook-app.js
+grep -q "mcpRolloutRuns" /tmp/mandoforge-actionbook-app.js
 grep -q "renderPolicyDiffSummary" /tmp/mandoforge-actionbook-app.js
 grep -q "policy-diff-table" /tmp/mandoforge-actionbook-app.js
 grep -q "cancelPolicyRollout" /tmp/mandoforge-actionbook-app.js

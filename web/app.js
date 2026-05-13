@@ -40,6 +40,7 @@ const state = {
   mcpScheduledHealthRun: null,
   mcpRolloutRun: null,
   mcpRolloutSummary: null,
+  mcpRolloutRuns: null,
   executionJobs: [],
   workerReadiness: null,
   usageRollups: [],
@@ -1145,12 +1146,14 @@ async function loadMcpServers() {
     return;
   }
   state.mcpTeamId = teamId;
-  const [servers, rolloutSummary] = await Promise.all([
+  const [servers, rolloutSummary, rolloutRuns] = await Promise.all([
     api(`/api/teams/${teamId}/mcp-servers`),
     api(`/api/teams/${teamId}/mcp-servers/rollouts/summary`),
+    api(`/api/teams/${teamId}/mcp-servers/rollouts/runs`),
   ]);
   state.mcpServers = servers;
   state.mcpRolloutSummary = rolloutSummary;
+  state.mcpRolloutRuns = rolloutRuns;
   renderMcpServers();
 }
 
@@ -4141,8 +4144,9 @@ function renderMcpServers() {
       </div>`
     : "";
   const rolloutSummary = renderMcpRolloutSummary(state.mcpRolloutSummary);
+  const rolloutRuns = renderMcpRolloutRuns(state.mcpRolloutRuns);
   mcpServerRoot.innerHTML = state.mcpServers.length
-    ? `${rolloutSummary}${runSummary}${scheduledRunSummary}${rolloutRunSummary}${state.mcpServers
+    ? `${rolloutSummary}${rolloutRuns}${runSummary}${scheduledRunSummary}${rolloutRunSummary}${state.mcpServers
         .map((server) => {
           const health = state.mcpHealth[server.id];
           const pendingRollout = server.config?.pending_rollout;
@@ -4174,8 +4178,8 @@ function renderMcpServers() {
         })
         .join("")}`
     : state.mcpTeamId
-      ? `${rolloutSummary}${runSummary}${scheduledRunSummary}${rolloutRunSummary}<div class="muted">No MCP servers for this team</div>`
-      : `<div class="muted">Enter a team ID to manage MCP servers</div>`;
+      ? `${rolloutSummary}${rolloutRuns}${runSummary}${scheduledRunSummary}${rolloutRunSummary}<div class="muted">No MCP servers for this team</div>`
+      : `<div class="muted">MCP ROLLOUT RUNS require a team ID</div><div class="muted">Enter a team ID to manage MCP servers</div>`;
   mcpServerRoot.querySelectorAll("[data-discover-mcp]").forEach((button) => {
     button.addEventListener("click", () => discoverMcpTools(button.dataset.discoverMcp));
   });
@@ -4203,6 +4207,63 @@ function renderMcpServers() {
       updateMcpStatus(button.dataset.mcpStatus, button.dataset.status),
     );
   });
+}
+
+function renderMcpRolloutRuns(runs) {
+  if (!runs) {
+    return "";
+  }
+  const recentRuns = runs.recent_runs || [];
+  const attentionItems = runs.attention_items || [];
+  return `
+    <div class="nested-item">
+      <strong>MCP ROLLOUT RUNS</strong>
+      <div class="muted">Runs ${formatInteger(runs.run_count)} · processed ${formatInteger(runs.processed_run_count)} · failed ${formatInteger(runs.failed_run_count)}</div>
+      ${
+        recentRuns.length
+          ? `<table class="usage-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Applied</th>
+                  <th>Expired</th>
+                  <th>Failed</th>
+                  <th>Skipped</th>
+                  <th>Ran</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${recentRuns
+                  .slice(0, 5)
+                  .map(
+                    (run) => `
+                      <tr>
+                        <td>${escapeHtml(run.status)}</td>
+                        <td>${formatInteger(run.applied_count)}</td>
+                        <td>${formatInteger(run.expired_count)}</td>
+                        <td>${formatInteger(run.failed_count)}</td>
+                        <td>${formatInteger(run.skipped_count)}</td>
+                        <td>${escapeHtml(run.ran_at)}</td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>`
+          : `<div class="muted">No MCP rollout runs</div>`
+      }
+      ${
+        attentionItems.length
+          ? attentionItems
+              .map(
+                (item) =>
+                  `<div class="muted">${escapeHtml(item.severity)} · ${escapeHtml(item.kind)} · ${escapeHtml(item.message)}</div>`,
+              )
+              .join("")
+          : `<div class="muted">No MCP rollout run attention items.</div>`
+      }
+    </div>
+  `;
 }
 
 function renderMcpRolloutSummary(summary) {
