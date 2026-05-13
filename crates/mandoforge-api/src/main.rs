@@ -491,7 +491,68 @@ struct ApprovalNotificationDelivery {
     target_subjects: Vec<String>,
     group_id: Option<Uuid>,
     group_name: Option<String>,
+    channel_deliveries: Vec<ApprovalNotificationChannelDelivery>,
     delivered_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationChannelDelivery {
+    channel: String,
+    status: String,
+    delivered: bool,
+    target_configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationDeliveryRun {
+    status: String,
+    subject: Option<String>,
+    candidate_count: usize,
+    delivered_count: usize,
+    reserved_count: usize,
+    failed_count: usize,
+    skipped_count: usize,
+    deliveries: Vec<ApprovalNotificationDelivery>,
+    failures: Vec<ApprovalNotificationDeliveryFailure>,
+    ran_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationDeliveryFailure {
+    approval_id: Uuid,
+    error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationDeliveryRunSummary {
+    generated_at: DateTime<Utc>,
+    run_count: usize,
+    delivered_run_count: usize,
+    reserved_run_count: usize,
+    failed_run_count: usize,
+    latest_run: Option<ApprovalNotificationDeliveryRunRecord>,
+    recent_runs: Vec<ApprovalNotificationDeliveryRunRecord>,
+    attention_items: Vec<ApprovalNotificationDeliveryRunAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationDeliveryRunRecord {
+    id: Uuid,
+    status: String,
+    subject: Option<String>,
+    candidate_count: usize,
+    delivered_count: usize,
+    reserved_count: usize,
+    failed_count: usize,
+    skipped_count: usize,
+    ran_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationDeliveryRunAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2578,6 +2639,14 @@ fn build_router(state: AppState) -> Router {
             post(run_observability_remediation),
         )
         .route("/api/approvals", get(list_approvals))
+        .route(
+            "/api/approvals/notifications/run",
+            post(run_approval_notifications),
+        )
+        .route(
+            "/api/approvals/notifications/runs",
+            get(get_approval_notification_delivery_runs),
+        )
         .route("/api/approvals/{id}/approve", post(approve))
         .route("/api/approvals/{id}/reject", post(reject))
         .route("/api/approvals/{id}/expire", post(expire))
@@ -14026,6 +14095,49 @@ async fn deliver_approval(
     ))
 }
 
+async fn run_approval_notifications(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApprovalNotificationDeliveryRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "approval_notifications".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    Ok(Json(
+        execute_approval_notification_delivery_run(
+            &state,
+            Some(principal.subject_id),
+            Utc::now(),
+            50,
+        )
+        .await?,
+    ))
+}
+
+async fn get_approval_notification_delivery_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApprovalNotificationDeliveryRunSummary>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "approval_notifications",
+        None,
+    )
+    .await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    Ok(Json(build_approval_notification_delivery_run_summary(
+        &audit_logs,
+        Utc::now(),
+    )))
+}
+
 async fn get_approval_notification_routing_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -14049,6 +14161,200 @@ async fn get_approval_notification_routing_summary(
         )
         .await,
     ))
+}
+
+async fn execute_approval_notification_delivery_run(
+    state: &AppState,
+    subject: Option<String>,
+    ran_at: DateTime<Utc>,
+    max_deliveries: usize,
+) -> Result<ApprovalNotificationDeliveryRun, AppError> {
+    let approvals = state.list_approvals().await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let recently_notified = recently_notified_approval_ids(&audit_logs, ran_at);
+    let candidates = approvals
+        .into_iter()
+        .filter(|approval| approval.status == "pending")
+        .collect::<Vec<_>>();
+    let candidate_count = candidates.len();
+    let mut deliveries = Vec::new();
+    let mut failures = Vec::new();
+    let mut delivered_count = 0usize;
+    let mut reserved_count = 0usize;
+    let mut skipped_count = candidate_count.saturating_sub(max_deliveries);
+
+    for approval in candidates.into_iter().take(max_deliveries) {
+        if approval_is_expired_at(&approval, ran_at) {
+            expire_approval_record(state, approval.id).await?;
+            skipped_count += 1;
+            continue;
+        }
+        if recently_notified.contains(&approval.id) {
+            skipped_count += 1;
+            continue;
+        }
+        match deliver_approval_notification(state, &approval, ran_at).await {
+            Ok(delivery) => {
+                if delivery.delivered {
+                    delivered_count += 1;
+                } else {
+                    reserved_count += 1;
+                }
+                deliveries.push(delivery);
+            }
+            Err(error) => failures.push(ApprovalNotificationDeliveryFailure {
+                approval_id: approval.id,
+                error: error.message,
+            }),
+        }
+    }
+    let failed_count = failures.len();
+    let status = if failed_count > 0 && delivered_count > 0 {
+        "partial_failure"
+    } else if failed_count > 0 {
+        "failed"
+    } else if delivered_count > 0 {
+        "delivered"
+    } else if reserved_count > 0 {
+        "reserved"
+    } else {
+        "no_pending"
+    }
+    .to_string();
+    let run = ApprovalNotificationDeliveryRun {
+        status,
+        subject,
+        candidate_count,
+        delivered_count,
+        reserved_count,
+        failed_count,
+        skipped_count,
+        deliveries,
+        failures,
+        ran_at,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "approval.notification_delivery_run",
+            "approval_notifications",
+            None,
+            serde_json::to_value(&run)?,
+        ))
+        .await?;
+    Ok(run)
+}
+
+fn recently_notified_approval_ids(audit_logs: &[AuditLog], now: DateTime<Utc>) -> HashSet<Uuid> {
+    let cutoff = now - chrono::Duration::hours(24);
+    audit_logs
+        .iter()
+        .filter(|log| log.action == "approval.notification_delivered" && log.created_at >= cutoff)
+        .filter_map(|log| log.resource_id)
+        .collect()
+}
+
+fn build_approval_notification_delivery_run_summary(
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> ApprovalNotificationDeliveryRunSummary {
+    let mut recent_runs: Vec<_> = audit_logs
+        .iter()
+        .filter_map(approval_notification_delivery_run_from_audit_log)
+        .collect();
+    recent_runs.sort_by(|left, right| right.ran_at.cmp(&left.ran_at));
+    let run_count = recent_runs.len();
+    let delivered_run_count = recent_runs
+        .iter()
+        .filter(|run| run.delivered_count > 0 && run.failed_count == 0)
+        .count();
+    let reserved_run_count = recent_runs
+        .iter()
+        .filter(|run| run.status == "reserved")
+        .count();
+    let failed_run_count = recent_runs
+        .iter()
+        .filter(|run| run.failed_count > 0 || run.status == "failed")
+        .count();
+    let latest_run = recent_runs.first().cloned();
+    let mut attention_items = Vec::new();
+    match latest_run.as_ref() {
+        Some(run) if run.failed_count > 0 => {
+            attention_items.push(ApprovalNotificationDeliveryRunAttentionItem {
+                kind: "latest_delivery_failed".to_string(),
+                severity: "critical".to_string(),
+                message: format!(
+                    "latest approval notification run failed for {} approval(s)",
+                    run.failed_count
+                ),
+            });
+        }
+        Some(run) if run.status == "reserved" => {
+            attention_items.push(ApprovalNotificationDeliveryRunAttentionItem {
+                kind: "latest_delivery_reserved".to_string(),
+                severity: "warning".to_string(),
+                message:
+                    "latest approval notification run found pending approvals but no delivery channel or target was ready".to_string(),
+            });
+        }
+        Some(run) if (generated_at - run.ran_at).num_hours() >= 24 => {
+            attention_items.push(ApprovalNotificationDeliveryRunAttentionItem {
+                kind: "stale_delivery_run".to_string(),
+                severity: "warning".to_string(),
+                message: "approval notifications have not been run in the last 24 hours"
+                    .to_string(),
+            });
+        }
+        None => {
+            attention_items.push(ApprovalNotificationDeliveryRunAttentionItem {
+                kind: "missing_delivery_run".to_string(),
+                severity: "warning".to_string(),
+                message: "approval notification delivery has not been run yet".to_string(),
+            });
+        }
+        _ => {}
+    }
+    recent_runs.truncate(10);
+    ApprovalNotificationDeliveryRunSummary {
+        generated_at,
+        run_count,
+        delivered_run_count,
+        reserved_run_count,
+        failed_run_count,
+        latest_run,
+        recent_runs,
+        attention_items,
+    }
+}
+
+fn approval_notification_delivery_run_from_audit_log(
+    log: &AuditLog,
+) -> Option<ApprovalNotificationDeliveryRunRecord> {
+    if log.action != "approval.notification_delivery_run" {
+        return None;
+    }
+    Some(ApprovalNotificationDeliveryRunRecord {
+        id: log.id,
+        status: log
+            .details
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        subject: log
+            .details
+            .get("subject")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        candidate_count: json_usize(&log.details, "candidate_count"),
+        delivered_count: json_usize(&log.details, "delivered_count"),
+        reserved_count: json_usize(&log.details, "reserved_count"),
+        failed_count: json_usize(&log.details, "failed_count"),
+        skipped_count: json_usize(&log.details, "skipped_count"),
+        ran_at: log.created_at,
+    })
 }
 
 async fn build_approval_notification_routing_summary(
@@ -14180,7 +14486,23 @@ async fn deliver_approval_notification(
     };
     let target_subjects = approval_notification_targets(approval, approval_group.as_ref());
     let group_name = approval_group.as_ref().map(|group| group.name.clone());
-    let Some(webhook_url) = state.approval_webhook_url.as_ref() else {
+    if target_subjects.is_empty() {
+        return Ok(ApprovalNotificationDelivery {
+            status: "reserved".to_string(),
+            delivered: false,
+            channel: "none".to_string(),
+            webhook_configured: state.approval_webhook_url.is_some(),
+            approval_id: approval.id,
+            target_count: 0,
+            target_subjects,
+            group_id: approval_group_id,
+            group_name,
+            channel_deliveries: vec![],
+            delivered_at,
+        });
+    }
+    let channel_configs = approval_notification_channel_configs(state);
+    if channel_configs.is_empty() {
         return Ok(ApprovalNotificationDelivery {
             status: "reserved".to_string(),
             delivered: false,
@@ -14191,54 +14513,200 @@ async fn deliver_approval_notification(
             target_subjects,
             group_id: approval_group_id,
             group_name,
+            channel_deliveries: vec![],
             delivered_at,
         });
     };
-    let response = tokio::time::timeout(
-        Duration::from_secs(10),
-        reqwest::Client::new()
-            .post(webhook_url)
-            .json(&json!({
-                "type": "mandoforge.approval_requested",
-                "approval": approval,
-                "approval_group": approval_group,
-                "target_subjects": target_subjects.clone(),
-                "target_count": target_subjects.len(),
-                "delivered_at": delivered_at,
-            }))
-            .send(),
-    )
-    .await??;
-    if !response.status().is_success() {
-        return Err(AppError::bad_request(format!(
-            "approval webhook returned status {}",
-            response.status()
-        )));
+    let mut channel_deliveries = Vec::new();
+    for config in &channel_configs {
+        channel_deliveries.push(
+            deliver_approval_notification_channel(
+                config,
+                approval,
+                approval_group.as_ref(),
+                &target_subjects,
+                delivered_at,
+            )
+            .await?,
+        );
     }
+    let delivered = channel_deliveries.iter().any(|delivery| delivery.delivered);
+    let channel = if channel_deliveries.len() == 1 {
+        channel_deliveries
+            .first()
+            .map(|delivery| delivery.channel.clone())
+            .unwrap_or_else(|| "webhook".to_string())
+    } else {
+        "multi".to_string()
+    };
     let delivery = ApprovalNotificationDelivery {
-        status: "delivered".to_string(),
-        delivered: true,
-        channel: "webhook".to_string(),
-        webhook_configured: true,
+        status: if delivered { "delivered" } else { "reserved" }.to_string(),
+        delivered,
+        channel,
+        webhook_configured: state.approval_webhook_url.is_some(),
         approval_id: approval.id,
         target_count: target_subjects.len(),
         target_subjects,
         group_id: approval_group_id,
         group_name,
+        channel_deliveries,
         delivered_at,
     };
-    state
-        .append_audit_log(new_audit_log(
-            Some(approval.session_id),
-            "system",
-            Some(approval.id),
-            "approval.notification_delivered",
-            "approval",
-            Some(approval.id),
-            serde_json::to_value(&delivery)?,
-        ))
-        .await?;
+    if delivery.delivered {
+        state
+            .append_audit_log(new_audit_log(
+                Some(approval.session_id),
+                "system",
+                Some(approval.id),
+                "approval.notification_delivered",
+                "approval",
+                Some(approval.id),
+                serde_json::to_value(&delivery)?,
+            ))
+            .await?;
+    }
     Ok(delivery)
+}
+
+struct ApprovalNotificationChannelConfig {
+    channel: &'static str,
+    url: String,
+}
+
+fn approval_notification_channel_configs(
+    state: &AppState,
+) -> Vec<ApprovalNotificationChannelConfig> {
+    let mut configs = Vec::new();
+    if let Some(url) = state.approval_webhook_url.clone() {
+        configs.push(ApprovalNotificationChannelConfig {
+            channel: "webhook",
+            url,
+        });
+    }
+    if let Some(url) = approval_slack_webhook_url_from_env() {
+        configs.push(ApprovalNotificationChannelConfig {
+            channel: "slack",
+            url,
+        });
+    }
+    if let Some(url) = approval_email_relay_url_from_env() {
+        configs.push(ApprovalNotificationChannelConfig {
+            channel: "email_relay",
+            url,
+        });
+    }
+    configs
+}
+
+async fn deliver_approval_notification_channel(
+    config: &ApprovalNotificationChannelConfig,
+    approval: &Approval,
+    approval_group: Option<&ApprovalGroup>,
+    target_subjects: &[String],
+    delivered_at: DateTime<Utc>,
+) -> Result<ApprovalNotificationChannelDelivery, AppError> {
+    let payload = match config.channel {
+        "slack" => slack_approval_notification_payload(
+            approval,
+            approval_group,
+            target_subjects,
+            delivered_at,
+        ),
+        "email_relay" => email_approval_notification_payload(
+            approval,
+            approval_group,
+            target_subjects,
+            delivered_at,
+        ),
+        _ => json!({
+            "type": "mandoforge.approval_requested",
+            "approval": approval,
+            "approval_group": approval_group,
+            "target_subjects": target_subjects,
+            "target_count": target_subjects.len(),
+            "delivered_at": delivered_at,
+        }),
+    };
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        reqwest::Client::new()
+            .post(&config.url)
+            .json(&payload)
+            .send(),
+    )
+    .await??;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "approval {} notification returned status {}",
+            config.channel,
+            response.status()
+        )));
+    }
+    Ok(ApprovalNotificationChannelDelivery {
+        channel: config.channel.to_string(),
+        status: "delivered".to_string(),
+        delivered: true,
+        target_configured: true,
+    })
+}
+
+fn slack_approval_notification_payload(
+    approval: &Approval,
+    approval_group: Option<&ApprovalGroup>,
+    target_subjects: &[String],
+    delivered_at: DateTime<Utc>,
+) -> Value {
+    let reason = approval.reason.clone();
+    let group_name = approval_group
+        .map(|group| group.name.clone())
+        .unwrap_or_else(|| "direct".to_string());
+    json!({
+        "text": format!("MandoForge approval requested: {} ({})", approval.risk_level, reason),
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format!("*Approval requested*\nRisk: `{}`\nReason: {}\nTargets: {}", approval.risk_level, reason, target_subjects.join(", "))
+                }
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": format!("approval `{}` · group `{}` · delivered {}", approval.id, group_name, delivered_at)
+                    }
+                ]
+            }
+        ]
+    })
+}
+
+fn email_approval_notification_payload(
+    approval: &Approval,
+    approval_group: Option<&ApprovalGroup>,
+    target_subjects: &[String],
+    delivered_at: DateTime<Utc>,
+) -> Value {
+    let reason = approval.reason.clone();
+    json!({
+        "type": "mandoforge.approval_email",
+        "to_subjects": target_subjects,
+        "subject": format!("MandoForge approval requested: {}", approval.risk_level),
+        "text": format!(
+            "Approval {} requires review.\nRisk: {}\nReason: {}\nGroup: {}\nDelivered: {}",
+            approval.id,
+            approval.risk_level,
+            reason,
+            approval_group.map(|group| group.name.as_str()).unwrap_or("direct"),
+            delivered_at
+        ),
+        "approval_id": approval.id,
+        "session_id": approval.session_id,
+        "risk_level": approval.risk_level,
+        "delivered_at": delivered_at,
+    })
 }
 
 fn approval_notification_targets(
@@ -21448,6 +21916,64 @@ not json
         assert!(summary.attention_items.iter().all(|item| {
             item.approval_id != Some(approval_id) || item.kind != "missing_target"
         }));
+
+        let run: ApprovalNotificationDeliveryRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approvals/notifications/run")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run.status, "delivered");
+        assert_eq!(run.candidate_count, 1);
+        assert_eq!(run.delivered_count, 1);
+        assert_eq!(run.reserved_count, 0);
+        assert_eq!(run.failed_count, 0);
+        assert_eq!(run.deliveries.len(), 1);
+        assert_eq!(run.deliveries[0].channel, "webhook");
+        assert_eq!(run.deliveries[0].channel_deliveries.len(), 1);
+        assert_eq!(run.deliveries[0].channel_deliveries[0].channel, "webhook");
+
+        let run_summary: ApprovalNotificationDeliveryRunSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals/notifications/runs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run_summary.run_count, 1);
+        assert_eq!(run_summary.delivered_run_count, 1);
+        assert_eq!(
+            run_summary
+                .latest_run
+                .as_ref()
+                .expect("latest delivery run")
+                .delivered_count,
+            1
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "approval.notification_delivery_run")
+        );
         server.abort();
     }
 

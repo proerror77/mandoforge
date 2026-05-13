@@ -69,6 +69,8 @@ const state = {
   selectedTeamId: "",
   approvalDeliveries: {},
   approvalNotificationRouting: null,
+  approvalNotificationRuns: null,
+  approvalNotificationRun: null,
   approvalEscalationDueRun: null,
   approvalGroups: [],
   approvalEscalationRules: [],
@@ -154,8 +156,10 @@ const tenantInvitationForm = document.querySelector("#tenant-invitation-form");
 const approvalGroupForm = document.querySelector("#approval-group-form");
 const approvalEscalationRuleForm = document.querySelector("#approval-escalation-rule-form");
 const runDueApprovalEscalationsButton = document.querySelector("#run-due-approval-escalations");
+const runApprovalNotificationsButton = document.querySelector("#run-approval-notifications");
 const approvalGovernanceRoot = document.querySelector("#approval-governance");
 const approvalNotificationRoutingRoot = document.querySelector("#approval-notification-routing");
+const approvalNotificationRunsRoot = document.querySelector("#approval-notification-runs");
 const providerForm = document.querySelector("#provider-form");
 const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
 const runProviderPolicyGateButton = document.querySelector("#run-provider-policy-gate");
@@ -200,6 +204,7 @@ tenantInvitationForm.addEventListener("submit", createTenantInvitation);
 approvalGroupForm.addEventListener("submit", createApprovalGroup);
 approvalEscalationRuleForm.addEventListener("submit", createApprovalEscalationRule);
 runDueApprovalEscalationsButton.addEventListener("click", runDueApprovalEscalations);
+runApprovalNotificationsButton.addEventListener("click", runApprovalNotifications);
 providerForm.addEventListener("submit", createProvider);
 providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
 runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
@@ -1355,6 +1360,7 @@ async function refreshOps() {
     approvalGroups,
     approvalEscalationRules,
     approvalNotificationRouting,
+    approvalNotificationRuns,
   ] =
     await Promise.all([
       api("/api/providers"),
@@ -1386,6 +1392,7 @@ async function refreshOps() {
       api("/api/approval-groups"),
       api("/api/approval-escalation-rules"),
       api("/api/approvals/notification-routing/summary"),
+      api("/api/approvals/notifications/runs"),
     ]);
   state.providers = providers;
   state.providerSummary = providerSummary;
@@ -1416,6 +1423,7 @@ async function refreshOps() {
   state.approvalGroups = approvalGroups;
   state.approvalEscalationRules = approvalEscalationRules;
   state.approvalNotificationRouting = approvalNotificationRouting;
+  state.approvalNotificationRuns = approvalNotificationRuns;
   await refreshAgentReleases(false);
   if (
     state.selectedOrganizationId &&
@@ -1536,6 +1544,7 @@ async function deliverApprovalNotification(id) {
     method: "POST",
   });
   await refreshApprovals();
+  await refreshOps();
 }
 
 async function escalateApproval(id) {
@@ -1548,6 +1557,17 @@ async function escalateApproval(id) {
   await refreshOps();
 }
 
+async function runApprovalNotifications() {
+  state.approvalNotificationRun = await api("/api/approvals/notifications/run", {
+    method: "POST",
+  });
+  state.approvalNotificationRuns = await api("/api/approvals/notifications/runs");
+  state.approvalNotificationRouting = await api("/api/approvals/notification-routing/summary");
+  renderApprovalNotificationRouting();
+  renderApprovalNotificationRuns();
+  await refreshApprovals();
+}
+
 function renderOps() {
   renderUsage();
   renderObservability();
@@ -1557,6 +1577,7 @@ function renderOps() {
   renderVaultReadiness();
   renderSecretRecords();
   renderApprovalGovernance();
+  renderApprovalNotificationRuns();
   renderPolicy();
   renderEvalJudgeProfiles();
   renderEvalSuiteBootstrap();
@@ -3644,6 +3665,71 @@ function renderApprovalNotificationRouting() {
             </tbody>
           </table>`
         : `<div class="muted">No approval notification routing attention items.</div>`
+    }
+  `;
+}
+
+function renderApprovalNotificationRuns() {
+  const runs = state.approvalNotificationRuns;
+  const latestRun = state.approvalNotificationRun;
+  if (!runs) {
+    approvalNotificationRunsRoot.innerHTML = `<div class="muted">Approval notification runs are not loaded.</div>`;
+    return;
+  }
+  const attentionItems = runs.attention_items || [];
+  const recentRuns = runs.recent_runs || [];
+  approvalNotificationRunsRoot.innerHTML = `
+    <div class="item">
+      <strong>NOTIFICATION RUNS</strong>
+      <div class="muted">Runs ${formatInteger(runs.run_count)} · delivered ${formatInteger(runs.delivered_run_count)} · reserved ${formatInteger(runs.reserved_run_count)} · failed ${formatInteger(runs.failed_run_count)}</div>
+      ${
+        latestRun
+          ? `<div class="muted">Latest action: ${escapeHtml(latestRun.status)} · delivered ${formatInteger(latestRun.delivered_count)} · reserved ${formatInteger(latestRun.reserved_count)} · failed ${formatInteger(latestRun.failed_count)} · skipped ${formatInteger(latestRun.skipped_count)}</div>`
+          : `<div class="muted">No notification run triggered in this browser session</div>`
+      }
+    </div>
+    ${
+      recentRuns.length
+        ? `<table class="usage-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Delivered</th>
+                <th>Reserved</th>
+                <th>Failed</th>
+                <th>Skipped</th>
+                <th>Ran</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${recentRuns
+                .slice(0, 5)
+                .map(
+                  (run) => `
+                    <tr>
+                      <td>${escapeHtml(run.status)}</td>
+                      <td>${formatInteger(run.delivered_count)}</td>
+                      <td>${formatInteger(run.reserved_count)}</td>
+                      <td>${formatInteger(run.failed_count)}</td>
+                      <td>${formatInteger(run.skipped_count)}</td>
+                      <td>${escapeHtml(run.ran_at)}</td>
+                    </tr>
+                  `,
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : `<div class="muted">No approval notification runs</div>`
+    }
+    ${
+      attentionItems.length
+        ? attentionItems
+            .map(
+              (item) =>
+                `<div class="muted">${escapeHtml(item.severity)} · ${escapeHtml(item.kind)} · ${escapeHtml(item.message)}</div>`,
+            )
+            .join("")
+        : `<div class="muted">No approval notification delivery attention items.</div>`
     }
   `;
 }
