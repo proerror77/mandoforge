@@ -300,6 +300,7 @@ struct AgentReleaseAutomationRun {
     promoted_count: usize,
     rejected_count: usize,
     skipped_count: usize,
+    controller_required: bool,
     controller_configured: bool,
     controller_execution_count: usize,
     controller_failed_count: usize,
@@ -4422,6 +4423,7 @@ where
     let mut promoted_count = 0usize;
     let mut rejected_count = 0usize;
     let mut skipped_count = 0usize;
+    let controller_required = agent_release_controller_required(&lookup);
     let controller_configured = agent_release_controller_configured(&lookup);
     let mut controller_execution_count = 0usize;
     let mut controller_failed_count = 0usize;
@@ -4468,6 +4470,17 @@ where
                     "status": "skipped",
                     "reason": "controller_not_configured"
                 });
+                if controller_required && !controller_configured {
+                    skipped_count += 1;
+                    results.push(json!({
+                        "release_id": release.id,
+                        "agent_id": release.agent_id,
+                        "status": "skipped",
+                        "reason": "controller_required_not_configured",
+                        "controller_execution": controller_execution,
+                    }));
+                    continue;
+                }
                 if controller_configured {
                     controller_execution_count += 1;
                     match execute_agent_release_controller(&lookup, &release, checked_at).await {
@@ -4559,6 +4572,7 @@ where
         promoted_count,
         rejected_count,
         skipped_count,
+        controller_required,
         controller_configured,
         controller_execution_count,
         controller_failed_count,
@@ -4578,6 +4592,7 @@ where
                 "promoted_count": run.promoted_count,
                 "rejected_count": run.rejected_count,
                 "skipped_count": run.skipped_count,
+                "controller_required": run.controller_required,
                 "controller_configured": run.controller_configured,
                 "controller_execution_count": run.controller_execution_count,
                 "controller_failed_count": run.controller_failed_count,
@@ -4605,6 +4620,20 @@ where
 {
     lookup("MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL")
         .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn agent_release_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -28832,6 +28861,93 @@ not json
         assert_eq!(payloads[0]["eval_score"], 1.0);
 
         controller_server.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_release_required_controller_skips_auto_promotion_when_missing() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("list agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let dataset = state
+            .create_eval_dataset(CreateEvalDataset {
+                name: "release controller required".to_string(),
+                description: None,
+            })
+            .await
+            .expect("create dataset");
+        state
+            .create_eval_case(
+                dataset.id,
+                CreateEvalCase {
+                    input: json!({"final_answer": "evidence approval audit"}),
+                    expected: Some(json!({"contains": ["evidence", "approval", "audit"]})),
+                    grading_policy: json!({"kind": "final_answer"}),
+                },
+            )
+            .await
+            .expect("create eval case");
+        let run = state
+            .create_eval_run(dataset.id, CreateEvalRun { agent_id: agent.id })
+            .await
+            .expect("create eval run");
+        let release = state
+            .request_agent_release_promotion(
+                agent.id,
+                CreateAgentRelease {
+                    agent_version_id: None,
+                    eval_run_id: run.id,
+                    environment: "prod".to_string(),
+                    min_score: Some(1.0),
+                },
+                "release-requester".to_string(),
+                Some("system".to_string()),
+                Some("requires external rollout controller".to_string()),
+                normalize_release_automation_policy(
+                    Some(true),
+                    Some(
+                        (Utc::now() - chrono::Duration::minutes(1))
+                            .to_rfc3339()
+                            .as_str(),
+                    ),
+                    Some(
+                        (Utc::now() + chrono::Duration::minutes(10))
+                            .to_rfc3339()
+                            .as_str(),
+                    ),
+                )
+                .expect("automation policy"),
+            )
+            .await
+            .expect("request release");
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED" => Some("true".to_string()),
+            _ => None,
+        };
+
+        let automation = execute_due_agent_release_promotions_with_lookup(&state, lookup)
+            .await
+            .expect("release automation");
+
+        assert!(automation.controller_required);
+        assert!(!automation.controller_configured);
+        assert_eq!(automation.pending_count, 1);
+        assert_eq!(automation.promoted_count, 0);
+        assert_eq!(automation.skipped_count, 1);
+        assert_eq!(
+            automation.results[0]["reason"],
+            "controller_required_not_configured"
+        );
+        let pending = state
+            .list_pending_agent_releases()
+            .await
+            .expect("pending releases");
+        assert!(pending.iter().any(|candidate| candidate.id == release.id));
     }
 
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {
