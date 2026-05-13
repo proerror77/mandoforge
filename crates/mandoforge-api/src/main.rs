@@ -1399,6 +1399,9 @@ struct RemoteComputerStateFilesystemReadiness {
     provider_configured_by_env: bool,
     provider_manifest_present: bool,
     provider_manifest_path: String,
+    production_profile_present: bool,
+    production_profile_path: String,
+    production_claim_name: String,
     supported_providers: Vec<String>,
     status: String,
 }
@@ -18164,6 +18167,7 @@ async fn build_remote_computer_readiness(
     let pvc_path = "deploy/k8s/remote-computer-state-pvc.yaml";
     let state_contract_path = "deploy/k8s/remote-computer-state-contract.yaml";
     let provider_manifest_path = "deploy/k8s/remote-computer-state-juicefs-example.yaml";
+    let production_profile_path = "deploy/k8s/remote-computer-state-juicefs-profile.yaml";
     let pvc_present = project_file_path(pvc_path).is_some();
     let state_contract_present = project_file_path(state_contract_path).is_some();
     let state_provider = std::env::var("MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER")
@@ -18173,6 +18177,7 @@ async fn build_remote_computer_readiness(
         .unwrap_or_else(|| "pvc-placeholder".to_string());
     let provider_configured_by_env = state_provider != "pvc-placeholder";
     let provider_manifest_present = project_file_path(provider_manifest_path).is_some();
+    let production_profile_present = project_file_path(production_profile_path).is_some();
     let distributed_filesystem_configured = provider_configured_by_env;
     let conflict_policy = std::env::var("MANDOFORGE_REMOTE_COMPUTER_STATE_CONFLICT_POLICY")
         .ok()
@@ -18214,6 +18219,9 @@ async fn build_remote_computer_readiness(
         provider_configured_by_env,
         provider_manifest_present,
         provider_manifest_path: provider_manifest_path.to_string(),
+        production_profile_present,
+        production_profile_path: production_profile_path.to_string(),
+        production_claim_name: "mandoforge-remote-computer-state".to_string(),
         supported_providers: vec![
             "juicefs".to_string(),
             "cephfs".to_string(),
@@ -18221,8 +18229,12 @@ async fn build_remote_computer_readiness(
             "cloud-file-storage".to_string(),
             "object-sync".to_string(),
         ],
-        status: if pvc_present && distributed_filesystem_configured {
+        status: if pvc_present && distributed_filesystem_configured && production_profile_present {
             "configured"
+        } else if pvc_present && distributed_filesystem_configured {
+            "provider_configured_profile_missing"
+        } else if pvc_present && production_profile_present {
+            "production_profile_present"
         } else if pvc_present && provider_manifest_present {
             "example_present"
         } else if pvc_present {
@@ -18334,11 +18346,19 @@ async fn build_remote_computer_readiness(
             "critical",
             "remote computer Memory/Notes/Skills state contract ConfigMap is missing",
         ));
+    } else if state_filesystem.provider_configured_by_env
+        && !state_filesystem.production_profile_present
+    {
+        attention_items.push(remote_computer_attention(
+            "distributed_state_profile_missing",
+            "critical",
+            "remote computer state provider is configured, but the production state filesystem profile manifest is missing",
+        ));
     } else if !state_filesystem.distributed_filesystem_configured {
         attention_items.push(remote_computer_attention(
             "distributed_state_filesystem_missing",
             "warning",
-            "state mount has a PVC/RWX placeholder and optional JuiceFS example; set a real JuiceFS/CephFS/Longhorn or equivalent provider before multi-Pod state sync",
+            "state mount has a PVC/RWX placeholder and optional JuiceFS production profile; set a real JuiceFS/CephFS/Longhorn or equivalent provider before multi-Pod state sync",
         ));
     }
     if !network_policy.present {
@@ -18401,6 +18421,12 @@ async fn build_remote_computer_readiness(
     if !state_filesystem.distributed_filesystem_configured {
         runbook_actions.push(
             "set MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER to juicefs, cephfs, longhorn-rwx, or an equivalent provider before running multi-Pod Memory/Notes/Skills sync"
+                .to_string(),
+        );
+    }
+    if state_filesystem.production_profile_present {
+        runbook_actions.push(
+            "apply deploy/k8s/remote-computer-state-juicefs-profile.yaml only after replacing placeholder JuiceFS metadata, object storage, and access credentials"
                 .to_string(),
         );
     }
@@ -32807,12 +32833,23 @@ not json
         assert!(remote_computer_readiness.state_filesystem.pvc_present);
         assert_eq!(
             remote_computer_readiness.state_filesystem.status,
-            "example_present"
+            "production_profile_present"
         );
         assert!(
             remote_computer_readiness
                 .state_filesystem
                 .provider_manifest_present
+        );
+        assert!(
+            remote_computer_readiness
+                .state_filesystem
+                .production_profile_present
+        );
+        assert_eq!(
+            remote_computer_readiness
+                .state_filesystem
+                .production_claim_name,
+            "mandoforge-remote-computer-state"
         );
         assert!(
             remote_computer_readiness
