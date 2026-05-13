@@ -8,3 +8,4 @@ resources:
   - ../stage2-evidence/remote-computer-evidence-job.example.yaml
   - ../stage2-evidence/provider-governance-evidence-job.example.yaml
   - ../stage2-evidence/tenant-isolation-evidence-job.example.yaml
+  - ../stage2-evidence/vault-evidence-job.example.yaml

@@ -15,12 +15,14 @@ manifests=(
   deploy/stage2-evidence/remote-computer-evidence-job.example.yaml
   deploy/stage2-evidence/provider-governance-evidence-job.example.yaml
   deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml
+  deploy/stage2-evidence/vault-evidence-job.example.yaml
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
 remote_computer_script="scripts/remote-computer-evidence-gate.sh"
 provider_script="scripts/provider-governance-evidence-gate.sh"
 tenant_script="scripts/tenant-isolation-evidence-gate.sh"
+vault_script="scripts/vault-evidence-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -51,6 +53,11 @@ fi
 
 if [[ ! -x "$tenant_script" ]]; then
   echo "missing tenant isolation evidence script: $tenant_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$vault_script" ]]; then
+  echo "missing Vault evidence script: $vault_script" >&2
   exit 1
 fi
 
@@ -95,6 +102,11 @@ fi
 
 if ! grep -q "name: mandoforge-tenant-isolation-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the tenant isolation evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-vault-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the Vault evidence Job" >&2
   exit 1
 fi
 
@@ -200,6 +212,26 @@ fi
 
 if ! grep -q "/api/tenant-isolation/routing/validate" "$tenant_script"; then
   echo "Tenant isolation evidence script must validate tenant production routing" >&2
+  exit 1
+fi
+
+if ! grep -q "vault-evidence-gate.sh" deploy/stage2-evidence/vault-evidence-job.example.yaml; then
+  echo "Vault evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/vault-evidence-job.example.yaml; then
+  echo "Vault evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/vault/kms/recovery/validate" "$vault_script"; then
+  echo "Vault evidence script must validate KMS recovery readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/vault/kms/rotation/run" "$vault_script"; then
+  echo "Vault evidence script must capture KMS rotation evidence" >&2
   exit 1
 fi
 

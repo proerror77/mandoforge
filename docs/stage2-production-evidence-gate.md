@@ -59,6 +59,15 @@ For a narrower tenant-isolation proof, run:
 
 That gate collects tenant isolation readiness and audited production routing validation evidence into `.mandoforge/tenant-isolation-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower Vault/KMS proof, run:
+
+```bash
+RUN_STAGE2_SECRET_LIFECYCLE=1 \
+./scripts/vault-evidence-gate.sh
+```
+
+That gate collects Vault readiness, Vault health, KMS recovery validation, and optional KMS rotation evidence into `.mandoforge/vault-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/vault-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.
