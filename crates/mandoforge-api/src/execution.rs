@@ -191,6 +191,20 @@ pub(crate) async fn run_execution_job(
     }
     let tool_call = state.get_tool_call(job.tool_call_id).await?;
     let result = match tool_call.tool_name.as_str() {
+        "file.write"
+            if remote_computer_assignment.is_some()
+                && remote_computer_pod_execution_requested() =>
+        {
+            execute_approved_remote_computer_file_write(
+                state,
+                &approval,
+                &tool_call,
+                remote_computer_assignment
+                    .as_ref()
+                    .expect("checked assignment"),
+            )
+            .await
+        }
         "file.write" => execute_approved_file_write(state, &approval, &tool_call).await,
         "shell.exec"
             if remote_computer_assignment.is_some()
@@ -556,6 +570,181 @@ async fn execute_approved_file_write(
             "tool_call",
             Some(tool_call.id),
             json!({"tool": tool_call.tool_name, "path": relative_path, "resumed_after_approval": true}),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn execute_approved_remote_computer_file_write(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+    assignment: &crate::RemoteComputerJobAssignment,
+) -> Result<(), AppError> {
+    let relative_path = tool_call
+        .args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("file.write requires path"))?;
+    let content = tool_call
+        .args
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("file.write requires content"))?;
+    validate_workspace_relative_path(relative_path)?;
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == assignment.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    let pod_name = remote_computer
+        .pod_name
+        .clone()
+        .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
+    let command = remote_file_write_command(relative_path, content);
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = remote_computer_runner_for_config(&config);
+    let response = runner
+        .mutate(
+            &config,
+            RemoteComputerRunnerDryRunRequest {
+                operation: Some("live_exec".to_string()),
+                remote_computer_id: Some(remote_computer.id),
+                session_id: Some(approval.session_id),
+                pod_name: Some(pod_name.clone()),
+                metadata: Some(json!({"command": command, "tool_call_id": tool_call.id})),
+            },
+        )
+        .await;
+    let exec_result = response.exec_result.clone().ok_or_else(|| {
+        AppError::bad_request(format!(
+            "Remote Computer file.write did not return output: {}",
+            response.message
+        ))
+    })?;
+    if response.status != "exec_ok" || !response.execution_enabled {
+        return Err(AppError::bad_request(response.message));
+    }
+    let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
+    if !kubernetes_exec_status_succeeded(&status) {
+        return Err(AppError::bad_request(format!(
+            "Remote Computer file.write failed with status {status}"
+        )));
+    }
+    let limit = execution_output_limit_bytes();
+    let stdout = truncate_output(
+        exec_result
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        limit,
+    );
+    let stderr = truncate_output(
+        exec_result
+            .get("stderr")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        limit,
+    );
+    let result = json!({
+        "approval": "approved",
+        "path": relative_path,
+        "runner": "remote_computer_pod_exec",
+        "remote_computer_id": remote_computer.id,
+        "assignment_id": assignment.id,
+        "lease_id": assignment.lease_id,
+        "namespace": remote_computer.namespace,
+        "pod_name": pod_name,
+        "status": status,
+        "stdout": stdout.text,
+        "stdout_bytes": stdout.original_bytes,
+        "stdout_truncated": stdout.truncated || exec_result
+            .get("stdout_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "stderr": stderr.text,
+        "stderr_bytes": stderr.original_bytes,
+        "stderr_truncated": stderr.truncated || exec_result
+            .get("stderr_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    });
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
+        .await?;
+    let artifact = Artifact {
+        id: Uuid::new_v4(),
+        session_id: approval.session_id,
+        artifact_type: "file".to_string(),
+        name: relative_path.to_string(),
+        path: Some(relative_path.to_string()),
+        content: json!({
+            "text": content,
+            "runner": "remote_computer_pod_exec",
+            "remote_computer_id": remote_computer.id,
+            "assignment_id": assignment.id,
+        }),
+        created_at: Utc::now(),
+    };
+    let artifact = state.insert_artifact(artifact).await?;
+    state
+        .append_event(
+            "worker",
+            Some(tool_call.id),
+            approval.session_id,
+            "remote_computer.execution_transport_completed",
+            json!({
+                "tool_call_id": tool_call.id,
+                "assignment_id": assignment.id,
+                "remote_computer_id": remote_computer.id,
+                "lease_id": assignment.lease_id,
+                "pod_name": pod_name,
+                "tool": tool_call.tool_name,
+                "path": relative_path,
+                "stdout_bytes": stdout.original_bytes,
+                "stderr_bytes": stderr.original_bytes,
+                "status": status,
+                "execution_enabled": true,
+            }),
+        )
+        .await?;
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+        )
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(artifact.id),
+            approval.session_id,
+            "artifact.created",
+            json!({"artifact_id": artifact.id, "name": artifact.name, "path": artifact.path, "artifact_type": artifact.artifact_type, "runner": "remote_computer_pod_exec"}),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "tool.completed",
+            "tool_call",
+            Some(tool_call.id),
+            json!({
+                "tool": tool_call.tool_name,
+                "path": relative_path,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "pod_name": pod_name,
+                "status": status,
+                "resumed_after_approval": true
+            }),
         ))
         .await?;
     Ok(())
@@ -1064,6 +1253,11 @@ async fn session_workspace(state: &AppState, session_id: Uuid) -> Result<PathBuf
 }
 
 fn safe_workspace_path(workspace: &FsPath, relative_path: &str) -> Result<PathBuf, AppError> {
+    validate_workspace_relative_path(relative_path)?;
+    Ok(workspace.join(FsPath::new(relative_path)))
+}
+
+fn validate_workspace_relative_path(relative_path: &str) -> Result<(), AppError> {
     let path = FsPath::new(relative_path);
     if path.is_absolute()
         || path
@@ -1074,7 +1268,7 @@ fn safe_workspace_path(workspace: &FsPath, relative_path: &str) -> Result<PathBu
             "file.write path must stay inside the session workspace",
         ));
     }
-    Ok(workspace.join(path))
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1165,6 +1359,29 @@ fn remote_codex_exec_command(request: &CodexRequest) -> String {
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn remote_file_write_command(relative_path: &str, content: &str) -> String {
+    let delimiter = heredoc_delimiter(content);
+    format!(
+        "set -eu\ncd /workspace\nmkdir -p -- \"$(dirname -- {})\"\ncat > {} <<'{}'\n{}\n{}\nprintf 'wrote file %s\\n' {}",
+        shell_single_quote(relative_path),
+        shell_single_quote(relative_path),
+        delimiter,
+        content,
+        delimiter,
+        shell_single_quote(relative_path)
+    )
+}
+
+fn heredoc_delimiter(content: &str) -> String {
+    for index in 0..1000 {
+        let delimiter = format!("MANDOFORGE_FILE_WRITE_EOF_{index}");
+        if !content.lines().any(|line| line == delimiter) {
+            return delimiter;
+        }
+    }
+    format!("MANDOFORGE_FILE_WRITE_EOF_{}", Uuid::new_v4().simple())
 }
 
 fn split_remote_codex_output(stdout: &str) -> RemoteCodexOutput {
@@ -1682,6 +1899,20 @@ mod tests {
         assert_eq!(output.jsonl_stdout, "{\"type\":\"session.started\"}");
         assert_eq!(output.final_message, "# Report\n\nDone");
         assert_eq!(parse_codex_jsonl(&output.jsonl_stdout).len(), 1);
+    }
+
+    #[test]
+    fn remote_file_write_command_uses_safe_heredoc_delimiter() {
+        let command = remote_file_write_command(
+            "reports/diagnostics.md",
+            "line one\nMANDOFORGE_FILE_WRITE_EOF_0\nline two",
+        );
+
+        assert!(command.contains("cd /workspace"));
+        assert!(command.contains("mkdir -p -- \"$(dirname -- 'reports/diagnostics.md')\""));
+        assert!(command.contains("cat > 'reports/diagnostics.md'"));
+        assert!(command.contains("MANDOFORGE_FILE_WRITE_EOF_1"));
+        assert!(!command.contains("<<'MANDOFORGE_FILE_WRITE_EOF_0'"));
     }
 
     #[test]
