@@ -11,6 +11,8 @@ pub(crate) struct RemoteComputerRunnerConfig {
     pub(crate) pod_template_path: String,
     pub(crate) service_account: String,
     pub(crate) kubeconfig_path: Option<String>,
+    pub(crate) kube_api_url: Option<String>,
+    pub(crate) bearer_token_path: Option<String>,
     pub(crate) in_cluster: bool,
     pub(crate) mutation_enabled: bool,
 }
@@ -43,6 +45,14 @@ impl RemoteComputerRunnerConfig {
                 .or_else(|| std::env::var("KUBECONFIG").ok())
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            kube_api_url: std::env::var("MANDOFORGE_REMOTE_COMPUTER_KUBE_API_URL")
+                .ok()
+                .map(|value| value.trim().trim_end_matches('/').to_string())
+                .filter(|value| !value.is_empty()),
+            bearer_token_path: std::env::var("MANDOFORGE_REMOTE_COMPUTER_BEARER_TOKEN_PATH")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             in_cluster: env_flag("MANDOFORGE_REMOTE_COMPUTER_IN_CLUSTER"),
             mutation_enabled: env_flag("MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED"),
         }
@@ -58,6 +68,8 @@ pub(crate) struct RemoteComputerRunnerReadiness {
     pub(crate) pod_template_path: String,
     pub(crate) service_account: String,
     pub(crate) client_configured: bool,
+    pub(crate) api_server_configured: bool,
+    pub(crate) bearer_token_configured: bool,
     pub(crate) mutation_enabled: bool,
     pub(crate) dry_run_only: bool,
     pub(crate) supported_operations: Vec<String>,
@@ -120,6 +132,8 @@ impl RemoteComputerRunner for ReservedRemoteComputerRunner {
             pod_template_path: config.pod_template_path.clone(),
             service_account: config.service_account.clone(),
             client_configured: false,
+            api_server_configured: false,
+            bearer_token_configured: false,
             mutation_enabled: false,
             dry_run_only: true,
             supported_operations: vec![
@@ -161,6 +175,8 @@ impl RemoteComputerRunner for ReservedRemoteComputerRunner {
 impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
     fn readiness(&self, config: &RemoteComputerRunnerConfig) -> RemoteComputerRunnerReadiness {
         let client_configured = kubernetes_client_configured(config);
+        let api_server_configured = config.kube_api_url.is_some();
+        let bearer_token_configured = kubernetes_bearer_token_configured(config);
         let template_present = Path::new(&config.pod_template_path).exists();
         let configured = client_configured && template_present;
         let status = if configured {
@@ -178,6 +194,8 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             pod_template_path: config.pod_template_path.clone(),
             service_account: config.service_account.clone(),
             client_configured,
+            api_server_configured,
+            bearer_token_configured,
             mutation_enabled: config.mutation_enabled,
             dry_run_only: true,
             supported_operations: vec![
@@ -189,6 +207,8 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
                 "Kubernetes Remote Computer adapter is configured for dry-run planning; Pod mutation remains disabled in this skeleton"
             } else if !template_present {
                 "Kubernetes Remote Computer adapter is selected, but the Pod template is missing"
+            } else if api_server_configured && !bearer_token_configured && !config.in_cluster {
+                "Kubernetes Remote Computer adapter has an API server URL, but no bearer token path or in-cluster identity is configured"
             } else {
                 "Kubernetes Remote Computer adapter is selected, but kubeconfig or in-cluster config is missing"
             }
@@ -232,10 +252,18 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
 
 fn kubernetes_client_configured(config: &RemoteComputerRunnerConfig) -> bool {
     config.in_cluster
+        || (config.kube_api_url.is_some() && kubernetes_bearer_token_configured(config))
         || config
             .kubeconfig_path
             .as_deref()
             .is_some_and(|path| Path::new(path).exists())
+}
+
+fn kubernetes_bearer_token_configured(config: &RemoteComputerRunnerConfig) -> bool {
+    config
+        .bearer_token_path
+        .as_deref()
+        .is_some_and(|path| Path::new(path).exists())
 }
 
 fn env_flag(name: &str) -> bool {
@@ -264,6 +292,8 @@ mod tests {
             pod_template_path: test_pod_template_path(),
             service_account: "mandoforge-remote-computer".to_string(),
             kubeconfig_path: None,
+            kube_api_url: None,
+            bearer_token_path: None,
             in_cluster: false,
             mutation_enabled: false,
         };
@@ -297,6 +327,8 @@ mod tests {
             kubeconfig_path: None,
             in_cluster: true,
             mutation_enabled: true,
+            kube_api_url: None,
+            bearer_token_path: None,
         };
         let runner = KubernetesRemoteComputerRunner;
         let response = runner
@@ -315,5 +347,26 @@ mod tests {
         assert!(response.would_create_pod);
         assert!(!response.would_delete_pod);
         assert!(!response.execution_enabled);
+    }
+
+    #[test]
+    fn kubernetes_runner_requires_identity_for_api_server_config() {
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some("https://kubernetes.default.svc".to_string()),
+            bearer_token_path: None,
+            in_cluster: false,
+            mutation_enabled: true,
+        };
+        let readiness = KubernetesRemoteComputerRunner.readiness(&config);
+        assert_eq!(readiness.status, "client_missing");
+        assert!(readiness.api_server_configured);
+        assert!(!readiness.bearer_token_configured);
+        assert!(!readiness.configured);
+        assert!(readiness.dry_run_only);
     }
 }
