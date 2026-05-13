@@ -5,6 +5,7 @@ template="deploy/stage2-evidence/stage2-production-controllers.env.example"
 job_manifest="deploy/stage2-evidence/stage2-evidence-gate-job.yaml"
 secret_manifest="deploy/stage2-evidence/stage2-controller-env-secret.example.yaml"
 production_job_manifest="deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml"
+render_secret_script="scripts/render-stage2-controller-secret.sh"
 api_source="crates/mandoforge-api/src/main.rs"
 
 required_template_vars=(
@@ -132,6 +133,11 @@ if [[ ! -f "$production_job_manifest" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$render_secret_script" ]]; then
+  echo "missing executable Stage 2 controller Secret render script: $render_secret_script" >&2
+  exit 1
+fi
+
 for var in "${required_template_vars[@]}"; do
   if ! grep -q "^${var}=" "$template"; then
     echo "Stage 2 controller env template is missing $var" >&2
@@ -179,6 +185,18 @@ fi
 
 if grep -q "name: RUN_STAGE2_PRODUCTION_VALIDATIONS" "$production_job_manifest"; then
   echo "Stage 2 production evidence Job should read validation flags from the Secret, not hard-coded env" >&2
+  exit 1
+fi
+
+ALLOW_STAGE2_CONTROLLER_PLACEHOLDERS=1 "$render_secret_script" "$template" >/tmp/mandoforge-stage2-controller-secret-render.yaml
+
+if ! grep -q "name: mandoforge-stage2-controller-env" /tmp/mandoforge-stage2-controller-secret-render.yaml; then
+  echo "Stage 2 controller Secret render script produced the wrong Secret name" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL" /tmp/mandoforge-stage2-controller-secret-render.yaml; then
+  echo "Stage 2 controller Secret render is missing controller env data" >&2
   exit 1
 fi
 

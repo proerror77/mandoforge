@@ -11,6 +11,7 @@ Stage 2 is complete only when `/api/stage2/readiness` reports no open gaps and t
 - `stage2-controller-env-secret.example.yaml` is the Kubernetes Secret shape for those controller settings. Replace placeholders through your secret manager or deployment pipeline; do not commit real values.
 - `stage2-production-evidence-pvc.example.yaml` is the persistent evidence volume shape for strict production runs.
 - `stage2-production-evidence-gate-job.example.yaml` runs the strict production gate and reads validation flags from `mandoforge-stage2-controller-env`.
+- `../../scripts/render-stage2-controller-secret.sh` renders the real controller Secret from an env file and fails closed on placeholders unless `ALLOW_STAGE2_CONTROLLER_PLACEHOLDERS=1` is set.
 
 ## Local Manifest Verification
 
@@ -42,14 +43,15 @@ Use this only after real validation controllers and credentials are configured:
 
 ```bash
 kubectl create namespace agent-os --dry-run=client -o yaml | kubectl apply -f -
+scripts/render-stage2-controller-secret.sh /secure/path/stage2-production-controllers.env | kubectl apply -f -
 kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone | kubectl apply -f -
 kubectl wait --for=condition=complete job/mandoforge-stage2-production-evidence-gate -n agent-os --timeout=30m
 kubectl logs job/mandoforge-stage2-production-evidence-gate -n agent-os
 ```
 
-For a real run, create `mandoforge-stage2-controller-env` from the same keys but with production controller URLs, tokens, team id, and KMS settings supplied outside git. The strict Job sets `ALLOW_BLOCKED=0` through that Secret and fails closed if required controller evidence is missing, stale, or unhealthy. Keep the `mandoforge-stage2-production-evidence` PVC until the evidence directory has been archived with the release record.
+For a real run, create `/secure/path/stage2-production-controllers.env` from the same keys but with production controller URLs, tokens, team id, and KMS settings supplied outside git. The render script refuses `example.com` placeholders and empty token/key/team values by default. The strict Job sets `ALLOW_BLOCKED=0` through that Secret and fails closed if required controller evidence is missing, stale, or unhealthy. Keep the `mandoforge-stage2-production-evidence` PVC until the evidence directory has been archived with the release record.
 
-The production kustomize bundle references the reviewed example files under `deploy/stage2-evidence`, so `kubectl kustomize` needs `--load-restrictor LoadRestrictionsNone`. Use your deployment pipeline's secret overlay instead of applying the example Secret with placeholder values.
+The production kustomize bundle references the reviewed PVC and Job examples under `deploy/stage2-evidence`, so `kubectl kustomize` needs `--load-restrictor LoadRestrictionsNone`. It does not include the example Secret; render and apply the real Secret first.
 
 ## Completion Rule
 
