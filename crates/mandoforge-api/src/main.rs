@@ -2083,6 +2083,8 @@ struct UsageFinanceOperationsRun {
     rollup_created: Option<UsageRollup>,
     cost_alert_delivery: Option<CostAlertDelivery>,
     finance_export_delivery: Option<UsageFinanceExportDelivery>,
+    close_controller_configured: bool,
+    close_controller_execution: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14670,12 +14672,25 @@ async fn execute_usage_finance_operations(
     state: &AppState,
     subject: Option<&str>,
 ) -> Result<UsageFinanceOperationsRun, AppError> {
+    execute_usage_finance_operations_with_lookup(state, subject, |key| std::env::var(key).ok())
+        .await
+}
+
+async fn execute_usage_finance_operations_with_lookup<F>(
+    state: &AppState,
+    subject: Option<&str>,
+    lookup: F,
+) -> Result<UsageFinanceOperationsRun, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let ran_at = Utc::now();
     let before = build_usage_finance_operations_summary(state).await?;
     let mut actions = Vec::new();
     let mut rollup_created = None;
     let mut cost_alert_delivery = None;
     let mut finance_export_delivery = None;
+    let close_controller_configured = usage_finance_close_controller_configured(&lookup);
 
     if before.rollup_status != "fresh" {
         let period_end = ran_at;
@@ -14709,9 +14724,59 @@ async fn execute_usage_finance_operations(
     }
 
     let after = build_usage_finance_operations_summary(state).await?;
+    let mut close_controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if close_controller_configured {
+            "production_close_gate_not_ready"
+        } else {
+            "close_controller_not_configured"
+        }
+    });
+    if close_controller_configured && !after.production_close.production_blocked {
+        match execute_usage_finance_close_controller(
+            &lookup,
+            subject,
+            ran_at,
+            &before,
+            &after,
+            rollup_created.is_some(),
+            cost_alert_delivery.as_ref(),
+            finance_export_delivery.as_ref(),
+        )
+        .await
+        {
+            Ok(execution) => {
+                let execution_status = execution
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed")
+                    .to_string();
+                close_controller_execution = execution;
+                actions.push("usage_finance_close_controller_executed".to_string());
+                if execution_status != "closed" {
+                    actions.push("usage_finance_close_controller_attention".to_string());
+                }
+            }
+            Err(error) => {
+                close_controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+                actions.push("usage_finance_close_controller_failed".to_string());
+            }
+        }
+    }
     let run = UsageFinanceOperationsRun {
         status: if actions.is_empty() {
             "no_action".to_string()
+        } else if close_controller_execution
+            .get("status")
+            .and_then(Value::as_str)
+            == Some("failed")
+        {
+            "attention".to_string()
         } else {
             "completed".to_string()
         },
@@ -14722,6 +14787,8 @@ async fn execute_usage_finance_operations(
         rollup_created,
         cost_alert_delivery,
         finance_export_delivery,
+        close_controller_configured,
+        close_controller_execution,
     };
     state
         .append_audit_log(new_audit_log(
@@ -14738,6 +14805,8 @@ async fn execute_usage_finance_operations(
                 "rollup_created": run.rollup_created.is_some(),
                 "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
                 "finance_export_delivery_status": run.finance_export_delivery.as_ref().map(|delivery| delivery.status.clone()),
+                "close_controller_configured": run.close_controller_configured,
+                "close_controller_execution": run.close_controller_execution,
                 "before_status": run.before.status,
                 "after_status": run.after.status,
                 "ran_at": run.ran_at,
@@ -14745,6 +14814,90 @@ async fn execute_usage_finance_operations(
         ))
         .await?;
     Ok(run)
+}
+
+fn usage_finance_close_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_usage_finance_close_controller<F>(
+    lookup: &F,
+    subject: Option<&str>,
+    ran_at: DateTime<Utc>,
+    before: &UsageFinanceOperationsSummary,
+    after: &UsageFinanceOperationsSummary,
+    rollup_created: bool,
+    cost_alert_delivery: Option<&CostAlertDelivery>,
+    finance_export_delivery: Option<&UsageFinanceExportDelivery>,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_FINANCE_CLOSE_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_FINANCE_CLOSE_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.finance_close",
+        "subject": subject,
+        "ran_at": ran_at,
+        "before": {
+            "status": before.status,
+            "readiness_score": before.readiness_score,
+            "production_close": before.production_close,
+        },
+        "after": {
+            "status": after.status,
+            "readiness_score": after.readiness_score,
+            "production_close": after.production_close,
+        },
+        "rollup_created": rollup_created,
+        "cost_alert_delivery_status": cost_alert_delivery.map(|delivery| delivery.status.clone()),
+        "finance_export_delivery_status": finance_export_delivery.map(|delivery| delivery.status.clone()),
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "finance close controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("closed");
+    let closed = matches!(controller_status, "closed" | "success" | "ok" | "validated");
+    Ok(json!({
+        "attempted": true,
+        "status": if closed { "closed" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "close_id": body.get("close_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 fn build_usage_finance_dashboard_summary_from_parts(
@@ -23883,6 +24036,108 @@ not json
         );
     }
 
+    #[tokio::test]
+    async fn finance_close_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("finance close listener");
+        let controller_addr = listener.local_addr().expect("finance close addr");
+        let controller = Router::new()
+            .route("/finance-close", post(mock_finance_close_controller))
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock finance close controller");
+        });
+        let generated_at = Utc::now();
+        let before = ready_finance_operations_summary(generated_at, "attention");
+        let after = ready_finance_operations_summary(generated_at, "ready");
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/finance-close"))
+            }
+            "MANDOFORGE_FINANCE_CLOSE_CONTROLLER_TOKEN" => Some("finance-token".to_string()),
+            _ => None,
+        };
+
+        let execution = execute_usage_finance_close_controller(
+            &lookup,
+            Some("admin-1"),
+            generated_at,
+            &before,
+            &after,
+            true,
+            None,
+            None,
+        )
+        .await
+        .expect("finance close controller");
+
+        assert_eq!(execution["status"], "closed");
+        assert_eq!(execution["close_id"], "finance-close-1");
+        assert_eq!(execution["steps"].as_array().expect("steps").len(), 3);
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.finance_close");
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["rollup_created"], true);
+        assert_eq!(payloads[0]["after"]["production_close"]["status"], "ready");
+
+        controller_server.abort();
+    }
+
+    fn ready_finance_operations_summary(
+        generated_at: DateTime<Utc>,
+        status: &str,
+    ) -> UsageFinanceOperationsSummary {
+        UsageFinanceOperationsSummary {
+            generated_at,
+            status: status.to_string(),
+            readiness_score: 100,
+            open_alert_count: 0,
+            acknowledged_alert_count: 0,
+            unacknowledged_alert_count: 0,
+            active_alert_route_count: 1,
+            rollup_status: "fresh".to_string(),
+            export_status: "delivered".to_string(),
+            alert_delivery_status: "delivered".to_string(),
+            last_finance_export: Some(UsageFinanceOperationAudit {
+                action: "usage.finance_export_delivered".to_string(),
+                status: "delivered".to_string(),
+                subject: Some("admin-1".to_string()),
+                created_at: generated_at,
+            }),
+            last_alert_delivery: Some(UsageFinanceOperationAudit {
+                action: "usage.cost_alert_delivery_run".to_string(),
+                status: "delivered".to_string(),
+                subject: Some("admin-1".to_string()),
+                created_at: generated_at,
+            }),
+            last_alert_acknowledgement: Some(UsageFinanceOperationAudit {
+                action: "usage.alert_acknowledged".to_string(),
+                status: "acknowledged".to_string(),
+                subject: Some("admin-1".to_string()),
+                created_at: generated_at,
+            }),
+            production_close: UsageFinanceProductionCloseReadiness {
+                status: "ready".to_string(),
+                production_blocked: false,
+                rollup_fresh: true,
+                export_target_configured: true,
+                export_recent: true,
+                alert_delivery_ready: true,
+                critical_alerts_acknowledged: true,
+                failed_delivery_evidence: false,
+                blocking_reasons: vec![],
+                message: "ready".to_string(),
+            },
+            runbook_actions: vec![],
+            attention_items: vec![],
+        }
+    }
+
     #[test]
     fn builds_codex_app_server_turn_trace_summary() {
         let base_time = "2026-05-13T00:00:00Z"
@@ -28517,6 +28772,30 @@ not json
             "message": "replacement pod sidecars are healthy",
             "replacement_pods_healthy": true,
             "checked_pod_count": 1
+        }))
+    }
+
+    async fn mock_finance_close_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer finance-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "closed",
+            "close_id": "finance-close-1",
+            "message": "finance close accepted",
+            "steps": [
+                {"name": "rollup", "status": "verified"},
+                {"name": "export", "status": "delivered"},
+                {"name": "alerts", "status": "acknowledged"}
+            ]
         }))
     }
 

@@ -3154,6 +3154,7 @@ function renderUsage() {
             <div class="muted">${escapeHtml(financeOperationsRun.ran_at)} · ${(financeOperationsRun.actions || []).map(escapeHtml).join(" · ") || "no action"}</div>
             <div class="muted">Before ${escapeHtml(financeOperationsRun.before?.status || "unknown")} → after ${escapeHtml(financeOperationsRun.after?.status || "unknown")}</div>
             <div class="muted">Rollup ${escapeHtml(financeOperationsRun.rollup_created ? "created" : "not created")} · alerts ${escapeHtml(financeOperationsRun.cost_alert_delivery?.status || "not run")} · export ${escapeHtml(financeOperationsRun.finance_export_delivery?.status || "not run")}</div>
+            <div class="muted">Close controller ${escapeHtml(financeOperationsRun.close_controller_configured ? "configured" : "not configured")} · ${escapeHtml(financeOperationsRun.close_controller_execution?.status || "skipped")}</div>
           </div>`
         : ""
     }
