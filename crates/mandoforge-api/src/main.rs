@@ -20728,6 +20728,7 @@ where
         "checked_at": checked_at,
         "service_name": config.service_name.clone(),
         "otlp_endpoint": collector_endpoint,
+        "collector_health_endpoint": config.collector_health_endpoint.clone(),
         "sample_ratio": config.sample_ratio,
         "signal_paths": signal_paths,
     });
@@ -30468,6 +30469,7 @@ not json
         let config = ObservabilityConfig {
             service_name: "mandoforge-api-test".to_string(),
             otlp_endpoint: Some("http://otel-collector:4318".to_string()),
+            collector_health_endpoint: None,
             sample_ratio: 1.0,
         };
 
@@ -30528,6 +30530,7 @@ not json
         let config = ObservabilityConfig {
             service_name: "mandoforge-api-test".to_string(),
             otlp_endpoint: Some("http://otel-collector:4318".to_string()),
+            collector_health_endpoint: None,
             sample_ratio: 1.0,
         };
         let audit = new_audit_log(
@@ -36605,6 +36608,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
@@ -36944,6 +36948,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
@@ -38204,6 +38209,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
@@ -38458,6 +38464,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: Some("http://otel.test".to_string()),
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: exporter.clone(),
@@ -38576,6 +38583,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
@@ -38950,6 +38958,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
@@ -39093,6 +39102,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
@@ -39277,6 +39287,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
@@ -39433,6 +39444,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
@@ -39702,6 +39714,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),
@@ -39874,6 +39887,7 @@ not json
             observability_config: ObservabilityConfig {
                 service_name: "mandoforge-api-test".to_string(),
                 otlp_endpoint: None,
+                collector_health_endpoint: None,
                 sample_ratio: 1.0,
             },
             telemetry_exporter: Arc::new(ReservedTelemetryExporter),

@@ -6,4 +6,7 @@ data:
   MANDOFORGE_ADDR: "0.0.0.0:8787"
   MANDOFORGE_WORKSPACE_ROOT: "/var/lib/mandoforge/workspaces"
   MANDOFORGE_EXECUTION_WORKER: "queue"
+  MANDOFORGE_SERVICE_NAME: "mandoforge-api"
+  MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT: "http://mandoforge-otel-collector:4318"
+  MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT: "http://mandoforge-otel-collector:13133/healthz"
   RUST_LOG: "info"

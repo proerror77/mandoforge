@@ -11,6 +11,7 @@ use crate::AppError;
 pub(crate) struct ObservabilityConfig {
     pub(crate) service_name: String,
     pub(crate) otlp_endpoint: Option<String>,
+    pub(crate) collector_health_endpoint: Option<String>,
     pub(crate) sample_ratio: f64,
 }
 
@@ -51,6 +52,9 @@ impl ObservabilityConfig {
         let otlp_endpoint = lookup("MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        let collector_health_endpoint = lookup("MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         let sample_ratio = lookup("MANDOFORGE_OTEL_SAMPLE_RATIO")
             .and_then(|value| value.trim().parse::<f64>().ok())
             .unwrap_or(1.0);
@@ -63,6 +67,7 @@ impl ObservabilityConfig {
         Ok(Self {
             service_name,
             otlp_endpoint,
+            collector_health_endpoint,
             sample_ratio,
         })
     }
@@ -73,6 +78,12 @@ impl ObservabilityConfig {
 
     fn normalized_otlp_endpoint(&self) -> Option<String> {
         self.otlp_endpoint
+            .as_deref()
+            .map(|endpoint| endpoint.trim_end_matches('/').to_string())
+    }
+
+    fn normalized_collector_health_endpoint(&self) -> Option<String> {
+        self.collector_health_endpoint
             .as_deref()
             .map(|endpoint| endpoint.trim_end_matches('/').to_string())
     }
@@ -124,9 +135,11 @@ impl HttpTelemetryExporter {
     }
 
     fn health_url(config: &ObservabilityConfig) -> Option<String> {
-        config
-            .normalized_otlp_endpoint()
-            .map(|endpoint| format!("{endpoint}/healthz"))
+        config.normalized_collector_health_endpoint().or_else(|| {
+            config
+                .normalized_otlp_endpoint()
+                .map(|endpoint| format!("{endpoint}/healthz"))
+        })
     }
 
     fn logs_url(config: &ObservabilityConfig) -> Option<String> {
@@ -456,6 +469,9 @@ mod tests {
         let config = ObservabilityConfig::from_lookup(|key| match key {
             "MANDOFORGE_SERVICE_NAME" => Some("agent-os-api".to_string()),
             "MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT" => Some("http://otel:4318".to_string()),
+            "MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT" => {
+                Some("http://otel:13133/healthz".to_string())
+            }
             "MANDOFORGE_OTEL_SAMPLE_RATIO" => Some("0.25".to_string()),
             _ => None,
         })
@@ -463,6 +479,14 @@ mod tests {
 
         assert_eq!(config.service_name, "agent-os-api");
         assert_eq!(config.otlp_endpoint.as_deref(), Some("http://otel:4318"));
+        assert_eq!(
+            config.collector_health_endpoint.as_deref(),
+            Some("http://otel:13133/healthz")
+        );
+        assert_eq!(
+            HttpTelemetryExporter::health_url(&config).as_deref(),
+            Some("http://otel:13133/healthz")
+        );
         assert_eq!(config.sample_ratio, 0.25);
         assert!(config.is_enabled());
     }

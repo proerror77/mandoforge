@@ -6,6 +6,7 @@ It contains:
 
 - Namespace.
 - API Deployment and Service.
+- OTel Collector Deployment and Service for in-cluster OTLP logs/traces/metrics ingestion, with a separate health endpoint used by the API readiness gate.
 - Worker Deployment for queued execution jobs, with a restricted ServiceAccount, disabled token automount, RuntimeDefault seccomp, dropped capabilities, read-only root filesystem, resource bounds, and a worker NetworkPolicy.
 - Worker HPA skeleton for CPU-based scaling experiments.
 - Worker KEDA ScaledObject for queue-depth scaling experiments.
@@ -60,3 +61,4 @@ Production notes:
 - Treat `../kustomization.yaml` as the reviewable bundle for enabling those examples together; do not apply it until storage credentials, Prometheus metrics, namespace policy, and state conflict rules have been reviewed.
 - Treat `../stage2-evidence/kustomization.yaml` as an inventory Job first. Its default `ALLOW_BLOCKED=1` collects readiness evidence without claiming completion; patch `RUN_STAGE2_PRODUCTION_VALIDATIONS=1` only when the external validation controllers and real deployment targets are configured.
 - Replace the scheduler example shared token before production exposure. If `MANDOFORGE_SCHEDULER_TOKEN` is set in the API runtime, `/api/scheduler/run-due` requires the CronJob to send the matching `x-mandoforge-scheduler-token` header in addition to Admin authorization.
+- The bundled OTel Collector exports to the collector `debug` exporter so local clusters have a real OTLP target without external credentials. Replace or extend its exporter pipeline before claiming production collector rollout; keep `MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT` pointed at the collector health extension rather than the OTLP HTTP receiver.

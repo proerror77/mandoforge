@@ -6,6 +6,7 @@ resources:
   - configmap.yaml
   - secret.example.yaml
   - postgres.yaml
+  - otel-collector.yaml
   - api.yaml
   - worker-serviceaccount.yaml
   - worker.yaml
