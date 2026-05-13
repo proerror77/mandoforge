@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mandoforge-remote-computer-artifact-discovery
+data:
+  discover-artifacts.py: |
+    import json
+    import os
+    import time
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+
+    enabled = os.getenv("MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    api_url = os.getenv("MANDOFORGE_API_URL", "http://mandoforge-api:8080").rstrip("/")
+    session_id = os.getenv("MANDOFORGE_SESSION_ID", "")
+    remote_computer_id = os.getenv("MANDOFORGE_REMOTE_COMPUTER_ID", "")
+    assignment_id = os.getenv("MANDOFORGE_ASSIGNMENT_ID", "")
+    artifact_dir = Path(os.getenv("MANDOFORGE_ARTIFACT_DIR", "/workspace/artifacts"))
+    interval_seconds = int(os.getenv("MANDOFORGE_ARTIFACT_DISCOVERY_INTERVAL_SECONDS", "30"))
+    max_files = int(os.getenv("MANDOFORGE_ARTIFACT_DISCOVERY_MAX_FILES", "50"))
+    seen = {}
+
+    def artifact_type(path):
+        suffix = path.suffix.lower()
+        if suffix in {".md", ".markdown"}:
+            return "markdown"
+        if suffix == ".json":
+            return "json"
+        if suffix == ".sql":
+            return "sql"
+        if suffix == ".csv":
+            return "csv"
+        if suffix == ".log":
+            return "log"
+        if suffix in {".py", ".sh", ".rs", ".ts", ".tsx", ".js", ".jsx"}:
+            return "script"
+        return "file"
+
+    def scan_once():
+        if not enabled or not session_id or not remote_computer_id:
+            return
+        if not artifact_dir.exists():
+            return
+        artifacts = []
+        for path in sorted(p for p in artifact_dir.rglob("*") if p.is_file())[:max_files]:
+            stat = path.stat()
+            key = str(path)
+            fingerprint = (stat.st_mtime_ns, stat.st_size)
+            if seen.get(key) == fingerprint:
+                continue
+            seen[key] = fingerprint
+            artifacts.append(
+                {
+                    "name": path.name,
+                    "artifact_type": artifact_type(path),
+                    "path": str(path.relative_to(artifact_dir.parent)),
+                    "content": {
+                        "text": path.read_text(encoding="utf-8", errors="replace"),
+                        "bytes": stat.st_size,
+                        "source": "remote_computer_artifact_discovery_sidecar",
+                    },
+                    "metadata": {
+                        "source_path": str(path),
+                        "mtime_ns": stat.st_mtime_ns,
+                        "sidecar": "remote-computer-artifact-discovery",
+                    },
+                }
+            )
+        if not artifacts:
+            return
+        payload = {
+            "session_id": session_id,
+            "remote_computer_id": remote_computer_id,
+            "artifacts": artifacts,
+        }
+        if assignment_id:
+            payload["assignment_id"] = assignment_id
+        request = urllib.request.Request(
+            f"{api_url}/api/remote-computers/artifacts/sync",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "content-type": "application/json",
+                "x-mandoforge-subject": "remote-computer-artifact-sidecar",
+                "x-mandoforge-roles": "operator",
+            },
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(request, timeout=10).read()
+        except urllib.error.URLError as error:
+            print(f"artifact discovery sync failed: {error}", flush=True)
+
+    while True:
+        scan_once()
+        time.sleep(interval_seconds)

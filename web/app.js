@@ -1966,6 +1966,7 @@ function renderRemoteComputerReadiness() {
   const networkPolicy = report.network_policy || {};
   const autoscaling = report.autoscaling || {};
   const warmPool = report.warm_pool || {};
+  const artifactDiscoverySidecar = report.artifact_discovery_sidecar || {};
   const runner = state.remoteComputerRunnerReadiness || report.runner || {};
   const executionTransport = report.execution_transport || {};
   const attentionItems = report.attention_items || [];
@@ -2012,6 +2013,7 @@ function renderRemoteComputerReadiness() {
     <div class="item">
       <strong>WARM POOL / SCALING</strong>
       <div class="muted">Warm pool: ${escapeHtml(warmPool.status || "unknown")} · manifest ${warmPool.manifest_present ? "present" : "missing"}</div>
+      <div class="muted">Artifact discovery sidecar: ${escapeHtml(artifactDiscoverySidecar.status || "unknown")} · manifest ${artifactDiscoverySidecar.present ? "present" : "missing"} · ${escapeHtml(artifactDiscoverySidecar.path || "unknown")}</div>
       <div class="muted">Worker HPA ${autoscaling.worker_hpa_present ? "present" : "missing"} · KEDA ${autoscaling.keda_manifest_present ? "present" : "missing"} · remote pool scaler ${autoscaling.remote_pool_scaled_object_present ? "present" : "missing"} · queue-depth scaling ${autoscaling.queue_depth_scaling_present ? "present" : "missing"}</div>
     </div>
     <div class="item">

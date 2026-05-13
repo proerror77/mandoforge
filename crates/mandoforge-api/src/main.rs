@@ -1329,6 +1329,7 @@ struct RemoteComputerReadinessReport {
     network_policy: RemoteComputerManifestReadiness,
     autoscaling: RemoteComputerAutoscalingReadiness,
     warm_pool: RemoteComputerWarmPoolReadiness,
+    artifact_discovery_sidecar: RemoteComputerManifestReadiness,
     runner: RemoteComputerRunnerReadiness,
     execution_transport: RemoteComputerExecutionTransportReadiness,
     event_types: Vec<String>,
@@ -17706,6 +17707,10 @@ async fn build_remote_computer_readiness(
         }
         .to_string(),
     };
+    let artifact_discovery_sidecar = remote_computer_manifest_readiness(
+        "deploy/k8s/remote-computer-artifact-discovery-sidecar.yaml",
+        "artifact_discovery_sidecar",
+    );
     let runner = build_remote_computer_runner_readiness();
     let execution_transport = build_remote_computer_execution_transport_readiness(state).await?;
 
@@ -17790,6 +17795,13 @@ async fn build_remote_computer_readiness(
             "no remote computer warm-pool manifest is present; first Pod lease will still cold start",
         ));
     }
+    if !artifact_discovery_sidecar.present {
+        attention_items.push(remote_computer_attention(
+            "artifact_discovery_sidecar_missing",
+            "warning",
+            "remote computer Pods need an artifact discovery sidecar before continuous artifact sync can be piloted",
+        ));
+    }
     if !runner.configured {
         attention_items.push(remote_computer_attention(
             "runner_reserved",
@@ -17827,6 +17839,12 @@ async fn build_remote_computer_readiness(
     if !warm_pool.manifest_present {
         runbook_actions.push(
             "add a warm-pool controller only after the Pod lease lifecycle and state sync are observable"
+                .to_string(),
+        );
+    }
+    if artifact_discovery_sidecar.present {
+        runbook_actions.push(
+            "keep MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED=false until session_id and remote_computer_id injection are wired for leased Pods"
                 .to_string(),
         );
     }
@@ -17879,6 +17897,7 @@ async fn build_remote_computer_readiness(
         network_policy,
         autoscaling,
         warm_pool,
+        artifact_discovery_sidecar,
         runner,
         execution_transport,
         event_types,
@@ -31565,6 +31584,11 @@ not json
         assert!(remote_computer_readiness.network_policy.present);
         assert!(remote_computer_readiness.warm_pool.manifest_present);
         assert_eq!(remote_computer_readiness.warm_pool.status, "skeleton");
+        assert!(remote_computer_readiness.artifact_discovery_sidecar.present);
+        assert_eq!(
+            remote_computer_readiness.artifact_discovery_sidecar.status,
+            "artifact_discovery_sidecar"
+        );
         assert!(
             remote_computer_readiness
                 .autoscaling

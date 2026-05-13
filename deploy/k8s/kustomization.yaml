@@ -16,5 +16,6 @@ resources:
   - remote-computer-serviceaccount.yaml
   - remote-computer-state-pvc.yaml
   - remote-computer-state-contract.yaml
+  - remote-computer-artifact-discovery-sidecar.yaml
   - agent-remote-computer.yaml
   - remote-computer-networkpolicy.yaml
