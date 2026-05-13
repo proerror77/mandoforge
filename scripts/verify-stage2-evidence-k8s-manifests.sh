@@ -11,8 +11,10 @@ manifests=(
   deploy/stage2-evidence/stage2-evidence-gate-job.yaml
   deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml
   deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml
+  deploy/stage2-evidence/observability-collector-evidence-job.example.yaml
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
+observability_script="scripts/observability-collector-evidence-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -23,6 +25,11 @@ done
 
 if [[ ! -x "$archive_script" ]]; then
   echo "missing executable Stage 2 production evidence archive script: $archive_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$observability_script" ]]; then
+  echo "missing executable observability collector evidence script: $observability_script" >&2
   exit 1
 fi
 
@@ -47,6 +54,11 @@ fi
 
 if ! grep -q "name: mandoforge-stage2-production-evidence-gate" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the strict production Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-observability-collector-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the observability collector evidence Job" >&2
   exit 1
 fi
 
@@ -82,6 +94,21 @@ fi
 
 if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml; then
   echo "Stage 2 production evidence Job example does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-collector-evidence-gate.sh" deploy/stage2-evidence/observability-collector-evidence-job.example.yaml; then
+  echo "Observability collector evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/observability-collector-evidence-job.example.yaml; then
+  echo "Observability collector evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/observability/collector/cluster/validate" "$observability_script"; then
+  echo "Observability collector evidence script must validate cluster rollout" >&2
   exit 1
 fi
 

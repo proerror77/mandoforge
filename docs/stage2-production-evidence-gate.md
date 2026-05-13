@@ -24,6 +24,15 @@ This mode calls the bounded validation endpoints for tenant routing, provider de
 
 Use `deploy/stage2-evidence/stage2-production-controllers.env.example` as the operator checklist for the external controller URLs, required flags, and opt-in validation switches. `deploy/stage2-evidence/stage2-controller-env-secret.example.yaml` shows the matching Kubernetes Secret shape, and `deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml` shows the strict production-validation Job that consumes that Secret through `envFrom`. These are templates only; real URLs and tokens belong in your secret manager, CI environment, or Kubernetes Secret generation pipeline.
 
+For a narrower collector rollout proof, run the dedicated observability collector gate:
+
+```bash
+RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 \
+./scripts/observability-collector-evidence-gate.sh
+```
+
+That gate collects `GET /api/observability`, `GET /api/observability/collector-readiness`, `POST /api/observability/collector/deployment/validate`, `POST /api/observability/collector/cluster/validate`, and optional remediation evidence into `.mandoforge/observability-collector-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/observability-collector-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.

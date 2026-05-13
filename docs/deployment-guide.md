@@ -153,3 +153,11 @@ kubectl kustomize deploy/stage2-evidence
 ```
 
 The Job uses the published MandoForge image, calls `http://mandoforge-api:8787`, writes evidence to an ephemeral volume, and defaults to `ALLOW_BLOCKED=1` so it can inventory an incomplete Stage 2 deployment without pretending the stage is complete.
+
+For strict production evidence, render the persistent evidence bundle:
+
+```bash
+kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone
+```
+
+That bundle includes the all-up Stage 2 production gate and a narrower `mandoforge-observability-collector-evidence` Job. The observability Job runs `scripts/observability-collector-evidence-gate.sh`, calls the collector readiness plus deployment/cluster rollout validation endpoints, optionally runs remediation supervision, and writes evidence under the shared production evidence PVC for later archival.

@@ -4,3 +4,4 @@ namespace: agent-os
 resources:
   - ../stage2-evidence/stage2-production-evidence-pvc.example.yaml
   - ../stage2-evidence/stage2-production-evidence-gate-job.example.yaml
+  - ../stage2-evidence/observability-collector-evidence-job.example.yaml
