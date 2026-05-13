@@ -55,6 +55,7 @@ mod store_events;
 mod store_governance;
 mod store_policy_revisions;
 mod store_releases;
+mod store_remote_computers;
 mod store_rows;
 mod store_secret_records;
 mod store_seed;
@@ -1270,6 +1271,60 @@ struct RemoteComputerAttentionItem {
     kind: String,
     severity: String,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputer {
+    id: Uuid,
+    name: String,
+    profile: String,
+    status: String,
+    namespace: String,
+    pod_name: Option<String>,
+    workspace_path: String,
+    state_mount_path: String,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerLease {
+    id: Uuid,
+    remote_computer_id: Uuid,
+    session_id: Option<Uuid>,
+    status: String,
+    worker_id: Option<String>,
+    lease_expires_at: Option<DateTime<Utc>>,
+    heartbeat_at: Option<DateTime<Utc>>,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateRemoteComputer {
+    name: String,
+    profile: Option<String>,
+    namespace: Option<String>,
+    pod_name: Option<String>,
+    workspace_path: Option<String>,
+    state_mount_path: Option<String>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateRemoteComputerLease {
+    session_id: Option<Uuid>,
+    worker_id: Option<String>,
+    lease_seconds: Option<i64>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateRemoteComputerLease {
+    reason: Option<String>,
+    metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2826,6 +2881,30 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/readiness",
             get(get_remote_computer_readiness),
+        )
+        .route(
+            "/api/remote-computers",
+            get(list_remote_computers).post(create_remote_computer),
+        )
+        .route(
+            "/api/remote-computers/{id}/leases",
+            post(create_remote_computer_lease),
+        )
+        .route(
+            "/api/remote-computer-leases",
+            get(list_remote_computer_leases),
+        )
+        .route(
+            "/api/remote-computer-leases/{id}/heartbeat",
+            post(heartbeat_remote_computer_lease),
+        )
+        .route(
+            "/api/remote-computer-leases/{id}/release",
+            post(release_remote_computer_lease),
+        )
+        .route(
+            "/api/remote-computer-leases/{id}/fail",
+            post(fail_remote_computer_lease),
         )
         .route(
             "/api/execution-jobs/{id}/run",
@@ -15333,6 +15412,187 @@ async fn get_remote_computer_readiness(
     Ok(Json(build_remote_computer_readiness()))
 }
 
+async fn list_remote_computers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputer>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computers",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computers().await?))
+}
+
+async fn create_remote_computer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputer>,
+) -> Result<Json<RemoteComputer>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computers",
+        None,
+    )
+    .await?;
+    let record = state.create_remote_computer(input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "remote_computer.created",
+            "remote_computer",
+            Some(record.id),
+            json!({
+                "name": record.name,
+                "profile": record.profile,
+                "namespace": record.namespace,
+                "pod_name": record.pod_name,
+                "execution_enabled": false
+            }),
+        ))
+        .await?;
+    Ok(Json(record))
+}
+
+async fn list_remote_computer_leases(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputerLease>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_leases",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computer_leases().await?))
+}
+
+async fn create_remote_computer_lease(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputerLease>,
+) -> Result<Json<RemoteComputerLease>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer",
+        Some(id),
+    )
+    .await?;
+    let lease = state.create_remote_computer_lease(id, input).await?;
+    record_remote_computer_lease_event(&state, &lease, "remote_computer.leased").await?;
+    Ok(Json(lease))
+}
+
+async fn heartbeat_remote_computer_lease(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateRemoteComputerLease>,
+) -> Result<Json<RemoteComputerLease>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_lease",
+        Some(id),
+    )
+    .await?;
+    let lease = state
+        .update_remote_computer_lease_status(id, "leased", input)
+        .await?;
+    record_remote_computer_lease_event(&state, &lease, "remote_computer.heartbeat").await?;
+    Ok(Json(lease))
+}
+
+async fn release_remote_computer_lease(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateRemoteComputerLease>,
+) -> Result<Json<RemoteComputerLease>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_lease",
+        Some(id),
+    )
+    .await?;
+    let lease = state
+        .update_remote_computer_lease_status(id, "released", input)
+        .await?;
+    record_remote_computer_lease_event(&state, &lease, "remote_computer.released").await?;
+    Ok(Json(lease))
+}
+
+async fn fail_remote_computer_lease(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateRemoteComputerLease>,
+) -> Result<Json<RemoteComputerLease>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_lease",
+        Some(id),
+    )
+    .await?;
+    let lease = state
+        .update_remote_computer_lease_status(id, "failed", input)
+        .await?;
+    record_remote_computer_lease_event(&state, &lease, "remote_computer.failed").await?;
+    Ok(Json(lease))
+}
+
+async fn record_remote_computer_lease_event(
+    state: &AppState,
+    lease: &RemoteComputerLease,
+    event_type: &str,
+) -> Result<(), AppError> {
+    let details = json!({
+        "lease_id": lease.id,
+        "remote_computer_id": lease.remote_computer_id,
+        "session_id": lease.session_id,
+        "status": lease.status,
+        "worker_id": lease.worker_id,
+        "lease_expires_at": lease.lease_expires_at,
+        "heartbeat_at": lease.heartbeat_at,
+        "metadata": lease.metadata,
+        "execution_enabled": false
+    });
+    if let Some(session_id) = lease.session_id {
+        state
+            .append_event("system", None, session_id, event_type, details.clone())
+            .await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            lease.session_id,
+            "system",
+            None,
+            event_type,
+            "remote_computer_lease",
+            Some(lease.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
 fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
     let pod_template =
         remote_computer_manifest_readiness("deploy/k8s/agent-remote-computer.yaml", "pod_template");
@@ -17273,9 +17533,187 @@ not json
         assert!(names.contains(&"0015_tenant_invitations.sql"));
         assert!(names.contains(&"0016_organization_owner.sql"));
         assert!(names.contains(&"0017_agent_release_workflows.sql"));
+        assert!(names.contains(&"0018_agent_release_automation.sql"));
+        assert!(names.contains(&"0019_remote_computers.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_computer_leases_are_audited_without_executing_tools() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "remote computer lease"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "remote-computer-test",
+                        "profile": "workspace-write",
+                        "pod_name": "agent-remote-computer-0"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(computer.status, "available");
+
+        let lease: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computers/{}/leases", computer.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "worker_id": "remote-manager-1",
+                        "lease_seconds": 120,
+                        "metadata": {"execution_enabled": false}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(lease.status, "leased");
+        assert_eq!(lease.session_id, Some(session.id));
+        assert!(lease.lease_expires_at.is_some());
+
+        let heartbeat: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/remote-computer-leases/{}/heartbeat",
+                    lease.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"metadata": {"heartbeat": true}}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(heartbeat.status, "leased");
+        assert_eq!(heartbeat.metadata["heartbeat"], true);
+
+        let released: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computer-leases/{}/release", lease.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"reason": "readiness skeleton release"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(released.status, "released");
+        assert_eq!(released.metadata["reason"], "readiness skeleton release");
+
+        let leases: Vec<RemoteComputerLease> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computer-leases")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(leases.len(), 1);
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let event_types: Vec<_> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        assert!(event_types.contains(&"remote_computer.leased"));
+        assert!(event_types.contains(&"remote_computer.heartbeat"));
+        assert!(event_types.contains(&"remote_computer.released"));
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            tool_calls.is_empty(),
+            "remote computer lease lifecycle must not execute tools"
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/audit-logs", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "remote_computer.leased")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "remote_computer.released")
         );
     }
 

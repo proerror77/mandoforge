@@ -8,7 +8,8 @@ use crate::{
     Agent, AgentRelease, AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup, Artifact,
     AuditLog, CodexAppServerRun, CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord,
     Membership, Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord,
-    SecretRecord, Session, SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup,
+    RemoteComputer, RemoteComputerLease, SecretRecord, Session, SessionEvent, Team,
+    TenantInvitation, ToolCall, UsageRollup,
 };
 
 #[derive(Default)]
@@ -40,6 +41,8 @@ pub(crate) struct MemoryStore {
     pub(crate) eval_runs: HashMap<Uuid, EvalRun>,
     pub(crate) usage_rollups: HashMap<Uuid, UsageRollup>,
     pub(crate) codex_app_server_runs: HashMap<Uuid, CodexAppServerRun>,
+    pub(crate) remote_computers: HashMap<Uuid, RemoteComputer>,
+    pub(crate) remote_computer_leases: HashMap<Uuid, RemoteComputerLease>,
 }
 
 #[derive(Clone)]

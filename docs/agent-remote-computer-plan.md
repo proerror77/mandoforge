@@ -1,6 +1,6 @@
 # Agent Remote Computer Plan
 
-This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a readiness skeleton for this direction, not a production execution substrate. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, deny-by-default NetworkPolicy, and `GET /api/remote-computers/readiness`. It does not yet create a dedicated Pod per agent session or mount a real shared distributed state filesystem.
+This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a control-plane skeleton for this direction, not a production execution substrate. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, deny-by-default NetworkPolicy, `GET /api/remote-computers/readiness`, and persisted Remote Computer lease lifecycle APIs. It does not yet create a dedicated Kubernetes Pod per agent session or mount a real shared distributed state filesystem.
 
 ## Objective
 
@@ -49,11 +49,13 @@ Covered today:
 - Codex App Server and Codex CLI execution remain governed by approval and queue paths.
 - Remote Computer readiness is API/UI-visible.
 - K8s Remote Computer manifests exist for the Pod template, service account, state PVC placeholder, and NetworkPolicy skeleton.
+- `remote_computers` and `remote_computer_leases` persist control-plane lease state.
+- Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 
 Not covered today:
 
-- No `remote_computers` store or API.
-- No session-to-Pod lease lifecycle.
+- No dynamic Kubernetes Pod creation.
+- No actual session-to-Pod runtime attach.
 - No actual Remote Computer execution path.
 - No real distributed Memory/Notes/Skills mount.
 - No distributed filesystem integration such as JuiceFS, CephFS, Longhorn RWX, or object-backed sync.
@@ -148,9 +150,9 @@ Completed Stage 2 readiness skeleton:
 
 Remaining Stage 2 pilot work:
 
-1. Add `remote_computers` and `remote_computer_leases` tables.
-2. Add session-to-Pod lease state transitions without moving tool execution yet.
-3. Add heartbeat/release/reclaim APIs or worker hooks.
+1. Add a Kubernetes client/runner boundary that can create a Pod from the template when policy permits.
+2. Add session-to-Pod attach state without moving tool execution yet.
+3. Add stale lease reclaim automation.
 4. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
 
 Stage 2 acceptance for this slice:
@@ -202,13 +204,13 @@ Stage 3 acceptance:
 After the Remote Computer readiness skeleton, the next coherent implementation slice should be:
 
 ```text
-Add Remote Computer lease store
+Add Remote Computer Kubernetes runner boundary
 ```
 
 Concrete deliverables:
 
-- `remote_computers` and `remote_computer_leases` migrations.
-- Store APIs for requested, leased, heartbeat, released, and failed states.
-- Session/event/audit records for lease lifecycle changes.
-- Read-only list/detail APIs for operators.
-- Tests proving leases do not execute tools or bypass approval yet.
+- `RemoteComputerRunner` trait with a reserved implementation.
+- Fail-closed Kubernetes client configuration boundary.
+- Admin-only dry-run create/delete Pod endpoints or runbook route.
+- Readiness fields showing runner configured/reserved state.
+- Tests proving the reserved runner never creates Pods or executes tools.

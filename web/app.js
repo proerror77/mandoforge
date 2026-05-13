@@ -44,6 +44,8 @@ const state = {
   executionJobs: [],
   workerReadiness: null,
   remoteComputerReadiness: null,
+  remoteComputers: [],
+  remoteComputerLeases: [],
   usageRollups: [],
   usageTrend: null,
   usageFinanceSummary: null,
@@ -1364,6 +1366,8 @@ async function refreshOps() {
     executionJobs,
     workerReadiness,
     remoteComputerReadiness,
+    remoteComputers,
+    remoteComputerLeases,
     approvalGroups,
     approvalEscalationRules,
     approvalNotificationRouting,
@@ -1397,6 +1401,8 @@ async function refreshOps() {
       api("/api/execution-jobs"),
       api("/api/execution-jobs/worker-readiness"),
       api("/api/remote-computers/readiness"),
+      api("/api/remote-computers"),
+      api("/api/remote-computer-leases"),
       api("/api/approval-groups"),
       api("/api/approval-escalation-rules"),
       api("/api/approvals/notification-routing/summary"),
@@ -1429,6 +1435,8 @@ async function refreshOps() {
   state.executionJobs = executionJobs;
   state.workerReadiness = workerReadiness;
   state.remoteComputerReadiness = remoteComputerReadiness;
+  state.remoteComputers = remoteComputers;
+  state.remoteComputerLeases = remoteComputerLeases;
   state.approvalGroups = approvalGroups;
   state.approvalEscalationRules = approvalEscalationRules;
   state.approvalNotificationRouting = approvalNotificationRouting;
@@ -1895,6 +1903,8 @@ function renderRemoteComputerReadiness() {
   const warmPool = report.warm_pool || {};
   const attentionItems = report.attention_items || [];
   const runbookActions = report.runbook_actions || [];
+  const computerRows = state.remoteComputers || [];
+  const leaseRows = state.remoteComputerLeases || [];
   remoteComputerReadinessRoot.innerHTML = `
     <div class="metrics compact-metrics">
       <div class="metric">
@@ -1933,6 +1943,30 @@ function renderRemoteComputerReadiness() {
     <div class="item">
       <strong>REMOTE COMPUTER EVENTS</strong>
       <div class="muted">${escapeHtml((report.event_types || []).join(", ") || "none")}</div>
+    </div>
+    <div class="item">
+      <strong>REMOTE COMPUTER LEASE STORE</strong>
+      <div class="muted">${formatInteger(computerRows.length)} computers · ${formatInteger(leaseRows.length)} leases · execution remains on approved worker path</div>
+      ${
+        computerRows.length
+          ? computerRows
+              .map(
+                (computer) =>
+                  `<div class="muted">${escapeHtml(computer.name)} · ${escapeHtml(computer.profile)} · ${escapeHtml(computer.status)} · ${escapeHtml(computer.pod_name || "no pod")}</div>`,
+              )
+              .join("")
+          : `<div class="muted">No remote computers registered</div>`
+      }
+      ${
+        leaseRows.length
+          ? leaseRows
+              .map(
+                (lease) =>
+                  `<div class="muted">lease ${escapeHtml(lease.id)} · ${escapeHtml(lease.status)} · session ${escapeHtml(lease.session_id || "none")}</div>`,
+              )
+              .join("")
+          : `<div class="muted">No remote computer leases</div>`
+      }
     </div>
     <div class="item">
       <strong>REMOTE COMPUTER ATTENTION</strong>
