@@ -20,8 +20,9 @@ use crate::remote_computer_runner::{
 };
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
-    AppError, AppState, Approval, Artifact, CreateRemoteComputerJobAssignment, ToolCall,
-    new_audit_log, record_remote_computer_job_assignment_event,
+    AppError, AppState, Approval, Artifact, CreateRemoteComputerJobAssignment,
+    CreateRemoteComputerLease, ToolCall, new_audit_log,
+    record_remote_computer_job_assignment_event,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -427,7 +428,7 @@ async fn auto_assign_remote_computer_for_job(
         .filter(|assignment| assignment.status == "assigned")
         .map(|assignment| assignment.lease_id)
         .collect();
-    let Some(lease) = state
+    let lease = if let Some(lease) = state
         .list_remote_computer_leases()
         .await?
         .into_iter()
@@ -446,9 +447,13 @@ async fn auto_assign_remote_computer_for_job(
                 lease.session_id == Some(job.session_id),
                 lease.heartbeat_at.unwrap_or(lease.created_at),
             )
-        })
-    else {
-        return Ok(None);
+        }) {
+        lease
+    } else {
+        match claim_remote_computer_warm_pool_lease_for_job(state, job, worker_id).await? {
+            Some(lease) => lease,
+            None => return Ok(None),
+        }
     };
     let assignment = state
         .create_remote_computer_job_assignment(
@@ -472,6 +477,85 @@ async fn auto_assign_remote_computer_for_job(
     )
     .await?;
     Ok(Some(assignment))
+}
+
+async fn claim_remote_computer_warm_pool_lease_for_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+) -> Result<Option<crate::RemoteComputerLease>, AppError> {
+    let leased_remote_computer_ids: HashSet<_> = state
+        .list_remote_computer_leases()
+        .await?
+        .into_iter()
+        .filter(|lease| lease.status == "leased")
+        .map(|lease| lease.remote_computer_id)
+        .collect();
+    let Some(computer) = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .filter(|computer| {
+            computer.status == "available"
+                && !leased_remote_computer_ids.contains(&computer.id)
+                && computer
+                    .metadata
+                    .get("warm_pool")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        })
+        .max_by_key(|computer| computer.updated_at)
+    else {
+        return Ok(None);
+    };
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: Some(job.session_id),
+                worker_id: Some(worker_id.to_string()),
+                lease_seconds: Some(900),
+                metadata: Some(json!({
+                    "handoff_mode": "auto-warm-pool-lease",
+                    "source": "run_execution_job",
+                    "execution_job_id": job.id,
+                    "tool_call_id": job.tool_call_id,
+                })),
+            },
+        )
+        .await?;
+    let details = json!({
+        "lease_id": lease.id,
+        "remote_computer_id": lease.remote_computer_id,
+        "session_id": lease.session_id,
+        "worker_id": lease.worker_id,
+        "status": lease.status,
+        "lease_expires_at": lease.lease_expires_at,
+        "source": "auto-warm-pool-lease",
+        "execution_job_id": job.id,
+        "tool_call_id": job.tool_call_id,
+    });
+    state
+        .append_event(
+            "worker",
+            Some(job.id),
+            job.session_id,
+            "remote_computer.warm_pool_claimed",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(job.session_id),
+            "worker",
+            Some(job.id),
+            "remote_computer.warm_pool_claimed",
+            "remote_computer_lease",
+            Some(lease.id),
+            details,
+        ))
+        .await?;
+    Ok(Some(lease))
 }
 
 async fn finalize_remote_computer_assignment_for_job(

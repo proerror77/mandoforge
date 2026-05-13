@@ -17332,6 +17332,7 @@ async fn build_remote_computer_readiness(
         "remote_computer.started".to_string(),
         "remote_computer.heartbeat".to_string(),
         "remote_computer.attached".to_string(),
+        "remote_computer.warm_pool_claimed".to_string(),
         "remote_computer.execution_handoff_planned".to_string(),
         "remote_computer.execution_handoff_assigned".to_string(),
         "remote_computer.execution_handoff_acknowledged".to_string(),
@@ -31304,6 +31305,147 @@ not json
             event.event_type == "remote_computer.execution_handoff_completed"
                 && event.payload["assignment_id"] == json!(assignment.id)
                 && event.payload["status"] == json!("completed")
+        }));
+    }
+
+    #[tokio::test]
+    async fn queue_backed_worker_claims_available_warm_pool_remote_computer() {
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "warm pool claim"}),
+            ),
+        )
+        .await;
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {"path": "warm-pool.md", "content": "warm pool"}
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id)
+        .expect("execution job queued")
+        .id;
+
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "warm-pool-remote-computer",
+                        "profile": "workspace-write",
+                        "pod_name": "agent-remote-computer-warm",
+                        "metadata": {"warm_pool": true}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(computer.status, "available");
+
+        let completed: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "warm-pool-worker")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+
+        let leases: Vec<RemoteComputerLease> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computer-leases")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let lease = leases
+            .iter()
+            .find(|lease| lease.remote_computer_id == computer.id)
+            .expect("warm pool lease was claimed");
+        assert_eq!(lease.session_id, Some(session.id));
+        assert_eq!(lease.worker_id.as_deref(), Some("warm-pool-worker"));
+        assert_eq!(lease.metadata["handoff_mode"], "auto-warm-pool-lease");
+
+        let assignments: Vec<RemoteComputerJobAssignment> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computer-job-assignments")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let assignment = assignments
+            .iter()
+            .find(|assignment| assignment.execution_job_id == job_id)
+            .expect("warm pool job assignment");
+        assert_eq!(assignment.lease_id, lease.id);
+        assert_eq!(assignment.status, "completed");
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "remote_computer.warm_pool_claimed"
+                && event.payload["remote_computer_id"] == json!(computer.id)
         }));
     }
 }
