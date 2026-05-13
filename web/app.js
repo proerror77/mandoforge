@@ -2760,7 +2760,9 @@ function renderObservability() {
             <dt>Production message</dt>
             <dd>${escapeHtml(collectorProductionOps.message || "collector production ops are not reported")}</dd>
             <dt>Deployment validation</dt>
-            <dd>${escapeHtml(collectorDeploymentReadiness.status || "unknown")} · blocked ${collectorDeploymentReadiness.production_blocked ? "yes" : "no"} · validated ${collectorDeploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${collectorDeploymentReadiness.latest_validation_healthy ? "yes" : "no"} · latest ${escapeHtml(collectorDeploymentReadiness.latest_validation_at || "none")}</dd>
+            <dd>${escapeHtml(collectorDeploymentReadiness.status || "unknown")} · blocked ${collectorDeploymentReadiness.production_blocked ? "yes" : "no"} · validated ${collectorDeploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${collectorDeploymentReadiness.latest_validation_healthy ? "yes" : "no"} · controller ${collectorDeploymentReadiness.controller_configured ? "configured" : "missing"} · latest ${escapeHtml(collectorDeploymentReadiness.latest_validation_at || "none")}</dd>
+            <dt>Deployment controller</dt>
+            <dd>required ${collectorDeploymentReadiness.controller_required ? "yes" : "no"} · status ${escapeHtml(collectorDeploymentReadiness.latest_controller_status || "none")} · validated ${collectorDeploymentReadiness.latest_controller_validated ? "yes" : "no"}</dd>
             <dt>Deployment message</dt>
             <dd>${escapeHtml(collectorDeploymentReadiness.message || "collector deployment validation is not reported")}</dd>
             <dt>Remediation supervision</dt>

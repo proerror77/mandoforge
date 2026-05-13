@@ -1349,11 +1349,15 @@ struct ObservabilityCollectorDeploymentReadiness {
     production_blocked: bool,
     otlp_enabled: bool,
     endpoint_configured: bool,
+    controller_required: bool,
+    controller_configured: bool,
     deployment_validated: bool,
     latest_validation_at: Option<DateTime<Utc>>,
     latest_validation_age_hours: Option<i64>,
     latest_validation_status: Option<String>,
     latest_validation_healthy: bool,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
 }
@@ -16423,6 +16427,9 @@ async fn validate_observability_collector_deployment(
 
     let checked_at = Utc::now();
     let config = &state.observability_config;
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = observability_collector_deployment_controller_required(&lookup);
+    let controller_configured = observability_collector_deployment_controller_configured(&lookup);
     let endpoint_configured = config
         .otlp_endpoint
         .as_deref()
@@ -16430,6 +16437,15 @@ async fn validate_observability_collector_deployment(
         .is_some_and(|value| !value.is_empty());
     let mut issues = Vec::new();
     let mut healthy = false;
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "collector_health_not_ready"
+        } else {
+            "controller_not_configured"
+        }
+    });
 
     if !config.is_enabled() {
         issues.push("OTLP export is disabled".to_string());
@@ -16445,6 +16461,42 @@ async fn validate_observability_collector_deployment(
             }
         }
     }
+    if healthy && controller_configured {
+        match execute_observability_collector_deployment_controller(
+            &lookup,
+            &principal.subject_id,
+            checked_at,
+            config,
+        )
+        .await
+        {
+            Ok(execution) => {
+                let controller_status = execution
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed")
+                    .to_string();
+                controller_execution = execution;
+                if controller_status != "validated" {
+                    healthy = false;
+                    issues.push("collector deployment controller did not validate".to_string());
+                }
+            }
+            Err(error) => {
+                healthy = false;
+                issues.push(error.message.clone());
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    }
+    if healthy && controller_required && !controller_configured {
+        healthy = false;
+        issues.push("collector deployment controller is required but not configured".to_string());
+    }
 
     let status = if healthy { "healthy" } else { "blocked" };
     let result = json!({
@@ -16454,6 +16506,9 @@ async fn validate_observability_collector_deployment(
         "endpoint_configured": endpoint_configured,
         "service_name": config.service_name.clone(),
         "sample_ratio": config.sample_ratio,
+        "controller_required": controller_required,
+        "controller_configured": controller_configured,
+        "controller_execution": controller_execution,
         "issues": issues,
         "subject": principal.subject_id,
         "checked_at": checked_at,
@@ -16470,6 +16525,112 @@ async fn validate_observability_collector_deployment(
         ))
         .await?;
     Ok(Json(result))
+}
+
+fn observability_collector_deployment_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn observability_collector_deployment_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_observability_collector_deployment_controller<F>(
+    lookup: &F,
+    subject: &str,
+    checked_at: DateTime<Utc>,
+    config: &ObservabilityConfig,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL is required",
+            )
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let collector_endpoint = config
+        .otlp_endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_string());
+    let signal_paths = collector_endpoint
+        .as_ref()
+        .map(|endpoint| {
+            json!({
+                "logs": format!("{endpoint}/v1/logs"),
+                "traces": format!("{endpoint}/v1/traces"),
+                "metrics": format!("{endpoint}/v1/metrics")
+            })
+        })
+        .unwrap_or_else(|| json!({}));
+    let payload = json!({
+        "type": "mandoforge.observability_collector_deployment",
+        "subject": subject,
+        "checked_at": checked_at,
+        "service_name": config.service_name.clone(),
+        "otlp_endpoint": collector_endpoint,
+        "sample_ratio": config.sample_ratio,
+        "signal_paths": signal_paths,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "observability collector deployment controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(
+        controller_status,
+        "validated" | "deployed" | "healthy" | "success" | "ok"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 async fn get_observability_remediation_plan(
@@ -16875,6 +17036,8 @@ async fn build_observability_collector_readiness(
     let deployment_readiness = build_observability_collector_deployment_readiness(
         config.is_enabled(),
         endpoint_configured,
+        observability_collector_deployment_controller_required(&|key| std::env::var(key).ok()),
+        observability_collector_deployment_controller_configured(&|key| std::env::var(key).ok()),
         &audit_logs,
         generated_at,
     );
@@ -17030,6 +17193,8 @@ fn build_observability_collector_production_ops(
 fn build_observability_collector_deployment_readiness(
     otlp_enabled: bool,
     endpoint_configured: bool,
+    controller_required: bool,
+    controller_configured: bool,
     audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
 ) -> ObservabilityCollectorDeploymentReadiness {
@@ -17048,6 +17213,13 @@ fn build_observability_collector_deployment_readiness(
         .and_then(|log| log.details.get("healthy"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let latest_controller_status = latest_validation
+        .and_then(|log| log.details["controller_execution"]["status"].as_str())
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status
+        .as_deref()
+        .map(|status| status == "validated")
+        .unwrap_or(false);
     let mut blocking_reasons = Vec::new();
 
     if !otlp_enabled {
@@ -17064,6 +17236,14 @@ fn build_observability_collector_deployment_readiness(
     }
     if latest_validation_age_hours.is_some_and(|hours| hours >= 24) {
         blocking_reasons.push("collector deployment validation evidence is stale".to_string());
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons
+            .push("collector deployment controller is required but not configured".to_string());
+    }
+    if controller_required && latest_validation.is_some() && !latest_controller_validated {
+        blocking_reasons
+            .push("latest collector deployment controller execution was not validated".to_string());
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -17087,11 +17267,15 @@ fn build_observability_collector_deployment_readiness(
         production_blocked,
         otlp_enabled,
         endpoint_configured,
+        controller_required,
+        controller_configured,
         deployment_validated: latest_validation_healthy && !production_blocked,
         latest_validation_at,
         latest_validation_age_hours,
         latest_validation_status,
         latest_validation_healthy,
+        latest_controller_status,
+        latest_controller_validated,
         blocking_reasons,
         message,
     }
@@ -24418,6 +24602,66 @@ not json
         controller_server.abort();
     }
 
+    #[tokio::test]
+    async fn observability_collector_deployment_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("collector deployment listener");
+        let controller_addr = listener.local_addr().expect("collector deployment addr");
+        let controller = Router::new()
+            .route(
+                "/collector-deployment",
+                post(mock_observability_collector_deployment_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock collector deployment controller");
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/collector-deployment"))
+            }
+            "MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_TOKEN" => {
+                Some("collector-token".to_string())
+            }
+            _ => None,
+        };
+        let config = ObservabilityConfig {
+            service_name: "mandoforge-api-test".to_string(),
+            otlp_endpoint: Some("http://otel-collector:4318".to_string()),
+            sample_ratio: 1.0,
+        };
+
+        let execution = execute_observability_collector_deployment_controller(
+            &lookup,
+            "admin-1",
+            Utc::now(),
+            &config,
+        )
+        .await
+        .expect("collector deployment controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(execution["deployment_id"], "collector-deployment-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.observability_collector_deployment"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["service_name"], "mandoforge-api-test");
+        assert_eq!(
+            payloads[0]["signal_paths"]["logs"],
+            "http://otel-collector:4318/v1/logs"
+        );
+
+        controller_server.abort();
+    }
+
     #[test]
     fn observability_remediation_supervision_blocks_when_required_without_controller_evidence() {
         let generated_at = Utc::now();
@@ -24470,6 +24714,57 @@ not json
             build_observability_remediation_supervision_readiness(false, false, &[], generated_at);
         assert_eq!(optional.status, "optional");
         assert!(!optional.production_blocked);
+    }
+
+    #[test]
+    fn observability_collector_deployment_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let missing_controller = build_observability_collector_deployment_readiness(
+            true,
+            true,
+            true,
+            false,
+            &[],
+            generated_at,
+        );
+        assert_eq!(missing_controller.status, "blocked");
+        assert!(missing_controller.production_blocked);
+        assert!(missing_controller.blocking_reasons.iter().any(|reason| {
+            reason == "collector deployment controller is required but not configured"
+        }));
+
+        let audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "observability.collector_deployment_validation",
+            "observability",
+            None,
+            json!({
+                "status": "healthy",
+                "healthy": true,
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "deployment_id": "collector-deployment-1"
+                }
+            }),
+        );
+        let ready = build_observability_collector_deployment_readiness(
+            true,
+            true,
+            true,
+            true,
+            &[audit],
+            generated_at,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert!(ready.deployment_validated);
+        assert!(ready.latest_controller_validated);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
     }
 
     fn ready_finance_operations_summary(
@@ -29202,6 +29497,29 @@ not json
             "steps": [
                 {"name": "approval-escalation", "status": "processed"},
                 {"name": "worker-drain", "status": "queued"}
+            ]
+        }))
+    }
+
+    async fn mock_observability_collector_deployment_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer collector-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "deployment_id": "collector-deployment-1",
+            "message": "collector deployment controller validated OTLP collector",
+            "steps": [
+                {"name": "collector-health", "status": "checked"},
+                {"name": "signal-paths", "status": "validated"}
             ]
         }))
     }
