@@ -607,6 +607,7 @@ struct ApprovalNotificationDeliveryRunSummary {
     latest_run: Option<ApprovalNotificationDeliveryRunRecord>,
     recent_runs: Vec<ApprovalNotificationDeliveryRunRecord>,
     production_ops: ApprovalNotificationProductionOpsReadiness,
+    deployment_readiness: ApprovalNotificationDeploymentReadiness,
     attention_items: Vec<ApprovalNotificationDeliveryRunAttentionItem>,
 }
 
@@ -619,6 +620,37 @@ struct ApprovalNotificationProductionOpsReadiness {
     routing_status: String,
     channel_count: usize,
     unroutable_pending_count: usize,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationDeploymentValidationRun {
+    status: String,
+    pending_approval_count: usize,
+    routable_pending_count: usize,
+    unroutable_pending_count: usize,
+    channel_count: usize,
+    persisted_policy_count: usize,
+    active_policy_count: usize,
+    routing_status: String,
+    checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalNotificationDeploymentReadiness {
+    status: String,
+    production_blocked: bool,
+    latest_validation_at: Option<DateTime<Utc>>,
+    latest_validation_age_hours: Option<i64>,
+    latest_validation_status: Option<String>,
+    pending_approval_count: usize,
+    routable_pending_count: usize,
+    unroutable_pending_count: usize,
+    channel_count: usize,
+    persisted_policy_count: usize,
+    active_policy_count: usize,
+    deployment_validated: bool,
+    blocking_reasons: Vec<String>,
     message: String,
 }
 
@@ -3599,6 +3631,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/approvals/notifications/run",
             post(run_approval_notifications),
+        )
+        .route(
+            "/api/approvals/notifications/deployment/validate",
+            post(validate_approval_notification_deployment),
         )
         .route(
             "/api/approvals/notifications/runs",
@@ -18076,6 +18112,76 @@ async fn run_approval_notifications(
     ))
 }
 
+async fn validate_approval_notification_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApprovalNotificationDeploymentValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "approval_notifications".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+
+    let routing = build_approval_notification_routing_summary(
+        state.list_approvals().await?,
+        state.list_approval_groups().await?,
+        state.list_approval_escalation_rules().await?,
+        state.list_approval_notification_channel_policies().await?,
+        state.approval_webhook_url.is_some(),
+        approval_slack_webhook_url_from_env().is_some(),
+        approval_email_relay_url_from_env().is_some(),
+    )
+    .await;
+    let checked_at = Utc::now();
+    let status = if routing.channel_count > 0
+        && routing.active_policy_count > 0
+        && routing.unroutable_pending_count == 0
+    {
+        "healthy"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    let run = ApprovalNotificationDeploymentValidationRun {
+        status,
+        pending_approval_count: routing.pending_approval_count,
+        routable_pending_count: routing.routable_pending_count,
+        unroutable_pending_count: routing.unroutable_pending_count,
+        channel_count: routing.channel_count,
+        persisted_policy_count: routing.persisted_policy_count,
+        active_policy_count: routing.active_policy_count,
+        routing_status: routing.status,
+        checked_at,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "approval.notification_deployment_validation_run",
+            "approval_notifications",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": run.status,
+                "pending_approval_count": run.pending_approval_count,
+                "routable_pending_count": run.routable_pending_count,
+                "unroutable_pending_count": run.unroutable_pending_count,
+                "channel_count": run.channel_count,
+                "persisted_policy_count": run.persisted_policy_count,
+                "active_policy_count": run.active_policy_count,
+                "routing_status": run.routing_status,
+                "checked_at": run.checked_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
 async fn get_approval_notification_delivery_runs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -18401,6 +18507,19 @@ fn build_approval_notification_delivery_run_summary(
             message: production_ops.message.clone(),
         });
     }
+    let deployment_readiness =
+        build_approval_notification_deployment_readiness(audit_logs, routing, generated_at);
+    if deployment_readiness.production_blocked {
+        attention_items.push(ApprovalNotificationDeliveryRunAttentionItem {
+            kind: "approval_notification_deployment_validation_blocked".to_string(),
+            severity: if deployment_readiness.status == "blocked" {
+                "critical".to_string()
+            } else {
+                "warning".to_string()
+            },
+            message: deployment_readiness.message.clone(),
+        });
+    }
     recent_runs.truncate(10);
     ApprovalNotificationDeliveryRunSummary {
         generated_at,
@@ -18411,6 +18530,7 @@ fn build_approval_notification_delivery_run_summary(
         latest_run,
         recent_runs,
         production_ops,
+        deployment_readiness,
         attention_items,
     }
 }
@@ -18471,6 +18591,109 @@ fn build_approval_notification_production_ops_readiness(
         routing_status: routing.status.clone(),
         channel_count: routing.channel_count,
         unroutable_pending_count: routing.unroutable_pending_count,
+        message,
+    }
+}
+
+fn build_approval_notification_deployment_readiness(
+    audit_logs: &[AuditLog],
+    routing: &ApprovalNotificationRoutingSummary,
+    generated_at: DateTime<Utc>,
+) -> ApprovalNotificationDeploymentReadiness {
+    let latest_validation = audit_logs
+        .iter()
+        .filter(|log| log.action == "approval.notification_deployment_validation_run")
+        .max_by_key(|log| log.created_at);
+    let latest_validation_at = latest_validation.map(|log| log.created_at);
+    let latest_validation_age_hours =
+        latest_validation_at.map(|created_at| (generated_at - created_at).num_hours());
+    let latest_validation_status = latest_validation
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let pending_approval_count = latest_validation
+        .map(|log| json_usize(&log.details, "pending_approval_count"))
+        .unwrap_or(routing.pending_approval_count);
+    let routable_pending_count = latest_validation
+        .map(|log| json_usize(&log.details, "routable_pending_count"))
+        .unwrap_or(routing.routable_pending_count);
+    let unroutable_pending_count = latest_validation
+        .map(|log| json_usize(&log.details, "unroutable_pending_count"))
+        .unwrap_or(routing.unroutable_pending_count);
+    let channel_count = latest_validation
+        .map(|log| json_usize(&log.details, "channel_count"))
+        .unwrap_or(routing.channel_count);
+    let persisted_policy_count = latest_validation
+        .map(|log| json_usize(&log.details, "persisted_policy_count"))
+        .unwrap_or(routing.persisted_policy_count);
+    let active_policy_count = latest_validation
+        .map(|log| json_usize(&log.details, "active_policy_count"))
+        .unwrap_or(routing.active_policy_count);
+    let mut blocking_reasons = Vec::new();
+
+    if latest_validation.is_none() {
+        blocking_reasons
+            .push("approval notification deployment validation has not run".to_string());
+    }
+    if channel_count == 0 {
+        blocking_reasons.push(
+            "approval notification deployment validation found no delivery channels".to_string(),
+        );
+    }
+    if active_policy_count == 0 {
+        blocking_reasons.push(
+            "approval notification deployment validation found no active channel policies"
+                .to_string(),
+        );
+    }
+    if unroutable_pending_count > 0 {
+        blocking_reasons.push(
+            "approval notification deployment validation found unroutable pending approvals"
+                .to_string(),
+        );
+    }
+    if latest_validation_status
+        .as_deref()
+        .is_some_and(|status| status != "healthy")
+    {
+        blocking_reasons
+            .push("latest approval notification deployment validation was not healthy".to_string());
+    }
+    if latest_validation_age_hours.is_some_and(|hours| hours >= 24) {
+        blocking_reasons
+            .push("approval notification deployment validation evidence is stale".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Approval notification deployment validation is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Approval notification deployment has a recent healthy validation run".to_string()
+    };
+
+    ApprovalNotificationDeploymentReadiness {
+        status,
+        production_blocked,
+        latest_validation_at,
+        latest_validation_age_hours,
+        latest_validation_status,
+        pending_approval_count,
+        routable_pending_count,
+        unroutable_pending_count,
+        channel_count,
+        persisted_policy_count,
+        active_policy_count,
+        deployment_validated: !production_blocked,
+        blocking_reasons,
         message,
     }
 }
@@ -30730,6 +30953,24 @@ not json
                 .expect("mock approval webhook");
         });
         let app = test_app_with_approval_webhook(format!("http://{addr}/approval")).await;
+        let policy: ApprovalNotificationChannelPolicy = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/approvals/notification-channel-policies",
+                json!({
+                    "name": "routing-webhook-policy",
+                    "channel": "webhook",
+                    "risk_filter": "all"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(policy.status, "active");
         let agents: Vec<Agent> = request_json(
             app.clone(),
             Request::builder()
@@ -30785,6 +31026,8 @@ not json
 
         assert_eq!(summary.channel_count, 1);
         assert!(summary.webhook_configured);
+        assert_eq!(summary.persisted_policy_count, 1);
+        assert_eq!(summary.active_policy_count, 1);
         assert_eq!(summary.pending_approval_count, 1);
         assert_eq!(summary.delegated_pending_count, 1);
         assert_eq!(summary.routable_pending_count, 1);
@@ -30793,6 +31036,23 @@ not json
         assert!(summary.attention_items.iter().all(|item| {
             item.approval_id != Some(approval_id) || item.kind != "missing_target"
         }));
+
+        let deployment_validation: ApprovalNotificationDeploymentValidationRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approvals/notifications/deployment/validate")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(deployment_validation.status, "healthy");
+        assert_eq!(deployment_validation.channel_count, 1);
+        assert_eq!(deployment_validation.active_policy_count, 1);
+        assert_eq!(deployment_validation.routable_pending_count, 1);
+        assert_eq!(deployment_validation.unroutable_pending_count, 0);
 
         let run: ApprovalNotificationDeliveryRun = request_json(
             app.clone(),
@@ -30831,6 +31091,9 @@ not json
         assert!(!run_summary.production_ops.production_blocked);
         assert_eq!(run_summary.production_ops.routing_status, "warning");
         assert_eq!(run_summary.production_ops.channel_count, 1);
+        assert_eq!(run_summary.deployment_readiness.status, "ready");
+        assert!(!run_summary.deployment_readiness.production_blocked);
+        assert!(run_summary.deployment_readiness.deployment_validated);
         assert_eq!(
             run_summary
                 .latest_run
@@ -30854,6 +31117,11 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "approval.notification_delivery_run")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "approval.notification_deployment_validation_run")
         );
         server.abort();
     }
@@ -30948,6 +31216,22 @@ not json
         assert_eq!(summary.channel_count, 0);
         assert_eq!(summary.status, "action_required");
 
+        let deployment_validation: ApprovalNotificationDeploymentValidationRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/approvals/notifications/deployment/validate")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(deployment_validation.status, "blocked");
+        assert_eq!(deployment_validation.channel_count, 0);
+        assert_eq!(deployment_validation.active_policy_count, 1);
+        assert_eq!(deployment_validation.unroutable_pending_count, 1);
+
         let delivery: ApprovalNotificationDelivery = request_json(
             app.clone(),
             Request::builder()
@@ -30990,8 +31274,15 @@ not json
         assert_eq!(run_summary.production_ops.status, "blocked");
         assert!(run_summary.production_ops.production_blocked);
         assert_eq!(run_summary.production_ops.channel_count, 0);
+        assert_eq!(run_summary.deployment_readiness.status, "blocked");
+        assert!(run_summary.deployment_readiness.production_blocked);
+        assert!(!run_summary.deployment_readiness.deployment_validated);
         assert!(run_summary.attention_items.iter().any(|item| {
             item.kind == "approval_notification_production_blocked" && item.severity == "critical"
+        }));
+        assert!(run_summary.attention_items.iter().any(|item| {
+            item.kind == "approval_notification_deployment_validation_blocked"
+                && item.severity == "critical"
         }));
 
         let archived: ApprovalNotificationChannelPolicy = request_json(
@@ -31028,6 +31319,11 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "approval.notification_channel_policy_archived")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "approval.notification_deployment_validation_run")
         );
     }
 
