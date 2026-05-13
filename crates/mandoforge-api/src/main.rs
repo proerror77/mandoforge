@@ -1443,6 +1443,45 @@ struct ProviderPolicyGateReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderPolicyGateRunResponse {
+    run: ProviderPolicyGateRun,
+    report: ProviderPolicyGateReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderPolicyGateRunSummary {
+    generated_at: DateTime<Utc>,
+    run_count: usize,
+    passed_run_count: usize,
+    failed_run_count: usize,
+    warning_run_count: usize,
+    latest_run: Option<ProviderPolicyGateRun>,
+    recent_runs: Vec<ProviderPolicyGateRun>,
+    attention_items: Vec<ProviderPolicyGateRunAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderPolicyGateRun {
+    id: Uuid,
+    status: String,
+    subject: Option<String>,
+    provider_count: usize,
+    passed_count: usize,
+    failed_count: usize,
+    warning_count: usize,
+    failed_provider_names: Vec<String>,
+    warning_provider_names: Vec<String>,
+    ran_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderPolicyGateRunAttentionItem {
+    kind: String,
+    severity: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProviderPolicyGateCheck {
     provider_id: Uuid,
     provider_name: String,
@@ -2254,6 +2293,14 @@ fn build_router(state: AppState) -> Router {
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/summary", get(get_provider_summary))
         .route("/api/providers/policy-gate", get(get_provider_policy_gate))
+        .route(
+            "/api/providers/policy-gate/run",
+            post(run_provider_policy_gate),
+        )
+        .route(
+            "/api/providers/policy-gate/runs",
+            get(get_provider_policy_gate_runs),
+        )
         .route("/api/providers/{id}/status", patch(update_provider_status))
         .route(
             "/api/providers/{id}/status-approval",
@@ -5361,6 +5408,72 @@ async fn get_provider_policy_gate(
     )))
 }
 
+async fn run_provider_policy_gate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderPolicyGateRunResponse>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "providers".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let providers = state.list_providers().await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let report = build_provider_policy_gate_report(&providers, &audit_logs);
+    let failed_provider_names = report
+        .checks
+        .iter()
+        .filter(|check| check.gate_status == "failed")
+        .map(|check| check.provider_name.clone())
+        .collect::<Vec<_>>();
+    let warning_provider_names = report
+        .checks
+        .iter()
+        .filter(|check| check.gate_status == "warning")
+        .map(|check| check.provider_name.clone())
+        .collect::<Vec<_>>();
+    let audit_log = state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "provider.policy_gate_run",
+            "providers",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": report.status,
+                "provider_count": report.provider_count,
+                "passed_count": report.passed_count,
+                "failed_count": report.failed_count,
+                "warning_count": report.warning_count,
+                "failed_provider_names": failed_provider_names,
+                "warning_provider_names": warning_provider_names,
+                "report": report,
+            }),
+        ))
+        .await?;
+    let run = provider_policy_gate_run_from_audit_log(&audit_log)
+        .ok_or_else(|| anyhow::anyhow!("failed to build provider policy gate run"))?;
+    Ok(Json(ProviderPolicyGateRunResponse { run, report }))
+}
+
+async fn get_provider_policy_gate_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderPolicyGateRunSummary>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    Ok(Json(build_provider_policy_gate_run_summary(
+        &audit_logs,
+        Utc::now(),
+    )))
+}
+
 fn build_provider_governance_summary(
     providers: &[ProviderRecord],
     audit_logs: &[AuditLog],
@@ -5624,6 +5737,142 @@ fn build_provider_policy_gate_report(
         warning_count,
         checks,
     }
+}
+
+fn build_provider_policy_gate_run_summary(
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> ProviderPolicyGateRunSummary {
+    let mut recent_runs: Vec<_> = audit_logs
+        .iter()
+        .filter_map(provider_policy_gate_run_from_audit_log)
+        .collect();
+    recent_runs.sort_by(|left, right| right.ran_at.cmp(&left.ran_at));
+    let run_count = recent_runs.len();
+    let passed_run_count = recent_runs
+        .iter()
+        .filter(|run| run.status == "passed")
+        .count();
+    let failed_run_count = recent_runs
+        .iter()
+        .filter(|run| run.status == "failed")
+        .count();
+    let warning_run_count = recent_runs
+        .iter()
+        .filter(|run| run.status == "warning")
+        .count();
+    let latest_run = recent_runs.first().cloned();
+    let mut attention_items = Vec::new();
+    match latest_run.as_ref() {
+        Some(run) if run.status == "failed" => {
+            attention_items.push(ProviderPolicyGateRunAttentionItem {
+                kind: "latest_gate_failed".to_string(),
+                severity: "critical".to_string(),
+                message: format!(
+                    "latest provider policy gate failed for {} provider(s)",
+                    run.failed_count
+                ),
+            });
+        }
+        Some(run) if run.status == "warning" => {
+            attention_items.push(ProviderPolicyGateRunAttentionItem {
+                kind: "latest_gate_warning".to_string(),
+                severity: "warning".to_string(),
+                message: format!(
+                    "latest provider policy gate produced {} warning provider(s)",
+                    run.warning_count
+                ),
+            });
+        }
+        Some(run) if (generated_at - run.ran_at).num_hours() >= 24 => {
+            attention_items.push(ProviderPolicyGateRunAttentionItem {
+                kind: "stale_gate_run".to_string(),
+                severity: "warning".to_string(),
+                message: "provider policy gate has not been run in the last 24 hours".to_string(),
+            });
+        }
+        None => {
+            attention_items.push(ProviderPolicyGateRunAttentionItem {
+                kind: "missing_gate_run".to_string(),
+                severity: "warning".to_string(),
+                message: "provider policy gate has not been run yet".to_string(),
+            });
+        }
+        _ => {}
+    }
+    recent_runs.truncate(10);
+    ProviderPolicyGateRunSummary {
+        generated_at,
+        run_count,
+        passed_run_count,
+        failed_run_count,
+        warning_run_count,
+        latest_run,
+        recent_runs,
+        attention_items,
+    }
+}
+
+fn provider_policy_gate_run_from_audit_log(log: &AuditLog) -> Option<ProviderPolicyGateRun> {
+    if log.action != "provider.policy_gate_run" {
+        return None;
+    }
+    let failed_provider_names = log
+        .details
+        .get("failed_provider_names")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let warning_provider_names = log
+        .details
+        .get("warning_provider_names")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ProviderPolicyGateRun {
+        id: log.id,
+        status: log
+            .details
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        subject: log
+            .details
+            .get("subject")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        provider_count: json_usize(&log.details, "provider_count"),
+        passed_count: json_usize(&log.details, "passed_count"),
+        failed_count: json_usize(&log.details, "failed_count"),
+        warning_count: json_usize(&log.details, "warning_count"),
+        failed_provider_names,
+        warning_provider_names,
+        ran_at: log.created_at,
+    })
+}
+
+fn json_usize(value: &Value, key: &str) -> usize {
+    value
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().map(|value| value as u64))
+        })
+        .unwrap_or_default() as usize
 }
 
 fn provider_requires_api_key(provider_type: &str) -> bool {
@@ -14290,7 +14539,7 @@ mod tests {
     use super::*;
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, StatusCode},
+        http::{Method, Request, StatusCode},
     };
     use tower::ServiceExt;
 
@@ -16306,7 +16555,7 @@ not json
         }));
 
         let gate: ProviderPolicyGateReport = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/providers/policy-gate")
                 .header("x-mandoforge-subject", "admin-1")
@@ -16346,6 +16595,48 @@ not json
                 .blockers
                 .iter()
                 .any(|blocker| blocker.contains("requires base_url"))
+        );
+
+        let gate_run: ProviderPolicyGateRunResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/providers/policy-gate/run")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(gate_run.run.status, "failed");
+        assert_eq!(gate_run.run.provider_count, 2);
+        assert_eq!(gate_run.run.failed_count, 2);
+        assert!(
+            gate_run
+                .run
+                .failed_provider_names
+                .iter()
+                .any(|name| name == "summary-misconfigured-openai")
+        );
+
+        let gate_runs: ProviderPolicyGateRunSummary = request_json(
+            app,
+            Request::builder()
+                .uri("/api/providers/policy-gate/runs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(gate_runs.run_count, 1);
+        assert_eq!(gate_runs.failed_run_count, 1);
+        assert_eq!(gate_runs.latest_run.unwrap().status, "failed");
+        assert!(
+            gate_runs
+                .attention_items
+                .iter()
+                .any(|item| { item.kind == "latest_gate_failed" && item.severity == "critical" })
         );
     }
 

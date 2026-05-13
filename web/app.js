@@ -8,6 +8,7 @@ const state = {
   providers: [],
   providerSummary: null,
   providerPolicyGate: null,
+  providerPolicyGateRuns: null,
   providerHealth: {},
   vaultHealth: null,
   vaultReadiness: null,
@@ -153,6 +154,7 @@ const approvalGovernanceRoot = document.querySelector("#approval-governance");
 const approvalNotificationRoutingRoot = document.querySelector("#approval-notification-routing");
 const providerForm = document.querySelector("#provider-form");
 const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
+const runProviderPolicyGateButton = document.querySelector("#run-provider-policy-gate");
 const secretForm = document.querySelector("#secret-form");
 const evalJudgeProfileForm = document.querySelector("#eval-judge-profile-form");
 const evalDatasetForm = document.querySelector("#eval-dataset-form");
@@ -195,6 +197,7 @@ approvalEscalationRuleForm.addEventListener("submit", createApprovalEscalationRu
 runDueApprovalEscalationsButton.addEventListener("click", runDueApprovalEscalations);
 providerForm.addEventListener("submit", createProvider);
 providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
+runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
 secretForm.addEventListener("submit", createSecretRecord);
 evalJudgeProfileForm.addEventListener("submit", createEvalJudgeProfile);
 checkVaultHealthButton.addEventListener("click", checkVaultHealth);
@@ -531,6 +534,15 @@ async function requestProviderStatusApproval(event) {
     }),
   });
   await refreshOps();
+}
+
+async function runProviderPolicyGate() {
+  const result = await api("/api/providers/policy-gate/run", {
+    method: "POST",
+  });
+  state.providerPolicyGate = result.report;
+  state.providerPolicyGateRuns = await api("/api/providers/policy-gate/runs");
+  renderProviders();
 }
 
 async function createSecretRecord(event) {
@@ -1298,6 +1310,7 @@ async function refreshOps() {
     providers,
     providerSummary,
     providerPolicyGate,
+    providerPolicyGateRuns,
     vaultReadiness,
     secretRecords,
     policy,
@@ -1326,6 +1339,7 @@ async function refreshOps() {
       api("/api/providers"),
       api("/api/providers/summary"),
       api("/api/providers/policy-gate"),
+      api("/api/providers/policy-gate/runs"),
       api("/api/vault/readiness"),
       api("/api/vault/secrets"),
       api("/api/policy"),
@@ -1353,6 +1367,7 @@ async function refreshOps() {
   state.providers = providers;
   state.providerSummary = providerSummary;
   state.providerPolicyGate = providerPolicyGate;
+  state.providerPolicyGateRuns = providerPolicyGateRuns;
   state.vaultReadiness = vaultReadiness;
   state.secretRecords = secretRecords;
   state.policy = policy;
@@ -2720,6 +2735,13 @@ function renderFinanceOperationAudit(audit) {
   return `${escapeHtml(audit.status || "recorded")} · ${escapeHtml(audit.created_at)}${subject}`;
 }
 
+function renderProviderPolicyGateRun(run) {
+  if (!run) {
+    return "none";
+  }
+  return `${escapeHtml(run.status)} · ${escapeHtml(run.ran_at)} · ${formatInteger(run.failed_count)} failed · ${formatInteger(run.warning_count)} warning`;
+}
+
 function formatDurationMs(value) {
   const milliseconds = Number(value || 0);
   if (milliseconds >= 1000) {
@@ -2962,7 +2984,9 @@ function renderProviders() {
   const summary = state.providerSummary;
   const attentionItems = summary?.attention_items || [];
   const policyGate = state.providerPolicyGate;
+  const policyGateRuns = state.providerPolicyGateRuns;
   const policyGateChecks = policyGate?.checks || [];
+  const policyGateRunAttention = policyGateRuns?.attention_items || [];
   const policyGateHtml = policyGate
     ? `
       <div class="detail-panel">
@@ -3005,6 +3029,82 @@ function renderProviders() {
             : `<div class="muted">No provider policy gate checks.</div>`
         }
         <div class="muted">Generated: ${escapeHtml(policyGate.generated_at)}</div>
+      </div>
+    `
+    : "";
+  const policyGateRunsHtml = policyGateRuns
+    ? `
+      <div class="detail-panel">
+        <h4>Provider Gate Runs</h4>
+        <div class="metric-grid compact-metrics">
+          <div class="metric"><span>Runs</span><strong>${formatInteger(policyGateRuns.run_count)}</strong></div>
+          <div class="metric"><span>Passed</span><strong>${formatInteger(policyGateRuns.passed_run_count)}</strong></div>
+          <div class="metric"><span>Failed</span><strong>${formatInteger(policyGateRuns.failed_run_count)}</strong></div>
+          <div class="metric"><span>Warnings</span><strong>${formatInteger(policyGateRuns.warning_run_count)}</strong></div>
+        </div>
+        <dl>
+          <dt>Latest run</dt>
+          <dd>${renderProviderPolicyGateRun(policyGateRuns.latest_run)}</dd>
+        </dl>
+        ${
+          policyGateRunAttention.length
+            ? `<table class="compact-table">
+                <thead>
+                  <tr>
+                    <th>Severity</th>
+                    <th>Signal</th>
+                    <th>Message</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${policyGateRunAttention
+                    .map(
+                      (item) => `
+                        <tr>
+                          <td><span class="budget-status ${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</span></td>
+                          <td>${escapeHtml(item.kind)}</td>
+                          <td>${escapeHtml(item.message)}</td>
+                        </tr>
+                      `,
+                    )
+                    .join("")}
+                </tbody>
+              </table>`
+            : `<div class="muted">No provider gate run attention items.</div>`
+        }
+        ${
+          (policyGateRuns.recent_runs || []).length
+            ? `<table class="compact-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Ran at</th>
+                    <th>Subject</th>
+                    <th>Providers</th>
+                    <th>Failed</th>
+                    <th>Warnings</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${(policyGateRuns.recent_runs || [])
+                    .map(
+                      (run) => `
+                        <tr>
+                          <td><span class="budget-status ${escapeHtml(run.status)}">${escapeHtml(run.status)}</span></td>
+                          <td>${escapeHtml(run.ran_at)}</td>
+                          <td>${escapeHtml(run.subject || "unknown")}</td>
+                          <td>${formatInteger(run.provider_count)}</td>
+                          <td>${escapeHtml((run.failed_provider_names || []).join("; ") || "none")}</td>
+                          <td>${escapeHtml((run.warning_provider_names || []).join("; ") || "none")}</td>
+                        </tr>
+                      `,
+                    )
+                    .join("")}
+                </tbody>
+              </table>`
+            : `<div class="muted">No provider policy gate runs.</div>`
+        }
+        <div class="muted">Generated: ${escapeHtml(policyGateRuns.generated_at)}</div>
       </div>
     `
     : "";
@@ -3100,7 +3200,7 @@ function renderProviders() {
         )
         .join("")
     : `<div class="muted">No stored providers</div>`;
-  providerRoot.innerHTML = policyGateHtml + summaryHtml + providerListHtml;
+  providerRoot.innerHTML = policyGateHtml + policyGateRunsHtml + summaryHtml + providerListHtml;
   providerRoot.querySelectorAll("[data-provider-status]").forEach((button) => {
     button.addEventListener("click", () =>
       updateProviderStatus(button.dataset.providerStatus, button.dataset.status),
