@@ -8,6 +8,7 @@ It contains:
 - API Deployment and Service.
 - Worker Deployment for queued execution jobs.
 - Worker HPA skeleton for CPU-based scaling experiments.
+- Worker KEDA ScaledObject for queue-depth scaling experiments.
 - Agent Remote Computer Pod template with zero replicas.
 - Remote Computer service account, RWX state PVC placeholder, and deny-by-default NetworkPolicy.
 - JuiceFS CSI Remote Computer state example, kept outside the default kustomization.
@@ -33,7 +34,7 @@ Production notes:
 - Replace `emptyDir` workspaces with PVC or object-storage-backed artifact sync before long-running workers.
 - Add NetworkPolicy before enabling shell, Codex, HTTP, or MCP execution in shared clusters.
 - Keep Codex and sandbox execution disabled or tightly constrained before multi-tenant use; the current worker drains jobs through the API execution endpoint.
-- Treat `worker-hpa.yaml` as an autoscaling skeleton only. Validate metrics-server, queue pressure behavior, and load characteristics before claiming production autoscaling.
+- Treat `worker-hpa.yaml` and `worker-keda.yaml` as autoscaling pilot manifests. KEDA is wired to a Prometheus queue-depth query, but you still need production metrics, load validation, and isolation policy before claiming production autoscaling.
 - Treat the Remote Computer manifests as readiness skeletons only. They do not yet create per-session Pod leases, warm pools, or distributed Memory/Notes/Skills synchronization.
 - Treat `remote-computer-state-juicefs-example.yaml` as an opt-in example. Replace its secret values, namespace, object store, and metadata backend before applying it.
 - Treat `remote-computer-warm-pool.yaml` as an opt-in example. It keeps placeholder Pods warm but does not yet lease, assign, or attach sessions to them.

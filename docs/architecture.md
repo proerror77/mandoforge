@@ -235,7 +235,7 @@ Current worker boundary:
 - Keep `MANDOFORGE_EXECUTION_QUEUE_BACKEND` fail-closed for unsupported values: `auto`, `memory`, `postgres`, `redis`, and `nats` are selectable now; generic `broker` remains reserved.
 - Keep `ExecutionWorker` as the swappable worker interface and `InlineExecutionWorker` as the current local implementation.
 - Keep queue-backed worker mode, the API-drained `mandoforge-worker` binary, and the shell worker loop as the current external-worker handoff.
-- Keep `GET /api/execution-jobs/worker-readiness` as the operator gate for this boundary. It reports active queue semantics, worker mode, queued/running/retryable/failed pressure, stale leases, K8s worker manifest coverage, HPA/KEDA autoscaling manifest presence, parsed scale targets/min/max replicas, attention items, and runbook actions. JetStream mode now reports durable broker handoff, while the same readiness path still exposes remaining gaps such as validated queue-depth autoscaling and hard-isolated worker pools.
+- Keep `GET /api/execution-jobs/worker-readiness` as the operator gate for this boundary. It reports active queue semantics, worker mode, queued/running/retryable/failed pressure, stale leases, K8s worker manifest coverage, HPA/KEDA autoscaling manifest presence, parsed scale targets/min/max replicas, KEDA trigger types, queue-depth scaling evidence, attention items, and runbook actions. JetStream mode now reports durable broker handoff, and worker KEDA now exposes queue-depth scaling configuration; the same readiness path still exposes remaining gaps such as production load validation and hard-isolated worker pools.
 - Replace the API-drained queue with a broker-backed queue in a later production stage.
 
 ## Deployment Boundary

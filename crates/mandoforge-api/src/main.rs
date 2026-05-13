@@ -1230,6 +1230,8 @@ struct WorkerAutoscalingReadiness {
     configured_min_replicas: Option<i64>,
     configured_max_replicas: Option<i64>,
     scale_target_refs: Vec<String>,
+    trigger_types: Vec<String>,
+    queue_depth_scaling_present: bool,
     validation_status: String,
 }
 
@@ -1246,6 +1248,9 @@ struct K8sAutoscalingSpec {
     scale_target_ref: Option<K8sScaleTargetRef>,
     min_replicas: Option<i64>,
     max_replicas: Option<i64>,
+    min_replica_count: Option<i64>,
+    max_replica_count: Option<i64>,
+    triggers: Option<Vec<K8sAutoscalingTrigger>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1253,6 +1258,13 @@ struct K8sAutoscalingSpec {
 struct K8sScaleTargetRef {
     kind: Option<String>,
     name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct K8sAutoscalingTrigger {
+    #[serde(rename = "type")]
+    trigger_type: Option<String>,
+    metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17083,6 +17095,12 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
             severity: "warning".to_string(),
             message: "worker HPA/KEDA manifest is present, but production autoscaling still needs cluster metrics, load validation, and isolation policy".to_string(),
         });
+    } else if autoscaling.validation_status == "queue_depth_configured" {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_autoscaling_load_validation_missing".to_string(),
+            severity: "warning".to_string(),
+            message: "worker KEDA queue-depth scaling is configured, but production load validation and isolation policy remain required".to_string(),
+        });
     }
 
     let mut runbook_actions = Vec::new();
@@ -17114,6 +17132,11 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
     } else if autoscaling.validation_status == "skeleton" {
         runbook_actions.push(
             "validate worker HPA/KEDA behavior under load before declaring production autoscaling complete"
+                .to_string(),
+        );
+    } else if autoscaling.validation_status == "queue_depth_configured" {
+        runbook_actions.push(
+            "run a production-like queue pressure test against worker KEDA scaling before declaring autoscaling validated"
                 .to_string(),
         );
     }
@@ -17204,6 +17227,8 @@ fn worker_autoscaling_readiness_from_manifests(paths: &[&str]) -> WorkerAutoscal
     let mut configured_min_replicas = env_i64("MANDOFORGE_WORKER_MIN_REPLICAS");
     let mut configured_max_replicas = env_i64("MANDOFORGE_WORKER_MAX_REPLICAS");
     let mut scale_target_refs = Vec::new();
+    let mut trigger_types = Vec::new();
+    let mut queue_depth_scaling_present = false;
 
     for path in paths {
         let Some(resolved_path) = project_file_path(path) else {
@@ -17219,8 +17244,20 @@ fn worker_autoscaling_readiness_from_manifests(paths: &[&str]) -> WorkerAutoscal
         let Some(spec) = manifest.spec else {
             continue;
         };
-        configured_min_replicas = configured_min_replicas.or(spec.min_replicas);
-        configured_max_replicas = configured_max_replicas.or(spec.max_replicas);
+        if let Some(min_replicas) = spec.min_replicas.or(spec.min_replica_count) {
+            configured_min_replicas = Some(
+                configured_min_replicas
+                    .map(|current| current.min(min_replicas))
+                    .unwrap_or(min_replicas),
+            );
+        }
+        if let Some(max_replicas) = spec.max_replicas.or(spec.max_replica_count) {
+            configured_max_replicas = Some(
+                configured_max_replicas
+                    .map(|current| current.max(max_replicas))
+                    .unwrap_or(max_replicas),
+            );
+        }
         if let Some(target) = spec.scale_target_ref {
             let kind = target.kind.unwrap_or_else(|| "unknown".to_string());
             let name = target.name.unwrap_or_else(|| "unknown".to_string());
@@ -17228,10 +17265,34 @@ fn worker_autoscaling_readiness_from_manifests(paths: &[&str]) -> WorkerAutoscal
         } else if let Some(kind) = manifest.kind {
             scale_target_refs.push(format!("{kind}/unknown"));
         }
+        for trigger in spec.triggers.unwrap_or_default() {
+            let trigger_type = trigger
+                .trigger_type
+                .unwrap_or_else(|| "unknown".to_string());
+            let metadata = trigger.metadata.unwrap_or_else(|| json!({}));
+            if trigger_type == "prometheus"
+                && metadata
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .is_some_and(|query| {
+                        query.contains("mandoforge_execution_jobs_queued")
+                            || query.contains("queue_depth")
+                    })
+            {
+                queue_depth_scaling_present = true;
+            }
+            trigger_types.push(trigger_type);
+        }
     }
 
     let validation_status = if autoscaling_manifest_paths.is_empty() {
         "missing"
+    } else if queue_depth_scaling_present
+        && scale_target_refs
+            .iter()
+            .any(|target| target == "Deployment/mandoforge-worker")
+    {
+        "queue_depth_configured"
     } else {
         "skeleton"
     }
@@ -17243,6 +17304,8 @@ fn worker_autoscaling_readiness_from_manifests(paths: &[&str]) -> WorkerAutoscal
         configured_min_replicas,
         configured_max_replicas,
         scale_target_refs,
+        trigger_types,
+        queue_depth_scaling_present,
         validation_status,
     }
 }
@@ -29388,13 +29451,32 @@ not json
                 .iter()
                 .any(|path| path == "deploy/k8s/worker-hpa.yaml")
         );
+        assert!(
+            worker_readiness
+                .autoscaling
+                .autoscaling_manifest_paths
+                .iter()
+                .any(|path| path == "deploy/k8s/worker-keda.yaml")
+        );
         assert_eq!(
             worker_readiness.autoscaling.configured_min_replicas,
             Some(1)
         );
         assert_eq!(
             worker_readiness.autoscaling.configured_max_replicas,
-            Some(3)
+            Some(10)
+        );
+        assert!(worker_readiness.autoscaling.queue_depth_scaling_present);
+        assert!(
+            worker_readiness
+                .autoscaling
+                .trigger_types
+                .iter()
+                .any(|trigger| trigger == "prometheus")
+        );
+        assert_eq!(
+            worker_readiness.autoscaling.validation_status,
+            "queue_depth_configured"
         );
         assert!(
             worker_readiness
@@ -29413,7 +29495,7 @@ not json
             worker_readiness
                 .attention_items
                 .iter()
-                .any(|item| item.kind == "worker_autoscaling_skeleton")
+                .any(|item| item.kind == "worker_autoscaling_load_validation_missing")
         );
         assert!(
             worker_readiness

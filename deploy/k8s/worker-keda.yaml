@@ -1,0 +1,21 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: mandoforge-worker-queue-depth
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mandoforge-worker
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 30
+  cooldownPeriod: 300
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local
+        metricName: mandoforge_execution_jobs_queued
+        threshold: "5"
+        query: |
+          sum(mandoforge_execution_jobs_queued{status="queued"})
