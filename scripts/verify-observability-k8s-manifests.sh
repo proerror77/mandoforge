@@ -7,10 +7,16 @@ if ! command -v kubectl >/dev/null 2>&1; then
 fi
 
 manifest="deploy/k8s/otel-collector.yaml"
+network_policy_manifest="deploy/k8s/otel-collector-networkpolicy.yaml"
 rendered="/tmp/mandoforge-observability-kustomize.out"
 
 if [[ ! -f "$manifest" ]]; then
   echo "missing OTel collector manifest: $manifest" >&2
+  exit 1
+fi
+
+if [[ ! -f "$network_policy_manifest" ]]; then
+  echo "missing OTel collector NetworkPolicy manifest: $network_policy_manifest" >&2
   exit 1
 fi
 
@@ -23,8 +29,10 @@ required_patterns=(
   "containerPort: 13133"
   "MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT: http://mandoforge-otel-collector:4318"
   "MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT: http://mandoforge-otel-collector:13133/healthz"
+  "kind: NetworkPolicy"
   "readOnlyRootFilesystem: true"
   "automountServiceAccountToken: false"
+  "app: mandoforge-api"
 )
 
 for pattern in "${required_patterns[@]}"; do
