@@ -4030,6 +4030,8 @@ function renderProviders() {
       <dl>
         <dt>Readiness</dt>
         <dd>${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · validated ${deploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${formatInteger(deploymentReadiness.healthy_count || 0)}/${formatInteger(deploymentReadiness.provider_count || 0)} · latest ${escapeHtml(deploymentReadiness.latest_validation_at || "none")}</dd>
+        <dt>Controller</dt>
+        <dd>required ${deploymentReadiness.controller_required ? "yes" : "no"} · configured ${deploymentReadiness.controller_configured ? "yes" : "no"} · latest ${escapeHtml(deploymentReadiness.latest_controller_status || "none")} · executions ${formatInteger(deploymentReadiness.controller_execution_count || 0)} · failed ${formatInteger(deploymentReadiness.controller_failed_count || 0)}</dd>
         <dt>Message</dt>
         <dd>${escapeHtml(deploymentReadiness.message || "provider deployment validation is not reported")}</dd>
       </dl>

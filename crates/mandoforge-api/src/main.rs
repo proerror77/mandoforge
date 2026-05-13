@@ -2447,6 +2447,9 @@ struct ProviderDeploymentValidationRun {
     healthy_count: usize,
     unhealthy_count: usize,
     results: Vec<ProviderHealth>,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
     ran_at: DateTime<Utc>,
 }
 
@@ -2460,6 +2463,12 @@ struct ProviderDeploymentReadiness {
     provider_count: usize,
     healthy_count: usize,
     unhealthy_count: usize,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
+    controller_execution_count: usize,
+    controller_failed_count: usize,
     deployment_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
@@ -7596,12 +7605,63 @@ async fn validate_provider_deployment(
     }
     let healthy_count = results.iter().filter(|health| health.healthy).count();
     let unhealthy_count = results.len().saturating_sub(healthy_count);
-    let status = if !results.is_empty() && unhealthy_count == 0 {
-        "healthy"
-    } else {
-        "blocked"
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = provider_deployment_controller_required(&lookup);
+    let controller_configured = provider_deployment_controller_configured(&lookup);
+    let mut healthy = !results.is_empty() && unhealthy_count == 0;
+    let mut issues = Vec::new();
+    if results.is_empty() {
+        issues.push("provider deployment validation covered no active providers");
     }
-    .to_string();
+    if unhealthy_count > 0 {
+        issues.push("provider deployment validation found unhealthy providers");
+    }
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "provider_health_not_ready"
+        } else {
+            "controller_not_configured"
+        }
+    });
+    if healthy && controller_configured {
+        match execute_provider_deployment_controller(
+            &lookup,
+            &principal.subject_id,
+            Utc::now(),
+            &results,
+        )
+        .await
+        {
+            Ok(execution) => {
+                let controller_status = execution
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed")
+                    .to_string();
+                controller_execution = execution;
+                if controller_status != "validated" {
+                    healthy = false;
+                    issues.push("provider deployment controller did not validate");
+                }
+            }
+            Err(error) => {
+                healthy = false;
+                issues.push("provider deployment controller failed");
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    }
+    if healthy && controller_required && !controller_configured {
+        healthy = false;
+        issues.push("provider deployment controller is required but not configured");
+    }
+    let status = if healthy { "healthy" } else { "blocked" }.to_string();
     let audit_log = state
         .append_audit_log(new_audit_log(
             None,
@@ -7617,6 +7677,10 @@ async fn validate_provider_deployment(
                 "healthy_count": healthy_count,
                 "unhealthy_count": unhealthy_count,
                 "provider_names": results.iter().map(|health| health.name.clone()).collect::<Vec<_>>(),
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+                "issues": issues,
             }),
         ))
         .await?;
@@ -7626,6 +7690,9 @@ async fn validate_provider_deployment(
         healthy_count,
         unhealthy_count,
         results,
+        controller_required,
+        controller_configured,
+        controller_execution,
         ran_at: audit_log.created_at,
     }))
 }
@@ -8122,7 +8189,13 @@ fn build_provider_governance_summary(
                 && log.details["policy_decision"]["gate"] == "provider_lifecycle_emergency"
         })
         .count();
-    let deployment_readiness = build_provider_deployment_readiness(audit_logs, Utc::now());
+    let lookup = |key: &str| std::env::var(key).ok();
+    let deployment_readiness = build_provider_deployment_readiness(
+        audit_logs,
+        Utc::now(),
+        provider_deployment_controller_required(&lookup),
+        provider_deployment_controller_configured(&lookup),
+    );
     if deployment_readiness.production_blocked {
         attention_items.push(ProviderGovernanceAttentionItem {
             provider_id: Uuid::nil(),
@@ -8159,11 +8232,36 @@ fn build_provider_governance_summary(
 fn build_provider_deployment_readiness(
     audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
 ) -> ProviderDeploymentReadiness {
     let latest_validation = audit_logs
         .iter()
         .filter(|log| log.action == "provider.deployment_validation_run")
         .max_by_key(|log| log.created_at);
+    let controller_validation_logs = audit_logs
+        .iter()
+        .filter(|log| {
+            log.action == "provider.deployment_validation_run"
+                && log
+                    .details
+                    .get("controller_execution")
+                    .and_then(|execution| execution.get("attempted"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    let controller_execution_count = controller_validation_logs.len();
+    let controller_failed_count = controller_validation_logs
+        .iter()
+        .filter(|log| {
+            log.details
+                .get("controller_execution")
+                .and_then(|execution| execution.get("status"))
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "validated")
+        })
+        .count();
     let latest_validation_at = latest_validation.map(|log| log.created_at);
     let latest_validation_age_hours =
         latest_validation_at.map(|created_at| (generated_at - created_at).num_hours());
@@ -8183,6 +8281,12 @@ fn build_provider_deployment_readiness(
         .and_then(|log| log.details.get("unhealthy_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
+    let latest_controller_status = latest_validation
+        .and_then(|log| log.details.get("controller_execution"))
+        .and_then(|execution| execution.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
 
     if latest_validation.is_none() {
@@ -8198,6 +8302,15 @@ fn build_provider_deployment_readiness(
     }
     if latest_validation_age_hours.is_some_and(|hours| hours >= 24) {
         blocking_reasons.push("provider deployment validation evidence is stale".to_string());
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons
+            .push("provider deployment controller is required but not configured".to_string());
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons.push(
+            "provider deployment controller evidence is missing or not validated".to_string(),
+        );
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -8225,10 +8338,116 @@ fn build_provider_deployment_readiness(
         provider_count,
         healthy_count,
         unhealthy_count,
+        controller_required,
+        controller_configured,
+        latest_controller_status,
+        latest_controller_validated,
+        controller_execution_count,
+        controller_failed_count,
         deployment_validated: !production_blocked,
         blocking_reasons,
         message,
     }
+}
+
+fn provider_deployment_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn provider_deployment_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_provider_deployment_controller<F>(
+    lookup: &F,
+    subject: &str,
+    checked_at: DateTime<Utc>,
+    results: &[ProviderHealth],
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_PROVIDER_DEPLOYMENT_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let providers = results
+        .iter()
+        .map(|health| {
+            json!({
+                "provider_id": health.provider_id,
+                "name": health.name,
+                "status": health.status,
+                "healthy": health.healthy,
+                "issues": health.issues,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = json!({
+        "type": "mandoforge.provider_deployment",
+        "subject": subject,
+        "checked_at": checked_at,
+        "provider_count": results.len(),
+        "healthy_count": results.iter().filter(|health| health.healthy).count(),
+        "unhealthy_count": results.iter().filter(|health| !health.healthy).count(),
+        "providers": providers,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "provider deployment controller failed with status {http_status}"
+        )));
+    }
+    let controller_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(
+        controller_status,
+        "validated" | "deployed" | "healthy" | "success" | "ok"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": controller_status,
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
 
 fn build_provider_policy_gate_report(
@@ -28777,6 +28996,12 @@ not json
         assert_eq!(deployment_validation.provider_count, 1);
         assert_eq!(deployment_validation.healthy_count, 1);
         assert_eq!(deployment_validation.unhealthy_count, 0);
+        assert!(!deployment_validation.controller_required);
+        assert!(!deployment_validation.controller_configured);
+        assert_eq!(
+            deployment_validation.controller_execution["status"],
+            "skipped"
+        );
 
         let summary: ProviderGovernanceSummary = request_json(
             app.clone(),
@@ -28973,6 +29198,141 @@ not json
                 && log.details["healthy_count"] == 1
                 && log.details["unhealthy_count"] == 0
         }));
+    }
+
+    #[tokio::test]
+    async fn provider_deployment_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("provider deployment listener");
+        let controller_addr = listener.local_addr().expect("provider deployment addr");
+        let controller = Router::new()
+            .route(
+                "/provider-deployment",
+                post(mock_provider_deployment_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock provider deployment controller");
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/provider-deployment"))
+            }
+            "MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_TOKEN" => {
+                Some("provider-deployment-token".to_string())
+            }
+            _ => None,
+        };
+        let provider_id = Uuid::new_v4();
+        let results = vec![ProviderHealth {
+            provider_id,
+            name: "deployment-mock".to_string(),
+            status: "healthy".to_string(),
+            healthy: true,
+            issues: vec![],
+            checks: json!({"kind": "mock"}),
+            checked_at: Utc::now(),
+        }];
+
+        let execution =
+            execute_provider_deployment_controller(&lookup, "admin-1", Utc::now(), &results)
+                .await
+                .expect("provider deployment controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(execution["deployment_id"], "provider-deployment-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.provider_deployment");
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["provider_count"], 1);
+        assert_eq!(
+            payloads[0]["providers"][0]["provider_id"],
+            provider_id.to_string()
+        );
+        assert!(payloads[0]["providers"][0]["checks"].is_null());
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn provider_deployment_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let missing = build_provider_deployment_readiness(&[], generated_at, true, false);
+        assert_eq!(missing.status, "blocked");
+        assert!(missing.production_blocked);
+        assert!(missing.controller_required);
+        assert!(!missing.controller_configured);
+        assert!(missing.blocking_reasons.iter().any(|reason| {
+            reason == "provider deployment controller is required but not configured"
+        }));
+
+        let without_controller = build_provider_deployment_readiness(
+            &[new_audit_log(
+                None,
+                "user",
+                None,
+                "provider.deployment_validation_run",
+                "providers",
+                None,
+                json!({
+                    "status": "healthy",
+                    "provider_count": 1,
+                    "healthy_count": 1,
+                    "unhealthy_count": 0,
+                    "controller_required": true,
+                    "controller_configured": true,
+                    "controller_execution": {
+                        "attempted": false,
+                        "status": "skipped",
+                        "reason": "controller_not_configured"
+                    }
+                }),
+            )],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(without_controller.status, "blocked");
+        assert!(without_controller.production_blocked);
+        assert!(!without_controller.latest_controller_validated);
+
+        let ready = build_provider_deployment_readiness(
+            &[new_audit_log(
+                None,
+                "user",
+                None,
+                "provider.deployment_validation_run",
+                "providers",
+                None,
+                json!({
+                    "status": "healthy",
+                    "provider_count": 1,
+                    "healthy_count": 1,
+                    "unhealthy_count": 0,
+                    "controller_required": true,
+                    "controller_configured": true,
+                    "controller_execution": {
+                        "attempted": true,
+                        "status": "validated",
+                        "deployment_id": "provider-deployment-1"
+                    }
+                }),
+            )],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+        assert!(ready.latest_controller_validated);
+        assert_eq!(ready.controller_execution_count, 1);
+        assert_eq!(ready.controller_failed_count, 0);
     }
 
     #[tokio::test]
@@ -30195,6 +30555,30 @@ not json
                 {"name": "preflight", "status": "passed"},
                 {"name": "apply", "status": "applied"},
                 {"name": "verify", "status": "passed"}
+            ]
+        }))
+    }
+
+    async fn mock_provider_deployment_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer provider-deployment-token")
+        );
+        assert_eq!(payload["type"], "mandoforge.provider_deployment");
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "deployment_id": "provider-deployment-1",
+            "message": "provider deployment controller validated active providers",
+            "steps": [
+                {"name": "provider-health", "status": "passed"},
+                {"name": "policy-bindings", "status": "passed"}
             ]
         }))
     }
