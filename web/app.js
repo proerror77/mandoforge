@@ -154,6 +154,7 @@ const evalSuiteBootstrapRoot = document.querySelector("#eval-suite-bootstrap");
 const agentReleaseRoot = document.querySelector("#agent-releases");
 const runDueAgentReleasesButton = document.querySelector("#run-due-agent-releases");
 const validateAgentReleaseDeploymentButton = document.querySelector("#validate-agent-release-deployment");
+const validateAgentReleaseOrchestrationButton = document.querySelector("#validate-agent-release-orchestration");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
 const workerReadinessRoot = document.querySelector("#worker-readiness");
@@ -279,6 +280,7 @@ evalRunForm.addEventListener("submit", createEvalRun);
 bootstrapEvalSuiteButton.addEventListener("click", bootstrapEvalSuite);
 runDueAgentReleasesButton.addEventListener("click", runDueAgentReleaseAutomation);
 validateAgentReleaseDeploymentButton.addEventListener("click", validateAgentReleaseDeployment);
+validateAgentReleaseOrchestrationButton.addEventListener("click", validateAgentReleaseOrchestration);
 mcpForm.addEventListener("submit", createMcpServer);
 loadMcpButton.addEventListener("click", loadMcpServers);
 runMcpHealthButton.addEventListener("click", runMcpHealth);
@@ -945,6 +947,13 @@ async function runDueAgentReleaseAutomation() {
 
 async function validateAgentReleaseDeployment() {
   state.agentReleaseDeploymentValidation = await api("/api/agents/releases/deployment/validate", {
+    method: "POST",
+  });
+  await refreshAgentReleases();
+}
+
+async function validateAgentReleaseOrchestration() {
+  state.agentReleaseOrchestrationValidation = await api("/api/agents/releases/orchestration/validate", {
     method: "POST",
   });
   await refreshAgentReleases();
@@ -4878,6 +4887,7 @@ function renderAgentReleaseAutomationRuns(runs) {
   const productionOps = runs.production_ops || {};
   const productionOrchestration = runs.production_orchestration || {};
   const deploymentReadiness = runs.deployment_readiness || {};
+  const orchestrationValidation = state.agentReleaseOrchestrationValidation;
   const deploymentValidation = state.agentReleaseDeploymentValidation;
   return `
     <div class="nested-item">
@@ -4886,7 +4896,13 @@ function renderAgentReleaseAutomationRuns(runs) {
       <div class="muted">Production rollout: ${escapeHtml(productionOps.status || "unknown")} · blocked ${productionOps.production_blocked ? "yes" : "no"} · pending ${formatInteger(productionOps.pending_count || 0)} · auto ${formatInteger(productionOps.auto_pending_count || 0)} · manual ${formatInteger(productionOps.manual_pending_count || 0)}</div>
       <div class="muted">${escapeHtml(productionOps.message || "Release production ops are not reported")}</div>
       <div class="muted">Production orchestration: ${escapeHtml(productionOrchestration.status || "unknown")} · supervision fresh ${productionOrchestration.automation_supervision_fresh ? "yes" : "no"} · pending clear ${productionOrchestration.pending_clear ? "yes" : "no"} · skipped clear ${productionOrchestration.skipped_automation_clear ? "yes" : "no"} · manual clear ${productionOrchestration.manual_approval_clear ? "yes" : "no"}</div>
+      <div class="muted">Orchestration controller: required ${productionOrchestration.controller_required ? "yes" : "no"} · configured ${productionOrchestration.controller_configured ? "yes" : "no"} · latest ${escapeHtml(productionOrchestration.latest_controller_status || "none")} · validated ${productionOrchestration.latest_controller_validated ? "yes" : "no"}</div>
       <div class="muted">${escapeHtml(productionOrchestration.message || "Release production orchestration is not reported")}</div>
+      ${
+        orchestrationValidation
+          ? `<div class="muted">Latest orchestration validation: ${escapeHtml(orchestrationValidation.status)} · releases ${formatInteger(orchestrationValidation.release_count || 0)} · controller ${escapeHtml(orchestrationValidation.controller_execution?.status || "skipped")} · checked ${escapeHtml(orchestrationValidation.checked_at)}</div>`
+          : ""
+      }
       <div class="muted">Deployment validation: ${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · validated ${deploymentReadiness.deployment_validated ? "yes" : "no"} · controller ${deploymentReadiness.controller_configured ? "configured" : "missing"} · required ${deploymentReadiness.controller_required ? "yes" : "no"}</div>
       <div class="muted">Latest release deployment validation: ${escapeHtml(deploymentReadiness.latest_validation_at || "none")} · status ${escapeHtml(deploymentReadiness.latest_validation_status || "none")} · controller status ${escapeHtml(deploymentReadiness.latest_controller_status || "none")} · controller runs ${formatInteger(deploymentReadiness.controller_execution_count || 0)} · failed ${formatInteger(deploymentReadiness.controller_failed_count || 0)}</div>
       <div class="muted">${escapeHtml(deploymentReadiness.message || "Release deployment validation is not reported")}</div>

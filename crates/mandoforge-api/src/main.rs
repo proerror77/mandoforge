@@ -337,6 +337,18 @@ struct AgentReleaseDeploymentValidationRun {
     checked_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct AgentReleaseOrchestrationValidationRun {
+    status: String,
+    release_count: usize,
+    latest_automation_status: Option<String>,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
+    issues: Vec<String>,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentReleaseDeploymentReadiness {
     status: String,
@@ -386,6 +398,10 @@ struct AgentReleaseProductionOrchestrationReadiness {
     stale_clear: bool,
     skipped_automation_clear: bool,
     manual_approval_clear: bool,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
 }
@@ -3514,6 +3530,10 @@ fn build_router(state: AppState) -> Router {
             post(validate_agent_release_deployment),
         )
         .route(
+            "/api/agents/releases/orchestration/validate",
+            post(validate_agent_release_orchestration),
+        )
+        .route(
             "/api/agents/{id}/releases",
             get(list_agent_releases).post(create_agent_release),
         )
@@ -4632,6 +4652,134 @@ async fn validate_agent_release_deployment(
     }))
 }
 
+async fn validate_agent_release_orchestration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AgentReleaseOrchestrationValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "agent_release".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+
+    let checked_at = Utc::now();
+    let audit_logs = state.list_audit_logs(None).await?;
+    let rollout_summary =
+        build_agent_release_rollout_summary(state.list_all_agent_releases().await?, checked_at);
+    let automation_summary =
+        build_agent_release_automation_run_summary(&audit_logs, &rollout_summary, checked_at);
+    let production_orchestration = automation_summary.production_orchestration.clone();
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = agent_release_orchestration_controller_required(&lookup);
+    let controller_configured = agent_release_orchestration_controller_configured(&lookup);
+    let mut issues = Vec::new();
+
+    if rollout_summary.release_count == 0 {
+        issues.push("agent release orchestration validation covered no releases".to_string());
+    }
+    if production_orchestration.production_blocked {
+        issues.push(production_orchestration.message.clone());
+    }
+
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "release_orchestration_not_ready"
+        } else {
+            "controller_not_configured"
+        }
+    });
+    if controller_configured {
+        match execute_agent_release_orchestration_controller(
+            &lookup,
+            &principal.subject_id,
+            checked_at,
+            &rollout_summary,
+            &automation_summary,
+        )
+        .await
+        {
+            Ok(execution) => {
+                if execution.get("status").and_then(Value::as_str) != Some("validated") {
+                    issues.push(
+                        "agent release orchestration controller did not validate".to_string(),
+                    );
+                }
+                controller_execution = execution;
+            }
+            Err(error) => {
+                issues.push("agent release orchestration controller failed".to_string());
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    } else if controller_required {
+        issues.push(
+            "agent release orchestration controller is required but not configured".to_string(),
+        );
+    }
+    if controller_required
+        && controller_execution.get("status").and_then(Value::as_str) != Some("validated")
+    {
+        issues.push(
+            "agent release orchestration controller evidence is missing or not validated"
+                .to_string(),
+        );
+    }
+    dedupe_strings(&mut issues);
+
+    let status = if issues.is_empty() {
+        "validated"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "agent.release_orchestration_validation_run",
+            "agent_release",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "release_count": rollout_summary.release_count,
+                "latest_automation_status": automation_summary.latest_run.as_ref().map(|run| run.status.clone()),
+                "latest_automation_run_id": automation_summary.latest_run.as_ref().map(|run| run.id),
+                "production_orchestration": production_orchestration,
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+                "issues": issues,
+            }),
+        ))
+        .await?;
+
+    Ok(Json(AgentReleaseOrchestrationValidationRun {
+        status,
+        release_count: rollout_summary.release_count,
+        latest_automation_status: automation_summary
+            .latest_run
+            .as_ref()
+            .map(|run| run.status.clone()),
+        controller_required,
+        controller_configured,
+        controller_execution,
+        issues,
+        checked_at,
+    }))
+}
+
 async fn create_agent_release(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -5125,6 +5273,109 @@ where
     }))
 }
 
+fn agent_release_orchestration_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn agent_release_orchestration_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_agent_release_orchestration_controller<F>(
+    lookup: &F,
+    subject: &str,
+    requested_at: DateTime<Utc>,
+    rollout_summary: &AgentReleaseRolloutSummary,
+    automation_summary: &AgentReleaseAutomationRunSummary,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_URL is required",
+            )
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.agent_release_orchestration_validation",
+        "subject": subject,
+        "release_counts": {
+            "release_count": rollout_summary.release_count,
+            "pending_count": rollout_summary.pending_count,
+            "promoted_count": rollout_summary.promoted_count,
+            "rejected_count": rollout_summary.rejected_count,
+            "rolled_back_count": rollout_summary.rolled_back_count,
+            "auto_pending_count": rollout_summary.auto_pending_count,
+            "manual_pending_count": rollout_summary.manual_pending_count,
+            "expired_pending_count": rollout_summary.expired_pending_count,
+            "stale_pending_count": rollout_summary.stale_pending_count,
+        },
+        "automation": {
+            "run_count": automation_summary.run_count,
+            "processed_run_count": automation_summary.processed_run_count,
+            "skipped_run_count": automation_summary.skipped_run_count,
+            "latest_run": automation_summary.latest_run,
+            "production_ops": automation_summary.production_ops,
+            "production_orchestration": automation_summary.production_orchestration,
+        },
+        "requested_at": requested_at,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "agent release orchestration controller failed with status {http_status}"
+        )));
+    }
+    let provider_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": provider_status,
+        "orchestration_id": body.get("orchestration_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
+}
+
 fn agent_release_rollback_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
@@ -5274,12 +5525,15 @@ fn build_agent_release_automation_run_summary(
         rollout_summary,
         generated_at,
     );
+    let lookup = |key: &str| std::env::var(key).ok();
     let production_orchestration = build_agent_release_production_orchestration_readiness(
         latest_run.as_ref(),
         rollout_summary,
+        audit_logs,
         generated_at,
+        agent_release_orchestration_controller_required(&lookup),
+        agent_release_orchestration_controller_configured(&lookup),
     );
-    let lookup = |key: &str| std::env::var(key).ok();
     let deployment_readiness = build_agent_release_deployment_readiness(
         audit_logs,
         generated_at,
@@ -5539,7 +5793,10 @@ fn build_agent_release_production_ops_readiness(
 fn build_agent_release_production_orchestration_readiness(
     latest_run: Option<&AgentReleaseAutomationRunRecord>,
     rollout_summary: &AgentReleaseRolloutSummary,
+    audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
 ) -> AgentReleaseProductionOrchestrationReadiness {
     let automation_supervision_fresh =
         latest_run.is_some_and(|run| (generated_at - run.ran_at).num_hours() < 6);
@@ -5550,6 +5807,18 @@ fn build_agent_release_production_orchestration_readiness(
     let stale_clear = rollout_summary.stale_pending_count == 0;
     let skipped_automation_clear = latest_run.is_some_and(|run| run.skipped_count == 0);
     let manual_approval_clear = rollout_summary.manual_pending_count == 0;
+    let latest_controller_status = audit_logs
+        .iter()
+        .filter(|log| log.action == "agent.release_orchestration_validation_run")
+        .max_by_key(|log| log.created_at)
+        .and_then(|log| {
+            log.details
+                .get("controller_execution")
+                .and_then(|execution| execution.get("status"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
 
     if !automation_supervision_fresh {
@@ -5569,6 +5838,17 @@ fn build_agent_release_production_orchestration_readiness(
     }
     if !manual_approval_clear {
         blocking_reasons.push("manual release approval steps remain".to_string());
+    }
+    if controller_required && !controller_configured {
+        blocking_reasons.push(
+            "agent release orchestration controller is required but not configured".to_string(),
+        );
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons.push(
+            "agent release orchestration controller evidence is missing or not validated"
+                .to_string(),
+        );
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -5598,6 +5878,10 @@ fn build_agent_release_production_orchestration_readiness(
         stale_clear,
         skipped_automation_clear,
         manual_approval_clear,
+        controller_required,
+        controller_configured,
+        latest_controller_status,
+        latest_controller_validated,
         blocking_reasons,
         message,
     }
@@ -33445,6 +33729,199 @@ not json
     }
 
     #[tokio::test]
+    async fn agent_release_orchestration_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("release orchestration listener");
+        let controller_addr = listener.local_addr().expect("release orchestration addr");
+        let controller = Router::new()
+            .route(
+                "/agent-release-orchestration",
+                post(mock_agent_release_orchestration_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock agent release orchestration controller");
+        });
+        let now = Utc::now();
+        let release = AgentRelease {
+            id: Uuid::new_v4(),
+            agent_id: Uuid::new_v4(),
+            agent_version_id: Uuid::new_v4(),
+            environment: "prod".to_string(),
+            status: "promoted".to_string(),
+            eval_run_id: Some(Uuid::new_v4()),
+            eval_score: Some(1.0),
+            min_score: 1.0,
+            requested_by: Some("release-requester".to_string()),
+            requested_at: Some(now - chrono::Duration::minutes(10)),
+            request_reason: Some("orchestration controller test".to_string()),
+            approver_subject: Some("system".to_string()),
+            decision_by: Some("system".to_string()),
+            decided_at: Some(now - chrono::Duration::minutes(5)),
+            decision_reason: Some("release automation auto-approved".to_string()),
+            promoted_by: Some("system".to_string()),
+            promoted_at: Some(now - chrono::Duration::minutes(5)),
+            automation_policy: json!({"auto_approve": true}),
+            created_at: now - chrono::Duration::minutes(10),
+        };
+        let rollout_summary = build_agent_release_rollout_summary(vec![release.clone()], now);
+        let audit_logs = vec![new_audit_log(
+            None,
+            "system",
+            None,
+            "agent.release_promotion_due_run",
+            "agent_release",
+            None,
+            json!({
+                "status": "processed",
+                "pending_count": 1,
+                "promoted_count": 1,
+                "rejected_count": 0,
+                "skipped_count": 0,
+                "controller_required": false,
+                "controller_configured": false,
+                "controller_execution_count": 0,
+                "controller_failed_count": 0,
+                "results": [{
+                    "release_id": release.id,
+                    "agent_id": release.agent_id,
+                    "status": "promoted"
+                }]
+            }),
+        )];
+        let automation_summary =
+            build_agent_release_automation_run_summary(&audit_logs, &rollout_summary, now);
+        assert_eq!(automation_summary.production_orchestration.status, "ready");
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_URL" => Some(format!(
+                "http://{controller_addr}/agent-release-orchestration"
+            )),
+            "MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_TOKEN" => {
+                Some("release-orchestration-token".to_string())
+            }
+            _ => None,
+        };
+
+        let execution = execute_agent_release_orchestration_controller(
+            &lookup,
+            "admin-1",
+            now,
+            &rollout_summary,
+            &automation_summary,
+        )
+        .await
+        .expect("agent release orchestration controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(
+            execution["orchestration_id"],
+            "agent-release-orchestration-1"
+        );
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.agent_release_orchestration_validation"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["release_counts"]["release_count"], 1);
+        assert_eq!(
+            payloads[0]["automation"]["production_orchestration"]["status"],
+            "ready"
+        );
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn agent_release_orchestration_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let latest_run = AgentReleaseAutomationRunRecord {
+            id: Uuid::new_v4(),
+            status: "processed".to_string(),
+            pending_count: 0,
+            promoted_count: 1,
+            rejected_count: 0,
+            skipped_count: 0,
+            ran_at: generated_at,
+        };
+        let rollout_summary = AgentReleaseRolloutSummary {
+            generated_at,
+            release_count: 1,
+            by_status: BTreeMap::from([("promoted".to_string(), 1)]),
+            by_environment: BTreeMap::from([("prod".to_string(), 1)]),
+            pending_count: 0,
+            promoted_count: 1,
+            rejected_count: 0,
+            rolled_back_count: 0,
+            auto_pending_count: 0,
+            manual_pending_count: 0,
+            expired_pending_count: 0,
+            expiring_soon_count: 0,
+            stale_pending_count: 0,
+            latest_promoted_by_environment: Vec::new(),
+            attention_items: Vec::new(),
+        };
+        let missing = build_agent_release_production_orchestration_readiness(
+            Some(&latest_run),
+            &rollout_summary,
+            &[],
+            generated_at,
+            true,
+            false,
+        );
+        assert_eq!(missing.status, "blocked");
+        assert!(missing.production_blocked);
+        assert!(missing.controller_required);
+        assert!(!missing.controller_configured);
+
+        let without_controller = build_agent_release_production_orchestration_readiness(
+            Some(&latest_run),
+            &rollout_summary,
+            &[],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(without_controller.status, "blocked");
+        assert!(!without_controller.latest_controller_validated);
+
+        let ready = build_agent_release_production_orchestration_readiness(
+            Some(&latest_run),
+            &rollout_summary,
+            &[new_audit_log(
+                None,
+                "user",
+                None,
+                "agent.release_orchestration_validation_run",
+                "agent_release",
+                None,
+                json!({
+                    "status": "validated",
+                    "controller_required": true,
+                    "controller_configured": true,
+                    "controller_execution": {
+                        "attempted": true,
+                        "status": "validated",
+                        "orchestration_id": "agent-release-orchestration-1"
+                    }
+                }),
+            )],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+        assert!(ready.latest_controller_validated);
+    }
+
+    #[tokio::test]
     async fn agent_release_rollback_controller_executes_external_boundary() {
         let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -34828,6 +35305,33 @@ not json
             "steps": [
                 {"name": "automation-supervision", "status": "passed"},
                 {"name": "rollback-plan", "status": "checked"}
+            ]
+        }))
+    }
+
+    async fn mock_agent_release_orchestration_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer release-orchestration-token")
+        );
+        assert_eq!(
+            payload["type"],
+            "mandoforge.agent_release_orchestration_validation"
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "orchestration_id": "agent-release-orchestration-1",
+            "message": "agent release orchestration controller validated production rollout sequencing",
+            "steps": [
+                {"name": "automation-supervision", "status": "passed"},
+                {"name": "production-target", "status": "validated"}
             ]
         }))
     }
