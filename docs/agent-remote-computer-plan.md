@@ -54,6 +54,7 @@ Covered today:
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness and dry-run endpoints.
 - `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
 - `POST /api/remote-computers/reclaim-stale` reclaims stale attachments and expired leases with event/audit records and no tool execution.
+- `/api/scheduler/due-plan` and `/api/scheduler/run-due` include Remote Computer stale reclaim in the aggregate operations path.
 
 Not covered today:
 
@@ -67,7 +68,7 @@ Not covered today:
 - No artifact/state sync daemon inside the Pod.
 - No KEDA/HPA queue-depth scaling for remote computer pools.
 - No real Kubernetes client mutation path; the current runner only reports intent and dry-run evidence.
-- No scheduler integration for Remote Computer reclaim runs yet.
+- No Kubernetes Pod mutation from the scheduler; reclaim remains metadata-only.
 
 ## Target Components
 
@@ -181,8 +182,7 @@ Completed Stage 2 readiness skeleton:
 Remaining Stage 2 pilot work:
 
 1. Add a real Kubernetes client implementation behind the existing runner boundary, still fail-closed by policy and configuration.
-2. Wire stale Remote Computer reclaim into scheduler due-plan/run history.
-3. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
+2. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
 
 Stage 2 acceptance for this slice:
 
@@ -233,15 +233,15 @@ Stage 3 acceptance:
 
 ## Immediate Next Slice
 
-After stale reclaim, the next coherent implementation slice should be:
+After scheduler integration, the next coherent implementation slice should be:
 
 ```text
-Wire Remote Computer reclaim into scheduler due-runs
+Add Remote Computer Kubernetes client adapter skeleton
 ```
 
 Concrete deliverables:
 
-- Add scheduler summary evidence for stale Remote Computer state.
-- Run Remote Computer reclaim from `/api/scheduler/run-due`.
+- Add a `KubernetesRemoteComputerRunner` implementation behind explicit env config.
+- Keep create/delete operations dry-run or disabled by default unless a live-cluster flag is set.
 - Keep `shell.exec` and `codex.exec` on the approved worker path until Pod lifecycle telemetry is reliable.
-- Add tests proving scheduler-triggered reclaim is auditable and does not bypass Tool Router, Policy Engine, or Approval Engine.
+- Add tests proving the adapter fails closed without kubeconfig/in-cluster config and still does not bypass Tool Router, Policy Engine, or Approval Engine.

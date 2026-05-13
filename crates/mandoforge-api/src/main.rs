@@ -640,6 +640,7 @@ struct SchedulerDueRun {
     mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
     codex_app_server_stale_polls: CodexAppServerStalePollRun,
     usage_finance_export: UsageFinanceExportDelivery,
+    remote_computer_reclaim: RemoteComputerReclaimRun,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12142,6 +12143,35 @@ async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, 
         },
     ));
 
+    let stale_remote_computer_attachments = state.list_stale_remote_computer_attachments().await?;
+    let remote_computer_leases = state.list_remote_computer_leases().await?;
+    let expired_remote_computer_leases = remote_computer_leases
+        .iter()
+        .filter(|lease| {
+            lease.status == "leased"
+                && lease
+                    .lease_expires_at
+                    .is_some_and(|lease_expires_at| lease_expires_at <= generated_at)
+        })
+        .count();
+    let remote_computer_due_count =
+        stale_remote_computer_attachments.len() + expired_remote_computer_leases;
+    actions.push(scheduler_due_plan_item(
+        "remote_computers",
+        "remote_computer_stale_reclaim",
+        "auto",
+        remote_computer_due_count,
+        remote_computer_leases
+            .len()
+            .saturating_sub(expired_remote_computer_leases),
+        remote_computer_leases.len() + stale_remote_computer_attachments.len(),
+        if remote_computer_due_count > 0 {
+            "reclaim stale Remote Computer attachments and expired leases"
+        } else {
+            "no stale Remote Computer attachment or expired lease is due"
+        },
+    ));
+
     let usage_export_enabled = usage_finance_export_schedule_enabled();
     let usage_export_ready = usage_finance_export_webhook_url().is_some();
     let usage_export_due_count = usize::from(usage_export_enabled);
@@ -12228,6 +12258,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     .await?;
     let usage_finance_export =
         execute_usage_finance_export_delivery(state, true, "system", Some("system")).await?;
+    let remote_computer_reclaim = execute_remote_computer_stale_reclaim(state).await?;
     let mut mcp_health_runs = Vec::new();
     let mut mcp_rollout_runs = Vec::new();
     let mut team_count = 0usize;
@@ -12275,6 +12306,11 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     if usage_finance_export.status != "disabled" {
         actions.push("usage_finance_export_processed".to_string());
     }
+    if remote_computer_reclaim.reclaimed_attachment_count > 0
+        || remote_computer_reclaim.reclaimed_lease_count > 0
+    {
+        actions.push("remote_computer_reclaim_processed".to_string());
+    }
     let status = if actions.is_empty() {
         "noop"
     } else {
@@ -12293,6 +12329,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
         mcp_rollout_runs,
         codex_app_server_stale_polls,
         usage_finance_export,
+        remote_computer_reclaim,
     };
     state
         .append_audit_log(new_audit_log(
@@ -15567,6 +15604,12 @@ async fn reclaim_stale_remote_computers(
         None,
     )
     .await?;
+    Ok(Json(execute_remote_computer_stale_reclaim(&state).await?))
+}
+
+async fn execute_remote_computer_stale_reclaim(
+    state: &AppState,
+) -> Result<RemoteComputerReclaimRun, AppError> {
     let stale_attachments = state.list_stale_remote_computer_attachments().await?;
     let expired_leases: Vec<_> = state
         .list_remote_computer_leases()
@@ -15650,7 +15693,7 @@ async fn reclaim_stale_remote_computers(
             json!(&run),
         ))
         .await?;
-    Ok(Json(run))
+    Ok(run)
 }
 
 async fn create_remote_computer(
@@ -24677,6 +24720,84 @@ not json
                 .expect("valid request"),
         )
         .await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "scheduler remote computer reclaim"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "scheduler-remote-computer", "profile": "workspace-write"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let lease: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computers/{}/leases", computer.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "worker_id": "scheduler-remote-manager",
+                        "lease_seconds": -1
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _attachment: RemoteComputerAttachment = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computer-leases/{}/attach", lease.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "attached_by": "scheduler-remote-manager",
+                        "stale_after_seconds": -1
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
 
         let plan: SchedulerDuePlan = request_json(
             app.clone(),
@@ -24690,8 +24811,8 @@ not json
         .await;
         assert_eq!(plan.status, "ready");
         assert_eq!(plan.team_count, 1);
-        assert!(plan.item_count >= 7);
-        assert!(plan.actionable_count >= 1);
+        assert!(plan.item_count >= 8);
+        assert!(plan.actionable_count >= 2);
         let mcp_health_plan = plan
             .actions
             .iter()
@@ -24701,6 +24822,14 @@ not json
         assert_eq!(mcp_health_plan.status, "due");
         assert_eq!(mcp_health_plan.due_count, 1);
         assert_eq!(mcp_health_plan.target_count, 1);
+        let remote_computer_plan = plan
+            .actions
+            .iter()
+            .find(|item| item.action == "remote_computer_stale_reclaim")
+            .expect("remote computer reclaim plan item");
+        assert_eq!(remote_computer_plan.area, "remote_computers");
+        assert_eq!(remote_computer_plan.status, "due");
+        assert_eq!(remote_computer_plan.due_count, 2);
 
         let run: SchedulerDueRun = request_json(
             app.clone(),
@@ -24720,6 +24849,9 @@ not json
         assert_eq!(run.mcp_health_runs[0].due_count, 1);
         assert_eq!(run.mcp_rollout_runs.len(), 1);
         assert_eq!(run.codex_app_server_stale_polls.candidate_count, 0);
+        assert_eq!(run.remote_computer_reclaim.status, "completed");
+        assert_eq!(run.remote_computer_reclaim.reclaimed_attachment_count, 1);
+        assert_eq!(run.remote_computer_reclaim.reclaimed_lease_count, 1);
         if !usage_finance_export_schedule_enabled() {
             assert_eq!(run.usage_finance_export.status, "disabled");
         }
@@ -24727,6 +24859,11 @@ not json
             run.actions
                 .iter()
                 .any(|action| action == "mcp_health_checks_processed")
+        );
+        assert!(
+            run.actions
+                .iter()
+                .any(|action| action == "remote_computer_reclaim_processed")
         );
 
         let summary: SchedulerOrchestrationSummary = request_json(
@@ -24747,6 +24884,12 @@ not json
                 .actions
                 .iter()
                 .any(|action| action == "mcp_health_checks_processed")
+        );
+        assert!(
+            summary.recent_runs[0]
+                .actions
+                .iter()
+                .any(|action| action == "remote_computer_reclaim_processed")
         );
 
         let audit_logs: Vec<AuditLog> = request_json(
