@@ -1760,10 +1760,26 @@ struct RemoteComputerProductionStateSyncReadiness {
     production_profile_present: bool,
     state_contract_present: bool,
     lock_manager_configured: bool,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_validation_at: Option<DateTime<Utc>>,
+    latest_validation_status: Option<String>,
+    latest_controller_status: Option<String>,
+    latest_controller_validated: bool,
     conflict_policy: String,
     provider: String,
     blocking_reasons: Vec<String>,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerStateSyncValidationRun {
+    status: String,
+    checked_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
+    issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4059,6 +4075,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/readiness",
             get(get_remote_computer_readiness),
+        )
+        .route(
+            "/api/remote-computers/state-sync/validate",
+            post(validate_remote_computer_state_sync),
         )
         .route(
             "/api/remote-computers/artifacts/sync",
@@ -25335,6 +25355,115 @@ async fn get_remote_computer_readiness(
     Ok(Json(build_remote_computer_readiness(&state).await?))
 }
 
+async fn validate_remote_computer_state_sync(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RemoteComputerStateSyncValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "remote_computer_state_sync".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+
+    let checked_at = Utc::now();
+    let lookup = |key: &str| std::env::var(key).ok();
+    let readiness = build_remote_computer_readiness(&state).await?;
+    let state_filesystem = readiness.state_filesystem;
+    let controller_required = remote_computer_state_sync_controller_required(&lookup);
+    let controller_configured = remote_computer_state_sync_controller_configured(&lookup);
+    let mut issues = remote_computer_state_sync_base_issues(&state_filesystem);
+    if controller_required && !controller_configured {
+        issues.push("state sync controller is required but not configured".to_string());
+    }
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            if issues.is_empty() {
+                "controller_not_required"
+            } else {
+                "state_sync_not_ready"
+            }
+        } else {
+            "controller_not_configured"
+        }
+    });
+    if controller_configured && issues.is_empty() {
+        match execute_remote_computer_state_sync_controller(
+            &lookup,
+            &principal.subject_id,
+            checked_at,
+            &state_filesystem,
+        )
+        .await
+        {
+            Ok(execution) => {
+                if execution.get("status").and_then(Value::as_str) != Some("validated") {
+                    issues.push("state sync controller did not validate".to_string());
+                }
+                controller_execution = execution;
+            }
+            Err(error) => {
+                issues.push("state sync controller failed".to_string());
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message
+                });
+            }
+        }
+    }
+    if controller_required
+        && controller_execution.get("status").and_then(Value::as_str) != Some("validated")
+    {
+        issues.push("state sync controller evidence is missing or not validated".to_string());
+    }
+    dedupe_strings(&mut issues);
+    let status = if issues.is_empty() {
+        "validated"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "remote_computer.production_state_sync_validation",
+            "remote_computer_state_sync",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+                "provider": state_filesystem.provider,
+                "distributed_filesystem_configured": state_filesystem.distributed_filesystem_configured,
+                "production_profile_present": state_filesystem.production_profile_present,
+                "state_contract_present": state_filesystem.state_contract_present,
+                "lock_manager_configured": state_filesystem.lock_manager_configured,
+                "conflict_policy": state_filesystem.conflict_policy,
+                "issues": issues,
+                "checked_at": checked_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(RemoteComputerStateSyncValidationRun {
+        status,
+        checked_at,
+        controller_required,
+        controller_configured,
+        controller_execution,
+        issues,
+    }))
+}
+
 async fn get_remote_computer_runner_readiness(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -26447,8 +26576,15 @@ async fn build_remote_computer_readiness(
         }
         .to_string(),
     };
-    let production_state_sync =
-        build_remote_computer_production_state_sync_readiness(&state_filesystem);
+    let audit_logs = state.list_audit_logs(None).await.unwrap_or_default();
+    let generated_at = Utc::now();
+    let production_state_sync = build_remote_computer_production_state_sync_readiness(
+        &state_filesystem,
+        &audit_logs,
+        generated_at,
+        remote_computer_state_sync_controller_required(&|key| std::env::var(key).ok()),
+        remote_computer_state_sync_controller_configured(&|key| std::env::var(key).ok()),
+    );
     let remote_pool_scaled_object_path = "deploy/k8s/remote-computer-keda.yaml";
     let remote_pool_scaled_object_present =
         project_file_path(remote_pool_scaled_object_path).is_some();
@@ -26720,7 +26856,7 @@ async fn build_remote_computer_readiness(
     .to_string();
 
     Ok(RemoteComputerReadinessReport {
-        generated_at: Utc::now(),
+        generated_at,
         status,
         readiness_score,
         pod_template,
@@ -26741,9 +26877,9 @@ async fn build_remote_computer_readiness(
     })
 }
 
-fn build_remote_computer_production_state_sync_readiness(
+fn remote_computer_state_sync_base_issues(
     state_filesystem: &RemoteComputerStateFilesystemReadiness,
-) -> RemoteComputerProductionStateSyncReadiness {
+) -> Vec<String> {
     let mut blocking_reasons = Vec::new();
     if !state_filesystem.distributed_filesystem_configured {
         blocking_reasons.push(
@@ -26767,6 +26903,138 @@ fn build_remote_computer_production_state_sync_readiness(
         blocking_reasons.push(
             "state conflict policy is not the expected one-active-writer contract".to_string(),
         );
+    }
+    blocking_reasons
+}
+
+fn remote_computer_state_sync_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn remote_computer_state_sync_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_remote_computer_state_sync_controller<F>(
+    lookup: &F,
+    subject: &str,
+    checked_at: DateTime<Utc>,
+    state_filesystem: &RemoteComputerStateFilesystemReadiness,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_CONTROLLER_URL is required",
+            )
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.remote_computer_state_sync_validation",
+        "subject": subject,
+        "checked_at": checked_at,
+        "provider": state_filesystem.provider,
+        "distributed_filesystem_configured": state_filesystem.distributed_filesystem_configured,
+        "production_profile_present": state_filesystem.production_profile_present,
+        "state_contract_present": state_filesystem.state_contract_present,
+        "lock_manager_configured": state_filesystem.lock_manager_configured,
+        "conflict_policy": state_filesystem.conflict_policy,
+        "mount_path": state_filesystem.mount_path,
+        "state_layout_paths": state_filesystem.state_layout_paths,
+        "production_claim_name": state_filesystem.production_claim_name,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "remote computer state sync controller failed with status {http_status}"
+        )));
+    }
+    let provider_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("validated");
+    let validated = matches!(provider_status, "validated" | "healthy" | "success" | "ok");
+    Ok(json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "failed" },
+        "http_status": http_status.as_u16(),
+        "provider_status": provider_status,
+        "state_sync_id": body.get("state_sync_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "checked_path_count": body.get("checked_path_count").and_then(Value::as_u64),
+    }))
+}
+
+fn build_remote_computer_production_state_sync_readiness(
+    state_filesystem: &RemoteComputerStateFilesystemReadiness,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
+) -> RemoteComputerProductionStateSyncReadiness {
+    let mut blocking_reasons = remote_computer_state_sync_base_issues(state_filesystem);
+    let latest_validation = audit_logs
+        .iter()
+        .filter(|log| log.action == "remote_computer.production_state_sync_validation")
+        .max_by_key(|log| log.created_at);
+    let latest_validation_at = latest_validation.map(|log| log.created_at);
+    let latest_validation_status = latest_validation
+        .and_then(|log| log.details.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_status = latest_validation
+        .and_then(|log| log.details.get("controller_execution"))
+        .and_then(|execution| execution.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
+    if controller_required && !controller_configured {
+        blocking_reasons.push("state sync controller is required but not configured".to_string());
+    }
+    if controller_required && latest_validation.is_none() {
+        blocking_reasons.push("state sync validation has not run".to_string());
+    }
+    if latest_validation_at.is_some_and(|created_at| (generated_at - created_at).num_hours() >= 24)
+    {
+        blocking_reasons.push("state sync validation evidence is stale".to_string());
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons
+            .push("state sync controller evidence is missing or not validated".to_string());
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -26792,6 +27060,12 @@ fn build_remote_computer_production_state_sync_readiness(
         production_profile_present: state_filesystem.production_profile_present,
         state_contract_present: state_filesystem.state_contract_present,
         lock_manager_configured: state_filesystem.lock_manager_configured,
+        controller_required,
+        controller_configured,
+        latest_validation_at,
+        latest_validation_status,
+        latest_controller_status,
+        latest_controller_validated,
         conflict_policy: state_filesystem.conflict_policy.clone(),
         provider: state_filesystem.provider.clone(),
         blocking_reasons,
@@ -32159,6 +32433,113 @@ not json
         }));
     }
 
+    #[tokio::test]
+    async fn remote_computer_state_sync_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("state sync listener");
+        let controller_addr = listener.local_addr().expect("state sync addr");
+        let controller = Router::new()
+            .route(
+                "/state-sync-validation",
+                post(mock_remote_state_sync_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock state sync controller");
+        });
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/state-sync-validation"))
+            }
+            "MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_CONTROLLER_TOKEN" => {
+                Some("state-sync-token".to_string())
+            }
+            _ => None,
+        };
+        let state_filesystem = ready_remote_state_filesystem();
+
+        let execution = execute_remote_computer_state_sync_controller(
+            &lookup,
+            "admin-1",
+            Utc::now(),
+            &state_filesystem,
+        )
+        .await
+        .expect("state sync controller");
+
+        assert_eq!(execution["status"], "validated");
+        assert_eq!(execution["state_sync_id"], "state-sync-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.remote_computer_state_sync_validation"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["provider"], "juicefs");
+        assert_eq!(
+            payloads[0]["state_layout_paths"].as_array().unwrap().len(),
+            6
+        );
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn remote_computer_state_sync_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let state_filesystem = ready_remote_state_filesystem();
+        let missing_controller = build_remote_computer_production_state_sync_readiness(
+            &state_filesystem,
+            &[],
+            generated_at,
+            true,
+            false,
+        );
+        assert_eq!(missing_controller.status, "blocked");
+        assert!(missing_controller.production_blocked);
+        assert!(
+            missing_controller
+                .blocking_reasons
+                .iter()
+                .any(|reason| { reason == "state sync controller is required but not configured" })
+        );
+
+        let audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "remote_computer.production_state_sync_validation",
+            "remote_computer_state_sync",
+            None,
+            json!({
+                "status": "validated",
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "state_sync_id": "state-sync-1"
+                }
+            }),
+        );
+        let ready = build_remote_computer_production_state_sync_readiness(
+            &state_filesystem,
+            &[audit],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+        assert!(ready.latest_controller_validated);
+    }
+
     #[test]
     fn remote_computer_sidecar_recovery_requires_validation_controller_when_configured() {
         let remote_computer_id = Uuid::new_v4();
@@ -36914,6 +37295,64 @@ not json
             "replacement_pods_healthy": true,
             "checked_pod_count": 1
         }))
+    }
+
+    async fn mock_remote_state_sync_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer state-sync-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "state_sync_id": "state-sync-1",
+            "message": "state sync controller validated shared filesystem contract",
+            "checked_path_count": 6
+        }))
+    }
+
+    fn ready_remote_state_filesystem() -> RemoteComputerStateFilesystemReadiness {
+        RemoteComputerStateFilesystemReadiness {
+            pvc_present: true,
+            pvc_path: "deploy/k8s/agent-remote-computer.yaml".to_string(),
+            access_mode: "ReadWriteMany".to_string(),
+            mount_path: "/agent-state".to_string(),
+            state_contract_present: true,
+            state_contract_path: "deploy/k8s/remote-computer-state-contract.yaml".to_string(),
+            state_layout_paths: vec![
+                "/agent-state/memory".to_string(),
+                "/agent-state/notes".to_string(),
+                "/agent-state/skills".to_string(),
+                "/agent-state/artifacts".to_string(),
+                "/agent-state/.locks".to_string(),
+                "/agent-state/.mandoforge".to_string(),
+            ],
+            conflict_policy: "one-active-writer-per-session".to_string(),
+            lock_manager_configured: true,
+            sync_contract_status: "contract_present".to_string(),
+            distributed_filesystem_configured: true,
+            provider: "juicefs".to_string(),
+            provider_configured_by_env: true,
+            provider_manifest_present: true,
+            provider_manifest_path: "deploy/k8s/remote-computer-state-juicefs-profile.yaml"
+                .to_string(),
+            production_profile_present: true,
+            production_profile_path: "deploy/k8s/remote-computer-state-juicefs-profile.yaml"
+                .to_string(),
+            production_claim_name: "mandoforge-remote-computer-state".to_string(),
+            supported_providers: vec![
+                "juicefs".to_string(),
+                "cephfs".to_string(),
+                "longhorn-rwx".to_string(),
+            ],
+            status: "configured".to_string(),
+        }
     }
 
     async fn mock_finance_close_controller(

@@ -165,6 +165,7 @@ const executionJobRoot = document.querySelector("#execution-jobs");
 const workerReadinessRoot = document.querySelector("#worker-readiness");
 const runWorkerLoadValidationButton = document.querySelector("#run-worker-load-validation");
 const remoteComputerReadinessRoot = document.querySelector("#remote-computer-readiness");
+const validateRemoteStateSyncButton = document.querySelector("#validate-remote-state-sync");
 const remoteArtifactDiscoveryForm = document.querySelector("#remote-artifact-discovery-form");
 const remoteStateLockForm = document.querySelector("#remote-state-lock-form");
 const usageRoot = document.querySelector("#usage-summary");
@@ -298,6 +299,7 @@ runDueMcpRolloutsButton.addEventListener("click", runDueMcpRollouts);
 loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 runWorkerLoadValidationButton.addEventListener("click", runWorkerLoadValidation);
+validateRemoteStateSyncButton.addEventListener("click", validateRemoteStateSync);
 remoteArtifactDiscoveryForm.addEventListener("submit", discoverRemoteArtifacts);
 remoteStateLockForm.addEventListener("submit", acquireRemoteStateLock);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
@@ -2283,6 +2285,7 @@ function renderRemoteComputerReadiness() {
   const sidecarHeartbeatRows = state.remoteComputerSidecarHeartbeats || [];
   const artifactDiscovery = state.remoteComputerArtifactDiscovery;
   const sidecarRecoveryRun = state.remoteComputerSidecarRecoveryRun;
+  const stateSyncValidation = state.remoteComputerStateSyncValidation;
   remoteComputerReadinessRoot.innerHTML = `
     <div class="metrics compact-metrics">
       <div class="metric">
@@ -2325,6 +2328,12 @@ function renderRemoteComputerReadiness() {
       <strong>PRODUCTION STATE SYNC GATE</strong>
       <div class="muted">${escapeHtml(productionStateSync.message || "Remote Computer production state sync gate is not reported")}</div>
       <div class="muted">provider ${escapeHtml(productionStateSync.provider || "unknown")} · distributed ${productionStateSync.distributed_filesystem_configured ? "yes" : "no"} · profile ${productionStateSync.production_profile_present ? "present" : "missing"} · contract ${productionStateSync.state_contract_present ? "present" : "missing"} · lock manager ${productionStateSync.lock_manager_configured ? "yes" : "no"}</div>
+      <div class="muted">Controller: required ${productionStateSync.controller_required ? "yes" : "no"} · configured ${productionStateSync.controller_configured ? "yes" : "no"} · latest ${escapeHtml(productionStateSync.latest_validation_at || "none")} · status ${escapeHtml(productionStateSync.latest_controller_status || "none")} · validated ${productionStateSync.latest_controller_validated ? "yes" : "no"}</div>
+      ${
+        stateSyncValidation
+          ? `<pre>${escapeHtml(JSON.stringify(stateSyncValidation, null, 2))}</pre>`
+          : `<div class="muted">No state sync validation run in this console session</div>`
+      }
     </div>
     <div class="item">
       <strong>WARM POOL / SCALING</strong>
@@ -2551,6 +2560,13 @@ async function releaseRemoteStateLock(lockId) {
 
 async function runRemoteSidecarRecovery() {
   state.remoteComputerSidecarRecoveryRun = await api("/api/remote-computers/sidecars/recovery/run", {
+    method: "POST",
+  });
+  await refreshOps();
+}
+
+async function validateRemoteStateSync() {
+  state.remoteComputerStateSyncValidation = await api("/api/remote-computers/state-sync/validate", {
     method: "POST",
   });
   await refreshOps();
