@@ -1731,6 +1731,19 @@ struct WorkerReadinessAttentionItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct Stage2CompletionReadiness {
+    generated_at: DateTime<Utc>,
+    status: String,
+    objective: String,
+    audit_path: String,
+    audit_present: bool,
+    open_gap_count: usize,
+    open_gaps: Vec<String>,
+    completion_blocked: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RemoteComputerReadinessReport {
     generated_at: DateTime<Utc>,
     status: String,
@@ -3623,6 +3636,7 @@ fn execution_queue_from_env(store: &StoreBackend, tenant_id: Uuid) -> Result<Exe
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/api/stage2/readiness", get(get_stage2_readiness))
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/agents/{id}/versions", get(list_agent_versions))
         .route(
@@ -4314,6 +4328,84 @@ fn approval_email_relay_url_from_env() -> Option<String> {
 
 async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
+}
+
+async fn get_stage2_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Stage2CompletionReadiness>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "stage2_readiness",
+        None,
+    )
+    .await?;
+    Ok(Json(build_stage2_completion_readiness()))
+}
+
+fn build_stage2_completion_readiness() -> Stage2CompletionReadiness {
+    let audit_path = "docs/stage2-completion-audit.md";
+    let audit_content =
+        project_file_path(audit_path).and_then(|path| std::fs::read_to_string(path).ok());
+    let audit_present = audit_content.is_some();
+    let open_gaps = audit_content
+        .as_deref()
+        .map(parse_stage2_open_gaps)
+        .unwrap_or_else(|| {
+            vec!["Stage 2 completion audit file is missing; completion is blocked".to_string()]
+        });
+    let completion_blocked = !open_gaps.is_empty();
+    let status = if completion_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if completion_blocked {
+        format!(
+            "Stage 2 completion is blocked by {} open audit gap(s)",
+            open_gaps.len()
+        )
+    } else {
+        "Stage 2 completion audit reports no open gaps".to_string()
+    };
+    Stage2CompletionReadiness {
+        generated_at: Utc::now(),
+        status,
+        objective: "Complete Stage 2 Governed Runtime Pilot".to_string(),
+        audit_path: audit_path.to_string(),
+        audit_present,
+        open_gap_count: open_gaps.len(),
+        open_gaps,
+        completion_blocked,
+        message,
+    }
+}
+
+fn parse_stage2_open_gaps(audit_content: &str) -> Vec<String> {
+    let mut in_gaps = false;
+    let mut gaps = Vec::new();
+    for line in audit_content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "## Open Completion Gaps" {
+            in_gaps = true;
+            continue;
+        }
+        if in_gaps && trimmed.starts_with("## ") {
+            break;
+        }
+        if !in_gaps {
+            continue;
+        }
+        if let Some((number, text)) = trimmed.split_once(". ") {
+            if number.chars().all(|char| char.is_ascii_digit()) && !text.trim().is_empty() {
+                gaps.push(text.trim().to_string());
+            }
+        }
+    }
+    gaps
 }
 
 fn runtime_policy(policy: PolicyConfig) -> Arc<RwLock<PolicyRuntime>> {
@@ -29005,6 +29097,28 @@ mod tests {
         ] {
             assert!(ensure_read_only_sql(sql).is_err(), "{sql}");
         }
+    }
+
+    #[test]
+    fn stage2_readiness_parses_open_completion_gaps() {
+        let audit = r#"
+# Stage 2 Completion Audit
+
+## Open Completion Gaps
+
+1. First production blocker.
+2. Second controller-backed blocker.
+
+## Completion Decision
+
+Stage 2 is not complete.
+"#;
+
+        let gaps = parse_stage2_open_gaps(audit);
+
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(gaps[0], "First production blocker.");
+        assert_eq!(gaps[1], "Second controller-backed blocker.");
     }
 
     #[test]

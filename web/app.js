@@ -90,6 +90,7 @@ const state = {
   tenantProvisioning: null,
   selectedOrganizationId: "",
   selectedTeamId: "",
+  stage2Readiness: null,
   approvalDeliveries: {},
   approvalNotificationRouting: null,
   approvalNotificationRuns: null,
@@ -1585,6 +1586,7 @@ async function refreshOps() {
     schedulerDuePlan,
     usageRollups,
     costAlertRoutes,
+    stage2Readiness,
     tenantIsolationReadiness,
     organizations,
     executionJobs,
@@ -1628,6 +1630,7 @@ async function refreshOps() {
       api("/api/scheduler/due-plan"),
       api("/api/usage/rollups"),
       api("/api/usage/alert-routes"),
+      api("/api/stage2/readiness"),
       api("/api/tenant-isolation/readiness"),
       api("/api/organizations"),
       api("/api/execution-jobs"),
@@ -1670,6 +1673,7 @@ async function refreshOps() {
   state.schedulerDuePlan = schedulerDuePlan;
   state.usageRollups = usageRollups;
   state.costAlertRoutes = costAlertRoutes;
+  state.stage2Readiness = stage2Readiness;
   state.tenantIsolationReadiness = tenantIsolationReadiness;
   state.organizations = organizations;
   state.executionJobs = executionJobs;
@@ -1879,8 +1883,19 @@ function renderOps() {
   renderRemoteComputerReadiness();
   renderExecutionJobs();
   renderCodexAppServer();
+  const stage2Readiness = state.stage2Readiness || {};
+  const stage2OpenGaps = stage2Readiness.open_gaps || [];
   governanceRoot.innerHTML = `
+    <div class="metric-grid compact-metrics">
+      <div class="metric"><span>Stage 2</span><strong>${escapeHtml(stage2Readiness.status || "unknown")}</strong></div>
+      <div class="metric"><span>Open Gaps</span><strong>${formatInteger(stage2Readiness.open_gap_count || 0)}</strong></div>
+      <div class="metric"><span>Audit</span><strong>${stage2Readiness.audit_present ? "present" : "missing"}</strong></div>
+    </div>
     <dl>
+      <dt>Stage 2 completion gate</dt>
+      <dd>${escapeHtml(stage2Readiness.message || "Stage 2 readiness is not loaded")}</dd>
+      <dt>Audit artifact</dt>
+      <dd>${escapeHtml(stage2Readiness.audit_path || "unknown")}</dd>
       <dt>Policy</dt>
       <dd>YAML policy enforced through Tool Router</dd>
       <dt>Vault</dt>
@@ -1890,6 +1905,14 @@ function renderOps() {
       <dt>MCP</dt>
       <dd>Gateway calls require global and team-scoped allowlists; discovery can import gateway tools into a team server allowlist</dd>
     </dl>
+    ${
+      stage2OpenGaps.length
+        ? `<h4>Stage 2 Open Gaps</h4>
+          <ol>
+            ${stage2OpenGaps.map((gap) => `<li>${escapeHtml(gap)}</li>`).join("")}
+          </ol>`
+        : `<div class="muted">No Stage 2 open gaps reported by the audit.</div>`
+    }
   `;
 }
 
