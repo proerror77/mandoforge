@@ -940,7 +940,7 @@ async function rejectAgentRelease(agentId, releaseId) {
 }
 
 async function rollbackAgentRelease(agentId, releaseId) {
-  await api(`/api/agents/${agentId}/releases/${releaseId}/rollback`, {
+  state.agentReleaseRollback = await api(`/api/agents/${agentId}/releases/${releaseId}/rollback`, {
     method: "POST",
   });
   await refreshAgentReleases();
@@ -4691,6 +4691,13 @@ function renderAgentReleases() {
         <div class="muted">Controller ${escapeHtml(automationRun.controller_configured ? "configured" : "not configured")} · required ${automationRun.controller_required ? "yes" : "no"} · executions ${formatInteger(automationRun.controller_execution_count || 0)} · failed ${formatInteger(automationRun.controller_failed_count || 0)}</div>
       </div>`
     : "";
+  const rollbackSummary = state.agentReleaseRollback
+    ? `<div class="item">
+        <strong>Release rollback</strong>
+        <div class="muted">${escapeHtml(state.agentReleaseRollback.environment)} · ${escapeHtml(state.agentReleaseRollback.status)} · ${escapeHtml(state.agentReleaseRollback.id)}</div>
+        <div class="muted">Version ${escapeHtml(state.agentReleaseRollback.agent_version_id)} · eval ${escapeHtml(state.agentReleaseRollback.eval_run_id || "none")}</div>
+      </div>`
+    : "";
   const automationRunHistory = renderAgentReleaseAutomationRuns(
     state.agentReleaseAutomationRuns,
   );
@@ -4701,7 +4708,7 @@ function renderAgentReleases() {
     }))
     .filter((group) => group.releases.length);
   agentReleaseRoot.innerHTML = releaseGroups.length
-    ? `${summaryPanel}${automationSummary}${automationRunHistory}${releaseGroups
+    ? `${summaryPanel}${automationSummary}${rollbackSummary}${automationRunHistory}${releaseGroups
         .map(
           ({ agent, releases }) => `
             <div class="item">
@@ -4737,7 +4744,7 @@ function renderAgentReleases() {
           `,
         )
         .join("")}`
-    : `${summaryPanel}${automationSummary}${automationRunHistory}<div class="muted">No promoted or rolled back releases</div>`;
+    : `${summaryPanel}${automationSummary}${rollbackSummary}${automationRunHistory}<div class="muted">No promoted or rolled back releases</div>`;
   agentReleaseRoot.querySelectorAll("[data-release-rollback]").forEach((button) => {
     button.addEventListener("click", () =>
       rollbackAgentRelease(button.dataset.releaseAgent, button.dataset.releaseRollback),

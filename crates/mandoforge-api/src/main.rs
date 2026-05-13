@@ -5037,6 +5037,102 @@ where
     }))
 }
 
+fn agent_release_rollback_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn agent_release_rollback_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn execute_agent_release_rollback_controller<F>(
+    lookup: &F,
+    subject: &str,
+    requested_at: DateTime<Utc>,
+    release: &AgentRelease,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_AGENT_RELEASE_ROLLBACK_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.agent_release_rollback",
+        "subject": subject,
+        "release": {
+            "release_id": release.id,
+            "agent_id": release.agent_id,
+            "agent_version_id": release.agent_version_id,
+            "environment": release.environment,
+            "status": release.status,
+            "eval_run_id": release.eval_run_id,
+            "eval_score": release.eval_score,
+            "min_score": release.min_score,
+            "promoted_by": release.promoted_by,
+            "promoted_at": release.promoted_at,
+        },
+        "requested_at": requested_at,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "agent release rollback controller failed with status {http_status}"
+        )));
+    }
+    let provider_status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("rolled_back");
+    let rolled_back = matches!(
+        provider_status,
+        "rolled_back" | "recovered" | "success" | "ok" | "applied"
+    );
+    Ok(json!({
+        "attempted": true,
+        "status": if rolled_back { "rolled_back" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": provider_status,
+        "rollback_id": body.get("rollback_id").and_then(Value::as_str),
+        "message": body.get("message").and_then(Value::as_str),
+        "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
+    }))
+}
+
 fn build_agent_release_automation_run_summary(
     audit_logs: &[AuditLog],
     rollout_summary: &AgentReleaseRolloutSummary,
@@ -5770,7 +5866,68 @@ async fn rollback_agent_release(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
-    Ok(Json(state.rollback_agent_release(id, release_id).await?))
+
+    let release = state
+        .list_agent_releases(id)
+        .await?
+        .into_iter()
+        .find(|release| release.id == release_id)
+        .ok_or_else(|| AppError::not_found("agent release not found"))?;
+    if release.status != "promoted" {
+        return Err(AppError::bad_request("agent release is not promoted"));
+    }
+
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = agent_release_rollback_controller_required(&lookup);
+    let controller_configured = agent_release_rollback_controller_configured(&lookup);
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": "controller_not_configured"
+    });
+    if controller_required && !controller_configured {
+        return Err(AppError::bad_request(
+            "agent release rollback controller is required but not configured",
+        ));
+    }
+    if controller_configured {
+        controller_execution = execute_agent_release_rollback_controller(
+            &lookup,
+            &principal.subject_id,
+            Utc::now(),
+            &release,
+        )
+        .await?;
+        if controller_execution.get("status").and_then(Value::as_str) != Some("rolled_back") {
+            return Err(AppError::bad_request(
+                "agent release rollback controller did not confirm rollback",
+            ));
+        }
+    }
+
+    let rolled_back = state.rollback_agent_release(id, release_id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "agent.release_rolled_back",
+            "agent_release",
+            Some(rolled_back.id),
+            json!({
+                "subject": principal.subject_id,
+                "agent_id": id,
+                "agent_version_id": rolled_back.agent_version_id,
+                "environment": rolled_back.environment,
+                "eval_run_id": rolled_back.eval_run_id,
+                "eval_score": rolled_back.eval_score,
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+            }),
+        ))
+        .await?;
+    Ok(Json(rolled_back))
 }
 
 async fn get_agent_version(
@@ -30939,6 +31096,98 @@ not json
     }
 
     #[tokio::test]
+    async fn agent_release_rollback_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("release rollback listener");
+        let controller_addr = listener.local_addr().expect("release rollback addr");
+        let controller = Router::new()
+            .route(
+                "/agent-release-rollback",
+                post(mock_agent_release_rollback_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock agent release rollback controller");
+        });
+        let now = Utc::now();
+        let release = AgentRelease {
+            id: Uuid::new_v4(),
+            agent_id: Uuid::new_v4(),
+            agent_version_id: Uuid::new_v4(),
+            environment: "prod".to_string(),
+            status: "promoted".to_string(),
+            eval_run_id: Some(Uuid::new_v4()),
+            eval_score: Some(1.0),
+            min_score: 1.0,
+            requested_by: Some("release-requester".to_string()),
+            requested_at: Some(now - chrono::Duration::minutes(10)),
+            request_reason: Some("rollback controller test".to_string()),
+            approver_subject: Some("system".to_string()),
+            decision_by: Some("system".to_string()),
+            decided_at: Some(now - chrono::Duration::minutes(5)),
+            decision_reason: Some("release automation auto-approved".to_string()),
+            promoted_by: Some("system".to_string()),
+            promoted_at: Some(now - chrono::Duration::minutes(5)),
+            automation_policy: json!({"auto_approve": true}),
+            created_at: now - chrono::Duration::minutes(10),
+        };
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/agent-release-rollback"))
+            }
+            "MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_TOKEN" => {
+                Some("release-rollback-token".to_string())
+            }
+            _ => None,
+        };
+
+        let execution =
+            execute_agent_release_rollback_controller(&lookup, "admin-1", now, &release)
+                .await
+                .expect("agent release rollback controller");
+
+        assert_eq!(execution["status"], "rolled_back");
+        assert_eq!(execution["rollback_id"], "agent-release-rollback-1");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["type"], "mandoforge.agent_release_rollback");
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["release"]["release_id"], release.id.to_string());
+        assert_eq!(
+            payloads[0]["release"]["agent_id"],
+            release.agent_id.to_string()
+        );
+        assert_eq!(payloads[0]["release"]["status"], "promoted");
+        assert_eq!(payloads[0]["release"]["eval_score"], 1.0);
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn agent_release_rollback_controller_required_flag_is_fail_closed() {
+        let missing = |key: &str| match key {
+            "MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED" => Some("true".to_string()),
+            _ => None,
+        };
+        assert!(agent_release_rollback_controller_required(&missing));
+        assert!(!agent_release_rollback_controller_configured(&missing));
+
+        let configured = |key: &str| match key {
+            "MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED" => Some("true".to_string()),
+            "MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL" => {
+                Some("https://controller.example/rollback".to_string())
+            }
+            _ => None,
+        };
+        assert!(agent_release_rollback_controller_required(&configured));
+        assert!(agent_release_rollback_controller_configured(&configured));
+    }
+
+    #[tokio::test]
     async fn mcp_rollout_required_controller_skips_due_apply_when_missing() {
         let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
         let organization = state
@@ -32035,6 +32284,31 @@ not json
             "steps": [
                 {"name": "automation-supervision", "status": "passed"},
                 {"name": "rollback-plan", "status": "checked"}
+            ]
+        }))
+    }
+
+    async fn mock_agent_release_rollback_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer release-rollback-token")
+        );
+        assert_eq!(payload["type"], "mandoforge.agent_release_rollback");
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "rolled_back",
+            "rollback_id": "agent-release-rollback-1",
+            "message": "agent release rollback controller restored previous production version",
+            "steps": [
+                {"name": "detect-current", "status": "passed"},
+                {"name": "restore-previous", "status": "rolled_back"},
+                {"name": "verify", "status": "passed"}
             ]
         }))
     }
@@ -40243,6 +40517,22 @@ not json
         assert_eq!(post_rollback_summary.rolled_back_count, 1);
         assert_eq!(post_rollback_summary.promoted_count, 2);
         assert_eq!(post_rollback_summary.rejected_count, 2);
+
+        let rollback_audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(rollback_audit_logs.iter().any(|log| {
+            log.action == "agent.release_rolled_back"
+                && log.resource_id == Some(release.id)
+                && log.details["controller_execution"]["status"] == "skipped"
+        }));
 
         let (status, rollback_error) = request_value(
             app.clone(),
