@@ -264,7 +264,7 @@ Stage 2/3 target components:
 
 MandoForge should evolve from generic worker drains toward a Kubernetes Pod-based Agent Remote Computer substrate. In that model, a governed session leases an isolated Pod that behaves like a remote machine for the agent: OS tools, workspace, approved skills, runtime config, code execution, artifact output, and state mounts all live behind the same Tool Router, Policy Engine, Approval Engine, event log, and audit path.
 
-The current repo does not yet implement this substrate as an execution path. Today it has K8s API/worker/scheduler skeletons, queue-backed execution jobs, worker leases, Docker shell sandbox support, a worker readiness gate, and a Remote Computer control-plane skeleton with a Pod template, restricted service account, RWX PVC placeholder, deny-by-default NetworkPolicy, `remote_computers` / `remote_computer_leases` storage, lease heartbeat/release/fail APIs, a reserved `RemoteComputerRunner` boundary, Admin-only runner readiness/dry-run routes, and session event/audit records. It does not yet create Kubernetes Pods dynamically, maintain a warm pool, or mount a real distributed Memory/Notes/Skills filesystem into leased agent Pods.
+The current repo does not yet implement this substrate as an execution path. Today it has K8s API/worker/scheduler skeletons, queue-backed execution jobs, worker leases, Docker shell sandbox support, a worker readiness gate, and a Remote Computer control-plane skeleton with a Pod template, restricted service account, RWX PVC placeholder, deny-by-default NetworkPolicy, `remote_computers` / `remote_computer_leases` storage, lease heartbeat/release/fail APIs, `remote_computer_session_attachments`, stale attachment listing, a reserved `RemoteComputerRunner` boundary, Admin-only runner readiness/dry-run routes, and session event/audit records. It does not yet create Kubernetes Pods dynamically, attach to a real Pod transport, maintain a warm pool, or mount a real distributed Memory/Notes/Skills filesystem into leased agent Pods.
 
 Target control flow:
 
@@ -279,7 +279,7 @@ Agent Session
   -> Artifact + Event + Audit sync
 ```
 
-Stage 2 now includes a readiness and lease-state Remote Computer control plane: Pod template, PVC/RWX state mount placeholder, readiness API, UI readiness panel, lease store, event names, reserved runner readiness/dry-run evidence, and honest blockers for warm pool, distributed filesystem, and queue-depth autoscaling. Stage 3 should make this the primary sandbox substrate by creating Kubernetes Pods per session, syncing artifacts/events back to MandoForge, adding warm pools, and integrating KEDA/HPA plus a distributed state filesystem option such as JuiceFS CSI.
+Stage 2 now includes a readiness and lease-state Remote Computer control plane: Pod template, PVC/RWX state mount placeholder, readiness API, UI readiness panel, lease store, session attachment state, event names, reserved runner readiness/dry-run evidence, and honest blockers for warm pool, distributed filesystem, and queue-depth autoscaling. Stage 3 should make this the primary sandbox substrate by creating Kubernetes Pods per session, syncing artifacts/events back to MandoForge, adding warm pools, and integrating KEDA/HPA plus a distributed state filesystem option such as JuiceFS CSI.
 
 See [Agent Remote Computer Plan](agent-remote-computer-plan.md).
 

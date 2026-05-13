@@ -21,7 +21,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 
 ## Next Stage 2 Slices
 
-1. Extend the Agent Remote Computer runner boundary described in [Agent Remote Computer Plan](agent-remote-computer-plan.md) from reserved dry-run evidence to session attach state, without moving tool execution into Pods yet.
+1. Extend the Agent Remote Computer control plane described in [Agent Remote Computer Plan](agent-remote-computer-plan.md) with stale lease/attachment reclaim automation, without moving tool execution into Pods yet.
 2. Add production multi-step rollout orchestration beyond the current policy/release summary dashboards.
 3. Add production finance close workflow automation beyond the current bounded close run, static readiness, forecast, pressure, acknowledgement, audit-evidence, and scheduled export delivery surfaces.
 4. Add broader remediation automation beyond safe approval/Codex due-runs and production collector-specific OTLP hardening beyond readiness checks.

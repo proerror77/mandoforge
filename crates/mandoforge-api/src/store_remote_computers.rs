@@ -6,8 +6,9 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::{
-    AppError, AppState, CreateRemoteComputer, CreateRemoteComputerLease, RemoteComputer,
-    RemoteComputerLease, UpdateRemoteComputerLease,
+    AppError, AppState, CreateRemoteComputer, CreateRemoteComputerAttachment,
+    CreateRemoteComputerLease, RemoteComputer, RemoteComputerAttachment, RemoteComputerLease,
+    UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
 
 impl AppState {
@@ -301,6 +302,247 @@ impl AppState {
             }
         }
     }
+
+    pub(crate) async fn list_remote_computer_attachments(
+        &self,
+    ) -> Result<Vec<RemoteComputerAttachment>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut attachments: Vec<_> = inner
+                    .read()
+                    .await
+                    .remote_computer_attachments
+                    .values()
+                    .cloned()
+                    .collect();
+                attachments.sort_by_key(|attachment| attachment.created_at);
+                attachments.reverse();
+                Ok(attachments)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, remote_computer_id, lease_id, session_id, status, attached_by, stale_after, released_at, metadata, created_at, updated_at
+                     FROM remote_computer_session_attachments
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.tenant_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(remote_computer_attachment_from_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn list_stale_remote_computer_attachments(
+        &self,
+    ) -> Result<Vec<RemoteComputerAttachment>, AppError> {
+        let now = Utc::now();
+        let attachments = self.list_remote_computer_attachments().await?;
+        Ok(attachments
+            .into_iter()
+            .filter(|attachment| {
+                attachment.status == "attached"
+                    && attachment
+                        .stale_after
+                        .is_some_and(|stale_after| stale_after <= now)
+            })
+            .collect())
+    }
+
+    pub(crate) async fn create_remote_computer_attachment(
+        &self,
+        lease_id: Uuid,
+        input: CreateRemoteComputerAttachment,
+    ) -> Result<RemoteComputerAttachment, AppError> {
+        let now = Utc::now();
+        let stale_after_seconds = input
+            .stale_after_seconds
+            .unwrap_or(900)
+            .clamp(-86_400, 86_400);
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let lease = store
+                    .remote_computer_leases
+                    .get(&lease_id)
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+                if lease.status != "leased" {
+                    return Err(AppError::bad_request(
+                        "only active remote computer leases can be attached",
+                    ));
+                }
+                if let Some(leased_session_id) = lease.session_id {
+                    if leased_session_id != input.session_id {
+                        return Err(AppError::bad_request(
+                            "attachment session must match the lease session",
+                        ));
+                    }
+                }
+                if store
+                    .remote_computer_attachments
+                    .values()
+                    .any(|attachment| {
+                        attachment.lease_id == lease_id && attachment.status == "attached"
+                    })
+                {
+                    return Err(AppError::bad_request(
+                        "remote computer lease already has an active attachment",
+                    ));
+                }
+                let attachment = RemoteComputerAttachment {
+                    id: Uuid::new_v4(),
+                    remote_computer_id: lease.remote_computer_id,
+                    lease_id,
+                    session_id: input.session_id,
+                    status: "attached".to_string(),
+                    attached_by: input
+                        .attached_by
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
+                    stale_after: Some(now + chrono::Duration::seconds(stale_after_seconds)),
+                    released_at: None,
+                    metadata: input.metadata.unwrap_or_else(|| json!({})),
+                    created_at: now,
+                    updated_at: now,
+                };
+                store
+                    .remote_computer_attachments
+                    .insert(attachment.id, attachment.clone());
+                Ok(attachment)
+            }
+            StoreBackend::Postgres(pool) => {
+                let lease_row = sqlx::query(
+                    "SELECT id, remote_computer_id, session_id, status, worker_id, lease_expires_at, heartbeat_at, metadata, created_at, updated_at
+                     FROM remote_computer_leases
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(lease_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+                let lease = remote_computer_lease_from_row(lease_row)?;
+                if lease.status != "leased" {
+                    return Err(AppError::bad_request(
+                        "only active remote computer leases can be attached",
+                    ));
+                }
+                if let Some(leased_session_id) = lease.session_id {
+                    if leased_session_id != input.session_id {
+                        return Err(AppError::bad_request(
+                            "attachment session must match the lease session",
+                        ));
+                    }
+                }
+                let duplicate = sqlx::query(
+                    "SELECT id
+                     FROM remote_computer_session_attachments
+                     WHERE tenant_id = $1 AND lease_id = $2 AND status = 'attached'
+                     LIMIT 1",
+                )
+                .bind(self.tenant_id)
+                .bind(lease_id)
+                .fetch_optional(pool)
+                .await?;
+                if duplicate.is_some() {
+                    return Err(AppError::bad_request(
+                        "remote computer lease already has an active attachment",
+                    ));
+                }
+                let attachment = RemoteComputerAttachment {
+                    id: Uuid::new_v4(),
+                    remote_computer_id: lease.remote_computer_id,
+                    lease_id,
+                    session_id: input.session_id,
+                    status: "attached".to_string(),
+                    attached_by: input
+                        .attached_by
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
+                    stale_after: Some(now + chrono::Duration::seconds(stale_after_seconds)),
+                    released_at: None,
+                    metadata: input.metadata.unwrap_or_else(|| json!({})),
+                    created_at: now,
+                    updated_at: now,
+                };
+                sqlx::query(
+                    "INSERT INTO remote_computer_session_attachments
+                        (id, tenant_id, remote_computer_id, lease_id, session_id, status, attached_by, stale_after, released_at, metadata, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                )
+                .bind(attachment.id)
+                .bind(self.tenant_id)
+                .bind(attachment.remote_computer_id)
+                .bind(attachment.lease_id)
+                .bind(attachment.session_id)
+                .bind(&attachment.status)
+                .bind(&attachment.attached_by)
+                .bind(attachment.stale_after)
+                .bind(attachment.released_at)
+                .bind(&attachment.metadata)
+                .bind(attachment.created_at)
+                .bind(attachment.updated_at)
+                .execute(pool)
+                .await?;
+                Ok(attachment)
+            }
+        }
+    }
+
+    pub(crate) async fn release_remote_computer_attachment(
+        &self,
+        attachment_id: Uuid,
+        input: UpdateRemoteComputerAttachment,
+    ) -> Result<RemoteComputerAttachment, AppError> {
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let attachment = store
+                    .remote_computer_attachments
+                    .get_mut(&attachment_id)
+                    .ok_or_else(|| AppError::not_found("Remote computer attachment not found"))?;
+                attachment.status = "released".to_string();
+                attachment.released_at = Some(now);
+                if let Some(metadata) = input.metadata {
+                    attachment.metadata = metadata;
+                }
+                if let Some(reason) = input.reason {
+                    attachment.metadata["reason"] = json!(reason);
+                }
+                attachment.updated_at = now;
+                Ok(attachment.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE remote_computer_session_attachments
+                     SET status = 'released',
+                         released_at = $1,
+                         metadata = CASE
+                           WHEN $2::jsonb IS NULL AND $3::text IS NULL THEN metadata
+                           ELSE COALESCE($2::jsonb, metadata) || CASE WHEN $3::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('reason', $3::text) END
+                         END,
+                         updated_at = $4
+                     WHERE tenant_id = $5 AND id = $6
+                     RETURNING id, remote_computer_id, lease_id, session_id, status, attached_by, stale_after, released_at, metadata, created_at, updated_at",
+                )
+                .bind(now)
+                .bind(input.metadata)
+                .bind(input.reason)
+                .bind(now)
+                .bind(self.tenant_id)
+                .bind(attachment_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("Remote computer attachment not found"))?;
+                remote_computer_attachment_from_row(row)
+            }
+        }
+    }
 }
 
 fn remote_computer_from_row(row: PgRow) -> Result<RemoteComputer, AppError> {
@@ -328,6 +570,22 @@ fn remote_computer_lease_from_row(row: PgRow) -> Result<RemoteComputerLease, App
         worker_id: row.try_get("worker_id")?,
         lease_expires_at: row.try_get("lease_expires_at")?,
         heartbeat_at: row.try_get("heartbeat_at")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn remote_computer_attachment_from_row(row: PgRow) -> Result<RemoteComputerAttachment, AppError> {
+    Ok(RemoteComputerAttachment {
+        id: row.try_get("id")?,
+        remote_computer_id: row.try_get("remote_computer_id")?,
+        lease_id: row.try_get("lease_id")?,
+        session_id: row.try_get("session_id")?,
+        status: row.try_get("status")?,
+        attached_by: row.try_get("attached_by")?,
+        stale_after: row.try_get("stale_after")?,
+        released_at: row.try_get("released_at")?,
         metadata: row.try_get("metadata")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,

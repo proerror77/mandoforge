@@ -1,6 +1,6 @@
 # Agent Remote Computer Plan
 
-This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a control-plane skeleton for this direction, not a production execution substrate. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, deny-by-default NetworkPolicy, `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, a fail-closed runner dry-run route, and persisted Remote Computer lease lifecycle APIs. It does not yet create a dedicated Kubernetes Pod per agent session or mount a real shared distributed state filesystem.
+This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a control-plane skeleton for this direction, not a production execution substrate. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, deny-by-default NetworkPolicy, `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, a fail-closed runner dry-run route, persisted Remote Computer lease lifecycle APIs, and persisted session attachment state. It does not yet create a dedicated Kubernetes Pod per agent session or mount a real shared distributed state filesystem.
 
 ## Objective
 
@@ -52,12 +52,14 @@ Covered today:
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness and dry-run endpoints.
+- `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
 
 Not covered today:
 
 - No dynamic Kubernetes Pod creation.
 - No actual session-to-Pod runtime attach.
 - No actual Remote Computer execution path.
+- No actual Pod attach transport; session attachment is control-plane state only.
 - No real distributed Memory/Notes/Skills mount.
 - No distributed filesystem integration such as JuiceFS, CephFS, Longhorn RWX, or object-backed sync.
 - No warm pool of prestarted agent Pods.
@@ -147,7 +149,9 @@ Completed Stage 2 readiness skeleton:
    - `remote_computer.leased`
    - `remote_computer.started`
    - `remote_computer.heartbeat`
+   - `remote_computer.attached`
    - `remote_computer.runner_dry_run`
+   - `remote_computer.detached`
    - `remote_computer.released`
    - `remote_computer.failed`
 - Add reserved runner boundary:
@@ -156,13 +160,19 @@ Completed Stage 2 readiness skeleton:
    - UI `RUNNER BOUNDARY` section
    - audit action `remote_computer.runner_dry_run`
    - tests proving dry-runs do not create leases, execution jobs, or tool calls
+- Add persisted session attachment control plane:
+   - `POST /api/remote-computer-leases/:id/attach`
+   - `GET /api/remote-computer-attachments`
+   - `GET /api/remote-computer-attachments/stale`
+   - `POST /api/remote-computer-attachments/:id/release`
+   - audit actions `remote_computer.attached` and `remote_computer.detached`
+   - tests proving attachments do not enqueue jobs or execute tools
 
 Remaining Stage 2 pilot work:
 
 1. Add a real Kubernetes client implementation behind the existing runner boundary, still fail-closed by policy and configuration.
-2. Add session-to-Pod attach state without moving tool execution yet.
-3. Add stale lease reclaim automation.
-4. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
+2. Add stale lease/attachment reclaim automation.
+3. Keep actual tool execution on the current worker path until the Pod lifecycle is observable and testable.
 
 Stage 2 acceptance for this slice:
 
@@ -170,6 +180,7 @@ Stage 2 acceptance for this slice:
 - Kustomize renders the remote computer manifest.
 - UI renders readiness without requiring a live cluster.
 - Runner readiness and dry-run routes are Admin-only, audited, and fail closed without mutating Kubernetes.
+- Session attachment APIs persist attach/release/stale evidence without creating jobs or tool calls.
 - Docs clearly state this is a skeleton/pilot boundary, not production remote execution.
 
 ## Stage 3 Plan
@@ -211,15 +222,15 @@ Stage 3 acceptance:
 
 ## Immediate Next Slice
 
-After the reserved runner boundary, the next coherent implementation slice should be:
+After the session attach state, the next coherent implementation slice should be:
 
 ```text
-Add Remote Computer session attach state
+Add Remote Computer stale lease and attachment reclaim run
 ```
 
 Concrete deliverables:
 
-- Attach a session to a selected Remote Computer lease without moving tool execution into the Pod.
-- Persist attach/release status and stale attach detection.
+- Add an Admin-only due-run that marks stale attachments or expired leases as attention/released according to policy.
+- Add scheduler summary evidence for stale Remote Computer state.
 - Keep `shell.exec` and `codex.exec` on the approved worker path until Pod lifecycle telemetry is reliable.
-- Add tests proving attach state is auditable and does not bypass Tool Router, Policy Engine, or Approval Engine.
+- Add tests proving stale reclaim is auditable and does not bypass Tool Router, Policy Engine, or Approval Engine.

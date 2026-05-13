@@ -1,6 +1,10 @@
 # MandoForge
 
+[简体中文 README](README.zh-CN.md)
+
 MandoForge is a Rust-native Generic Agent OS Kernel. It is not a vertical commerce, finance, or support agent. Stage 1 focuses on the runtime kernel that lets any configured agent create sessions, append events, route tools through policy, pause for approval, create artifacts, and replay the timeline.
+
+Current repo status: Stage 1 is implemented as the replayable runtime kernel. Stage 2 is a governed-runtime pilot with substantial groundwork for tenancy, RBAC, provider governance, Vault references, worker queues, approval v2, MCP, Codex App Server, eval/release gates, observability, cost controls, scheduler orchestration, and Remote Computer readiness. Stage 2 is not yet complete; see [Stage 2 Completion Audit](docs/stage2-completion-audit.md) for the strict gap list.
 
 ## Stage 1 Scope
 
@@ -221,6 +225,7 @@ The manifests are a starting point, not a production hardening claim. Before sha
 ## Architecture
 
 - [Runtime Architecture](docs/architecture.md)
+- [简体中文 README](README.zh-CN.md)
 - [Stage 1 Plan](docs/stage1-plan.md)
 - [Stage 1 Completion Audit](docs/stage1-completion-audit.md)
 - [Stage 2 Gap Audit](docs/stage2-gap-audit.md)
@@ -248,6 +253,10 @@ The manifests are a starting point, not a production hardening claim. Before sha
 - `POST /api/remote-computers`
 - `POST /api/remote-computers/:id/leases`
 - `GET /api/remote-computer-leases`
+- `POST /api/remote-computer-leases/:id/attach`
+- `GET /api/remote-computer-attachments`
+- `GET /api/remote-computer-attachments/stale`
+- `POST /api/remote-computer-attachments/:id/release`
 - `POST /api/remote-computer-leases/:id/heartbeat`
 - `POST /api/remote-computer-leases/:id/release`
 - `POST /api/remote-computer-leases/:id/fail`

@@ -47,6 +47,7 @@ const state = {
   remoteComputerRunnerReadiness: null,
   remoteComputers: [],
   remoteComputerLeases: [],
+  remoteComputerAttachments: [],
   usageRollups: [],
   usageTrend: null,
   usageFinanceSummary: null,
@@ -1370,6 +1371,7 @@ async function refreshOps() {
     remoteComputerRunnerReadiness,
     remoteComputers,
     remoteComputerLeases,
+    remoteComputerAttachments,
     approvalGroups,
     approvalEscalationRules,
     approvalNotificationRouting,
@@ -1406,6 +1408,7 @@ async function refreshOps() {
       api("/api/remote-computers/runner/readiness"),
       api("/api/remote-computers"),
       api("/api/remote-computer-leases"),
+      api("/api/remote-computer-attachments"),
       api("/api/approval-groups"),
       api("/api/approval-escalation-rules"),
       api("/api/approvals/notification-routing/summary"),
@@ -1441,6 +1444,7 @@ async function refreshOps() {
   state.remoteComputerRunnerReadiness = remoteComputerRunnerReadiness;
   state.remoteComputers = remoteComputers;
   state.remoteComputerLeases = remoteComputerLeases;
+  state.remoteComputerAttachments = remoteComputerAttachments;
   state.approvalGroups = approvalGroups;
   state.approvalEscalationRules = approvalEscalationRules;
   state.approvalNotificationRouting = approvalNotificationRouting;
@@ -1910,6 +1914,7 @@ function renderRemoteComputerReadiness() {
   const runbookActions = report.runbook_actions || [];
   const computerRows = state.remoteComputers || [];
   const leaseRows = state.remoteComputerLeases || [];
+  const attachmentRows = state.remoteComputerAttachments || [];
   remoteComputerReadinessRoot.innerHTML = `
     <div class="metrics compact-metrics">
       <div class="metric">
@@ -1957,7 +1962,7 @@ function renderRemoteComputerReadiness() {
     </div>
     <div class="item">
       <strong>REMOTE COMPUTER LEASE STORE</strong>
-      <div class="muted">${formatInteger(computerRows.length)} computers · ${formatInteger(leaseRows.length)} leases · execution remains on approved worker path</div>
+      <div class="muted">${formatInteger(computerRows.length)} computers · ${formatInteger(leaseRows.length)} leases · ${formatInteger(attachmentRows.length)} attachments · execution remains on approved worker path</div>
       ${
         computerRows.length
           ? computerRows
@@ -1977,6 +1982,19 @@ function renderRemoteComputerReadiness() {
               )
               .join("")
           : `<div class="muted">No remote computer leases</div>`
+      }
+    </div>
+    <div class="item">
+      <strong>REMOTE COMPUTER ATTACHMENTS</strong>
+      ${
+        attachmentRows.length
+          ? attachmentRows
+              .map(
+                (attachment) =>
+                  `<div class="muted">${escapeHtml(attachment.status)} · session ${escapeHtml(attachment.session_id)} · lease ${escapeHtml(attachment.lease_id)} · stale after ${escapeHtml(attachment.stale_after || "none")}</div>`,
+              )
+              .join("")
+          : `<div class="muted">No remote computer session attachments</div>`
       }
     </div>
     <div class="item">

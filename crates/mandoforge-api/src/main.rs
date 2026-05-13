@@ -1309,6 +1309,21 @@ struct RemoteComputerLease {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerAttachment {
+    id: Uuid,
+    remote_computer_id: Uuid,
+    lease_id: Uuid,
+    session_id: Uuid,
+    status: String,
+    attached_by: Option<String>,
+    stale_after: Option<DateTime<Utc>>,
+    released_at: Option<DateTime<Utc>>,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct CreateRemoteComputer {
     name: String,
@@ -1330,6 +1345,20 @@ struct CreateRemoteComputerLease {
 
 #[derive(Debug, Clone, Deserialize)]
 struct UpdateRemoteComputerLease {
+    reason: Option<String>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateRemoteComputerAttachment {
+    session_id: Uuid,
+    attached_by: Option<String>,
+    stale_after_seconds: Option<i64>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateRemoteComputerAttachment {
     reason: Option<String>,
     metadata: Option<Value>,
 }
@@ -2906,8 +2935,24 @@ fn build_router(state: AppState) -> Router {
             post(create_remote_computer_lease),
         )
         .route(
+            "/api/remote-computer-leases/{id}/attach",
+            post(attach_remote_computer_lease),
+        )
+        .route(
             "/api/remote-computer-leases",
             get(list_remote_computer_leases),
+        )
+        .route(
+            "/api/remote-computer-attachments",
+            get(list_remote_computer_attachments),
+        )
+        .route(
+            "/api/remote-computer-attachments/stale",
+            get(list_stale_remote_computer_attachments),
+        )
+        .route(
+            "/api/remote-computer-attachments/{id}/release",
+            post(release_remote_computer_attachment),
         )
         .route(
             "/api/remote-computer-leases/{id}/heartbeat",
@@ -15561,6 +15606,26 @@ async fn create_remote_computer_lease(
     Ok(Json(lease))
 }
 
+async fn attach_remote_computer_lease(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputerAttachment>,
+) -> Result<Json<RemoteComputerAttachment>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_lease",
+        Some(id),
+    )
+    .await?;
+    let attachment = state.create_remote_computer_attachment(id, input).await?;
+    record_remote_computer_attachment_event(&state, &attachment, "remote_computer.attached")
+        .await?;
+    Ok(Json(attachment))
+}
+
 async fn heartbeat_remote_computer_lease(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -15601,6 +15666,56 @@ async fn release_remote_computer_lease(
         .await?;
     record_remote_computer_lease_event(&state, &lease, "remote_computer.released").await?;
     Ok(Json(lease))
+}
+
+async fn list_remote_computer_attachments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputerAttachment>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_attachments",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computer_attachments().await?))
+}
+
+async fn list_stale_remote_computer_attachments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputerAttachment>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_attachments",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_stale_remote_computer_attachments().await?))
+}
+
+async fn release_remote_computer_attachment(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateRemoteComputerAttachment>,
+) -> Result<Json<RemoteComputerAttachment>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_attachment",
+        Some(id),
+    )
+    .await?;
+    let attachment = state.release_remote_computer_attachment(id, input).await?;
+    record_remote_computer_attachment_event(&state, &attachment, "remote_computer.detached")
+        .await?;
+    Ok(Json(attachment))
 }
 
 async fn fail_remote_computer_lease(
@@ -15653,6 +15768,46 @@ async fn record_remote_computer_lease_event(
             event_type,
             "remote_computer_lease",
             Some(lease.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn record_remote_computer_attachment_event(
+    state: &AppState,
+    attachment: &RemoteComputerAttachment,
+    event_type: &str,
+) -> Result<(), AppError> {
+    let details = json!({
+        "attachment_id": attachment.id,
+        "remote_computer_id": attachment.remote_computer_id,
+        "lease_id": attachment.lease_id,
+        "session_id": attachment.session_id,
+        "status": attachment.status,
+        "attached_by": attachment.attached_by,
+        "stale_after": attachment.stale_after,
+        "released_at": attachment.released_at,
+        "metadata": attachment.metadata,
+        "execution_enabled": false
+    });
+    state
+        .append_event(
+            "system",
+            None,
+            attachment.session_id,
+            event_type,
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(attachment.session_id),
+            "system",
+            None,
+            event_type,
+            "remote_computer_attachment",
+            Some(attachment.id),
             details,
         ))
         .await?;
@@ -15736,7 +15891,9 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         "remote_computer.leased".to_string(),
         "remote_computer.started".to_string(),
         "remote_computer.heartbeat".to_string(),
+        "remote_computer.attached".to_string(),
         "remote_computer.runner_dry_run".to_string(),
+        "remote_computer.detached".to_string(),
         "remote_computer.released".to_string(),
         "remote_computer.failed".to_string(),
     ];
@@ -15822,6 +15979,10 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
     );
     runbook_actions.push(
         "use /api/remote-computers/runner/dry-run to inspect Pod runner intent without mutating Kubernetes"
+            .to_string(),
+    );
+    runbook_actions.push(
+        "attach sessions to remote computer leases only as control-plane state until Pod telemetry and artifact sync are implemented"
             .to_string(),
     );
 
@@ -17621,6 +17782,7 @@ not json
         assert!(names.contains(&"0017_agent_release_workflows.sql"));
         assert!(names.contains(&"0018_agent_release_automation.sql"));
         assert!(names.contains(&"0019_remote_computers.sql"));
+        assert!(names.contains(&"0020_remote_computer_attachments.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -17929,6 +18091,213 @@ not json
             audit_logs
                 .iter()
                 .any(|log| log.action == "remote_computer.runner_dry_run")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_computer_session_attachments_are_persisted_and_audited_without_execution() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "remote computer attach"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "remote-computer-attach-test",
+                        "profile": "workspace-write",
+                        "pod_name": "agent-remote-computer-attach"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let lease: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computers/{}/leases", computer.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "worker_id": "remote-manager-attach",
+                        "lease_seconds": 120
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let attachment: RemoteComputerAttachment = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computer-leases/{}/attach", lease.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "attached_by": "remote-manager-attach",
+                        "stale_after_seconds": -1,
+                        "metadata": {"execution_enabled": false}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(attachment.status, "attached");
+        assert_eq!(attachment.session_id, session.id);
+        assert_eq!(attachment.lease_id, lease.id);
+        assert!(attachment.stale_after.is_some());
+
+        let stale: Vec<RemoteComputerAttachment> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computer-attachments/stale")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].id, attachment.id);
+
+        let released: RemoteComputerAttachment = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/remote-computer-attachments/{}/release",
+                    attachment.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"reason": "attach state verified"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(released.status, "released");
+        assert_eq!(released.metadata["reason"], "attach state verified");
+        assert!(released.released_at.is_some());
+
+        let stale_after_release: Vec<RemoteComputerAttachment> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computer-attachments/stale")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(stale_after_release.is_empty());
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let event_types: Vec<_> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        assert!(event_types.contains(&"remote_computer.attached"));
+        assert!(event_types.contains(&"remote_computer.detached"));
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            tool_calls.is_empty(),
+            "remote computer attach lifecycle must not execute tools"
+        );
+
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            jobs.is_empty(),
+            "remote computer attach lifecycle must not enqueue jobs"
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/audit-logs", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "remote_computer.attached")
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "remote_computer.detached")
         );
     }
 
