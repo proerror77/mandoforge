@@ -187,6 +187,7 @@ enum ExecutionQueueBackendSelection {
     Postgres,
     Redis,
     Nats,
+    NatsJetstream,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2590,14 +2591,15 @@ fn select_execution_queue_backend(
         }
         "redis" => Ok(ExecutionQueueBackendSelection::Redis),
         "nats" => Ok(ExecutionQueueBackendSelection::Nats),
+        "nats_jetstream" | "jetstream" => Ok(ExecutionQueueBackendSelection::NatsJetstream),
         "broker" => {
             anyhow::bail!(
-                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is reserved for a future broker-backed queue; use auto, memory, postgres, redis, or nats"
+                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is reserved for a future broker-backed queue; use auto, memory, postgres, redis, nats, or nats_jetstream"
             );
         }
         other => {
             anyhow::bail!(
-                "unsupported MANDOFORGE_EXECUTION_QUEUE_BACKEND={other}; use auto, memory, postgres, redis, or nats"
+                "unsupported MANDOFORGE_EXECUTION_QUEUE_BACKEND={other}; use auto, memory, postgres, redis, nats, or nats_jetstream"
             );
         }
     }
@@ -2630,6 +2632,13 @@ fn execution_queue_from_env(store: &StoreBackend, tenant_id: Uuid) -> Result<Exe
                 .map_err(|error| anyhow::anyhow!(error.message))?;
             Ok(ExecutionQueue::broker(Arc::new(
                 BrokerExecutionQueue::nats(config),
+            )))
+        }
+        (ExecutionQueueBackendSelection::NatsJetstream, _) => {
+            let config = BrokerQueueConfig::from_env(BrokerQueueKind::NatsJetstream)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            Ok(ExecutionQueue::broker(Arc::new(
+                BrokerExecutionQueue::nats_jetstream(config),
             )))
         }
     }
@@ -16906,8 +16915,16 @@ fn remote_computer_attention(
 
 async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessReport, AppError> {
     let generated_at = Utc::now();
-    let jobs = state.execution_queue.list().await?;
     let queue_backend = worker_queue_backend_readiness(state.execution_queue.backend_kind());
+    let mut queue_backend_error = None;
+    let jobs = match state.execution_queue.list().await {
+        Ok(jobs) => jobs,
+        Err(error) if queue_backend.kind == "nats_jetstream" => {
+            queue_backend_error = Some(error.message);
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
     let worker_mode = WorkerModeReadiness {
         mode: state.execution_worker.mode().to_string(),
         external_worker_required: state.execution_worker.mode() == "queue",
@@ -17022,6 +17039,15 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
                     .to_string(),
         });
     }
+    if let Some(error) = queue_backend_error {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "nats_jetstream_reserved".to_string(),
+            severity: "critical".to_string(),
+            message: format!(
+                "NATS JetStream backend is configured, but publish/drain/ack are reserved and fail closed: {error}"
+            ),
+        });
+    }
     if queued_jobs > 0 {
         attention_items.push(WorkerReadinessAttentionItem {
             kind: "queued_jobs_present".to_string(),
@@ -17114,6 +17140,12 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
                 .to_string(),
         );
     }
+    if queue_backend.kind == "nats_jetstream" {
+        runbook_actions.push(
+            "implement and validate JetStream publish, durable pull consumer drain, explicit ack, and redelivery handling before using this backend for production workers"
+                .to_string(),
+        );
+    }
 
     let critical_count = attention_items
         .iter()
@@ -17172,6 +17204,13 @@ fn worker_queue_backend_readiness(kind: &str) -> WorkerQueueBackendReadiness {
             broker_handoff: true,
             jetstream_enabled: false,
             semantics: "Core NATS queue subscription handoff; not JetStream durable".to_string(),
+        },
+        "nats_jetstream" => WorkerQueueBackendReadiness {
+            kind: "nats_jetstream".to_string(),
+            durable: false,
+            broker_handoff: true,
+            jetstream_enabled: true,
+            semantics: "Reserved NATS JetStream command/config boundary; real publish/drain/ack fail closed until implemented".to_string(),
         },
         _ => WorkerQueueBackendReadiness {
             kind: "memory".to_string(),
@@ -18597,6 +18636,15 @@ not json
         assert_eq!(
             select_execution_queue_backend(Some("nats"), true).expect("nats queue"),
             ExecutionQueueBackendSelection::Nats
+        );
+        assert_eq!(
+            select_execution_queue_backend(Some("nats_jetstream"), true)
+                .expect("nats jetstream queue"),
+            ExecutionQueueBackendSelection::NatsJetstream
+        );
+        assert_eq!(
+            select_execution_queue_backend(Some("jetstream"), true).expect("jetstream alias"),
+            ExecutionQueueBackendSelection::NatsJetstream
         );
         assert!(
             select_execution_queue_backend(Some("broker"), true).is_err(),

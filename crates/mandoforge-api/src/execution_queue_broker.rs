@@ -24,6 +24,7 @@ use crate::{
 pub(crate) enum BrokerQueueKind {
     Redis,
     Nats,
+    NatsJetstream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,13 @@ pub(crate) struct BrokerQueueConfig {
 pub(crate) struct RedisStreamCommand {
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct NatsJetStreamCommand {
+    pub(crate) subject: String,
+    pub(crate) payload: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,7 +80,7 @@ impl BrokerQueueKind {
     fn endpoint_env_key(self) -> &'static str {
         match self {
             Self::Redis => "MANDOFORGE_REDIS_URL",
-            Self::Nats => "MANDOFORGE_NATS_URL",
+            Self::Nats | Self::NatsJetstream => "MANDOFORGE_NATS_URL",
         }
     }
 
@@ -80,6 +88,7 @@ impl BrokerQueueKind {
         match self {
             Self::Redis => "mandoforge:execution-jobs",
             Self::Nats => "mandoforge.execution.jobs",
+            Self::NatsJetstream => "MANDOFORGE_EXECUTION_JOBS",
         }
     }
 
@@ -87,6 +96,7 @@ impl BrokerQueueKind {
         match self {
             Self::Redis => "MANDOFORGE_REDIS_STREAM",
             Self::Nats => "MANDOFORGE_NATS_SUBJECT",
+            Self::NatsJetstream => "MANDOFORGE_NATS_STREAM",
         }
     }
 }
@@ -278,6 +288,88 @@ impl RedisStreamCommand {
             .chain(self.args.iter().cloned())
             .collect()
     }
+}
+
+#[allow(dead_code)]
+impl NatsJetStreamCommand {
+    pub(crate) fn stream_info(config: &BrokerQueueConfig) -> Result<Self, AppError> {
+        ensure_jetstream_config(config)?;
+        Ok(Self {
+            subject: format!("$JS.API.STREAM.INFO.{}", config.stream),
+            payload: json!({}),
+        })
+    }
+
+    pub(crate) fn stream_create(config: &BrokerQueueConfig) -> Result<Self, AppError> {
+        ensure_jetstream_config(config)?;
+        Ok(Self {
+            subject: format!("$JS.API.STREAM.CREATE.{}", config.stream),
+            payload: json!({
+                "name": config.stream,
+                "subjects": [jetstream_jobs_subject(config)],
+                "retention": "workqueue",
+                "storage": "file",
+                "discard": "old",
+                "max_msgs": -1,
+                "max_bytes": -1,
+            }),
+        })
+    }
+
+    pub(crate) fn consumer_info(config: &BrokerQueueConfig) -> Result<Self, AppError> {
+        ensure_jetstream_config(config)?;
+        Ok(Self {
+            subject: format!(
+                "$JS.API.CONSUMER.INFO.{}.{}",
+                config.stream, config.consumer_group
+            ),
+            payload: json!({}),
+        })
+    }
+
+    pub(crate) fn consumer_create(config: &BrokerQueueConfig) -> Result<Self, AppError> {
+        ensure_jetstream_config(config)?;
+        Ok(Self {
+            subject: format!(
+                "$JS.API.CONSUMER.DURABLE.CREATE.{}.{}",
+                config.stream, config.consumer_group
+            ),
+            payload: json!({
+                "stream_name": config.stream,
+                "config": {
+                    "durable_name": config.consumer_group,
+                    "deliver_policy": "all",
+                    "ack_policy": "explicit",
+                    "filter_subject": jetstream_jobs_subject(config),
+                    "max_deliver": 10,
+                }
+            }),
+        })
+    }
+
+    pub(crate) fn publish_job(
+        config: &BrokerQueueConfig,
+        payload: &RedisExecutionJobPayload,
+    ) -> Result<Self, AppError> {
+        ensure_jetstream_config(config)?;
+        Ok(Self {
+            subject: jetstream_jobs_subject(config),
+            payload: payload.to_json(),
+        })
+    }
+}
+
+fn ensure_jetstream_config(config: &BrokerQueueConfig) -> Result<(), AppError> {
+    if config.kind != BrokerQueueKind::NatsJetstream {
+        return Err(AppError::bad_request(
+            "NATS JetStream command requires JetStream broker config",
+        ));
+    }
+    Ok(())
+}
+
+fn jetstream_jobs_subject(config: &BrokerQueueConfig) -> String {
+    format!("{}.jobs", config.stream.to_ascii_lowercase())
 }
 
 #[allow(dead_code)]
@@ -677,6 +769,14 @@ impl BrokerExecutionQueue {
         }
     }
 
+    pub(crate) fn nats_jetstream(config: BrokerQueueConfig) -> Self {
+        Self {
+            kind: BrokerQueueKind::NatsJetstream,
+            config: Some(config),
+            pending: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     fn reserved_error(&self) -> AppError {
         AppError::bad_request(format!(
             "{:?} execution queue backend is reserved but not implemented",
@@ -732,6 +832,7 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         match self.kind {
             BrokerQueueKind::Redis => "redis",
             BrokerQueueKind::Nats => "nats",
+            BrokerQueueKind::NatsJetstream => "nats_jetstream",
         }
     }
 
@@ -763,11 +864,15 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
                 let config = self.broker_config().await?;
                 NatsCoreClient::publish(config, &payload).await?;
             }
+            BrokerQueueKind::NatsJetstream => return Err(self.reserved_error()),
         }
         Ok(job)
     }
 
     async fn start(&self, job_id: Uuid, worker_id: &str) -> Result<ExecutionJob, AppError> {
+        if self.kind == BrokerQueueKind::NatsJetstream {
+            return Err(self.reserved_error());
+        }
         self.broker_config().await?;
         let mut pending = self.pending.write().await;
         let pending_job = pending
@@ -782,11 +887,15 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
     }
 
     async fn complete(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        if self.kind == BrokerQueueKind::Redis {
-            let config = self.redis_config().await?;
-            self.ack_redis_job(config, job_id).await?;
-        } else {
-            self.broker_config().await?;
+        match self.kind {
+            BrokerQueueKind::Redis => {
+                let config = self.redis_config().await?;
+                self.ack_redis_job(config, job_id).await?;
+            }
+            BrokerQueueKind::Nats => {
+                self.broker_config().await?;
+            }
+            BrokerQueueKind::NatsJetstream => return Err(self.reserved_error()),
         }
         let mut pending = self.pending.write().await;
         let pending_job = pending
@@ -799,11 +908,15 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
     }
 
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        if self.kind == BrokerQueueKind::Redis {
-            let config = self.redis_config().await?;
-            self.ack_redis_job(config, job_id).await?;
-        } else {
-            self.broker_config().await?;
+        match self.kind {
+            BrokerQueueKind::Redis => {
+                let config = self.redis_config().await?;
+                self.ack_redis_job(config, job_id).await?;
+            }
+            BrokerQueueKind::Nats => {
+                self.broker_config().await?;
+            }
+            BrokerQueueKind::NatsJetstream => return Err(self.reserved_error()),
         }
         let mut pending = self.pending.write().await;
         let pending_job = pending
@@ -816,6 +929,9 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
     }
 
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
+        if self.kind == BrokerQueueKind::NatsJetstream {
+            return Err(self.reserved_error());
+        }
         let (job, message_id) = {
             let mut pending = self.pending.write().await;
             let pending_job = pending
@@ -862,6 +978,7 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
                 let config = self.broker_config().await?;
                 NatsCoreClient::drain_once(config).await?
             }
+            BrokerQueueKind::NatsJetstream => return Err(self.reserved_error()),
         };
         {
             let mut pending = self.pending.write().await;
@@ -896,7 +1013,7 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
 mod tests {
     use super::{
         BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind,
-        RedisExecutionJobPayload, RedisStreamClient, RedisStreamCommand,
+        NatsJetStreamCommand, RedisExecutionJobPayload, RedisStreamClient, RedisStreamCommand,
         ReservedBrokerQueueHealthCheck, encode_resp_array, nats_tcp_addr, parse_nats_messages,
         parse_redis_response, parse_xreadgroup_execution_jobs, redis_tcp_addr,
     };
@@ -929,6 +1046,20 @@ mod tests {
 
         assert_eq!(config.endpoint, "nats://127.0.0.1:4222");
         assert_eq!(config.stream, "mandoforge.execution.jobs");
+        assert_eq!(config.consumer_group, "mandoforge-workers");
+    }
+
+    #[test]
+    fn broker_queue_config_defaults_jetstream_stream_and_consumer_group() {
+        let config =
+            BrokerQueueConfig::from_lookup(BrokerQueueKind::NatsJetstream, |key| match key {
+                "MANDOFORGE_NATS_URL" => Some("nats://127.0.0.1:4222".to_string()),
+                _ => None,
+            })
+            .expect("jetstream config");
+
+        assert_eq!(config.endpoint, "nats://127.0.0.1:4222");
+        assert_eq!(config.stream, "MANDOFORGE_EXECUTION_JOBS");
         assert_eq!(config.consumer_group, "mandoforge-workers");
     }
 
@@ -1094,6 +1225,85 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].0.starts_with("nats:"));
         assert_eq!(jobs[0].1.tool_name, "file.write");
+    }
+
+    #[test]
+    fn nats_jetstream_commands_build_stream_consumer_and_publish_contracts() {
+        let config =
+            BrokerQueueConfig::from_lookup(BrokerQueueKind::NatsJetstream, |key| match key {
+                "MANDOFORGE_NATS_URL" => Some("nats://127.0.0.1:4222".to_string()),
+                "MANDOFORGE_NATS_STREAM" => Some("MDF_EXECUTION".to_string()),
+                "MANDOFORGE_EXECUTION_QUEUE_CONSUMER_GROUP" => Some("runtime-workers".to_string()),
+                _ => None,
+            })
+            .expect("jetstream config");
+        let request = ExecutionJobRequest {
+            session_id: "00000000-0000-4000-8000-000000000001"
+                .parse()
+                .expect("session id"),
+            approval_id: "00000000-0000-4000-8000-000000000002"
+                .parse()
+                .expect("approval id"),
+            tool_call_id: "00000000-0000-4000-8000-000000000003"
+                .parse()
+                .expect("tool call id"),
+            tool_name: "codex.exec".to_string(),
+            max_attempts: Some(4),
+        };
+        let payload = RedisExecutionJobPayload::from_request(&request);
+
+        let stream_info = NatsJetStreamCommand::stream_info(&config).expect("stream info");
+        let stream_create = NatsJetStreamCommand::stream_create(&config).expect("stream create");
+        let consumer_info = NatsJetStreamCommand::consumer_info(&config).expect("consumer info");
+        let consumer_create =
+            NatsJetStreamCommand::consumer_create(&config).expect("consumer create");
+        let publish = NatsJetStreamCommand::publish_job(&config, &payload).expect("publish");
+
+        assert_eq!(stream_info.subject, "$JS.API.STREAM.INFO.MDF_EXECUTION");
+        assert_eq!(stream_create.subject, "$JS.API.STREAM.CREATE.MDF_EXECUTION");
+        assert_eq!(stream_create.payload["retention"], "workqueue");
+        assert_eq!(stream_create.payload["subjects"][0], "mdf_execution.jobs");
+        assert_eq!(
+            consumer_info.subject,
+            "$JS.API.CONSUMER.INFO.MDF_EXECUTION.runtime-workers"
+        );
+        assert_eq!(
+            consumer_create.subject,
+            "$JS.API.CONSUMER.DURABLE.CREATE.MDF_EXECUTION.runtime-workers"
+        );
+        assert_eq!(
+            consumer_create.payload["config"]["filter_subject"],
+            "mdf_execution.jobs"
+        );
+        assert_eq!(publish.subject, "mdf_execution.jobs");
+        assert_eq!(publish.payload["tool_name"], "codex.exec");
+    }
+
+    #[tokio::test]
+    async fn broker_execution_queue_jetstream_fails_closed_until_client_is_implemented() {
+        let config =
+            BrokerQueueConfig::from_lookup(BrokerQueueKind::NatsJetstream, |key| match key {
+                "MANDOFORGE_NATS_URL" => Some("nats://127.0.0.1:4222".to_string()),
+                _ => None,
+            })
+            .expect("jetstream config");
+        let queue = BrokerExecutionQueue::nats_jetstream(config);
+        let request = ExecutionJobRequest {
+            session_id: Uuid::new_v4(),
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "file.write".to_string(),
+            max_attempts: None,
+        };
+
+        let error = queue
+            .enqueue(request)
+            .await
+            .expect_err("jetstream reserved");
+
+        assert!(error.message.contains("NatsJetstream"));
+        assert!(error.message.contains("reserved"));
+        assert!(queue.list().await.is_err());
     }
 
     #[test]
