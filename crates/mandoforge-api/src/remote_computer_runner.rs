@@ -159,6 +159,7 @@ impl RemoteComputerRunner for ReservedRemoteComputerRunner {
                 "readiness".to_string(),
                 "dry_run_create".to_string(),
                 "dry_run_delete".to_string(),
+                "dry_run_exec".to_string(),
                 "dry_run_probe".to_string(),
             ],
             message:
@@ -262,6 +263,7 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
                 "readiness".to_string(),
                 "dry_run_create".to_string(),
                 "dry_run_delete".to_string(),
+                "dry_run_exec".to_string(),
                 "dry_run_probe".to_string(),
                 "live_create".to_string(),
                 "live_delete".to_string(),
@@ -294,6 +296,7 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         let operation_is_create = operation == "create" || operation == "dry_run_create";
         let operation_is_delete = operation == "delete" || operation == "dry_run_delete";
         let operation_is_probe = operation == "probe" || operation == "dry_run_probe";
+        let operation_is_exec = operation == "exec" || operation == "dry_run_exec";
         let pod_name = request
             .pod_name
             .clone()
@@ -308,6 +311,11 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             ))
         } else if operation_is_probe {
             Some("/version".to_string())
+        } else if operation_is_exec {
+            Some(format!(
+                "/api/v1/namespaces/{}/pods/{}/exec",
+                config.namespace, pod_name
+            ))
         } else {
             None
         };
@@ -352,6 +360,9 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
                 format!("Kubernetes API probe failed: {message}")
             } else if probe_result.is_some() {
                 "Kubernetes API probe succeeded; no Kubernetes mutation or tool execution was performed"
+                    .to_string()
+            } else if operation_is_exec && readiness.configured {
+                "Kubernetes adapter dry-run calculated Pod exec intent only; no command was executed"
                     .to_string()
             } else if readiness.configured {
                 "Kubernetes adapter dry-run calculated Pod intent only; no Kubernetes API mutation or tool execution was performed"
@@ -731,6 +742,49 @@ mod tests {
             Some("agent-remote-computer-test")
         );
         assert!(!response.execution_enabled);
+    }
+
+    #[tokio::test]
+    async fn kubernetes_runner_dry_run_exec_plans_pod_exec_without_execution() {
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            in_cluster: true,
+            mutation_enabled: true,
+            live_mutation_enabled: false,
+            kube_api_url: None,
+            bearer_token_path: None,
+        };
+        let runner = KubernetesRemoteComputerRunner;
+        let response = runner
+            .dry_run(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("exec".to_string()),
+                    remote_computer_id: None,
+                    session_id: None,
+                    pod_name: Some("agent-remote-computer-test".to_string()),
+                    metadata: Some(json!({"command": ["sh", "-lc", "pwd"]})),
+                },
+            )
+            .await;
+        assert_eq!(response.status, "dry_run_ready");
+        assert!(!response.would_create_pod);
+        assert!(!response.would_delete_pod);
+        assert_eq!(
+            response.kubernetes_api_path.as_deref(),
+            Some("/api/v1/namespaces/agent-os/pods/agent-remote-computer-test/exec")
+        );
+        assert_eq!(
+            response.pod_name.as_deref(),
+            Some("agent-remote-computer-test")
+        );
+        assert!(response.message.contains("no command was executed"));
+        assert!(!response.execution_enabled);
+        assert_eq!(response.request["metadata"]["command"][0], "sh");
     }
 
     #[test]

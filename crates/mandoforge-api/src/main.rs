@@ -18886,6 +18886,31 @@ not json
         assert!(!dry_run.would_delete_pod);
         assert!(!dry_run.execution_enabled);
 
+        let exec_dry_run: RemoteComputerRunnerDryRunResponse = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/runner/dry-run")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "operation": "exec",
+                        "session_id": session.id,
+                        "pod_name": "agent-remote-computer-dry-run",
+                        "metadata": {"command": ["sh", "-lc", "pwd"]}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(exec_dry_run.status, "reserved");
+        assert_eq!(exec_dry_run.operation, "exec");
+        assert!(!exec_dry_run.execution_enabled);
+        assert_eq!(exec_dry_run.request["metadata"]["command"][0], "sh");
+
         let mutate: RemoteComputerRunnerDryRunResponse = request_json(
             app.clone(),
             Request::builder()
