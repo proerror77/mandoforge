@@ -22,7 +22,7 @@ This audit maps the PRD v2 Stage 2 target to the current repo state. It is inten
 ## Next Stage 2 Slices
 
 1. Implement the actual Remote Computer Pod execution transport for assigned jobs without bypassing Tool Router, Policy Engine, Approval Engine, event log, or audit paths.
-2. Promote JuiceFS, warm-pool, and KEDA examples into explicit opt-in overlays once namespace, secret, metrics, and conflict-handling rules are implemented.
+2. Validate and harden the new `deploy/kustomization.yaml` Remote Computer pilot bundle with real namespace, secret, metrics, and conflict-handling rules before using it in production.
 3. Add production multi-step rollout orchestration beyond the current policy/release summary dashboards.
 4. Add production finance close workflow automation beyond the current bounded close run, static readiness, forecast, pressure, acknowledgement, audit-evidence, and scheduled export delivery surfaces.
 5. Add broader remediation automation beyond safe approval/Codex due-runs and production collector-specific OTLP hardening beyond readiness checks.
