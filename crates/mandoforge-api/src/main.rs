@@ -16236,6 +16236,7 @@ fn build_remote_computer_readiness() -> RemoteComputerReadinessReport {
         "remote_computer.attached".to_string(),
         "remote_computer.execution_handoff_planned".to_string(),
         "remote_computer.execution_handoff_acknowledged".to_string(),
+        "remote_computer.execution_transport_planned".to_string(),
         "remote_computer.runner_dry_run".to_string(),
         "remote_computer.detached".to_string(),
         "remote_computer.attachment_reclaimed".to_string(),
@@ -28641,6 +28642,13 @@ not json
         assert!(events_after_worker_run.iter().any(|event| {
             event.event_type == "remote_computer.execution_handoff_acknowledged"
                 && event.payload["assignment_id"] == json!(assignment.id)
+                && event.payload["execution_enabled"] == json!(false)
+        }));
+        assert!(events_after_worker_run.iter().any(|event| {
+            event.event_type == "remote_computer.execution_transport_planned"
+                && event.payload["assignment_id"] == json!(assignment.id)
+                && event.payload["pod_exec_api_path"]
+                    == json!("/api/v1/namespaces/agent-os/pods/agent-remote-computer-job/exec")
                 && event.payload["execution_enabled"] == json!(false)
         }));
 

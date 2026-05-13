@@ -173,6 +173,7 @@ pub(crate) async fn run_execution_job(
                 details,
             ))
             .await?;
+        append_remote_computer_execution_transport_plan(state, &job, worker_id, assignment).await?;
     }
     let approval = state.get_approval(job.approval_id).await?;
     if approval.status != "approved" {
@@ -233,6 +234,85 @@ pub(crate) async fn run_execution_job(
             Err(error)
         }
     }
+}
+
+async fn append_remote_computer_execution_transport_plan(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+    assignment: &crate::RemoteComputerJobAssignment,
+) -> Result<(), AppError> {
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == assignment.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    let transport_mode = std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "reserved".to_string());
+    let requested_execution_enabled = env_flag("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+    let pod_exec_api_path = remote_computer.pod_name.as_ref().map(|pod_name| {
+        format!(
+            "/api/v1/namespaces/{}/pods/{}/exec",
+            remote_computer.namespace, pod_name
+        )
+    });
+    let transport_status = if transport_mode == "kubernetes" && requested_execution_enabled {
+        "blocked_not_implemented"
+    } else if transport_mode == "kubernetes" {
+        "blocked"
+    } else {
+        "reserved"
+    };
+    let details = json!({
+        "assignment_id": assignment.id,
+        "execution_job_id": job.id,
+        "approval_id": job.approval_id,
+        "tool_call_id": job.tool_call_id,
+        "tool": job.tool_name,
+        "remote_computer_id": assignment.remote_computer_id,
+        "lease_id": assignment.lease_id,
+        "worker_id": worker_id,
+        "transport_mode": transport_mode,
+        "transport_status": transport_status,
+        "namespace": remote_computer.namespace,
+        "pod_name": remote_computer.pod_name,
+        "pod_exec_api_path": pod_exec_api_path,
+        "requested_execution_enabled": requested_execution_enabled,
+        "execution_enabled": false,
+        "handoff_mode": "control-plane-only"
+    });
+    state
+        .append_event(
+            "worker",
+            Some(job.id),
+            job.session_id,
+            "remote_computer.execution_transport_planned",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(job.session_id),
+            "worker",
+            Some(job.id),
+            "remote_computer.execution_transport_planned",
+            "remote_computer_job_assignment",
+            Some(assignment.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    })
 }
 
 async fn execute_approved_file_write(
