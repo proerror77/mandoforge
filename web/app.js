@@ -2695,6 +2695,7 @@ function renderObservability() {
   const collectorSignalPaths = collectorReadiness?.signal_paths || [];
   const collectorProductionOps = collectorReadiness?.production_ops || {};
   const collectorDeploymentReadiness = collectorReadiness?.deployment_readiness || {};
+  const remediationSupervision = collectorReadiness?.remediation_supervision || {};
   const remediationPlan = state.observabilityRemediationPlan;
   const remediationPlanActions = remediationPlan?.actions || [];
   const remediation = state.observabilityRemediation;
@@ -2762,6 +2763,10 @@ function renderObservability() {
             <dd>${escapeHtml(collectorDeploymentReadiness.status || "unknown")} · blocked ${collectorDeploymentReadiness.production_blocked ? "yes" : "no"} · validated ${collectorDeploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${collectorDeploymentReadiness.latest_validation_healthy ? "yes" : "no"} · latest ${escapeHtml(collectorDeploymentReadiness.latest_validation_at || "none")}</dd>
             <dt>Deployment message</dt>
             <dd>${escapeHtml(collectorDeploymentReadiness.message || "collector deployment validation is not reported")}</dd>
+            <dt>Remediation supervision</dt>
+            <dd>${escapeHtml(remediationSupervision.status || "unknown")} · blocked ${remediationSupervision.production_blocked ? "yes" : "no"} · required ${remediationSupervision.required ? "yes" : "no"} · controller ${remediationSupervision.controller_configured ? "configured" : "missing"} · latest ${escapeHtml(remediationSupervision.latest_controller_run_at || "none")}</dd>
+            <dt>Remediation message</dt>
+            <dd>${escapeHtml(remediationSupervision.message || "observability remediation supervision is not reported")}</dd>
           </dl>
           ${
             collectorSignalPaths.length

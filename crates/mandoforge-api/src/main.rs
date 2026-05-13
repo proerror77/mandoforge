@@ -1328,6 +1328,7 @@ struct ObservabilityCollectorReadiness {
     signal_paths: Vec<ObservabilityCollectorSignalPath>,
     production_ops: ObservabilityCollectorProductionOpsReadiness,
     deployment_readiness: ObservabilityCollectorDeploymentReadiness,
+    remediation_supervision: ObservabilityRemediationSupervisionReadiness,
     attention_items: Vec<ObservabilityCollectorAttentionItem>,
 }
 
@@ -1353,6 +1354,20 @@ struct ObservabilityCollectorDeploymentReadiness {
     latest_validation_age_hours: Option<i64>,
     latest_validation_status: Option<String>,
     latest_validation_healthy: bool,
+    blocking_reasons: Vec<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObservabilityRemediationSupervisionReadiness {
+    status: String,
+    production_blocked: bool,
+    required: bool,
+    controller_configured: bool,
+    latest_controller_run_at: Option<DateTime<Utc>>,
+    latest_controller_run_age_hours: Option<i64>,
+    latest_controller_status: Option<String>,
+    latest_controller_remediated: bool,
     blocking_reasons: Vec<String>,
     message: String,
 }
@@ -16863,6 +16878,12 @@ async fn build_observability_collector_readiness(
         &audit_logs,
         generated_at,
     );
+    let remediation_supervision = build_observability_remediation_supervision_readiness(
+        observability_remediation_controller_required(&|key| std::env::var(key).ok()),
+        observability_remediation_controller_configured(&|key| std::env::var(key).ok()),
+        &audit_logs,
+        generated_at,
+    );
     if production_ops.production_blocked {
         attention_items.push(ObservabilityCollectorAttentionItem {
             kind: "collector_production_ops_blocked".to_string(),
@@ -16883,6 +16904,13 @@ async fn build_observability_collector_readiness(
                 "warning".to_string()
             },
             message: deployment_readiness.message.clone(),
+        });
+    }
+    if remediation_supervision.production_blocked {
+        attention_items.push(ObservabilityCollectorAttentionItem {
+            kind: "observability_remediation_supervision_blocked".to_string(),
+            severity: "critical".to_string(),
+            message: remediation_supervision.message.clone(),
         });
     }
     let status = if attention_items
@@ -16908,8 +16936,23 @@ async fn build_observability_collector_readiness(
         signal_paths,
         production_ops,
         deployment_readiness,
+        remediation_supervision,
         attention_items,
     }
+}
+
+fn observability_remediation_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn build_observability_collector_production_ops(
@@ -17049,6 +17092,85 @@ fn build_observability_collector_deployment_readiness(
         latest_validation_age_hours,
         latest_validation_status,
         latest_validation_healthy,
+        blocking_reasons,
+        message,
+    }
+}
+
+fn build_observability_remediation_supervision_readiness(
+    required: bool,
+    controller_configured: bool,
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+) -> ObservabilityRemediationSupervisionReadiness {
+    let latest_controller_run = audit_logs
+        .iter()
+        .filter(|log| {
+            log.action == "observability.remediation_run"
+                && log.details["controller_execution"]["attempted"] == true
+        })
+        .max_by_key(|log| log.created_at);
+    let latest_controller_run_at = latest_controller_run.map(|log| log.created_at);
+    let latest_controller_run_age_hours =
+        latest_controller_run_at.map(|created_at| (generated_at - created_at).num_hours());
+    let latest_controller_status = latest_controller_run
+        .and_then(|log| log.details["controller_execution"]["status"].as_str())
+        .map(str::to_string);
+    let latest_controller_remediated = latest_controller_status
+        .as_deref()
+        .map(|status| status == "remediated")
+        .unwrap_or(false);
+    let mut blocking_reasons = Vec::new();
+
+    if required && !controller_configured {
+        blocking_reasons.push("remediation controller is required but not configured".to_string());
+    }
+    if required && latest_controller_run.is_none() {
+        blocking_reasons
+            .push("remediation controller has no audited execution evidence".to_string());
+    }
+    if required && latest_controller_run.is_some() && !latest_controller_remediated {
+        blocking_reasons
+            .push("latest remediation controller execution did not remediate".to_string());
+    }
+    if required && latest_controller_run_age_hours.is_some_and(|hours| hours >= 24) {
+        blocking_reasons.push("remediation controller execution evidence is stale".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else if required {
+        "ready"
+    } else if controller_configured {
+        "configured"
+    } else {
+        "optional"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Observability remediation supervision is blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else if required {
+        "Observability remediation controller has recent audited remediation evidence".to_string()
+    } else if controller_configured {
+        "Observability remediation controller is configured but not required for this runtime"
+            .to_string()
+    } else {
+        "Observability remediation controller is optional for this runtime".to_string()
+    };
+
+    ObservabilityRemediationSupervisionReadiness {
+        status,
+        production_blocked,
+        required,
+        controller_configured,
+        latest_controller_run_at,
+        latest_controller_run_age_hours,
+        latest_controller_status,
+        latest_controller_remediated,
         blocking_reasons,
         message,
     }
@@ -24294,6 +24416,60 @@ not json
         assert_eq!(payloads[0]["after"]["pending_approvals"], 0);
 
         controller_server.abort();
+    }
+
+    #[test]
+    fn observability_remediation_supervision_blocks_when_required_without_controller_evidence() {
+        let generated_at = Utc::now();
+        let missing =
+            build_observability_remediation_supervision_readiness(true, false, &[], generated_at);
+        assert_eq!(missing.status, "blocked");
+        assert!(missing.production_blocked);
+        assert!(missing.required);
+        assert!(!missing.controller_configured);
+        assert!(
+            missing.blocking_reasons.iter().any(|reason| {
+                reason == "remediation controller is required but not configured"
+            })
+        );
+        assert!(missing.blocking_reasons.iter().any(|reason| {
+            reason == "remediation controller has no audited execution evidence"
+        }));
+
+        let audit = new_audit_log(
+            None,
+            "system",
+            None,
+            "observability.remediation_run",
+            "observability",
+            None,
+            json!({
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "remediated",
+                    "remediation_id": "observability-remediation-1"
+                }
+            }),
+        );
+        let ready = build_observability_remediation_supervision_readiness(
+            true,
+            true,
+            &[audit],
+            generated_at,
+        );
+        assert_eq!(ready.status, "ready");
+        assert!(!ready.production_blocked);
+        assert!(ready.latest_controller_remediated);
+        assert_eq!(
+            ready.latest_controller_status.as_deref(),
+            Some("remediated")
+        );
+
+        let optional =
+            build_observability_remediation_supervision_readiness(false, false, &[], generated_at);
+        assert_eq!(optional.status, "optional");
+        assert!(!optional.production_blocked);
     }
 
     fn ready_finance_operations_summary(
