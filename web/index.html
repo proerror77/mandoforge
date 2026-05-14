@@ -792,6 +792,30 @@
               <div class="muted">Pod template / state filesystem / warm pool readiness / lease lifecycle / artifact discovery / state locks</div>
               <button type="button" class="secondary form-inline-action" id="validate-remote-state-sync">Validate State Sync</button>
               <button type="button" class="secondary form-inline-action" id="reclaim-remote-computers">Reclaim Stale Remote Computers</button>
+              <form id="remote-runner-form" class="stack-form compact-form">
+                <label>
+                  Runner operation
+                  <input name="operation" value="create" />
+                </label>
+                <label>
+                  Remote computer ID
+                  <input name="remote_computer_id" placeholder="Optional Remote Computer UUID" />
+                </label>
+                <label>
+                  Session ID
+                  <input name="session_id" placeholder="Optional session UUID" />
+                </label>
+                <label>
+                  Pod name
+                  <input name="pod_name" value="mandoforge-agent-remote-dry-run" />
+                </label>
+                <label>
+                  Metadata JSON
+                  <textarea name="metadata" rows="3">{"source":"static-admin-console","reason":"inspect remote computer runner intent"}</textarea>
+                </label>
+                <button type="button" class="secondary form-inline-action" id="dry-run-remote-runner">Dry-run Runner</button>
+                <button type="button" class="secondary form-inline-action" id="mutate-remote-runner">Mutate Runner</button>
+              </form>
               <form id="remote-computer-form" class="stack-form compact-form">
                 <label>
                   Computer name

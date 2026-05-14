@@ -55,6 +55,8 @@ const state = {
   workerLoadValidationRun: null,
   remoteComputerReadiness: null,
   remoteComputerRunnerReadiness: null,
+  remoteComputerRunnerDryRun: null,
+  remoteComputerRunnerMutation: null,
   remoteComputers: [],
   remoteComputerLeases: [],
   remoteComputerAttachments: [],
@@ -170,6 +172,9 @@ const runWorkerLoadValidationButton = document.querySelector("#run-worker-load-v
 const remoteComputerReadinessRoot = document.querySelector("#remote-computer-readiness");
 const validateRemoteStateSyncButton = document.querySelector("#validate-remote-state-sync");
 const reclaimRemoteComputersButton = document.querySelector("#reclaim-remote-computers");
+const remoteRunnerForm = document.querySelector("#remote-runner-form");
+const dryRunRemoteRunnerButton = document.querySelector("#dry-run-remote-runner");
+const mutateRemoteRunnerButton = document.querySelector("#mutate-remote-runner");
 const remoteComputerForm = document.querySelector("#remote-computer-form");
 const remoteComputerLeaseForm = document.querySelector("#remote-computer-lease-form");
 const remoteArtifactDiscoveryForm = document.querySelector("#remote-artifact-discovery-form");
@@ -325,6 +330,8 @@ refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 runWorkerLoadValidationButton.addEventListener("click", runWorkerLoadValidation);
 validateRemoteStateSyncButton.addEventListener("click", validateRemoteStateSync);
 reclaimRemoteComputersButton.addEventListener("click", reclaimStaleRemoteComputers);
+dryRunRemoteRunnerButton.addEventListener("click", dryRunRemoteRunner);
+mutateRemoteRunnerButton.addEventListener("click", mutateRemoteRunner);
 remoteComputerForm.addEventListener("submit", createRemoteComputer);
 remoteComputerLeaseForm.addEventListener("submit", createRemoteComputerLease);
 remoteArtifactDiscoveryForm.addEventListener("submit", discoverRemoteArtifacts);
@@ -2589,6 +2596,8 @@ function renderRemoteComputerReadiness() {
   const sidecarRecoveryRun = state.remoteComputerSidecarRecoveryRun;
   const stateSyncValidation = state.remoteComputerStateSyncValidation;
   const reclaimRun = state.remoteComputerReclaimRun;
+  const runnerDryRun = state.remoteComputerRunnerDryRun;
+  const runnerMutation = state.remoteComputerRunnerMutation;
   remoteComputerReadinessRoot.innerHTML = `
     <div class="metrics compact-metrics">
       <div class="metric">
@@ -2651,6 +2660,17 @@ function renderRemoteComputerReadiness() {
       <div class="muted">API server: ${runner.api_server_configured ? "configured" : "not configured"} · bearer token: ${runner.bearer_token_configured ? "configured" : "not configured"}</div>
       <div class="muted">Namespace: ${escapeHtml(runner.namespace || "unknown")} · Service account: ${escapeHtml(runner.service_account || "unknown")}</div>
       <div class="muted">${escapeHtml(runner.message || "Kubernetes Pod mutation is disabled unless a runner is explicitly implemented")}</div>
+      <div class="muted">Supported operations: ${escapeHtml((runner.supported_operations || []).join(", ") || "not reported")}</div>
+      ${
+        runnerDryRun
+          ? `<div class="muted">Last runner dry-run: ${escapeHtml(runnerDryRun.status || "unknown")} · ${escapeHtml(runnerDryRun.operation || "unknown")} · pod ${escapeHtml(runnerDryRun.pod_name || "none")} · create ${runnerDryRun.would_create_pod ? "yes" : "no"} · delete ${runnerDryRun.would_delete_pod ? "yes" : "no"} · execution ${runnerDryRun.execution_enabled ? "enabled" : "disabled"}</div>`
+          : `<div class="muted">No Remote Computer runner dry-run in this console session</div>`
+      }
+      ${
+        runnerMutation
+          ? `<div class="muted">Last runner mutation: ${escapeHtml(runnerMutation.status || "unknown")} · ${escapeHtml(runnerMutation.operation || "unknown")} · live attempted ${runnerMutation.live_mutation_attempted ? "yes" : "no"} · status ${escapeHtml(runnerMutation.live_mutation_status_code || "none")} · ${escapeHtml(runnerMutation.message || "")}</div>`
+          : `<div class="muted">No Remote Computer runner mutation in this console session</div>`
+      }
     </div>
     <div class="item">
       <strong>EXECUTION TRANSPORT</strong>
@@ -2840,6 +2860,34 @@ function optionalNumberFormValue(form, name) {
 
 function fillRemoteLeaseComputer(remoteComputerId) {
   remoteComputerLeaseForm.elements.remote_computer_id.value = remoteComputerId;
+  remoteRunnerForm.elements.remote_computer_id.value = remoteComputerId;
+}
+
+function remoteRunnerPayload() {
+  const form = new FormData(remoteRunnerForm);
+  return {
+    operation: optionalFormValue(form, "operation"),
+    remote_computer_id: optionalFormValue(form, "remote_computer_id"),
+    session_id: optionalFormValue(form, "session_id"),
+    pod_name: optionalFormValue(form, "pod_name"),
+    metadata: parseJsonField(form.get("metadata"), "Remote runner metadata JSON"),
+  };
+}
+
+async function dryRunRemoteRunner() {
+  state.remoteComputerRunnerDryRun = await api("/api/remote-computers/runner/dry-run", {
+    method: "POST",
+    body: JSON.stringify(remoteRunnerPayload()),
+  });
+  await refreshOps();
+}
+
+async function mutateRemoteRunner() {
+  state.remoteComputerRunnerMutation = await api("/api/remote-computers/runner/mutate", {
+    method: "POST",
+    body: JSON.stringify(remoteRunnerPayload()),
+  });
+  await refreshOps();
 }
 
 async function createRemoteComputer(event) {
