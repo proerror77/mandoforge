@@ -164,11 +164,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+health_body="$(mktemp)"
+if ! health_status="$(curl -sS -o "$health_body" -w "%{http_code}" "$BASE_URL/healthz")"; then
+  echo "stage2 completion audit gate could not reach BASE_URL health endpoint: $BASE_URL/healthz" >&2
+  rm -f "$health_body"
+  exit 1
+fi
+if [[ "$health_status" != 2* ]]; then
+  echo "stage2 completion audit gate could not verify MandoForge API health at $BASE_URL/healthz: HTTP $health_status" >&2
+  sed -n '1,40p' "$health_body" >&2
+  rm -f "$health_body"
+  exit 1
+fi
+rm -f "$health_body"
+
 readiness_file="$AUDIT_DIR/api-stage2-readiness.json"
 response_body="$(mktemp)"
 http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "${auth_headers[@]}" "$BASE_URL/api/stage2/readiness")"
 if [[ "$http_status" != 2* ]]; then
-  echo "stage2 completion audit gate could not fetch /api/stage2/readiness: HTTP $http_status" >&2
+  echo "stage2 completion audit gate could not fetch $BASE_URL/api/stage2/readiness: HTTP $http_status" >&2
   sed -n '1,40p' "$response_body" >&2
   rm -f "$response_body"
   exit 1
