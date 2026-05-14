@@ -51,16 +51,17 @@ SOURCE_EVIDENCE_DIR=.mandoforge/stage2-production-evidence \
 
 This fetches `GET /api/stage2/readiness`, maps every `evidence_requirements[]` entry to the endpoint JSON artifacts in the source evidence directory, verifies declared evidence scripts, Job manifests, required controller flags, and required evidence artifacts, and writes `.mandoforge/stage2-completion-audit/checklist.md` plus `.mandoforge/stage2-completion-audit/checklist.json`. It exits non-zero by default while Stage 2 readiness is blocked or required endpoint artifacts, scripts, manifests, or flags are missing. `ALLOW_BLOCKED=1` is only for inventory and should not be used as completion proof.
 
+The strict production evidence gate runs this completion audit automatically by default after evidence collection and writes it under `$EVIDENCE_DIR/completion-audit/`. Set `RUN_STAGE2_COMPLETION_AUDIT=0` only for a narrow debugging run where an archive-ready checklist is not expected.
+
 The matching in-cluster template is `deploy/stage2-evidence/stage2-completion-audit-job.example.yaml`. It mounts the same Stage 2 production evidence PVC, reads endpoint artifacts from `/evidence`, checks the packaged `scripts/` and `deploy/` metadata in the runtime image, writes the checklist to `/evidence/completion-audit`, and remains fail-closed unless the production readiness gate and artifact coverage are complete.
 
 After the strict evidence and completion-audit Jobs pass, archive the shared evidence PVC for the release record:
 
 ```bash
 scripts/archive-stage2-production-evidence.sh .mandoforge/stage2-production-evidence-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
-scripts/verify-stage2-evidence-archive.sh .mandoforge/stage2-production-evidence-YYYYMMDDTHHMMSSZ.tar.gz
 ```
 
-The archive verifier checks the tarball checksum and manifest, then extracts `completion-audit/checklist.json`. By default it fails if the checklist is still blocked or any endpoint, artifact, evidence script, evidence Job manifest, or required controller flag is missing. `ALLOW_BLOCKED=1` is only for inventory archive inspection.
+The archive helper writes a `.sha256` checksum sidecar and `.manifest.txt` release manifest, then runs `scripts/verify-stage2-evidence-archive.sh` automatically by default. The verifier checks the tarball checksum and manifest, then extracts `completion-audit/checklist.json`. By default it fails if the checklist is still blocked or any endpoint, artifact, evidence script, evidence Job manifest, or required controller flag is missing. `ALLOW_BLOCKED=1` is only for inventory archive inspection, and `VERIFY_STAGE2_EVIDENCE_ARCHIVE=0` should only be used when debugging the archive helper itself.
 
 For a narrower collector rollout proof, run the dedicated observability collector gate:
 
@@ -186,6 +187,7 @@ The script deliberately skips higher-impact production actions unless explicitly
 - `RUN_STAGE2_OBSERVABILITY_REMEDIATION=1` runs observability remediation supervision.
 - `RUN_STAGE2_FINANCE_CONTROLLERS=1` runs finance close and accounting reconciliation endpoints.
 - `RUN_STAGE2_FINANCE_EXPORT=1` runs usage export CSV capture and export delivery proof.
+- `RUN_STAGE2_COMPLETION_AUDIT=1` writes `$EVIDENCE_DIR/completion-audit/checklist.json` from the collected evidence.
 - `VERIFY_STAGE2_VALIDATION_COVERAGE=1` fails the gate when any declared validation endpoint from `/api/stage2/readiness` is missing from the collected evidence. Leave this off for read-only inventory or partial validation runs.
 
 ## Exit Rules
