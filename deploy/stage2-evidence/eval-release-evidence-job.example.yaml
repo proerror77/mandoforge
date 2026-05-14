@@ -34,6 +34,8 @@ spec:
               value: /evidence/eval-release
             - name: RUN_STAGE2_EVAL_RELEASE_AUTOMATION
               value: "1"
+            - name: RUN_STAGE2_EVAL_RELEASE_ROLLBACK
+              value: "1"
             - name: MANDOFORGE_STAGE2_GATE_SUBJECT
               valueFrom:
                 secretKeyRef:

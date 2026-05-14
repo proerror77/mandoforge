@@ -786,6 +786,11 @@ if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-ev
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_MCP_ROLLBACK" deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml; then
+  echo "MCP Gateway evidence Job does not explicitly enable rollback evidence capture" >&2
+  exit 1
+fi
+
 if ! grep -q '/api/teams/\$TEAM_ID/mcp-servers/rollouts/summary' "$mcp_gateway_script"; then
   echo "MCP Gateway evidence script must collect rollout summary" >&2
   exit 1
@@ -853,6 +858,11 @@ fi
 
 if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/eval-release-evidence-job.example.yaml; then
   echo "eval/release evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_EVAL_RELEASE_ROLLBACK" deploy/stage2-evidence/eval-release-evidence-job.example.yaml; then
+  echo "eval/release evidence Job does not explicitly enable rollback evidence capture" >&2
   exit 1
 fi
 
@@ -938,6 +948,11 @@ fi
 
 if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/finance-evidence-job.example.yaml; then
   echo "finance evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_FINANCE_EXPORT" deploy/stage2-evidence/finance-evidence-job.example.yaml; then
+  echo "finance evidence Job does not explicitly enable export evidence capture" >&2
   exit 1
 fi
 
