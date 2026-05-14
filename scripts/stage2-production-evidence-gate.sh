@@ -33,6 +33,12 @@ slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
 
+local_script_artifact_path() {
+  local script_path="$1"
+  script_path="${script_path#./}"
+  printf '%s/local-script-%s.json\n' "$EVIDENCE_DIR" "$(slugify "$script_path")"
+}
+
 file_mtime_epoch() {
   local path="$1"
   if stat -f %m "$path" >/dev/null 2>&1; then
@@ -981,6 +987,19 @@ write_endpoint_coverage() {
 
   while IFS= read -r endpoint; do
     if [[ -z "$endpoint" ]]; then
+      continue
+    fi
+    if [[ "$endpoint" == ./* ]]; then
+      echo "$endpoint" >>"$declared_file"
+      expected_file="$(local_script_artifact_path "$endpoint")"
+      if artifact_is_fresh "$expected_file"; then
+        continue
+      elif [[ -s "$expected_file" ]]; then
+        echo "$endpoint" >>"$stale_file"
+        echo "$endpoint" >>"$missing_file"
+      else
+        echo "$endpoint" >>"$missing_file"
+      fi
       continue
     fi
     if ! resolved="$(resolve_requirement_endpoint "$endpoint")"; then
