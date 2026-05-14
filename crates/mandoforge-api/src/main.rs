@@ -720,8 +720,11 @@ struct ApprovalNotificationProductionOpsReadiness {
     controller_required: bool,
     controller_configured: bool,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
+    controller_evidence_fresh: bool,
     latest_controller_validated: bool,
     message: String,
+    blocking_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25036,16 +25039,21 @@ fn build_approval_notification_production_ops_readiness(
 ) -> ApprovalNotificationProductionOpsReadiness {
     let latest_run_age_hours = latest_run.map(|run| (generated_at - run.ran_at).num_hours());
     let latest_run_status = latest_run.map(|run| run.status.clone());
-    let latest_controller_status = audit_logs
+    let latest_controller_log = audit_logs
         .iter()
         .filter(|log| log.action == "approval.notification_ops_validation_run")
-        .max_by_key(|log| log.created_at)
+        .max_by_key(|log| log.created_at);
+    let latest_controller_status = latest_controller_log
         .and_then(|log| {
             log.details["controller_execution"]["status"]
                 .as_str()
                 .or_else(|| log.details["status"].as_str())
         })
         .map(str::to_string);
+    let latest_controller_age_hours =
+        latest_controller_log.map(|log| (generated_at - log.created_at).num_hours());
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
     if routing.channel_count == 0 {
@@ -25077,6 +25085,9 @@ fn build_approval_notification_production_ops_readiness(
             "approval notification ops controller evidence is missing or not validated".to_string(),
         );
     }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons.push("approval notification ops controller evidence is stale".to_string());
+    }
     let production_blocked = !blocking_reasons.is_empty();
     let status = if production_blocked {
         "blocked"
@@ -25102,8 +25113,11 @@ fn build_approval_notification_production_ops_readiness(
         controller_required,
         controller_configured,
         latest_controller_status,
+        latest_controller_age_hours,
+        controller_evidence_fresh,
         latest_controller_validated,
         message,
+        blocking_reasons,
     }
 }
 
@@ -43473,7 +43487,46 @@ not json
         assert_eq!(ready.status, "ready");
         assert!(!ready.production_blocked);
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+
+        let mut stale_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "approval.notification_ops_validation_run",
+            "approval_notifications",
+            None,
+            json!({
+                "status": "validated",
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "ops_id": "approval-notification-ops-stale"
+                },
+                "checked_at": generated_at - chrono::Duration::hours(25),
+            }),
+        );
+        stale_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = build_approval_notification_production_ops_readiness(
+            Some(&delivery_run),
+            &routing,
+            &[stale_audit],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.production_blocked);
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(
+            stale
+                .message
+                .contains("approval notification ops controller evidence is stale")
+        );
     }
 
     #[test]

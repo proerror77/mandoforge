@@ -66,6 +66,8 @@ write_summary() {
   local pending_approvals
   local unroutable_pending
   local production_ops_status
+  local ops_controller_fresh
+  local ops_controller_age_hours
   local deployment_status
   local delivery_evidence_status
   local delivery_status
@@ -79,6 +81,8 @@ write_summary() {
   pending_approvals="$(jq -r '.pending_approval_count // .pending_count // 0' "$routing_file")"
   unroutable_pending="$(jq -r '.unroutable_pending_approval_count // .unroutable_pending_count // 0' "$routing_file")"
   production_ops_status="$(jq -r '.production_ops.status // "unknown"' "$runs_file")"
+  ops_controller_fresh="$(jq -r '.production_ops.controller_evidence_fresh // false' "$runs_file")"
+  ops_controller_age_hours="$(jq -r '.production_ops.latest_controller_age_hours // "none"' "$runs_file")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$runs_file")"
   delivery_evidence_status="not_requested"
   delivery_status="not_run"
@@ -102,6 +106,8 @@ write_summary() {
     echo "pending_approval_count=$pending_approvals"
     echo "unroutable_pending_approval_count=$unroutable_pending"
     echo "production_ops_status=$production_ops_status"
+    echo "production_ops_controller_evidence_fresh=$ops_controller_fresh"
+    echo "production_ops_controller_age_hours=$ops_controller_age_hours"
     echo "deployment_readiness_status=$deployment_status"
     echo "delivery_evidence_status=$delivery_evidence_status"
     echo "delivery_status=$delivery_status"
