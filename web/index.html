@@ -712,6 +712,60 @@
                 <button type="button" class="secondary form-inline-action" id="validate-mcp-deployment">Validate Deployment</button>
                 <button type="button" class="secondary form-inline-action" id="run-due-mcp-rollouts">Run Due Rollouts</button>
               </form>
+              <form id="mcp-update-form" class="stack-form compact-form">
+                <label>
+                  Team ID
+                  <input name="team_id" required placeholder="Team UUID" />
+                </label>
+                <label>
+                  MCP server ID
+                  <input name="server_id" required placeholder="MCP server UUID" />
+                </label>
+                <label>
+                  Transport
+                  <input name="transport" required value="http" />
+                </label>
+                <label>
+                  Tool allowlist
+                  <input name="tool_allowlist" value="search,query" />
+                </label>
+                <label>
+                  Config JSON
+                  <textarea name="config" rows="4">{"secret_refs":["vault:mcp/docs#api_key"]}</textarea>
+                </label>
+                <button type="submit">Update MCP Server</button>
+              </form>
+              <form id="mcp-rollout-form" class="stack-form compact-form">
+                <label>
+                  Team ID
+                  <input name="team_id" required placeholder="Team UUID" />
+                </label>
+                <label>
+                  MCP server ID
+                  <input name="server_id" required placeholder="MCP server UUID" />
+                </label>
+                <label>
+                  Target transport
+                  <input name="transport" required value="http" />
+                </label>
+                <label>
+                  Target status
+                  <input name="status" required value="active" />
+                </label>
+                <label>
+                  Target tool allowlist
+                  <input name="tool_allowlist" value="search,query" />
+                </label>
+                <label>
+                  Target config JSON
+                  <textarea name="config" rows="4">{"secret_refs":["vault:mcp/docs#api_key"]}</textarea>
+                </label>
+                <label>
+                  Activate after
+                  <input name="activate_after" placeholder="Optional RFC3339 timestamp" />
+                </label>
+                <button type="submit">Request MCP Rollout</button>
+              </form>
               <div id="mcp-servers" class="list"></div>
             </div>
             <div>

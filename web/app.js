@@ -227,6 +227,8 @@ const evalCaseForm = document.querySelector("#eval-case-form");
 const evalRunForm = document.querySelector("#eval-run-form");
 const bootstrapEvalSuiteButton = document.querySelector("#bootstrap-eval-suite");
 const mcpForm = document.querySelector("#mcp-form");
+const mcpUpdateForm = document.querySelector("#mcp-update-form");
+const mcpRolloutForm = document.querySelector("#mcp-rollout-form");
 const loadMcpButton = document.querySelector("#load-mcp");
 const runMcpHealthButton = document.querySelector("#run-mcp-health");
 const runDueMcpHealthButton = document.querySelector("#run-due-mcp-health");
@@ -305,6 +307,8 @@ runDueAgentReleasesButton.addEventListener("click", runDueAgentReleaseAutomation
 validateAgentReleaseDeploymentButton.addEventListener("click", validateAgentReleaseDeployment);
 validateAgentReleaseOrchestrationButton.addEventListener("click", validateAgentReleaseOrchestration);
 mcpForm.addEventListener("submit", createMcpServer);
+mcpUpdateForm.addEventListener("submit", updateMcpServerFromForm);
+mcpRolloutForm.addEventListener("submit", requestMcpRolloutFromForm);
 loadMcpButton.addEventListener("click", loadMcpServers);
 runMcpHealthButton.addEventListener("click", runMcpHealth);
 runDueMcpHealthButton.addEventListener("click", runDueMcpHealth);
@@ -1144,21 +1148,93 @@ async function createMcpServer(event) {
   event.preventDefault();
   const form = new FormData(mcpForm);
   const teamId = String(form.get("team_id") || "").trim();
-  const toolAllowlist = String(form.get("tool_allowlist") || "")
-    .split(",")
-    .map((tool) => tool.trim())
-    .filter(Boolean);
+  const payload = mcpPayloadFromForm(form);
   await api(`/api/teams/${teamId}/mcp-servers`, {
     method: "POST",
     body: JSON.stringify({
-      name: form.get("name"),
-      transport: form.get("transport"),
-      config: parseJsonField(form.get("config"), "MCP config"),
-      tool_allowlist: toolAllowlist,
+      name: String(form.get("name") || "").trim(),
+      ...payload,
     }),
   });
   state.mcpTeamId = teamId;
   await loadMcpServers();
+}
+
+function mcpToolAllowlistFromForm(form) {
+  return String(form.get("tool_allowlist") || "")
+    .split(",")
+    .map((tool) => tool.trim())
+    .filter(Boolean);
+}
+
+function mcpPayloadFromForm(form) {
+  return {
+    transport: String(form.get("transport") || "").trim(),
+    config: parseJsonField(form.get("config"), "MCP config"),
+    tool_allowlist: mcpToolAllowlistFromForm(form),
+  };
+}
+
+async function updateMcpServerFromForm(event) {
+  event.preventDefault();
+  const form = new FormData(mcpUpdateForm);
+  const teamId = String(form.get("team_id") || state.mcpTeamId || "").trim();
+  const serverId = String(form.get("server_id") || "").trim();
+  await api(`/api/teams/${teamId}/mcp-servers/${serverId}`, {
+    method: "PATCH",
+    body: JSON.stringify(mcpPayloadFromForm(form)),
+  });
+  state.mcpTeamId = teamId;
+  await loadMcpServers();
+}
+
+async function requestMcpRolloutFromForm(event) {
+  event.preventDefault();
+  const form = new FormData(mcpRolloutForm);
+  const teamId = String(form.get("team_id") || state.mcpTeamId || "").trim();
+  const serverId = String(form.get("server_id") || "").trim();
+  await api(`/api/teams/${teamId}/mcp-servers/${serverId}/rollouts`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...mcpPayloadFromForm(form),
+      status: String(form.get("status") || "").trim(),
+      activate_after: String(form.get("activate_after") || "").trim() || null,
+      reason: "Requested from static console",
+    }),
+  });
+  state.mcpTeamId = teamId;
+  await loadMcpServers();
+}
+
+function fillMcpLifecycleForms(server) {
+  const toolAllowlist = (server.tool_allowlist || []).join(",");
+  const configJson = JSON.stringify(server.config || {}, null, 2);
+  mcpUpdateForm.elements.team_id.value = state.mcpTeamId || "";
+  mcpUpdateForm.elements.server_id.value = server.id;
+  mcpUpdateForm.elements.transport.value = server.transport;
+  mcpUpdateForm.elements.tool_allowlist.value = toolAllowlist;
+  mcpUpdateForm.elements.config.value = configJson;
+  mcpRolloutForm.elements.team_id.value = state.mcpTeamId || "";
+  mcpRolloutForm.elements.server_id.value = server.id;
+  mcpRolloutForm.elements.transport.value = server.transport;
+  mcpRolloutForm.elements.status.value = server.status;
+  mcpRolloutForm.elements.tool_allowlist.value = toolAllowlist;
+  mcpRolloutForm.elements.config.value = configJson;
+  mcpRolloutForm.elements.activate_after.value = "";
+}
+
+function selectMcpServerForUpdate(serverId) {
+  const server = state.mcpServers.find((item) => item.id === serverId);
+  if (server) {
+    fillMcpLifecycleForms(server);
+  }
+}
+
+function selectMcpServerForRollout(serverId) {
+  const server = state.mcpServers.find((item) => item.id === serverId);
+  if (server) {
+    fillMcpLifecycleForms(server);
+  }
 }
 
 async function createUsageRollup() {
@@ -1490,6 +1566,8 @@ async function loadMcpServers() {
     return;
   }
   state.mcpTeamId = teamId;
+  mcpUpdateForm.elements.team_id.value = teamId;
+  mcpRolloutForm.elements.team_id.value = teamId;
   const [servers, rolloutSummary, rolloutRuns] = await Promise.all([
     api(`/api/teams/${teamId}/mcp-servers`),
     api(`/api/teams/${teamId}/mcp-servers/rollouts/summary`),
@@ -1580,34 +1658,7 @@ async function updateMcpStatus(serverId, status) {
 }
 
 async function requestMcpRollout(serverId) {
-  if (!state.mcpTeamId) return;
-  const server = state.mcpServers.find((item) => item.id === serverId);
-  if (!server) return;
-  const transport = window.prompt("Target transport", server.transport);
-  if (transport === null) return;
-  const tools = window.prompt("Target tool allowlist", server.tool_allowlist.join(","));
-  if (tools === null) return;
-  const config = window.prompt("Target config JSON", JSON.stringify(server.config, null, 2));
-  if (config === null) return;
-  const status = window.prompt("Target status", server.status);
-  if (status === null) return;
-  const activateAfter = window.prompt("Activate after RFC3339 (blank for manual apply)", "");
-  if (activateAfter === null) return;
-  await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/rollouts`, {
-    method: "POST",
-    body: JSON.stringify({
-      transport,
-      config: parseJsonField(config, "MCP rollout config"),
-      tool_allowlist: tools
-        .split(",")
-        .map((tool) => tool.trim())
-        .filter(Boolean),
-      status,
-      activate_after: activateAfter.trim() || null,
-      reason: "Requested from static console",
-    }),
-  });
-  await loadMcpServers();
+  selectMcpServerForRollout(serverId);
 }
 
 async function applyMcpRollout(serverId, rolloutId) {
@@ -1627,27 +1678,7 @@ async function rollbackMcpRollout(serverId, rolloutId) {
 }
 
 async function editMcpServer(serverId) {
-  if (!state.mcpTeamId) return;
-  const server = state.mcpServers.find((item) => item.id === serverId);
-  if (!server) return;
-  const transport = window.prompt("Transport", server.transport);
-  if (transport === null) return;
-  const tools = window.prompt("Tool allowlist", server.tool_allowlist.join(","));
-  if (tools === null) return;
-  const config = window.prompt("Config JSON", JSON.stringify(server.config, null, 2));
-  if (config === null) return;
-  await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      transport,
-      config: parseJsonField(config, "MCP config"),
-      tool_allowlist: tools
-        .split(",")
-        .map((tool) => tool.trim())
-        .filter(Boolean),
-    }),
-  });
-  await loadMcpServers();
+  selectMcpServerForUpdate(serverId);
 }
 
 async function refreshExecutionJobs() {
@@ -5418,6 +5449,8 @@ function setTeamId(teamId) {
   projectForm.elements.team_id.value = teamId;
   membershipForm.elements.team_id.value = teamId;
   mcpForm.elements.team_id.value = teamId;
+  mcpUpdateForm.elements.team_id.value = teamId;
+  mcpRolloutForm.elements.team_id.value = teamId;
   providerAccessForm.elements.team_id.value = teamId;
 }
 
