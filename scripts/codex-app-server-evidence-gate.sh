@@ -60,6 +60,7 @@ write_summary() {
   local summary_file_json="$EVIDENCE_DIR/api-codex-app-server-control-plane-summary.json"
   local deployment_file="$EVIDENCE_DIR/api-codex-app-server-deployment-validate.json"
   local ops_file="$EVIDENCE_DIR/api-codex-app-server-ops-validate.json"
+  local stale_poll_evidence_file="$EVIDENCE_DIR/codex-app-server-stale-poll-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local health_status
   local configured
@@ -70,6 +71,10 @@ write_summary() {
   local deployment_status
   local deployment_validation_status
   local ops_validation_status
+  local stale_poll_evidence_status
+  local stale_poll_status
+  local stale_poll_processed_count
+  local stale_poll_failed_count
   local blocked_count
 
   health_status="$(jq -r '.status // "unknown"' "$health_file")"
@@ -81,6 +86,16 @@ write_summary() {
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$summary_file_json")"
   deployment_validation_status="$(jq -r '.status // "unknown"' "$deployment_file")"
   ops_validation_status="$(jq -r '.status // "unknown"' "$ops_file")"
+  stale_poll_evidence_status="not_requested"
+  stale_poll_status="not_run"
+  stale_poll_processed_count="0"
+  stale_poll_failed_count="0"
+  if [[ -s "$stale_poll_evidence_file" ]]; then
+    stale_poll_evidence_status="$(jq -r '.status // "unknown"' "$stale_poll_evidence_file")"
+    stale_poll_status="$(jq -r '.response.status // "unknown"' "$stale_poll_evidence_file")"
+    stale_poll_processed_count="$(jq -r '.response.processed_count // .response.polled_count // 0' "$stale_poll_evidence_file")"
+    stale_poll_failed_count="$(jq -r '.response.failed_count // 0' "$stale_poll_evidence_file")"
+  fi
   blocked_count="$(jq -r '[
       .production_ops.production_blocked,
       .deployment_readiness.production_blocked
@@ -96,6 +111,10 @@ write_summary() {
     echo "deployment_readiness_status=$deployment_status"
     echo "deployment_validation_status=$deployment_validation_status"
     echo "ops_validation_status=$ops_validation_status"
+    echo "stale_poll_evidence_status=$stale_poll_evidence_status"
+    echo "stale_poll_status=$stale_poll_status"
+    echo "stale_poll_processed_count=$stale_poll_processed_count"
+    echo "stale_poll_failed_count=$stale_poll_failed_count"
     echo "production_blocked_count=$blocked_count"
     echo "stale_poll_run=$RUN_CODEX_STALE_POLL"
     echo "evidence_dir=$EVIDENCE_DIR"
@@ -121,6 +140,24 @@ write_summary() {
   fi
 }
 
+capture_stale_poll_evidence() {
+  local stale_poll_response
+  local stale_poll_evidence_file="$EVIDENCE_DIR/codex-app-server-stale-poll-evidence.json"
+
+  stale_poll_response="$(fetch_json POST /api/codex-app-server/runs/poll-stale)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$stale_poll_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$stale_poll_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$stale_poll_evidence_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -134,7 +171,7 @@ fetch_json POST /api/codex-app-server/deployment/validate >/dev/null
 fetch_json POST /api/codex-app-server/ops/validate >/dev/null
 
 if [[ "$RUN_CODEX_STALE_POLL" == "1" ]]; then
-  fetch_json POST /api/codex-app-server/runs/poll-stale >/dev/null
+  capture_stale_poll_evidence
 else
   echo "skipping Codex App Server stale poll; set RUN_STAGE2_CODEX_STALE_POLL=1 to include stale-run supervision evidence" >&2
 fi

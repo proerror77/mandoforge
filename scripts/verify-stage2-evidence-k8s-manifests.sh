@@ -611,6 +611,21 @@ if ! grep -q "/api/codex-app-server/runs/poll-stale" "$codex_app_server_script";
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_CODEX_STALE_POLL" "$codex_app_server_script"; then
+  echo "Codex App Server evidence script must support optional stale-poll evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "codex-app-server-stale-poll-evidence.json" "$codex_app_server_script"; then
+  echo "Codex App Server evidence script must write explicit stale-poll evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "codex-app-server-stale-poll-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit Codex App Server stale-poll evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "mcp-gateway-evidence-gate.sh" deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml; then
   echo "MCP Gateway evidence Job does not run the dedicated evidence gate" >&2
   exit 1

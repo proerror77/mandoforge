@@ -366,6 +366,24 @@ capture_approval_notification_delivery_validation() {
     }' >"$delivery_file"
 }
 
+capture_codex_app_server_stale_poll_validation() {
+  local stale_poll_response
+  local stale_poll_file="$EVIDENCE_DIR/codex-app-server-stale-poll-evidence.json"
+
+  stale_poll_response="$(fetch_json POST /api/codex-app-server/runs/poll-stale)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$stale_poll_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$stale_poll_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$stale_poll_file"
+}
+
 run_controller_validations() {
   fetch_json POST /api/tenant-isolation/routing/validate >/dev/null
   fetch_json POST /api/providers/policy-gate/run >/dev/null
@@ -423,7 +441,7 @@ run_controller_validations() {
   fi
 
   if [[ "${RUN_STAGE2_CODEX_STALE_POLL:-0}" == "1" ]]; then
-    fetch_json POST /api/codex-app-server/runs/poll-stale >/dev/null
+    capture_codex_app_server_stale_poll_validation
   else
     echo "skipping Codex App Server stale poll; set RUN_STAGE2_CODEX_STALE_POLL=1 to include stale-run supervision evidence" >&2
   fi
