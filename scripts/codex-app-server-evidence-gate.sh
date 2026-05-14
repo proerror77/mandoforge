@@ -71,6 +71,8 @@ write_summary() {
   local ops_controller_fresh
   local ops_controller_age_hours
   local deployment_status
+  local deployment_controller_fresh
+  local deployment_controller_age_hours
   local deployment_validation_status
   local ops_validation_status
   local stale_poll_evidence_status
@@ -88,6 +90,8 @@ write_summary() {
   ops_controller_fresh="$(jq -r '.production_ops.controller_evidence_fresh // false' "$summary_file_json")"
   ops_controller_age_hours="$(jq -r '.production_ops.latest_controller_age_hours // "none"' "$summary_file_json")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$summary_file_json")"
+  deployment_controller_fresh="$(jq -r '.deployment_readiness.controller_evidence_fresh // false' "$summary_file_json")"
+  deployment_controller_age_hours="$(jq -r '.deployment_readiness.latest_controller_age_hours // "none"' "$summary_file_json")"
   deployment_validation_status="$(jq -r '.status // "unknown"' "$deployment_file")"
   ops_validation_status="$(jq -r '.status // "unknown"' "$ops_file")"
   stale_poll_evidence_status="not_requested"
@@ -115,6 +119,8 @@ write_summary() {
     echo "production_ops_controller_evidence_fresh=$ops_controller_fresh"
     echo "production_ops_controller_age_hours=$ops_controller_age_hours"
     echo "deployment_readiness_status=$deployment_status"
+    echo "deployment_controller_evidence_fresh=$deployment_controller_fresh"
+    echo "deployment_controller_age_hours=$deployment_controller_age_hours"
     echo "deployment_validation_status=$deployment_validation_status"
     echo "ops_validation_status=$ops_validation_status"
     echo "stale_poll_evidence_status=$stale_poll_evidence_status"
