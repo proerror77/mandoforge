@@ -107,7 +107,8 @@ discover_team_id() {
 write_summary() {
   local rollout_summary_file="$EVIDENCE_DIR/api-teams-$TEAM_ID-mcp-servers-rollouts-summary.json"
   local rollout_runs_file="$EVIDENCE_DIR/api-teams-$TEAM_ID-mcp-servers-rollouts-runs.json"
-  local deployment_file="$EVIDENCE_DIR/api-teams-$TEAM_ID-mcp-servers-deployment-validate.json"
+  local deployment_evidence_file="$EVIDENCE_DIR/mcp-deployment-validation-evidence.json"
+  local due_run_evidence_file="$EVIDENCE_DIR/mcp-rollout-due-run-evidence.json"
   local rollback_file="$EVIDENCE_DIR/mcp-rollback-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local server_count
@@ -120,6 +121,9 @@ write_summary() {
   local production_orchestration_status
   local deployment_status
   local deployment_validation_status
+  local deployment_evidence_status
+  local due_run_evidence_status
+  local due_run_status
   local controller_required
   local controller_configured
   local latest_controller_status
@@ -134,7 +138,18 @@ write_summary() {
   production_ops_status="$(jq -r '.production_ops.status // "unknown"' "$rollout_runs_file")"
   production_orchestration_status="$(jq -r '.production_orchestration.status // "unknown"' "$rollout_runs_file")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$rollout_runs_file")"
-  deployment_validation_status="$(jq -r '.status // "unknown"' "$deployment_file")"
+  deployment_evidence_status="missing"
+  deployment_validation_status="unknown"
+  if [[ -s "$deployment_evidence_file" ]]; then
+    deployment_evidence_status="$(jq -r '.status // "unknown"' "$deployment_evidence_file")"
+    deployment_validation_status="$(jq -r '.response.status // "unknown"' "$deployment_evidence_file")"
+  fi
+  due_run_evidence_status="not_requested"
+  due_run_status="not_run"
+  if [[ -s "$due_run_evidence_file" ]]; then
+    due_run_evidence_status="$(jq -r '.status // "unknown"' "$due_run_evidence_file")"
+    due_run_status="$(jq -r '.response.status // "unknown"' "$due_run_evidence_file")"
+  fi
   controller_required="$(jq -r '.deployment_readiness.controller_required // false' "$rollout_runs_file")"
   controller_configured="$(jq -r '.deployment_readiness.controller_configured // false' "$rollout_runs_file")"
   latest_controller_status="$(jq -r '.deployment_readiness.latest_controller_status // "none"' "$rollout_runs_file")"
@@ -155,7 +170,10 @@ write_summary() {
     echo "production_ops_status=$production_ops_status"
     echo "production_orchestration_status=$production_orchestration_status"
     echo "deployment_readiness_status=$deployment_status"
+    echo "deployment_evidence_status=$deployment_evidence_status"
     echo "deployment_validation_status=$deployment_validation_status"
+    echo "due_run_evidence_status=$due_run_evidence_status"
+    echo "due_run_status=$due_run_status"
     echo "deployment_controller_required=$controller_required"
     echo "deployment_controller_configured=$controller_configured"
     echo "latest_deployment_controller_status=$latest_controller_status"
@@ -185,6 +203,42 @@ write_summary() {
     echo "MCP Gateway evidence gate failed closed; set ALLOW_BLOCKED=1 only for inventory runs." >&2
     exit 1
   fi
+}
+
+capture_deployment_validation_evidence() {
+  local deployment_response
+  local deployment_evidence_file="$EVIDENCE_DIR/mcp-deployment-validation-evidence.json"
+
+  deployment_response="$(fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/deployment/validate")"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$deployment_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$deployment_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$deployment_evidence_file"
+}
+
+capture_due_run_evidence() {
+  local due_run_response
+  local due_run_evidence_file="$EVIDENCE_DIR/mcp-rollout-due-run-evidence.json"
+
+  due_run_response="$(fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/rollouts/run-due")"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$due_run_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$due_run_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$due_run_evidence_file"
 }
 
 capture_rollback_evidence() {
@@ -246,10 +300,10 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 discover_team_id
 fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/summary" >/dev/null
 fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/runs" >/dev/null
-fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/deployment/validate" >/dev/null
+capture_deployment_validation_evidence
 
 if [[ "$RUN_MCP_DUE_RUN" == "1" ]]; then
-  fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/rollouts/run-due" >/dev/null
+  capture_due_run_evidence
 else
   echo "skipping MCP rollout due-run; set RUN_STAGE2_MCP_DUE_RUN=1 to include due-run evidence" >&2
 fi

@@ -791,6 +791,31 @@ if ! grep -q '/api/teams/\$TEAM_ID/mcp-servers/rollouts/run-due' "$mcp_gateway_s
   exit 1
 fi
 
+if ! grep -q "mcp-deployment-validation-evidence.json" "$mcp_gateway_script"; then
+  echo "MCP Gateway evidence script must write explicit deployment validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "mcp-deployment-validation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit MCP deployment validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_MCP_DUE_RUN" "$mcp_gateway_script"; then
+  echo "MCP Gateway evidence script must support optional due-run evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "mcp-rollout-due-run-evidence.json" "$mcp_gateway_script"; then
+  echo "MCP Gateway evidence script must write explicit due-run evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "mcp-rollout-due-run-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit MCP due-run evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "RUN_STAGE2_MCP_ROLLBACK" "$mcp_gateway_script"; then
   echo "MCP Gateway evidence script must support optional rollback evidence capture" >&2
   exit 1

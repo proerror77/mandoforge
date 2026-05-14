@@ -298,6 +298,56 @@ capture_mcp_rollback_validation() {
     }' >"$rollback_file"
 }
 
+capture_mcp_deployment_validation() {
+  if [[ -z "$TEAM_ID" ]]; then
+    echo "skipping MCP connector deployment validation; set MANDOFORGE_STAGE2_TEAM_ID or create an active team to include deployment evidence" >&2
+    return 0
+  fi
+
+  local deployment_response
+  local deployment_file="$EVIDENCE_DIR/mcp-deployment-validation-evidence.json"
+
+  deployment_response="$(fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/deployment/validate")"
+  jq -n \
+    --arg status "captured" \
+    --arg team_id "$TEAM_ID" \
+    --arg response_file "$deployment_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$deployment_response" \
+    '{
+      status: $status,
+      team_id: $team_id,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$deployment_file"
+}
+
+capture_mcp_due_run_validation() {
+  if [[ -z "$TEAM_ID" ]]; then
+    echo "skipping MCP connector due-run; set MANDOFORGE_STAGE2_TEAM_ID or create an active team to include due-run evidence" >&2
+    return 0
+  fi
+
+  local due_run_response
+  local due_run_file="$EVIDENCE_DIR/mcp-rollout-due-run-evidence.json"
+
+  due_run_response="$(fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/rollouts/run-due")"
+  jq -n \
+    --arg status "captured" \
+    --arg team_id "$TEAM_ID" \
+    --arg response_file "$due_run_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$due_run_response" \
+    '{
+      status: $status,
+      team_id: $team_id,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$due_run_file"
+}
+
 capture_eval_release_rollback_validation() {
   local summary_file
   local selected_file="$EVIDENCE_DIR/eval-release-rollback-candidate.json"
@@ -619,8 +669,8 @@ run_controller_validations() {
   fetch_json POST /api/scheduler/run-due >/dev/null
 
   if [[ -n "$TEAM_ID" ]]; then
-    fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/deployment/validate" >/dev/null
-    fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/rollouts/run-due" >/dev/null
+    capture_mcp_deployment_validation
+    capture_mcp_due_run_validation
   else
     echo "skipping MCP connector validation; set MANDOFORGE_STAGE2_TEAM_ID to include team-scoped MCP rollout evidence" >&2
   fi
