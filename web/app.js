@@ -2690,7 +2690,7 @@ function renderRemoteComputerReadiness() {
       <strong>PRODUCTION STATE SYNC GATE</strong>
       <div class="muted">${escapeHtml(productionStateSync.message || "Remote Computer production state sync gate is not reported")}</div>
       <div class="muted">provider ${escapeHtml(productionStateSync.provider || "unknown")} · distributed ${productionStateSync.distributed_filesystem_configured ? "yes" : "no"} · profile ${productionStateSync.production_profile_present ? "present" : "missing"} · contract ${productionStateSync.state_contract_present ? "present" : "missing"} · lock manager ${productionStateSync.lock_manager_configured ? "yes" : "no"}</div>
-      <div class="muted">Controller: required ${productionStateSync.controller_required ? "yes" : "no"} · configured ${productionStateSync.controller_configured ? "yes" : "no"} · latest ${escapeHtml(productionStateSync.latest_validation_at || "none")} · status ${escapeHtml(productionStateSync.latest_controller_status || "none")} · validated ${productionStateSync.latest_controller_validated ? "yes" : "no"}</div>
+      <div class="muted">Controller: required ${productionStateSync.controller_required ? "yes" : "no"} · configured ${productionStateSync.controller_configured ? "yes" : "no"} · latest ${escapeHtml(productionStateSync.latest_validation_at || "none")} · status ${escapeHtml(productionStateSync.latest_controller_status || "none")} · validated ${productionStateSync.latest_controller_validated ? "yes" : "no"} · fresh ${productionStateSync.controller_evidence_fresh ? "yes" : "no"} · age ${productionStateSync.latest_controller_age_hours ?? "n/a"}h</div>
       ${
         stateSyncValidation
           ? `<pre>${escapeHtml(JSON.stringify(stateSyncValidation, null, 2))}</pre>`

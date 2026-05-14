@@ -1806,6 +1806,8 @@ struct RemoteComputerProductionStateSyncReadiness {
     latest_validation_at: Option<DateTime<Utc>>,
     latest_validation_status: Option<String>,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
+    controller_evidence_fresh: bool,
     latest_controller_validated: bool,
     conflict_policy: String,
     provider: String,
@@ -27994,6 +27996,11 @@ fn build_remote_computer_production_state_sync_readiness(
         .and_then(|execution| execution.get("status"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let latest_controller_age_hours = latest_validation
+        .filter(|_| latest_controller_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     if controller_required && !controller_configured {
         blocking_reasons.push("state sync controller is required but not configured".to_string());
@@ -28008,6 +28015,9 @@ fn build_remote_computer_production_state_sync_readiness(
     if controller_required && controller_configured && !latest_controller_validated {
         blocking_reasons
             .push("state sync controller evidence is missing or not validated".to_string());
+    }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons.push("state sync controller evidence is stale".to_string());
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -28038,6 +28048,8 @@ fn build_remote_computer_production_state_sync_readiness(
         latest_validation_at,
         latest_validation_status,
         latest_controller_status,
+        latest_controller_age_hours,
+        controller_evidence_fresh,
         latest_controller_validated,
         conflict_policy: state_filesystem.conflict_policy.clone(),
         provider: state_filesystem.provider.clone(),
@@ -34048,7 +34060,7 @@ not json
                 .any(|reason| { reason == "state sync controller is required but not configured" })
         );
 
-        let audit = new_audit_log(
+        let mut audit = new_audit_log(
             None,
             "user",
             None,
@@ -34066,6 +34078,7 @@ not json
                 }
             }),
         );
+        audit.created_at = generated_at;
         let ready = build_remote_computer_production_state_sync_readiness(
             &state_filesystem,
             &[audit],
@@ -34077,6 +34090,47 @@ not json
         assert!(!ready.production_blocked);
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
+
+        let mut stale_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "remote_computer.production_state_sync_validation",
+            "remote_computer_state_sync",
+            None,
+            json!({
+                "status": "validated",
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "state_sync_id": "state-sync-1"
+                }
+            }),
+        );
+        stale_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = build_remote_computer_production_state_sync_readiness(
+            &state_filesystem,
+            &[stale_audit],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.production_blocked);
+        assert_eq!(stale.latest_controller_status.as_deref(), Some("validated"));
+        assert!(stale.latest_controller_validated);
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(
+            stale
+                .blocking_reasons
+                .iter()
+                .any(|reason| reason == "state sync controller evidence is stale")
+        );
     }
 
     #[test]

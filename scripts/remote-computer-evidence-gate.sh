@@ -69,6 +69,8 @@ write_summary() {
   local runner_status
   local state_sync_evidence_status
   local state_sync_validation_status
+  local state_sync_controller_fresh
+  local state_sync_controller_age_hours
   local sidecar_recovery_evidence_status
   local sidecar_recovery_run_status
   local blocked_count
@@ -76,6 +78,8 @@ write_summary() {
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
   score="$(jq -r '.readiness_score // 0' "$readiness_file")"
   state_sync_status="$(jq -r '.production_state_sync.status // "unknown"' "$readiness_file")"
+  state_sync_controller_fresh="$(jq -r '.production_state_sync.controller_evidence_fresh // false' "$readiness_file")"
+  state_sync_controller_age_hours="$(jq -r '.production_state_sync.latest_controller_age_hours // "none"' "$readiness_file")"
   sidecar_supervision_status="$(jq -r '.sidecar_supervision.status // "unknown"' "$readiness_file")"
   sidecar_recovery_status="$(jq -r '.sidecar_recovery.status // "unknown"' "$readiness_file")"
   runner_status="$(jq -r '.status // "unknown"' "$runner_file")"
@@ -105,6 +109,8 @@ write_summary() {
     echo "runner_status=$runner_status"
     echo "state_sync_evidence_status=$state_sync_evidence_status"
     echo "state_sync_validation_status=$state_sync_validation_status"
+    echo "state_sync_controller_evidence_fresh=$state_sync_controller_fresh"
+    echo "state_sync_controller_age_hours=$state_sync_controller_age_hours"
     echo "sidecar_recovery_evidence_status=$sidecar_recovery_evidence_status"
     echo "sidecar_recovery_run_status=$sidecar_recovery_run_status"
     echo "production_blocked_count=$blocked_count"
