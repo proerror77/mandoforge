@@ -25,6 +25,7 @@ jobs:
       - run: node --check web/app.js
       - run: bash -n scripts/stage1-final-gate.sh
       - run: bash -n scripts/stage2-production-evidence-gate.sh
+      - run: bash -n scripts/stage2-completion-audit-gate.sh
       - run: bash -n scripts/observability-collector-evidence-gate.sh
       - run: bash -n scripts/remote-computer-evidence-gate.sh
       - run: bash -n scripts/provider-governance-evidence-gate.sh

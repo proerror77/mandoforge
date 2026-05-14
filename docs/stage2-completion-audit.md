@@ -37,6 +37,7 @@ cargo test -p mandoforge-api
 cargo check -p mandoforge-api --bin mandoforge-worker
 cargo test -p mandoforge-api stage2_readiness -- --nocapture
 ALLOW_BLOCKED=1 BASE_URL=http://127.0.0.1:8792 EVIDENCE_DIR=.mandoforge/stage2-production-evidence-local ./scripts/stage2-production-evidence-gate.sh
+ALLOW_BLOCKED=1 BASE_URL=http://127.0.0.1:8792 SOURCE_EVIDENCE_DIR=.mandoforge/stage2-production-evidence-local ./scripts/stage2-completion-audit-gate.sh
 ./scripts/verify-static-ui-actionbook.sh
 ./scripts/verify-stage2-controller-env-template.sh
 ./scripts/verify-stage2-evidence-k8s-manifests.sh
@@ -59,6 +60,7 @@ Latest evidence:
 cargo test -p mandoforge-api: 211 passed
 cargo test -p mandoforge-api stage2_readiness -- --nocapture: 1 passed
 stage2 production evidence gate local inventory: stage2_status=blocked; open_gap_count=12; evidence_requirement_count=12; validation_declared_endpoint_count=26; validation_missing_endpoint_count=26
+Stage 2 completion audit gate writes `.mandoforge/stage2-completion-audit/checklist.md` and `.mandoforge/stage2-completion-audit/checklist.json`, mapping every readiness `evidence_requirements[]` item to discovered readiness/validation endpoint artifacts and failing closed while readiness remains blocked or evidence artifacts are missing
 strict validation coverage gate fails closed without production validation evidence and reports missing endpoints; controller-backed validation mode reports missing controller configuration, for example POST /api/tenant-isolation/routing/validate returned HTTP 400 with MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL required
 static UI actionbook smoke ok
 Stage 2 controller env template verifier ok; Stage 2 evidence K8s manifest verifier ok; Remote Computer K8s manifest verifier ok

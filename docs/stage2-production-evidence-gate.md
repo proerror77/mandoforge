@@ -41,6 +41,16 @@ To run the same rehearsal without manually starting the API:
 
 This starts a temporary local API on `127.0.0.1:8794`, injects mock controller URLs into that API process, runs `scripts/stage2-controller-drill.sh` against a mock controller on `127.0.0.1:18082` with optional controller actions enabled by default, and records evidence under `.mandoforge/stage2-controller-drill-live-evidence/`. It is a CI/local wiring proof only; it does not replace real production controller evidence.
 
+To turn collected evidence into a requirement-by-requirement completion checklist, run:
+
+```bash
+ALLOW_BLOCKED=1 \
+SOURCE_EVIDENCE_DIR=.mandoforge/stage2-production-evidence \
+./scripts/stage2-completion-audit-gate.sh
+```
+
+This fetches `GET /api/stage2/readiness`, maps every `evidence_requirements[]` entry to the endpoint JSON artifacts in the source evidence directory, and writes `.mandoforge/stage2-completion-audit/checklist.md` plus `.mandoforge/stage2-completion-audit/checklist.json`. It exits non-zero by default while Stage 2 readiness is blocked or required endpoint artifacts are missing. `ALLOW_BLOCKED=1` is only for inventory and should not be used as completion proof.
+
 For a narrower collector rollout proof, run the dedicated observability collector gate:
 
 ```bash
