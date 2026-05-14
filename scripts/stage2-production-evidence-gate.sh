@@ -10,6 +10,7 @@ RUN_VALIDATIONS="${RUN_STAGE2_PRODUCTION_VALIDATIONS:-0}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 TEAM_ID="${MANDOFORGE_STAGE2_TEAM_ID:-}"
 VERIFY_VALIDATION_COVERAGE="${VERIFY_STAGE2_VALIDATION_COVERAGE:-0}"
+RUN_COMPLETION_AUDIT="${RUN_STAGE2_COMPLETION_AUDIT:-1}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -1003,6 +1004,36 @@ write_summary() {
   fi
 }
 
+run_completion_audit() {
+  if [[ "$RUN_COMPLETION_AUDIT" != "1" ]]; then
+    echo "completion audit skipped; set RUN_STAGE2_COMPLETION_AUDIT=1 to write archive-ready checklist evidence" >&2
+    return 0
+  fi
+
+  local audit_script="scripts/stage2-completion-audit-gate.sh"
+  if [[ ! -x "$audit_script" && -x "/app/$audit_script" ]]; then
+    audit_script="/app/$audit_script"
+  fi
+  if [[ ! -x "$audit_script" ]]; then
+    echo "Stage 2 production evidence gate could not find executable completion audit script" >&2
+    exit 1
+  fi
+
+  ALLOW_BLOCKED=1 \
+    BASE_URL="$BASE_URL" \
+    MANDOFORGE_STAGE2_GATE_SUBJECT="$SUBJECT" \
+    MANDOFORGE_STAGE2_GATE_ROLES="$ROLES" \
+    MANDOFORGE_STAGE2_TEAM_ID="$TEAM_ID" \
+    SOURCE_EVIDENCE_DIR="$EVIDENCE_DIR" \
+    AUDIT_DIR="$EVIDENCE_DIR/completion-audit" \
+    "$audit_script" >/dev/null
+
+  if [[ ! -s "$EVIDENCE_DIR/completion-audit/checklist.json" ]]; then
+    echo "Stage 2 completion audit did not write completion-audit/checklist.json" >&2
+    exit 1
+  fi
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -1026,4 +1057,5 @@ else
   fi
 fi
 
+run_completion_audit
 write_summary

@@ -621,6 +621,16 @@ if ! grep -q "RUN_STAGE2_UI_STATIC_ASSETS" scripts/stage2-production-evidence-ga
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_COMPLETION_AUDIT" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must support archive-ready completion audit capture" >&2
+  exit 1
+fi
+
+if ! grep -q "completion-audit/checklist.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must write completion audit checklist evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "/api/organizations" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must auto-discover a team for team-scoped MCP evidence" >&2
   exit 1
