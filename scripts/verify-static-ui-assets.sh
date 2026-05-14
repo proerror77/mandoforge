@@ -66,6 +66,7 @@ app_patterns=(
   "createRemoteComputerLease"
   "attachRemoteComputerLease"
   "recordRemoteSidecarHeartbeat"
+  "artifact_discovery_sidecar_config"
   "dryRunRemoteRunner"
   "mutateRemoteRunner"
   "assignExecutionJobRemoteLease"

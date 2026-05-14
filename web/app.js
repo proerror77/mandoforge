@@ -2629,6 +2629,7 @@ function renderRemoteComputerReadiness() {
   const autoscaling = report.autoscaling || {};
   const warmPool = report.warm_pool || {};
   const artifactDiscoverySidecar = report.artifact_discovery_sidecar || {};
+  const artifactDiscoverySidecarConfig = report.artifact_discovery_sidecar_config || {};
   const sidecarSupervision = report.sidecar_supervision || {};
   const sidecarRecovery = report.sidecar_recovery || {};
   const runner = state.remoteComputerRunnerReadiness || report.runner || {};
@@ -2700,6 +2701,7 @@ function renderRemoteComputerReadiness() {
       <strong>WARM POOL / SCALING</strong>
       <div class="muted">Warm pool: ${escapeHtml(warmPool.status || "unknown")} · manifest ${warmPool.manifest_present ? "present" : "missing"}</div>
       <div class="muted">Artifact discovery sidecar: ${escapeHtml(artifactDiscoverySidecar.status || "unknown")} · manifest ${artifactDiscoverySidecar.present ? "present" : "missing"} · ${escapeHtml(artifactDiscoverySidecar.path || "unknown")}</div>
+      <div class="muted">Sidecar API URL: ${escapeHtml(artifactDiscoverySidecarConfig.status || "unknown")} · expected ${escapeHtml(artifactDiscoverySidecarConfig.expected_api_url || "not reported")} · pod ${artifactDiscoverySidecarConfig.pod_template_api_url_configured ? "configured" : "missing"} · warm pool ${artifactDiscoverySidecarConfig.warm_pool_api_url_configured ? "configured" : "missing"} · config default ${artifactDiscoverySidecarConfig.configmap_default_api_url_configured ? "configured" : "missing"}</div>
       <div class="muted">Worker HPA ${autoscaling.worker_hpa_present ? "present" : "missing"} · KEDA ${autoscaling.keda_manifest_present ? "present" : "missing"} · remote pool scaler ${autoscaling.remote_pool_scaled_object_present ? "present" : "missing"} · queue-depth scaling ${autoscaling.queue_depth_scaling_present ? "present" : "missing"}</div>
     </div>
     <div class="item">
