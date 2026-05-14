@@ -57,12 +57,21 @@ fetch_json() {
 
 write_summary() {
   local readiness_file="$EVIDENCE_DIR/api-observability-collector-readiness.json"
+  local deployment_evidence_file="$EVIDENCE_DIR/observability-collector-deployment-evidence.json"
+  local cluster_evidence_file="$EVIDENCE_DIR/observability-collector-cluster-rollout-evidence.json"
+  local remediation_evidence_file="$EVIDENCE_DIR/observability-collector-remediation-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local status
   local production_ops_status
   local deployment_status
   local cluster_status
   local remediation_status
+  local deployment_evidence_status
+  local deployment_validation_status
+  local cluster_evidence_status
+  local cluster_validation_status
+  local remediation_evidence_status
+  local remediation_run_status
   local blocked_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
@@ -70,6 +79,24 @@ write_summary() {
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$readiness_file")"
   cluster_status="$(jq -r '.cluster_rollout.status // "unknown"' "$readiness_file")"
   remediation_status="$(jq -r '.remediation_supervision.status // "unknown"' "$readiness_file")"
+  deployment_evidence_status="missing"
+  deployment_validation_status="unknown"
+  if [[ -s "$deployment_evidence_file" ]]; then
+    deployment_evidence_status="$(jq -r '.status // "unknown"' "$deployment_evidence_file")"
+    deployment_validation_status="$(jq -r '.response.status // "unknown"' "$deployment_evidence_file")"
+  fi
+  cluster_evidence_status="missing"
+  cluster_validation_status="unknown"
+  if [[ -s "$cluster_evidence_file" ]]; then
+    cluster_evidence_status="$(jq -r '.status // "unknown"' "$cluster_evidence_file")"
+    cluster_validation_status="$(jq -r '.response.status // "unknown"' "$cluster_evidence_file")"
+  fi
+  remediation_evidence_status="not_requested"
+  remediation_run_status="not_run"
+  if [[ -s "$remediation_evidence_file" ]]; then
+    remediation_evidence_status="$(jq -r '.status // "unknown"' "$remediation_evidence_file")"
+    remediation_run_status="$(jq -r '.response.status // "unknown"' "$remediation_evidence_file")"
+  fi
   blocked_count="$(jq -r '[
       .production_ops.production_blocked,
       .deployment_readiness.production_blocked,
@@ -83,6 +110,12 @@ write_summary() {
     echo "deployment_readiness_status=$deployment_status"
     echo "cluster_rollout_status=$cluster_status"
     echo "remediation_supervision_status=$remediation_status"
+    echo "deployment_evidence_status=$deployment_evidence_status"
+    echo "deployment_validation_status=$deployment_validation_status"
+    echo "cluster_evidence_status=$cluster_evidence_status"
+    echo "cluster_validation_status=$cluster_validation_status"
+    echo "remediation_evidence_status=$remediation_evidence_status"
+    echo "remediation_run_status=$remediation_run_status"
     echo "production_blocked_count=$blocked_count"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "remediation_run=$RUN_REMEDIATION"
@@ -108,6 +141,60 @@ write_summary() {
   fi
 }
 
+capture_deployment_evidence() {
+  local deployment_response
+  local deployment_evidence_file="$EVIDENCE_DIR/observability-collector-deployment-evidence.json"
+
+  deployment_response="$(fetch_json POST /api/observability/collector/deployment/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$deployment_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$deployment_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$deployment_evidence_file"
+}
+
+capture_cluster_rollout_evidence() {
+  local cluster_response
+  local cluster_evidence_file="$EVIDENCE_DIR/observability-collector-cluster-rollout-evidence.json"
+
+  cluster_response="$(fetch_json POST /api/observability/collector/cluster/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$cluster_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$cluster_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$cluster_evidence_file"
+}
+
+capture_remediation_evidence() {
+  local remediation_response
+  local remediation_evidence_file="$EVIDENCE_DIR/observability-collector-remediation-evidence.json"
+
+  remediation_response="$(fetch_json POST /api/observability/remediation/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$remediation_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$remediation_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$remediation_evidence_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -115,11 +202,11 @@ mkdir -p "$EVIDENCE_DIR"
 curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/observability >/dev/null
 fetch_json GET /api/observability/collector-readiness >/dev/null
-fetch_json POST /api/observability/collector/deployment/validate >/dev/null
-fetch_json POST /api/observability/collector/cluster/validate >/dev/null
+capture_deployment_evidence
+capture_cluster_rollout_evidence
 
 if [[ "$RUN_REMEDIATION" == "1" ]]; then
-  fetch_json POST /api/observability/remediation/run >/dev/null
+  capture_remediation_evidence
 else
   echo "skipping observability remediation run; set RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 to include remediation evidence" >&2
 fi

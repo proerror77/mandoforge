@@ -316,6 +316,41 @@ if ! grep -q "/api/observability/collector/cluster/validate" "$observability_scr
   exit 1
 fi
 
+if ! grep -q "observability-collector-deployment-evidence.json" "$observability_script"; then
+  echo "Observability collector evidence script must write explicit deployment evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-collector-deployment-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit observability collector deployment evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-collector-cluster-rollout-evidence.json" "$observability_script"; then
+  echo "Observability collector evidence script must write explicit cluster rollout evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-collector-cluster-rollout-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit observability collector cluster rollout evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_OBSERVABILITY_REMEDIATION" "$observability_script"; then
+  echo "Observability collector evidence script must support optional remediation evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-collector-remediation-evidence.json" "$observability_script"; then
+  echo "Observability collector evidence script must write explicit remediation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-collector-remediation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit observability collector remediation evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "remote-computer-evidence-gate.sh" deploy/stage2-evidence/remote-computer-evidence-job.example.yaml; then
   echo "Remote Computer evidence Job does not run the dedicated evidence gate" >&2
   exit 1

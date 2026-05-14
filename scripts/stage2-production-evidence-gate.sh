@@ -474,6 +474,60 @@ capture_codex_app_server_stale_poll_validation() {
     }' >"$stale_poll_file"
 }
 
+capture_observability_collector_deployment_validation() {
+  local deployment_response
+  local deployment_file="$EVIDENCE_DIR/observability-collector-deployment-evidence.json"
+
+  deployment_response="$(fetch_json POST /api/observability/collector/deployment/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$deployment_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$deployment_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$deployment_file"
+}
+
+capture_observability_collector_cluster_validation() {
+  local cluster_response
+  local cluster_file="$EVIDENCE_DIR/observability-collector-cluster-rollout-evidence.json"
+
+  cluster_response="$(fetch_json POST /api/observability/collector/cluster/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$cluster_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$cluster_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$cluster_file"
+}
+
+capture_observability_remediation_validation() {
+  local remediation_response
+  local remediation_file="$EVIDENCE_DIR/observability-collector-remediation-evidence.json"
+
+  remediation_response="$(fetch_json POST /api/observability/remediation/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$remediation_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$remediation_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$remediation_file"
+}
+
 run_controller_validations() {
   fetch_json POST /api/tenant-isolation/routing/validate >/dev/null
   fetch_json POST /api/providers/policy-gate/run >/dev/null
@@ -488,8 +542,8 @@ run_controller_validations() {
   fetch_json POST /api/codex-app-server/ops/validate >/dev/null
   fetch_json POST /api/agents/releases/deployment/validate >/dev/null
   fetch_json POST /api/agents/releases/orchestration/validate >/dev/null
-  fetch_json POST /api/observability/collector/deployment/validate >/dev/null
-  fetch_json POST /api/observability/collector/cluster/validate >/dev/null
+  capture_observability_collector_deployment_validation
+  capture_observability_collector_cluster_validation
   fetch_json POST /api/scheduler/run-due >/dev/null
 
   if [[ -n "$TEAM_ID" ]]; then
@@ -550,7 +604,7 @@ run_controller_validations() {
   fi
 
   if [[ "${RUN_STAGE2_OBSERVABILITY_REMEDIATION:-0}" == "1" ]]; then
-    fetch_json POST /api/observability/remediation/run >/dev/null
+    capture_observability_remediation_validation
   else
     echo "skipping observability remediation run; set RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 to include remediation evidence" >&2
   fi
