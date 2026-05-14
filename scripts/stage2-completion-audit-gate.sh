@@ -80,6 +80,7 @@ resolve_endpoint() {
 
 local_script_artifact_path() {
   local endpoint="$1"
+  endpoint="${endpoint#./}"
   printf '%s/local-script-%s.json\n' "$SOURCE_EVIDENCE_DIR" "$(slugify "$endpoint")"
 }
 

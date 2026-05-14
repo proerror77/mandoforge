@@ -701,6 +701,16 @@ if ! grep -q "local-script-" scripts/stage2-completion-audit-gate.sh; then
   exit 1
 fi
 
+if ! grep -q 'endpoint="${endpoint#./}"' scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must canonicalize ./ local script artifact names" >&2
+  exit 1
+fi
+
+if ! grep -q 'slugify "${script_path#./}"' scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must write canonical local script artifact names" >&2
+  exit 1
+fi
+
 if ! grep -q "team-discovery.json" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit gate must reuse team discovery evidence for team-scoped endpoints" >&2
   exit 1

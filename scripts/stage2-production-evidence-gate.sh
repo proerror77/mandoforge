@@ -180,7 +180,7 @@ discover_team_id() {
 run_local_script_validation() {
   local script_path="$1"
   local label
-  label="local-script-$(slugify "$script_path")"
+  label="local-script-$(slugify "${script_path#./}")"
   local target="$EVIDENCE_DIR/$label.json"
   local stdout_file
   local stderr_file
