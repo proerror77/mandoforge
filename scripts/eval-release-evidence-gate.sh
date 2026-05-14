@@ -59,8 +59,10 @@ fetch_json() {
 write_summary() {
   local rollout_summary_file="$EVIDENCE_DIR/api-agents-releases-summary.json"
   local automation_file="$EVIDENCE_DIR/api-agents-releases-automation-runs.json"
-  local deployment_file="$EVIDENCE_DIR/api-agents-releases-deployment-validate.json"
-  local orchestration_file="$EVIDENCE_DIR/api-agents-releases-orchestration-validate.json"
+  local deployment_evidence_file="$EVIDENCE_DIR/eval-release-deployment-validation-evidence.json"
+  local orchestration_evidence_file="$EVIDENCE_DIR/eval-release-orchestration-validation-evidence.json"
+  local regression_evidence_file="$EVIDENCE_DIR/eval-release-stage2-regression-evidence.json"
+  local due_run_evidence_file="$EVIDENCE_DIR/eval-release-due-run-evidence.json"
   local rollback_file="$EVIDENCE_DIR/eval-release-rollback-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local release_count
@@ -73,8 +75,14 @@ write_summary() {
   local production_ops_status
   local production_orchestration_status
   local deployment_status
+  local deployment_evidence_status
   local deployment_validation_status
+  local orchestration_evidence_status
   local orchestration_validation_status
+  local regression_evidence_status
+  local regression_run_status
+  local due_run_evidence_status
+  local due_run_status
   local deployment_controller_required
   local orchestration_controller_required
   local deployment_controller_configured
@@ -91,8 +99,30 @@ write_summary() {
   production_ops_status="$(jq -r '.production_ops.status // "unknown"' "$automation_file")"
   production_orchestration_status="$(jq -r '.production_orchestration.status // "unknown"' "$automation_file")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$automation_file")"
-  deployment_validation_status="$(jq -r '.status // "unknown"' "$deployment_file")"
-  orchestration_validation_status="$(jq -r '.status // "unknown"' "$orchestration_file")"
+  deployment_evidence_status="missing"
+  deployment_validation_status="unknown"
+  if [[ -s "$deployment_evidence_file" ]]; then
+    deployment_evidence_status="$(jq -r '.status // "unknown"' "$deployment_evidence_file")"
+    deployment_validation_status="$(jq -r '.response.status // "unknown"' "$deployment_evidence_file")"
+  fi
+  orchestration_evidence_status="missing"
+  orchestration_validation_status="unknown"
+  if [[ -s "$orchestration_evidence_file" ]]; then
+    orchestration_evidence_status="$(jq -r '.status // "unknown"' "$orchestration_evidence_file")"
+    orchestration_validation_status="$(jq -r '.response.status // "unknown"' "$orchestration_evidence_file")"
+  fi
+  regression_evidence_status="not_requested"
+  regression_run_status="not_run"
+  if [[ -s "$regression_evidence_file" ]]; then
+    regression_evidence_status="$(jq -r '.status // "unknown"' "$regression_evidence_file")"
+    regression_run_status="$(jq -r '.response.status // "unknown"' "$regression_evidence_file")"
+  fi
+  due_run_evidence_status="not_requested"
+  due_run_status="not_run"
+  if [[ -s "$due_run_evidence_file" ]]; then
+    due_run_evidence_status="$(jq -r '.status // "unknown"' "$due_run_evidence_file")"
+    due_run_status="$(jq -r '.response.status // "unknown"' "$due_run_evidence_file")"
+  fi
   deployment_controller_required="$(jq -r '.deployment_readiness.controller_required // false' "$automation_file")"
   orchestration_controller_required="$(jq -r '.production_orchestration.controller_required // false' "$automation_file")"
   deployment_controller_configured="$(jq -r '.deployment_readiness.controller_configured // false' "$automation_file")"
@@ -114,8 +144,14 @@ write_summary() {
     echo "production_ops_status=$production_ops_status"
     echo "production_orchestration_status=$production_orchestration_status"
     echo "deployment_readiness_status=$deployment_status"
+    echo "deployment_evidence_status=$deployment_evidence_status"
     echo "deployment_validation_status=$deployment_validation_status"
+    echo "orchestration_evidence_status=$orchestration_evidence_status"
     echo "orchestration_validation_status=$orchestration_validation_status"
+    echo "regression_evidence_status=$regression_evidence_status"
+    echo "regression_run_status=$regression_run_status"
+    echo "due_run_evidence_status=$due_run_evidence_status"
+    echo "due_run_status=$due_run_status"
     echo "deployment_controller_required=$deployment_controller_required"
     echo "deployment_controller_configured=$deployment_controller_configured"
     echo "orchestration_controller_required=$orchestration_controller_required"
@@ -149,6 +185,78 @@ write_summary() {
     echo "eval/release evidence gate failed closed; set ALLOW_BLOCKED=1 only for inventory runs." >&2
     exit 1
   fi
+}
+
+capture_deployment_validation_evidence() {
+  local deployment_response
+  local deployment_evidence_file="$EVIDENCE_DIR/eval-release-deployment-validation-evidence.json"
+
+  deployment_response="$(fetch_json POST /api/agents/releases/deployment/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$deployment_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$deployment_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$deployment_evidence_file"
+}
+
+capture_orchestration_validation_evidence() {
+  local orchestration_response
+  local orchestration_evidence_file="$EVIDENCE_DIR/eval-release-orchestration-validation-evidence.json"
+
+  orchestration_response="$(fetch_json POST /api/agents/releases/orchestration/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$orchestration_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$orchestration_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$orchestration_evidence_file"
+}
+
+capture_stage2_regression_evidence() {
+  local regression_response
+  local regression_evidence_file="$EVIDENCE_DIR/eval-release-stage2-regression-evidence.json"
+
+  regression_response="$(fetch_json POST /api/eval/suites/stage2-regression)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$regression_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$regression_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$regression_evidence_file"
+}
+
+capture_due_run_evidence() {
+  local due_run_response
+  local due_run_evidence_file="$EVIDENCE_DIR/eval-release-due-run-evidence.json"
+
+  due_run_response="$(fetch_json POST /api/agents/releases/run-due)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$due_run_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$due_run_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$due_run_evidence_file"
 }
 
 capture_rollback_evidence() {
@@ -207,12 +315,12 @@ mkdir -p "$EVIDENCE_DIR"
 curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/agents/releases/summary >/dev/null
 fetch_json GET /api/agents/releases/automation-runs >/dev/null
-fetch_json POST /api/agents/releases/deployment/validate >/dev/null
-fetch_json POST /api/agents/releases/orchestration/validate >/dev/null
+capture_deployment_validation_evidence
+capture_orchestration_validation_evidence
 
 if [[ "$RUN_EVAL_RELEASE_AUTOMATION" == "1" ]]; then
-  fetch_json POST /api/eval/suites/stage2-regression >/dev/null
-  fetch_json POST /api/agents/releases/run-due >/dev/null
+  capture_stage2_regression_evidence
+  capture_due_run_evidence
 else
   echo "skipping eval/release automation; set RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 to include regression and release due-run evidence" >&2
 fi

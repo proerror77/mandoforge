@@ -866,6 +866,51 @@ if ! grep -q "/api/eval/suites/stage2-regression" "$eval_release_script"; then
   exit 1
 fi
 
+if ! grep -q "eval-release-deployment-validation-evidence.json" "$eval_release_script"; then
+  echo "eval/release evidence script must write explicit deployment validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-deployment-validation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit eval/release deployment validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-orchestration-validation-evidence.json" "$eval_release_script"; then
+  echo "eval/release evidence script must write explicit orchestration validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-orchestration-validation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit eval/release orchestration validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_EVAL_RELEASE_AUTOMATION" "$eval_release_script"; then
+  echo "eval/release evidence script must support optional automation evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-stage2-regression-evidence.json" "$eval_release_script"; then
+  echo "eval/release evidence script must write explicit Stage 2 regression evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-stage2-regression-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit eval/release regression evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-due-run-evidence.json" "$eval_release_script"; then
+  echo "eval/release evidence script must write explicit release due-run evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-due-run-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit eval/release due-run evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "RUN_STAGE2_EVAL_RELEASE_ROLLBACK" "$eval_release_script"; then
   echo "eval/release evidence script must support optional rollback evidence capture" >&2
   exit 1

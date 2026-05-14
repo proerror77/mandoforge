@@ -398,6 +398,78 @@ capture_eval_release_rollback_validation() {
     }' >"$rollback_file"
 }
 
+capture_eval_release_deployment_validation() {
+  local deployment_response
+  local deployment_file="$EVIDENCE_DIR/eval-release-deployment-validation-evidence.json"
+
+  deployment_response="$(fetch_json POST /api/agents/releases/deployment/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$deployment_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$deployment_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$deployment_file"
+}
+
+capture_eval_release_orchestration_validation() {
+  local orchestration_response
+  local orchestration_file="$EVIDENCE_DIR/eval-release-orchestration-validation-evidence.json"
+
+  orchestration_response="$(fetch_json POST /api/agents/releases/orchestration/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$orchestration_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$orchestration_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$orchestration_file"
+}
+
+capture_eval_release_stage2_regression() {
+  local regression_response
+  local regression_file="$EVIDENCE_DIR/eval-release-stage2-regression-evidence.json"
+
+  regression_response="$(fetch_json POST /api/eval/suites/stage2-regression)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$regression_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$regression_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$regression_file"
+}
+
+capture_eval_release_due_run() {
+  local due_run_response
+  local due_run_file="$EVIDENCE_DIR/eval-release-due-run-evidence.json"
+
+  due_run_response="$(fetch_json POST /api/agents/releases/run-due)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$due_run_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$due_run_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$due_run_file"
+}
+
 capture_remote_computer_state_sync_validation() {
   local state_sync_response
   local state_sync_file="$EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
@@ -662,8 +734,8 @@ run_controller_validations() {
   fetch_json POST /api/approvals/notifications/ops/validate >/dev/null
   fetch_json POST /api/codex-app-server/deployment/validate >/dev/null
   fetch_json POST /api/codex-app-server/ops/validate >/dev/null
-  fetch_json POST /api/agents/releases/deployment/validate >/dev/null
-  fetch_json POST /api/agents/releases/orchestration/validate >/dev/null
+  capture_eval_release_deployment_validation
+  capture_eval_release_orchestration_validation
   capture_observability_collector_deployment_validation
   capture_observability_collector_cluster_validation
   fetch_json POST /api/scheduler/run-due >/dev/null
@@ -719,8 +791,8 @@ run_controller_validations() {
   fi
 
   if [[ "${RUN_STAGE2_EVAL_RELEASE_AUTOMATION:-0}" == "1" ]]; then
-    fetch_json POST /api/eval/suites/stage2-regression >/dev/null
-    fetch_json POST /api/agents/releases/run-due >/dev/null
+    capture_eval_release_stage2_regression
+    capture_eval_release_due_run
   else
     echo "skipping eval/release automation; set RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 to include regression and release due-run evidence" >&2
   fi
