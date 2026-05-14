@@ -3831,6 +3831,7 @@ fn build_router(state: AppState) -> Router {
             post(discover_mcp_server_tools),
         )
         .route("/api/providers", get(list_providers).post(create_provider))
+        .route("/api/providers/{id}", patch(update_provider))
         .route("/api/providers/summary", get(get_provider_summary))
         .route(
             "/api/providers/deployment/validate",
@@ -9401,6 +9402,33 @@ async fn create_provider(
 ) -> Result<Json<ProviderRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
     Ok(Json(state.create_provider(input).await?))
+}
+
+async fn update_provider(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateProviderRecord>,
+) -> Result<Json<ProviderRecord>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "providers", Some(id)).await?;
+    let provider = state.update_provider(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "provider.updated",
+            "provider",
+            Some(id),
+            json!({
+                "subject": principal_from_request(&state, &headers).await?.subject_id,
+                "provider_name": provider.name,
+                "provider_type": provider.provider_type,
+                "default_model": provider.default_model
+            }),
+        ))
+        .await?;
+    Ok(Json(provider))
 }
 
 async fn get_provider_summary(
@@ -35001,6 +35029,29 @@ not json
                 .expect("valid request"),
         )
         .await;
+        let budgeted_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/providers/{}", budgeted_provider.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "summary-budgeted-mock",
+                        "base_url": "http://mock-provider.local/v1",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {"budget": {"daily_request_limit": 8}}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(budgeted_provider.name, "summary-budgeted-mock");
+        assert_eq!(budgeted_provider.config["budget"]["daily_request_limit"], 8);
         let misconfigured_provider: ProviderRecord = request_json(
             app.clone(),
             Request::builder()
@@ -35282,6 +35333,11 @@ not json
             log.action == "provider.deployment_validation_run"
                 && log.details["healthy_count"] == 1
                 && log.details["unhealthy_count"] == 0
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider.updated"
+                && log.resource_id == Some(budgeted_provider.id)
+                && log.details["provider_name"] == "summary-budgeted-mock"
         }));
     }
 

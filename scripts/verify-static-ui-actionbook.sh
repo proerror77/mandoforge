@@ -59,6 +59,7 @@ wait_for_static_ui() {
     hasCollectorReadiness: text.includes('COLLECTOR READINESS') && text.includes('COLLECTOR ENDPOINT') && text.includes('HEALTH MESSAGE') && (text.includes('CLUSTER ROLLOUT') || text.includes('Cluster rollout')) && Boolean(document.querySelector('#validate-observability-collector-cluster')),
     hasCostAlertRoutes: text.includes('Create Alert Route') && Array.from(document.querySelectorAll('#cost-alert-route-form input')).some((input) => input.placeholder.includes('SMTP recipient email')) && text.includes('No cost alert routes'),
     hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
+    hasProviderUpdateWorkflow: text.includes('Update Provider') && typeof updateProvider === 'function' && Boolean(document.querySelector('#provider-update-form')),
     hasProviderApprovalWorkflow: text.includes('Request Provider Approval') && text.includes('Approver subject'),
     hasProviderGateRuns: text.includes('Run Provider Gate') && text.includes('PROVIDER GATE RUNS') && text.includes('PRODUCTION ENFORCEMENT') && text.includes('Run Production Rollout') && text.includes('PRODUCTION ROLLOUT'),
     hasPolicyConsole: text.includes('Policy Console') && text.includes('Simulate Policy') && text.includes('Test Policy') && text.includes('POLICY REVISIONS') && text.includes('Create Policy Revision') && text.includes('Gate cases JSON') && text.includes('Rollout %') && text.includes('Activate after') && text.includes('Activate before'),
@@ -95,6 +96,7 @@ wait_for_static_ui() {
     && result.hasCollectorReadiness
     && result.hasCostAlertRoutes
     && result.hasProviderCredentialFields
+    && result.hasProviderUpdateWorkflow
     && result.hasProviderApprovalWorkflow
     && result.hasProviderGateRuns
     && result.hasPolicyConsole

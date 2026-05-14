@@ -1592,6 +1592,51 @@ impl AppState {
         Ok(provider)
     }
 
+    pub(crate) async fn update_provider(
+        &self,
+        provider_id: Uuid,
+        input: CreateProviderRecord,
+    ) -> Result<ProviderRecord, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let provider = store
+                    .providers
+                    .get_mut(&provider_id)
+                    .ok_or_else(|| AppError::not_found("provider not found"))?;
+                provider.provider_type = input.provider_type;
+                provider.name = input.name;
+                provider.base_url = input.base_url;
+                provider.default_model = input.default_model;
+                provider.config = input.config;
+                Ok(provider.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE providers
+                     SET provider_type = $1,
+                         name = $2,
+                         base_url = $3,
+                         default_model = $4,
+                         config = $5
+                     WHERE tenant_id = $6 AND id = $7
+                     RETURNING id, provider_type, name, base_url, default_model, config, status, created_at",
+                )
+                .bind(input.provider_type)
+                .bind(input.name)
+                .bind(input.base_url)
+                .bind(input.default_model)
+                .bind(input.config)
+                .bind(self.tenant_id)
+                .bind(provider_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("provider not found"))?;
+                provider_record_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn update_provider_status(
         &self,
         provider_id: Uuid,

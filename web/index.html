@@ -501,6 +501,57 @@
                 </label>
                 <button type="submit">Save Provider</button>
               </form>
+              <form id="provider-update-form" class="stack-form compact-form">
+                <label>
+                  Provider ID
+                  <input name="provider_id" required placeholder="Provider UUID" />
+                </label>
+                <label>
+                  Name
+                  <input name="name" required value="governed-mock-updated" />
+                </label>
+                <label>
+                  Type
+                  <input name="provider_type" required value="mock" />
+                </label>
+                <label>
+                  Model
+                  <input name="default_model" value="gpt-5.4-mini" />
+                </label>
+                <label>
+                  Base URL
+                  <input name="base_url" placeholder="https://api.openai.com/v1" />
+                </label>
+                <label>
+                  API key env var
+                  <input name="api_key_env" placeholder="OPENAI_API_KEY" />
+                </label>
+                <label>
+                  API key ref
+                  <input name="api_key_ref" placeholder="vault:path#key" />
+                </label>
+                <label>
+                  Daily request limit
+                  <input name="daily_request_limit" type="number" min="0" value="100" />
+                </label>
+                <label>
+                  Daily cost limit cents
+                  <input name="daily_cost_limit_cents" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <label>
+                  Per request cents
+                  <input name="per_request_cents" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <label>
+                  Prompt 1K token cents
+                  <input name="per_1k_prompt_tokens_cents" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <label>
+                  Completion 1K token cents
+                  <input name="per_1k_completion_tokens_cents" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <button type="submit">Update Provider</button>
+              </form>
               <form id="provider-status-approval-form" class="stack-form compact-form">
                 <label>
                   Provider ID

@@ -209,6 +209,7 @@ const approvalGovernanceRoot = document.querySelector("#approval-governance");
 const approvalNotificationRoutingRoot = document.querySelector("#approval-notification-routing");
 const approvalNotificationRunsRoot = document.querySelector("#approval-notification-runs");
 const providerForm = document.querySelector("#provider-form");
+const providerUpdateForm = document.querySelector("#provider-update-form");
 const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
 const runProviderPolicyGateButton = document.querySelector("#run-provider-policy-gate");
 const validateProviderDeploymentButton = document.querySelector("#validate-provider-deployment");
@@ -273,6 +274,7 @@ runApprovalNotificationsButton.addEventListener("click", runApprovalNotification
 validateApprovalNotificationsButton.addEventListener("click", validateApprovalNotifications);
 validateApprovalNotificationOpsButton.addEventListener("click", validateApprovalNotificationOps);
 providerForm.addEventListener("submit", createProvider);
+providerUpdateForm.addEventListener("submit", updateProvider);
 providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
 runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
 validateProviderDeploymentButton.addEventListener("click", validateProviderDeployment);
@@ -674,6 +676,25 @@ async function runDueApprovalEscalations() {
 async function createProvider(event) {
   event.preventDefault();
   const form = new FormData(providerForm);
+  await api("/api/providers", {
+    method: "POST",
+    body: JSON.stringify(providerPayloadFromForm(form)),
+  });
+  await refreshOps();
+}
+
+async function updateProvider(event) {
+  event.preventDefault();
+  const form = new FormData(providerUpdateForm);
+  const providerId = String(form.get("provider_id") || "").trim();
+  await api(`/api/providers/${providerId}`, {
+    method: "PATCH",
+    body: JSON.stringify(providerPayloadFromForm(form)),
+  });
+  await refreshOps();
+}
+
+function providerPayloadFromForm(form) {
   const dailyRequestLimit = Number(form.get("daily_request_limit") || 0);
   const dailyCostLimitCents = Number(form.get("daily_cost_limit_cents") || 0);
   const perRequestCents = Number(form.get("per_request_cents") || 0);
@@ -695,17 +716,13 @@ async function createProvider(event) {
   };
   if (apiKeyEnv) config.api_key_env = apiKeyEnv;
   if (apiKeyRef) config.api_key_ref = apiKeyRef;
-  await api("/api/providers", {
-    method: "POST",
-    body: JSON.stringify({
-      name: form.get("name"),
-      provider_type: form.get("provider_type"),
-      base_url: baseUrl || null,
-      default_model: form.get("default_model"),
-      config,
-    }),
-  });
-  await refreshOps();
+  return {
+    name: String(form.get("name") || "").trim(),
+    provider_type: String(form.get("provider_type") || "").trim(),
+    base_url: baseUrl || null,
+    default_model: String(form.get("default_model") || "").trim() || null,
+    config,
+  };
 }
 
 async function requestProviderStatusApproval(event) {
