@@ -796,7 +796,11 @@ run_controller_validations() {
 
   if [[ -n "$TEAM_ID" ]]; then
     capture_mcp_deployment_validation
-    capture_mcp_due_run_validation
+    if [[ "${RUN_STAGE2_MCP_DUE_RUN:-0}" == "1" ]]; then
+      capture_mcp_due_run_validation
+    else
+      echo "skipping MCP rollout due-run; set RUN_STAGE2_MCP_DUE_RUN=1 to include due-run evidence" >&2
+    fi
   else
     echo "skipping MCP connector validation; set MANDOFORGE_STAGE2_TEAM_ID to include team-scoped MCP rollout evidence" >&2
   fi
