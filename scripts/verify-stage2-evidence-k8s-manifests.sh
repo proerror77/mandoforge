@@ -19,6 +19,7 @@ manifests=(
   deploy/stage2-evidence/vault-evidence-job.example.yaml
   deploy/stage2-evidence/approval-notification-evidence-job.example.yaml
   deploy/stage2-evidence/worker-evidence-job.example.yaml
+  deploy/stage2-evidence/scheduler-evidence-job.example.yaml
   deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml
   deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml
   deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml
@@ -33,6 +34,7 @@ tenant_script="scripts/tenant-isolation-evidence-gate.sh"
 vault_script="scripts/vault-evidence-gate.sh"
 approval_notification_script="scripts/approval-notification-evidence-gate.sh"
 worker_script="scripts/worker-evidence-gate.sh"
+scheduler_script="scripts/scheduler-evidence-gate.sh"
 policy_rollout_script="scripts/policy-rollout-evidence-gate.sh"
 codex_app_server_script="scripts/codex-app-server-evidence-gate.sh"
 mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
@@ -84,6 +86,11 @@ fi
 
 if [[ ! -x "$worker_script" ]]; then
   echo "missing worker evidence script: $worker_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$scheduler_script" ]]; then
+  echo "missing scheduler evidence script: $scheduler_script" >&2
   exit 1
 fi
 
@@ -178,6 +185,11 @@ fi
 
 if ! grep -q "name: mandoforge-worker-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the worker evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-scheduler-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the scheduler evidence Job" >&2
   exit 1
 fi
 
@@ -393,6 +405,36 @@ fi
 
 if ! grep -q "/api/execution-jobs/worker-load-validation/run" "$worker_script"; then
   echo "Worker evidence script must validate worker load readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "scheduler-evidence-gate.sh" deploy/stage2-evidence/scheduler-evidence-job.example.yaml; then
+  echo "Scheduler evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/scheduler-evidence-job.example.yaml; then
+  echo "Scheduler evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/scheduler/summary" "$scheduler_script"; then
+  echo "Scheduler evidence script must collect orchestration summary" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/scheduler/due-plan" "$scheduler_script"; then
+  echo "Scheduler evidence script must collect due-plan evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/scheduler/run-due" "$scheduler_script"; then
+  echo "Scheduler evidence script must capture run-due evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "x-mandoforge-scheduler-token" "$scheduler_script"; then
+  echo "Scheduler evidence script must support shared-token authentication" >&2
   exit 1
 fi
 
