@@ -774,6 +774,8 @@ struct ApprovalNotificationDeploymentReadiness {
     controller_required: bool,
     controller_configured: bool,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
+    controller_evidence_fresh: bool,
     latest_controller_validated: bool,
     controller_execution_count: usize,
     controller_failed_count: usize,
@@ -25301,6 +25303,11 @@ fn build_approval_notification_deployment_readiness(
         .and_then(|execution| execution.get("status"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let latest_controller_age_hours = latest_validation
+        .filter(|_| latest_controller_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
 
@@ -25348,6 +25355,10 @@ fn build_approval_notification_deployment_readiness(
                 .to_string(),
         );
     }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons
+            .push("approval notification deployment controller evidence is stale".to_string());
+    }
 
     let production_blocked = !blocking_reasons.is_empty();
     let status = if production_blocked {
@@ -25380,6 +25391,8 @@ fn build_approval_notification_deployment_readiness(
         controller_required,
         controller_configured,
         latest_controller_status,
+        latest_controller_age_hours,
+        controller_evidence_fresh,
         latest_controller_validated,
         controller_execution_count,
         controller_failed_count,
@@ -44135,33 +44148,35 @@ not json
         assert!(stale_without_controller.production_blocked);
         assert!(!stale_without_controller.latest_controller_validated);
 
+        let mut controller_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "approval.notification_deployment_validation_run",
+            "approval_notifications",
+            None,
+            json!({
+                "status": "healthy",
+                "pending_approval_count": 0,
+                "routable_pending_count": 0,
+                "unroutable_pending_count": 0,
+                "channel_count": 1,
+                "persisted_policy_count": 1,
+                "active_policy_count": 1,
+                "routing_status": "healthy",
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "deployment_id": "approval-notification-deployment-1"
+                },
+                "checked_at": generated_at,
+            }),
+        );
+        controller_audit.created_at = generated_at;
         let ready = build_approval_notification_deployment_readiness(
-            &[new_audit_log(
-                None,
-                "user",
-                None,
-                "approval.notification_deployment_validation_run",
-                "approval_notifications",
-                None,
-                json!({
-                    "status": "healthy",
-                    "pending_approval_count": 0,
-                    "routable_pending_count": 0,
-                    "unroutable_pending_count": 0,
-                    "channel_count": 1,
-                    "persisted_policy_count": 1,
-                    "active_policy_count": 1,
-                    "routing_status": "healthy",
-                    "controller_required": true,
-                    "controller_configured": true,
-                    "controller_execution": {
-                        "attempted": true,
-                        "status": "validated",
-                        "deployment_id": "approval-notification-deployment-1"
-                    },
-                    "checked_at": generated_at,
-                }),
-            )],
+            &[controller_audit.clone()],
             &routing,
             generated_at,
             true,
@@ -44171,8 +44186,28 @@ not json
         assert!(!ready.production_blocked);
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
         assert_eq!(ready.controller_execution_count, 1);
         assert_eq!(ready.controller_failed_count, 0);
+
+        let mut stale_controller_audit = controller_audit;
+        stale_controller_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = build_approval_notification_deployment_readiness(
+            &[stale_controller_audit],
+            &routing,
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.production_blocked);
+        assert!(stale.latest_controller_validated);
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(stale.blocking_reasons.iter().any(|reason| {
+            reason == "approval notification deployment controller evidence is stale"
+        }));
     }
 
     #[tokio::test]
