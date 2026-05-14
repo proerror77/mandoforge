@@ -487,6 +487,14 @@ async function revokeTenantInvitation(invitationId) {
   await refreshOps();
 }
 
+async function acceptTenantInvitation(token) {
+  await api("/api/invitations/accept", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+  await refreshOps();
+}
+
 async function archiveOrganization(organizationId) {
   await api(`/api/organizations/${organizationId}/archive`, { method: "POST" });
   if (state.selectedOrganizationId === organizationId) {
@@ -2802,7 +2810,8 @@ function renderTenantGovernance() {
                 <div class="muted">token ${escapeHtml(invitation.token)}</div>
                 ${
                   invitation.status === "pending"
-                    ? `<button type="button" class="secondary reject" data-revoke-invitation="${escapeHtml(invitation.id)}">Revoke Invitation</button>`
+                    ? `<button type="button" class="secondary" data-accept-invitation="${escapeHtml(invitation.token)}">Accept Invitation</button>
+                       <button type="button" class="secondary reject" data-revoke-invitation="${escapeHtml(invitation.id)}">Revoke Invitation</button>`
                     : ""
                 }
               </div>
@@ -2814,6 +2823,11 @@ function renderTenantGovernance() {
   tenantInvitationRoot.querySelectorAll("[data-revoke-invitation]").forEach((button) => {
     button.addEventListener("click", () =>
       revokeTenantInvitation(button.dataset.revokeInvitation),
+    );
+  });
+  tenantInvitationRoot.querySelectorAll("[data-accept-invitation]").forEach((button) => {
+    button.addEventListener("click", () =>
+      acceptTenantInvitation(button.dataset.acceptInvitation),
     );
   });
 }
