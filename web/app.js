@@ -3400,7 +3400,7 @@ function renderTenantIsolationReadiness() {
       <strong>PRODUCTION ROUTING GATE</strong>
       <div class="muted">${escapeHtml(productionRouting.message || "tenant production routing gate is not reported")}</div>
       <div class="muted">cross-tenant routing ${productionRouting.cross_tenant_routing_supported ? "ready" : "missing"} · header fail-closed ${productionRouting.header_fail_closed ? "yes" : "no"} · membership scope ${productionRouting.membership_scope_enforced ? "yes" : "no"} · RLS ready ${productionRouting.rls_ready ? "yes" : "no"}</div>
-      <div class="muted">controller required ${productionRouting.controller_required ? "yes" : "no"} · configured ${productionRouting.controller_configured ? "yes" : "no"} · status ${escapeHtml(productionRouting.latest_controller_status || "none")} · validated ${productionRouting.latest_controller_validated ? "yes" : "no"}</div>
+      <div class="muted">controller required ${productionRouting.controller_required ? "yes" : "no"} · configured ${productionRouting.controller_configured ? "yes" : "no"} · status ${escapeHtml(productionRouting.latest_controller_status || "none")} · validated ${productionRouting.latest_controller_validated ? "yes" : "no"} · fresh ${productionRouting.controller_evidence_fresh ? "yes" : "no"} · age ${productionRouting.latest_controller_age_hours ?? "n/a"}h</div>
       ${
         tenantRoutingValidation
           ? `<div class="muted">Latest validation: ${escapeHtml(tenantRoutingValidation.status || "unknown")} · ${escapeHtml(tenantRoutingValidation.checked_at || "")}</div>`

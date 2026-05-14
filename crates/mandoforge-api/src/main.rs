@@ -2433,6 +2433,8 @@ struct TenantProductionRoutingReadiness {
     controller_required: bool,
     controller_configured: bool,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
+    controller_evidence_fresh: bool,
     latest_controller_validated: bool,
     message: String,
     blocking_reasons: Vec<String>,
@@ -8457,6 +8459,7 @@ async fn validate_tenant_production_routing(
 async fn build_tenant_isolation_readiness(
     state: &AppState,
 ) -> Result<TenantIsolationReadinessReport, AppError> {
+    let generated_at = Utc::now();
     let organizations = state.list_organizations().await?;
     let mut teams_count = 0usize;
     let mut projects_count = 0usize;
@@ -8509,6 +8512,7 @@ async fn build_tenant_isolation_readiness(
         &audit_logs,
         tenant_production_routing_controller_required(&|key| std::env::var(key).ok()),
         tenant_production_routing_controller_configured(&|key| std::env::var(key).ok()),
+        generated_at,
     );
     attention_items.push(TenantIsolationAttentionItem {
         kind: "single_runtime_tenant".to_string(),
@@ -8551,7 +8555,7 @@ async fn build_tenant_isolation_readiness(
     let readiness_score = (100_i64 - critical_count * 25 - warning_count * 15).clamp(0, 100);
 
     Ok(TenantIsolationReadinessReport {
-        generated_at: Utc::now(),
+        generated_at,
         status: if critical_count > 0 {
             "critical"
         } else if warning_count > 0 {
@@ -8588,19 +8592,25 @@ fn build_tenant_production_routing_readiness(
     audit_logs: &[AuditLog],
     controller_required: bool,
     controller_configured: bool,
+    generated_at: DateTime<Utc>,
 ) -> TenantProductionRoutingReadiness {
     let cross_tenant_routing_supported = runtime_tenant_mode == "tenant_routed";
     let rls_ready = rls.enabled && rls.forced && rls.tenant_context_configured;
-    let latest_controller_status = audit_logs
+    let latest_controller_log = audit_logs
         .iter()
         .filter(|log| log.action == "tenant.production_routing_validation_run")
-        .max_by_key(|log| log.created_at)
+        .max_by_key(|log| log.created_at);
+    let latest_controller_status = latest_controller_log
         .and_then(|log| {
             log.details["controller_execution"]["status"]
                 .as_str()
                 .or_else(|| log.details["status"].as_str())
         })
         .map(str::to_string);
+    let latest_controller_age_hours =
+        latest_controller_log.map(|log| (generated_at - log.created_at).num_hours());
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
     if !cross_tenant_routing_supported {
@@ -8629,6 +8639,9 @@ fn build_tenant_production_routing_readiness(
             "tenant production routing controller has no recent validated evidence".to_string(),
         );
     }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons.push("tenant production routing controller evidence is stale".to_string());
+    }
     let production_blocked = !blocking_reasons.is_empty();
     let status = if production_blocked {
         "blocked"
@@ -8655,6 +8668,8 @@ fn build_tenant_production_routing_readiness(
         controller_required,
         controller_configured,
         latest_controller_status,
+        latest_controller_age_hours,
+        controller_evidence_fresh,
         latest_controller_validated,
         message,
         blocking_reasons,
@@ -31018,6 +31033,7 @@ not json
             &[],
             true,
             false,
+            generated_at,
         );
         assert_eq!(missing_controller.status, "blocked");
         assert!(missing_controller.blocking_reasons.iter().any(|reason| {
@@ -31050,11 +31066,52 @@ not json
             &[validated_audit],
             true,
             true,
+            generated_at,
         );
         assert_eq!(ready.status, "ready");
         assert!(!ready.production_blocked);
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+
+        let mut stale_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.production_routing_validation_run",
+            "tenant_isolation",
+            None,
+            json!({
+                "status": "validated",
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "validation_id": "tenant-routing-stale"
+                },
+                "checked_at": generated_at - chrono::Duration::hours(25),
+            }),
+        );
+        stale_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = build_tenant_production_routing_readiness(
+            "tenant_routed",
+            true,
+            true,
+            &rls,
+            &[stale_audit],
+            true,
+            true,
+            generated_at,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(
+            stale.blocking_reasons.iter().any(|reason| {
+                reason == "tenant production routing controller evidence is stale"
+            })
+        );
     }
 
     #[test]
@@ -31817,6 +31874,7 @@ not json
             &[],
             false,
             true,
+            generated_at,
         );
         TenantIsolationReadinessReport {
             generated_at,

@@ -62,6 +62,8 @@ app_patterns=(
   "evidence_job_manifests"
   "required_flags"
   "required_artifacts"
+  "controller_evidence_fresh"
+  "latest_controller_age_hours"
   "createRemoteComputer"
   "createRemoteComputerLease"
   "attachRemoteComputerLease"
