@@ -68,6 +68,8 @@ write_summary() {
   local active_turn_count
   local failed_turn_count
   local production_ops_status
+  local ops_controller_fresh
+  local ops_controller_age_hours
   local deployment_status
   local deployment_validation_status
   local ops_validation_status
@@ -83,6 +85,8 @@ write_summary() {
   active_turn_count="$(jq -r '.trace_summary.active_turn_count // 0' "$summary_file_json")"
   failed_turn_count="$(jq -r '.trace_summary.failed_turn_count // 0' "$summary_file_json")"
   production_ops_status="$(jq -r '.production_ops.status // "unknown"' "$summary_file_json")"
+  ops_controller_fresh="$(jq -r '.production_ops.controller_evidence_fresh // false' "$summary_file_json")"
+  ops_controller_age_hours="$(jq -r '.production_ops.latest_controller_age_hours // "none"' "$summary_file_json")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$summary_file_json")"
   deployment_validation_status="$(jq -r '.status // "unknown"' "$deployment_file")"
   ops_validation_status="$(jq -r '.status // "unknown"' "$ops_file")"
@@ -108,6 +112,8 @@ write_summary() {
     echo "active_turn_count=$active_turn_count"
     echo "failed_turn_count=$failed_turn_count"
     echo "production_ops_status=$production_ops_status"
+    echo "production_ops_controller_evidence_fresh=$ops_controller_fresh"
+    echo "production_ops_controller_age_hours=$ops_controller_age_hours"
     echo "deployment_readiness_status=$deployment_status"
     echo "deployment_validation_status=$deployment_validation_status"
     echo "ops_validation_status=$ops_validation_status"

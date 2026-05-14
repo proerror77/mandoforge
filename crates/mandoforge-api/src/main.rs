@@ -1184,6 +1184,8 @@ struct CodexAppServerProductionOpsReadiness {
     controller_required: bool,
     controller_configured: bool,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
+    controller_evidence_fresh: bool,
     latest_controller_validated: bool,
     message: String,
 }
@@ -13942,16 +13944,21 @@ fn build_codex_app_server_production_ops_readiness(
         .and_then(|log| log.details.get("failed_count"))
         .and_then(|value| value.as_u64())
         .unwrap_or(0) as usize;
-    let latest_controller_status = audit_logs
+    let latest_controller_log = audit_logs
         .iter()
         .filter(|log| log.action == "codex_app_server.ops_validation")
-        .max_by_key(|log| log.created_at)
+        .max_by_key(|log| log.created_at);
+    let latest_controller_status = latest_controller_log
         .and_then(|log| {
             log.details["controller_execution"]["status"]
                 .as_str()
                 .or_else(|| log.details["status"].as_str())
         })
         .map(str::to_string);
+    let latest_controller_age_hours =
+        latest_controller_log.map(|log| (generated_at - log.created_at).num_hours());
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
     if !configured {
@@ -13980,6 +13987,9 @@ fn build_codex_app_server_production_ops_readiness(
         blocking_reasons.push(
             "Codex App Server ops controller evidence is missing or not validated".to_string(),
         );
+    }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons.push("Codex App Server ops controller evidence is stale".to_string());
     }
     let production_blocked = !blocking_reasons.is_empty();
     let status = if production_blocked {
@@ -14014,6 +14024,8 @@ fn build_codex_app_server_production_ops_readiness(
         controller_required,
         controller_configured,
         latest_controller_status,
+        latest_controller_age_hours,
+        controller_evidence_fresh,
         latest_controller_validated,
         message,
     }
@@ -32355,7 +32367,8 @@ not json
         assert!(missing.production_blocked);
         assert!(missing.message.contains("ops controller is required"));
 
-        let validated_audit = new_audit_log(
+        let generated_at = base_time + chrono::Duration::minutes(5);
+        let mut validated_audit = new_audit_log(
             None,
             "user",
             None,
@@ -32372,19 +32385,73 @@ not json
                 }
             }),
         );
+        validated_audit.created_at = generated_at;
         let ready = build_codex_app_server_production_ops_readiness(
             true,
             &trace_summary,
             0,
             &[stale_poll_audit, validated_audit],
-            base_time + chrono::Duration::minutes(5),
+            generated_at,
             true,
             true,
         );
         assert_eq!(ready.status, "ready");
         assert!(!ready.production_blocked);
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+
+        let mut stale_controller_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "codex_app_server.ops_validation",
+            "codex_app_server",
+            None,
+            json!({
+                "status": "validated",
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "ops_id": "codex-ops-stale"
+                }
+            }),
+        );
+        stale_controller_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let fresh_stale_poll_audit = AuditLog {
+            id: Uuid::new_v4(),
+            session_id: None,
+            actor_type: "system".to_string(),
+            actor_id: None,
+            action: "codex_app_server.stale_poll_due_run".to_string(),
+            resource_type: "codex_app_server".to_string(),
+            resource_id: None,
+            details: json!({
+                "candidate_count": 0,
+                "failed_count": 0
+            }),
+            created_at: generated_at,
+        };
+        let stale_controller = build_codex_app_server_production_ops_readiness(
+            true,
+            &trace_summary,
+            0,
+            &[fresh_stale_poll_audit, stale_controller_audit],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(stale_controller.status, "blocked");
+        assert!(stale_controller.production_blocked);
+        assert!(!stale_controller.controller_evidence_fresh);
+        assert_eq!(stale_controller.latest_controller_age_hours, Some(25));
+        assert!(
+            stale_controller
+                .message
+                .contains("Codex App Server ops controller evidence is stale")
+        );
     }
 
     #[test]
