@@ -69,6 +69,8 @@ write_summary() {
   local recovery_status
   local recovery_evidence_status
   local recovery_validation_status
+  local recovery_controller_fresh
+  local recovery_controller_age_hours
   local rotation_evidence_status
   local rotation_run_status
   local blocked_count
@@ -79,6 +81,8 @@ write_summary() {
   kms_status="$(jq -r '.kms.status // "unknown"' "$readiness_file")"
   rotation_status="$(jq -r '.production_rotation.status // "unknown"' "$readiness_file")"
   recovery_status="$(jq -r '.production_recovery.status // "unknown"' "$readiness_file")"
+  recovery_controller_fresh="$(jq -r '.production_recovery.controller_evidence_fresh // false' "$readiness_file")"
+  recovery_controller_age_hours="$(jq -r '.production_recovery.latest_controller_age_hours // "none"' "$readiness_file")"
   recovery_evidence_status="missing"
   recovery_validation_status="unknown"
   if [[ -s "$recovery_evidence_file" ]]; then
@@ -105,6 +109,8 @@ write_summary() {
     echo "production_recovery_status=$recovery_status"
     echo "recovery_evidence_status=$recovery_evidence_status"
     echo "recovery_validation_status=$recovery_validation_status"
+    echo "recovery_controller_evidence_fresh=$recovery_controller_fresh"
+    echo "recovery_controller_age_hours=$recovery_controller_age_hours"
     echo "rotation_evidence_status=$rotation_evidence_status"
     echo "rotation_run_status=$rotation_run_status"
     echo "production_blocked_count=$blocked_count"

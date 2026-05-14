@@ -5145,7 +5145,7 @@ function renderVaultReadiness() {
     <div class="item">
       <strong>KMS RECOVERY GATE</strong>
       <div class="muted">${escapeHtml(productionRecovery.message || "Vault KMS recovery gate is not reported")}</div>
-      <div class="muted">controller required ${productionRecovery.controller_required ? "yes" : "no"} · configured ${productionRecovery.controller_configured ? "yes" : "no"} · latest ${escapeHtml(productionRecovery.latest_controller_status || "none")} · validated ${productionRecovery.latest_controller_validated ? "yes" : "no"} · rotation evidence ${productionRecovery.latest_rotation_validated ? "yes" : "no"}</div>
+      <div class="muted">controller required ${productionRecovery.controller_required ? "yes" : "no"} · configured ${productionRecovery.controller_configured ? "yes" : "no"} · latest ${escapeHtml(productionRecovery.latest_controller_status || "none")} · validated ${productionRecovery.latest_controller_validated ? "yes" : "no"} · fresh ${productionRecovery.controller_evidence_fresh ? "yes" : "no"} · age ${productionRecovery.latest_controller_age_hours ?? "n/a"}h · rotation evidence ${productionRecovery.latest_rotation_validated ? "yes" : "no"}</div>
       ${
         kmsRecoveryValidation
           ? `<div class="muted">Latest recovery validation: ${escapeHtml(kmsRecoveryValidation.status)} · controller ${escapeHtml(kmsRecoveryValidation.controller_execution?.status || "skipped")} · checked ${escapeHtml(kmsRecoveryValidation.checked_at)}</div>
