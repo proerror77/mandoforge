@@ -35,6 +35,7 @@ jobs:
       - run: bash -n scripts/policy-rollout-evidence-gate.sh
       - run: bash -n scripts/codex-app-server-evidence-gate.sh
       - run: bash -n scripts/mcp-gateway-evidence-gate.sh
+      - run: bash -n scripts/eval-release-evidence-gate.sh
       - run: bash -n scripts/archive-stage2-production-evidence.sh
       - run: bash -n scripts/verify-stage2-evidence-archive.sh
       - run: bash -n scripts/render-stage2-controller-secret.sh

@@ -21,6 +21,7 @@ manifests=(
   deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml
   deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml
   deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml
+  deploy/stage2-evidence/eval-release-evidence-job.example.yaml
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
@@ -33,6 +34,7 @@ worker_script="scripts/worker-evidence-gate.sh"
 policy_rollout_script="scripts/policy-rollout-evidence-gate.sh"
 codex_app_server_script="scripts/codex-app-server-evidence-gate.sh"
 mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
+eval_release_script="scripts/eval-release-evidence-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -93,6 +95,11 @@ fi
 
 if [[ ! -x "$mcp_gateway_script" ]]; then
   echo "missing MCP Gateway evidence script: $mcp_gateway_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$eval_release_script" ]]; then
+  echo "missing eval/release evidence script: $eval_release_script" >&2
   exit 1
 fi
 
@@ -167,6 +174,11 @@ fi
 
 if ! grep -q "name: mandoforge-mcp-gateway-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the MCP Gateway evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-eval-release-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the eval/release evidence Job" >&2
   exit 1
 fi
 
@@ -417,6 +429,36 @@ fi
 
 if ! grep -q '/api/teams/\$TEAM_ID/mcp-servers/rollouts/run-due' "$mcp_gateway_script"; then
   echo "MCP Gateway evidence script must capture due-run supervision evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-evidence-gate.sh" deploy/stage2-evidence/eval-release-evidence-job.example.yaml; then
+  echo "eval/release evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/eval-release-evidence-job.example.yaml; then
+  echo "eval/release evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/agents/releases/automation-runs" "$eval_release_script"; then
+  echo "eval/release evidence script must collect release automation history" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/agents/releases/deployment/validate" "$eval_release_script"; then
+  echo "eval/release evidence script must validate release deployment readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/agents/releases/orchestration/validate" "$eval_release_script"; then
+  echo "eval/release evidence script must validate release orchestration readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/eval/suites/stage2-regression" "$eval_release_script"; then
+  echo "eval/release evidence script must capture Stage 2 regression suite evidence" >&2
   exit 1
 fi
 

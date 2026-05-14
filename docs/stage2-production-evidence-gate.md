@@ -113,6 +113,15 @@ MANDOFORGE_STAGE2_TEAM_ID=<team_uuid> \
 
 That gate collects team-scoped MCP rollout summary, rollout run history, deployment validation, and optional due-run supervision evidence into `.mandoforge/mcp-gateway-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower eval/release proof, run:
+
+```bash
+RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 \
+./scripts/eval-release-evidence-gate.sh
+```
+
+That gate collects agent release rollout summary, release automation history, deployment validation, orchestration validation, and optional Stage 2 regression/due-run evidence into `.mandoforge/eval-release-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/eval-release-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.
