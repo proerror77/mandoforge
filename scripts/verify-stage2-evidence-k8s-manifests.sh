@@ -671,6 +671,16 @@ if ! grep -q "team-discovery.json" scripts/stage2-completion-audit-gate.sh; then
   exit 1
 fi
 
+if ! grep -q "required_evidence_artifacts_for_requirement" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must map requirements to explicit evidence metadata artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "missing_required_evidence_artifact_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must report missing explicit evidence metadata artifacts" >&2
+  exit 1
+fi
+
 if ! grep -q "policy-rollout-evidence-gate.sh" deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml; then
   echo "Policy rollout evidence Job does not run the dedicated evidence gate" >&2
   exit 1
