@@ -449,7 +449,7 @@
             </div>
             <div>
               <h3>Providers</h3>
-              <div class="muted">Activate / Disable / Archive Provider</div>
+              <div class="muted">Activate / Disable / Archive Provider / Archive Provider Access</div>
               <button type="button" class="secondary form-inline-action" id="run-provider-policy-gate">Run Provider Gate</button>
               <button type="button" class="secondary form-inline-action" id="validate-provider-deployment">Validate Deployment</button>
               <button type="button" class="secondary form-inline-action" id="run-provider-production-rollout">Run Production Rollout</button>
@@ -570,6 +570,36 @@
                   <input name="reason" value="Provider lifecycle change requires review" />
                 </label>
                 <button type="submit">Request Provider Approval</button>
+              </form>
+              <form id="provider-access-form" class="stack-form compact-form">
+                <label>
+                  Team ID
+                  <input name="team_id" required placeholder="Team UUID" />
+                </label>
+                <label>
+                  Provider name
+                  <input name="provider_name" required value="governed-mock" />
+                </label>
+                <label>
+                  Model allowlist
+                  <input name="model_allowlist" value="gpt-5.4-mini" />
+                </label>
+                <button type="submit">Create Provider Access</button>
+              </form>
+              <form id="provider-access-update-form" class="stack-form compact-form">
+                <label>
+                  Provider access ID
+                  <input name="provider_access_id" required placeholder="Provider access UUID" />
+                </label>
+                <label>
+                  Provider name
+                  <input name="provider_name" required value="governed-mock" />
+                </label>
+                <label>
+                  Model allowlist
+                  <input name="model_allowlist" value="gpt-5.4-mini,gpt-5.4" />
+                </label>
+                <button type="submit">Update Provider Access</button>
               </form>
               <div id="providers" class="list"></div>
             </div>

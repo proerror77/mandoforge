@@ -12,7 +12,7 @@ use crate::{
     AppError, AppState, CreateMcpServerRecord, CreateMembership, CreateOrganization, CreateProject,
     CreateProviderAccess, CreateProviderRecord, CreateTeam, CreateTenantInvitation,
     McpServerRecord, Membership, Organization, Project, ProviderAccess, ProviderRecord, Role, Team,
-    TenantInvitation, UpdateMcpServerRecord,
+    TenantInvitation, UpdateMcpServerRecord, UpdateProviderAccess,
 };
 
 impl AppState {
@@ -1474,6 +1474,81 @@ impl AppState {
             }
         }
         Ok(provider_access)
+    }
+
+    pub(crate) async fn update_provider_access(
+        &self,
+        access_id: Uuid,
+        input: UpdateProviderAccess,
+    ) -> Result<ProviderAccess, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let access = store
+                    .provider_access
+                    .get_mut(&access_id)
+                    .ok_or_else(|| AppError::not_found("provider access not found"))?;
+                if access.status != "active" {
+                    return Err(AppError::bad_request(
+                        "archived provider access cannot be updated",
+                    ));
+                }
+                access.provider_name = input.provider_name;
+                access.model_allowlist = input.model_allowlist;
+                Ok(access.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE provider_access
+                     SET provider_name = $3, model_allowlist = $4
+                     WHERE tenant_id = $1 AND id = $2 AND status = 'active'
+                     RETURNING id, team_id, provider_name, model_allowlist, status, created_at",
+                )
+                .bind(self.tenant_id)
+                .bind(access_id)
+                .bind(input.provider_name)
+                .bind(serde_json::json!(input.model_allowlist))
+                .fetch_optional(pool)
+                .await?;
+                let Some(row) = row else {
+                    return Err(AppError::not_found("active provider access not found"));
+                };
+                provider_access_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn archive_provider_access(
+        &self,
+        access_id: Uuid,
+    ) -> Result<ProviderAccess, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let access = store
+                    .provider_access
+                    .get_mut(&access_id)
+                    .ok_or_else(|| AppError::not_found("provider access not found"))?;
+                access.status = "archived".to_string();
+                Ok(access.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE provider_access
+                     SET status = 'archived'
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING id, team_id, provider_name, model_allowlist, status, created_at",
+                )
+                .bind(self.tenant_id)
+                .bind(access_id)
+                .fetch_optional(pool)
+                .await?;
+                let Some(row) = row else {
+                    return Err(AppError::not_found("provider access not found"));
+                };
+                provider_access_from_row(row)
+            }
+        }
     }
 
     pub(crate) async fn ensure_provider_model_allowed(

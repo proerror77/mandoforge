@@ -6,6 +6,7 @@ const state = {
   toolCalls: [],
   auditLogs: [],
   providers: [],
+  providerAccess: [],
   providerSummary: null,
   providerPolicyGate: null,
   providerPolicyGateRuns: null,
@@ -210,6 +211,8 @@ const approvalNotificationRoutingRoot = document.querySelector("#approval-notifi
 const approvalNotificationRunsRoot = document.querySelector("#approval-notification-runs");
 const providerForm = document.querySelector("#provider-form");
 const providerUpdateForm = document.querySelector("#provider-update-form");
+const providerAccessForm = document.querySelector("#provider-access-form");
+const providerAccessUpdateForm = document.querySelector("#provider-access-update-form");
 const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
 const runProviderPolicyGateButton = document.querySelector("#run-provider-policy-gate");
 const validateProviderDeploymentButton = document.querySelector("#validate-provider-deployment");
@@ -275,6 +278,8 @@ validateApprovalNotificationsButton.addEventListener("click", validateApprovalNo
 validateApprovalNotificationOpsButton.addEventListener("click", validateApprovalNotificationOps);
 providerForm.addEventListener("submit", createProvider);
 providerUpdateForm.addEventListener("submit", updateProvider);
+providerAccessForm.addEventListener("submit", createProviderAccess);
+providerAccessUpdateForm.addEventListener("submit", updateProviderAccess);
 providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
 runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
 validateProviderDeploymentButton.addEventListener("click", validateProviderDeployment);
@@ -690,6 +695,45 @@ async function updateProvider(event) {
   await api(`/api/providers/${providerId}`, {
     method: "PATCH",
     body: JSON.stringify(providerPayloadFromForm(form)),
+  });
+  await refreshOps();
+}
+
+function providerAccessPayloadFromForm(form) {
+  return {
+    provider_name: String(form.get("provider_name") || "").trim(),
+    model_allowlist: String(form.get("model_allowlist") || "")
+      .split(",")
+      .map((model) => model.trim())
+      .filter(Boolean),
+  };
+}
+
+async function createProviderAccess(event) {
+  event.preventDefault();
+  const form = new FormData(providerAccessForm);
+  const teamId = String(form.get("team_id") || state.selectedTeamId || "").trim();
+  await api(`/api/teams/${teamId}/provider-access`, {
+    method: "POST",
+    body: JSON.stringify(providerAccessPayloadFromForm(form)),
+  });
+  await refreshOps();
+}
+
+async function updateProviderAccess(event) {
+  event.preventDefault();
+  const form = new FormData(providerAccessUpdateForm);
+  const accessId = String(form.get("provider_access_id") || "").trim();
+  await api(`/api/provider-access/${accessId}`, {
+    method: "PATCH",
+    body: JSON.stringify(providerAccessPayloadFromForm(form)),
+  });
+  await refreshOps();
+}
+
+async function archiveProviderAccess(accessId) {
+  await api(`/api/provider-access/${accessId}/archive`, {
+    method: "POST",
   });
   await refreshOps();
 }
@@ -1816,9 +1860,17 @@ async function refreshOps() {
     state.tenantInvitations = [];
     state.selectedTeamId = "";
   }
-  state.projects = state.selectedTeamId
-    ? await api(`/api/teams/${state.selectedTeamId}/projects`)
-    : [];
+  if (state.selectedTeamId) {
+    const [projects, providerAccess] = await Promise.all([
+      api(`/api/teams/${state.selectedTeamId}/projects`),
+      api(`/api/teams/${state.selectedTeamId}/provider-access`),
+    ]);
+    state.projects = projects;
+    state.providerAccess = providerAccess;
+  } else {
+    state.projects = [];
+    state.providerAccess = [];
+  }
   renderOps();
 }
 
@@ -4224,6 +4276,46 @@ function renderProviders() {
   const deploymentReadiness = summary?.deployment_readiness || {};
   const productionRolloutRun = state.providerProductionRolloutRun;
   const productionRollbackRun = state.providerProductionRollbackRun;
+  const providerAccessHtml = `
+    <div class="detail-panel">
+      <h4>Provider Access</h4>
+      <div class="muted">Selected team: ${escapeHtml(state.selectedTeamId || "none")}</div>
+      ${
+        state.providerAccess.length
+          ? `<table class="compact-table">
+              <thead>
+                <tr>
+                  <th>Provider</th>
+                  <th>Models</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${state.providerAccess
+                  .map(
+                    (access) => `
+                      <tr>
+                        <td>${escapeHtml(access.provider_name)}</td>
+                        <td>${escapeHtml((access.model_allowlist || []).join(", ") || "none")}</td>
+                        <td><span class="budget-status ${escapeHtml(access.status)}">${escapeHtml(access.status)}</span></td>
+                        <td>
+                          ${
+                            access.status === "active"
+                              ? `<button class="secondary reject" data-provider-access-archive="${escapeHtml(access.id)}">Archive Provider Access</button>`
+                              : `<span class="muted">archived</span>`
+                          }
+                        </td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>`
+          : `<div class="muted">No provider access grants for selected team.</div>`
+      }
+    </div>
+  `;
   const policyGateChecks = policyGate?.checks || [];
   const policyGateRunAttention = policyGateRuns?.attention_items || [];
   const policyGateHtml = policyGate
@@ -4494,7 +4586,13 @@ function renderProviders() {
         .join("")
     : `<div class="muted">No stored providers</div>`;
   providerRoot.innerHTML =
-    policyGateHtml + policyGateRunsHtml + deploymentValidationHtml + productionRolloutHtml + summaryHtml + providerListHtml;
+    policyGateHtml +
+    policyGateRunsHtml +
+    deploymentValidationHtml +
+    productionRolloutHtml +
+    summaryHtml +
+    providerAccessHtml +
+    providerListHtml;
   providerRoot.querySelectorAll("[data-provider-status]").forEach((button) => {
     button.addEventListener("click", () =>
       updateProviderStatus(button.dataset.providerStatus, button.dataset.status),
@@ -4507,6 +4605,9 @@ function renderProviders() {
     button.addEventListener("click", () =>
       decideProviderStatusApproval(button.dataset.providerApproval, button.dataset.decision),
     );
+  });
+  providerRoot.querySelectorAll("[data-provider-access-archive]").forEach((button) => {
+    button.addEventListener("click", () => archiveProviderAccess(button.dataset.providerAccessArchive));
   });
 }
 
@@ -5317,6 +5418,7 @@ function setTeamId(teamId) {
   projectForm.elements.team_id.value = teamId;
   membershipForm.elements.team_id.value = teamId;
   mcpForm.elements.team_id.value = teamId;
+  providerAccessForm.elements.team_id.value = teamId;
 }
 
 function setCodexThreadId(threadId) {

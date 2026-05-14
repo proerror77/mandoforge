@@ -2572,6 +2572,13 @@ struct CreateProviderAccess {
     model_allowlist: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateProviderAccess {
+    provider_name: String,
+    #[serde(default)]
+    model_allowlist: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProviderRecord {
     id: Uuid,
@@ -3773,6 +3780,11 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
+        )
+        .route("/api/provider-access/{id}", patch(update_provider_access))
+        .route(
+            "/api/provider-access/{id}/archive",
+            post(archive_provider_access),
         )
         .route(
             "/api/teams/{id}/mcp-servers",
@@ -9385,6 +9397,75 @@ async fn create_provider_access(
 ) -> Result<Json<ProviderAccess>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     Ok(Json(state.create_provider_access(id, input).await?))
+}
+
+async fn update_provider_access(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateProviderAccess>,
+) -> Result<Json<ProviderAccess>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "provider_access",
+        Some(id),
+    )
+    .await?;
+    let access = state.update_provider_access(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "provider_access.updated",
+            "provider_access",
+            Some(id),
+            json!({
+                "subject": principal_from_request(&state, &headers).await?.subject_id,
+                "team_id": access.team_id,
+                "provider_name": access.provider_name,
+                "model_allowlist": access.model_allowlist,
+                "status": access.status
+            }),
+        ))
+        .await?;
+    Ok(Json(access))
+}
+
+async fn archive_provider_access(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderAccess>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "provider_access",
+        Some(id),
+    )
+    .await?;
+    let access = state.archive_provider_access(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "provider_access.archived",
+            "provider_access",
+            Some(id),
+            json!({
+                "subject": principal_from_request(&state, &headers).await?.subject_id,
+                "team_id": access.team_id,
+                "provider_name": access.provider_name,
+                "model_allowlist": access.model_allowlist,
+                "status": access.status
+            }),
+        ))
+        .await?;
+    Ok(Json(access))
 }
 
 async fn list_providers(
@@ -45084,6 +45165,165 @@ not json
         .await;
         assert_eq!(governed_provider_access.provider_name, "governed-mock");
 
+        let access_lifecycle_provider: ProviderRecord = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_type": "mock",
+                        "name": "access-lifecycle-mock",
+                        "default_model": "gpt-5.4-mini",
+                        "config": {}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(access_lifecycle_provider.name, "access-lifecycle-mock");
+        let access_lifecycle: ProviderAccess = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/teams/{}/provider-access", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_name": "access-lifecycle-mock",
+                        "model_allowlist": ["gpt-5.4-mini"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(access_lifecycle.status, "active");
+        let updated_access_lifecycle: ProviderAccess = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/provider-access/{}", access_lifecycle.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "provider_name": "access-lifecycle-mock",
+                        "model_allowlist": ["gpt-5.4"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            updated_access_lifecycle.model_allowlist,
+            vec!["gpt-5.4".to_string()]
+        );
+        let (blocked_old_model_status, blocked_old_model_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "access old model blocked",
+                        "kind": "orchestrator",
+                        "team_id": team.id,
+                        "provider": "access-lifecycle-mock",
+                        "model": "gpt-5.4-mini",
+                        "tools": ["file.read"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(blocked_old_model_status, StatusCode::FORBIDDEN);
+        assert!(
+            blocked_old_model_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+        let allowed_updated_model_agent: Agent = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "access updated model allowed",
+                        "kind": "orchestrator",
+                        "team_id": team.id,
+                        "provider": "access-lifecycle-mock",
+                        "model": "gpt-5.4",
+                        "tools": ["file.read"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(allowed_updated_model_agent.model, "gpt-5.4");
+        let archived_access_lifecycle: ProviderAccess = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/provider-access/{}/archive",
+                    access_lifecycle.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(archived_access_lifecycle.status, "archived");
+        let (blocked_archived_access_status, blocked_archived_access_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "access archived blocked",
+                        "kind": "orchestrator",
+                        "team_id": team.id,
+                        "provider": "access-lifecycle-mock",
+                        "model": "gpt-5.4",
+                        "tools": ["file.read"]
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(blocked_archived_access_status, StatusCode::FORBIDDEN);
+        assert!(
+            blocked_archived_access_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
         let cost_limited_provider: ProviderRecord = request_json(
             app.clone(),
             Request::builder()
@@ -45452,6 +45692,19 @@ not json
             log.action == "provider.api_key_ref_rotated"
                 && log.details["previous_api_key_ref"] == "vault:providers/openai#api_key"
                 && log.details["new_api_key_ref"] == "vault:providers/openai/rotated#api_key"
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider_access.updated"
+                && log.resource_id == Some(access_lifecycle.id)
+                && log.details["provider_name"] == "access-lifecycle-mock"
+                && log.details["model_allowlist"]
+                    .as_array()
+                    .is_some_and(|models| models.iter().any(|model| model == "gpt-5.4"))
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "provider_access.archived"
+                && log.resource_id == Some(access_lifecycle.id)
+                && log.details["status"] == "archived"
         }));
         server.abort();
 
