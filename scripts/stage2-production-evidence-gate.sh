@@ -384,6 +384,42 @@ capture_remote_computer_sidecar_recovery_validation() {
     }' >"$sidecar_file"
 }
 
+capture_vault_kms_recovery_validation() {
+  local recovery_response
+  local recovery_file="$EVIDENCE_DIR/vault-kms-recovery-evidence.json"
+
+  recovery_response="$(fetch_json POST /api/vault/kms/recovery/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$recovery_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$recovery_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$recovery_file"
+}
+
+capture_vault_kms_rotation_validation() {
+  local rotation_response
+  local rotation_file="$EVIDENCE_DIR/vault-kms-rotation-evidence.json"
+
+  rotation_response="$(fetch_json POST /api/vault/kms/rotation/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$rotation_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$rotation_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$rotation_file"
+}
+
 capture_approval_notification_delivery_validation() {
   local delivery_response
   local delivery_file="$EVIDENCE_DIR/approval-notification-delivery-evidence.json"
@@ -425,7 +461,7 @@ run_controller_validations() {
   fetch_json POST /api/providers/policy-gate/run >/dev/null
   fetch_json POST /api/providers/deployment/validate >/dev/null
   fetch_json POST /api/policy/rollout/orchestration/validate >/dev/null
-  fetch_json POST /api/vault/kms/recovery/validate >/dev/null
+  capture_vault_kms_recovery_validation
   fetch_json POST /api/execution-jobs/worker-load-validation/run >/dev/null
   capture_remote_computer_state_sync_validation
   fetch_json POST /api/approvals/notifications/deployment/validate >/dev/null
@@ -452,7 +488,7 @@ run_controller_validations() {
   fi
 
   if [[ "${RUN_STAGE2_SECRET_LIFECYCLE:-0}" == "1" ]]; then
-    fetch_json POST /api/vault/kms/rotation/run >/dev/null
+    capture_vault_kms_rotation_validation
   else
     echo "skipping KMS rotation run; set RUN_STAGE2_SECRET_LIFECYCLE=1 to include secret lifecycle evidence" >&2
   fi

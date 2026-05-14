@@ -411,8 +411,33 @@ if ! grep -q "/api/vault/kms/recovery/validate" "$vault_script"; then
   exit 1
 fi
 
+if ! grep -q "vault-kms-recovery-evidence.json" "$vault_script"; then
+  echo "Vault evidence script must write explicit KMS recovery evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "vault-kms-recovery-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit KMS recovery evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "/api/vault/kms/rotation/run" "$vault_script"; then
   echo "Vault evidence script must capture KMS rotation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_SECRET_LIFECYCLE" "$vault_script"; then
+  echo "Vault evidence script must support optional secret lifecycle evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "vault-kms-rotation-evidence.json" "$vault_script"; then
+  echo "Vault evidence script must write explicit KMS rotation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "vault-kms-rotation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit KMS rotation evidence metadata" >&2
   exit 1
 fi
 
