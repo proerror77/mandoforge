@@ -74,6 +74,8 @@ write_summary() {
   local controller_required
   local controller_configured
   local latest_controller_status
+  local controller_fresh
+  local controller_age_hours
   local blocked_count
 
   readiness_status="$(jq -r '.status // "unknown"' "$readiness_file")"
@@ -98,6 +100,8 @@ write_summary() {
   controller_required="$(jq -r '.controller_required // false' "$readiness_file")"
   controller_configured="$(jq -r '.controller_configured // false' "$readiness_file")"
   latest_controller_status="$(jq -r '.latest_controller_status // "none"' "$readiness_file")"
+  controller_fresh="$(jq -r '.controller_evidence_fresh // false' "$readiness_file")"
+  controller_age_hours="$(jq -r '.latest_controller_age_hours // "none"' "$readiness_file")"
   blocked_count="$(jq -r 'if .production_blocked == true then 1 else 0 end' "$readiness_file")"
 
   {
@@ -116,6 +120,8 @@ write_summary() {
     echo "controller_required=$controller_required"
     echo "controller_configured=$controller_configured"
     echo "latest_controller_status=$latest_controller_status"
+    echo "controller_evidence_fresh=$controller_fresh"
+    echo "controller_age_hours=$controller_age_hours"
     echo "policy_due_run=$RUN_POLICY_DUE_RUN"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo

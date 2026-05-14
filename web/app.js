@@ -4473,7 +4473,7 @@ function renderPolicy() {
       <dt>Rollout orchestration</dt>
       <dd>${escapeHtml(rolloutOrchestration.status || "unknown")} · blocked ${rolloutOrchestration.production_blocked ? "yes" : "no"} · due fresh ${rolloutOrchestration.due_run_fresh ? "yes" : "no"} · controller ${rolloutOrchestration.controller_configured ? "configured" : "missing"} · required ${rolloutOrchestration.controller_required ? "yes" : "no"}</dd>
       <dt>Rollout validation</dt>
-      <dd>${escapeHtml(rolloutOrchestration.latest_validation_status || "none")} · controller ${escapeHtml(rolloutOrchestration.latest_controller_status || "none")} · latest due ${escapeHtml(rolloutOrchestration.latest_due_run_at || "none")}</dd>
+      <dd>${escapeHtml(rolloutOrchestration.latest_validation_status || "none")} · controller ${escapeHtml(rolloutOrchestration.latest_controller_status || "none")} · fresh ${rolloutOrchestration.controller_evidence_fresh ? "yes" : "no"} · age ${rolloutOrchestration.latest_controller_age_hours ?? "n/a"}h · latest due ${escapeHtml(rolloutOrchestration.latest_due_run_at || "none")}</dd>
       <dt>Blocked tools</dt>
       <dd>${escapeHtml(blockedTools.join(", ") || "none")}</dd>
       <dt>Approval required</dt>

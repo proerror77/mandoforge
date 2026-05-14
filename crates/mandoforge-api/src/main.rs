@@ -197,6 +197,8 @@ struct PolicyRolloutOrchestrationReadiness {
     latest_validation_at: Option<DateTime<Utc>>,
     latest_validation_status: Option<String>,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
+    controller_evidence_fresh: bool,
     latest_controller_validated: bool,
     controller_required: bool,
     controller_configured: bool,
@@ -11764,6 +11766,11 @@ fn build_policy_rollout_orchestration_readiness(
         .and_then(|execution| execution.get("status"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let latest_controller_age_hours = latest_validation
+        .filter(|_| latest_controller_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
 
@@ -11793,6 +11800,10 @@ fn build_policy_rollout_orchestration_readiness(
             "policy rollout orchestration controller evidence is missing or not validated"
                 .to_string(),
         );
+    }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons
+            .push("policy rollout orchestration controller evidence is stale".to_string());
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -11824,6 +11835,8 @@ fn build_policy_rollout_orchestration_readiness(
         latest_validation_at,
         latest_validation_status,
         latest_controller_status,
+        latest_controller_age_hours,
+        controller_evidence_fresh,
         latest_controller_validated,
         controller_required,
         controller_configured,
@@ -36921,29 +36934,28 @@ not json
         assert_eq!(without_controller.status, "blocked");
         assert!(!without_controller.latest_controller_validated);
 
+        let mut validation_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.rollout_orchestration_validation_run",
+            "policy",
+            Some(active_revision_id),
+            json!({
+                "status": "validated",
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "orchestration_id": "policy-orchestration-1"
+                }
+            }),
+        );
+        validation_audit.created_at = generated_at;
         let ready = build_policy_rollout_orchestration_readiness(
             &runtime,
-            &[
-                due_run,
-                new_audit_log(
-                    None,
-                    "user",
-                    None,
-                    "policy.rollout_orchestration_validation_run",
-                    "policy",
-                    Some(active_revision_id),
-                    json!({
-                        "status": "validated",
-                        "controller_required": true,
-                        "controller_configured": true,
-                        "controller_execution": {
-                            "attempted": true,
-                            "status": "validated",
-                            "orchestration_id": "policy-orchestration-1"
-                        }
-                    }),
-                ),
-            ],
+            &[due_run, validation_audit],
             generated_at,
             true,
             true,
@@ -36952,6 +36964,56 @@ not json
         assert!(!ready.production_blocked);
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
+
+        let mut stale_validation_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.rollout_orchestration_validation_run",
+            "policy",
+            Some(active_revision_id),
+            json!({
+                "status": "validated",
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "orchestration_id": "policy-orchestration-stale"
+                }
+            }),
+        );
+        stale_validation_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let fresh_due_run = new_audit_log(
+            None,
+            "system",
+            None,
+            "policy.rollout_due_run",
+            "policy",
+            Some(active_revision_id),
+            json!({
+                "status": "noop",
+                "scanned_count": 1,
+                "skipped_count": 1,
+            }),
+        );
+        let stale = build_policy_rollout_orchestration_readiness(
+            &runtime,
+            &[fresh_due_run, stale_validation_audit],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.production_blocked);
+        assert!(stale.latest_controller_validated);
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(stale.blocking_reasons.iter().any(|reason| {
+            reason == "policy rollout orchestration controller evidence is stale"
+        }));
     }
 
     #[tokio::test]
