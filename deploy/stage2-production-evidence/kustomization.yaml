@@ -12,3 +12,4 @@ resources:
   - ../stage2-evidence/approval-notification-evidence-job.example.yaml
   - ../stage2-evidence/worker-evidence-job.example.yaml
   - ../stage2-evidence/policy-rollout-evidence-job.example.yaml
+  - ../stage2-evidence/codex-app-server-evidence-job.example.yaml

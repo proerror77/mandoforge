@@ -19,6 +19,7 @@ manifests=(
   deploy/stage2-evidence/approval-notification-evidence-job.example.yaml
   deploy/stage2-evidence/worker-evidence-job.example.yaml
   deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml
+  deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
@@ -29,6 +30,7 @@ vault_script="scripts/vault-evidence-gate.sh"
 approval_notification_script="scripts/approval-notification-evidence-gate.sh"
 worker_script="scripts/worker-evidence-gate.sh"
 policy_rollout_script="scripts/policy-rollout-evidence-gate.sh"
+codex_app_server_script="scripts/codex-app-server-evidence-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -79,6 +81,11 @@ fi
 
 if [[ ! -x "$policy_rollout_script" ]]; then
   echo "missing policy rollout evidence script: $policy_rollout_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$codex_app_server_script" ]]; then
+  echo "missing Codex App Server evidence script: $codex_app_server_script" >&2
   exit 1
 fi
 
@@ -143,6 +150,11 @@ fi
 
 if ! grep -q "name: mandoforge-policy-rollout-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the policy rollout evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-codex-app-server-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the Codex App Server evidence Job" >&2
   exit 1
 fi
 
@@ -338,6 +350,36 @@ fi
 
 if ! grep -q "/api/policy/rollout/run-due" "$policy_rollout_script"; then
   echo "Policy rollout evidence script must capture due-run evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "codex-app-server-evidence-gate.sh" deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml; then
+  echo "Codex App Server evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml; then
+  echo "Codex App Server evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/codex-app-server/control-plane/summary" "$codex_app_server_script"; then
+  echo "Codex App Server evidence script must collect control-plane summary" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/codex-app-server/deployment/validate" "$codex_app_server_script"; then
+  echo "Codex App Server evidence script must validate deployment readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/codex-app-server/ops/validate" "$codex_app_server_script"; then
+  echo "Codex App Server evidence script must validate ops readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/codex-app-server/runs/poll-stale" "$codex_app_server_script"; then
+  echo "Codex App Server evidence script must capture stale-poll evidence" >&2
   exit 1
 fi
 

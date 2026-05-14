@@ -94,6 +94,15 @@ RUN_STAGE2_POLICY_DUE_RUN=1 \
 
 That gate collects policy rollout orchestration readiness, validates the external-controller boundary, and optionally runs due-rollout supervision evidence into `.mandoforge/policy-rollout-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower Codex App Server proof, run:
+
+```bash
+RUN_STAGE2_CODEX_STALE_POLL=1 \
+./scripts/codex-app-server-evidence-gate.sh
+```
+
+That gate collects Codex App Server health, control-plane summary, run/trace inventory, deployment validation, ops validation, and optional stale-poll evidence into `.mandoforge/codex-app-server-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.
