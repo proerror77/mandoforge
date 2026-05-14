@@ -19,6 +19,11 @@ require_cmd node
 require_cmd curl
 require_cmd jq
 
+auth_headers=(
+  -H "x-mandoforge-subject: stage2-controller-drill"
+  -H "x-mandoforge-roles: admin"
+)
+
 if ! curl -fsS "$BASE_URL/healthz" >/dev/null; then
   echo "Stage 2 controller drill requires a running MandoForge API at $BASE_URL" >&2
   exit 1
@@ -39,6 +44,158 @@ for _ in $(seq 1 50); do
 done
 
 curl -fsS "$MOCK_BASE_URL/healthz" >/dev/null
+
+seed_stage2_controller_drill_mcp_scope() {
+  local slug_suffix
+  local organization_file
+  local team_file
+  local server_file
+  local rollout_file
+  local organization_id
+  local team_id
+  local server_id
+  local activate_after
+
+  slug_suffix="$(date -u +%Y%m%d%H%M%S)-$$"
+  organization_file="$(mktemp)"
+  team_file="$(mktemp)"
+  server_file="$(mktemp)"
+  rollout_file="$(mktemp)"
+  activate_after="$(node -e 'console.log(new Date(Date.now() - 60000).toISOString())')"
+
+  curl -fsS "${auth_headers[@]}" \
+    -H "content-type: application/json" \
+    -d "{\"name\":\"Stage 2 Controller Drill Org\",\"slug\":\"stage2-controller-drill-$slug_suffix\"}" \
+    "$BASE_URL/api/organizations" >"$organization_file"
+  organization_id="$(jq -r '.id' "$organization_file")"
+
+  curl -fsS "${auth_headers[@]}" \
+    -H "content-type: application/json" \
+    -d "{\"name\":\"Stage 2 Controller Drill Team\",\"slug\":\"stage2-controller-drill-team-$slug_suffix\"}" \
+    "$BASE_URL/api/organizations/$organization_id/teams" >"$team_file"
+  team_id="$(jq -r '.id' "$team_file")"
+
+  curl -fsS "${auth_headers[@]}" \
+    -H "content-type: application/json" \
+    -d '{
+      "name": "stage2-controller-drill-docs",
+      "transport": "http",
+      "tool_allowlist": ["search"],
+      "config": {
+        "source": "stage2-controller-drill",
+        "health_check": {"interval_seconds": 60}
+      }
+    }' \
+    "$BASE_URL/api/teams/$team_id/mcp-servers" >"$server_file"
+  server_id="$(jq -r '.id' "$server_file")"
+
+  jq -n \
+    --arg activate_after "$activate_after" \
+    '{
+      transport: "http+json",
+      config: {
+        source: "stage2-controller-drill-rolled-out",
+        health_check: {interval_seconds: 60}
+      },
+      tool_allowlist: ["search"],
+      status: "active",
+      activate_after: $activate_after,
+      reason: "stage2 controller drill MCP rollout evidence seed"
+    }' | curl -fsS "${auth_headers[@]}" \
+      -H "content-type: application/json" \
+      -d @- \
+      "$BASE_URL/api/teams/$team_id/mcp-servers/$server_id/rollouts" >"$rollout_file"
+
+  mkdir -p "$EVIDENCE_DIR"
+  jq -n \
+    --arg status "seeded" \
+    --arg organization_id "$organization_id" \
+    --arg team_id "$team_id" \
+    --arg server_id "$server_id" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile organization "$organization_file" \
+    --slurpfile team "$team_file" \
+    --slurpfile server "$server_file" \
+    --slurpfile rollout "$rollout_file" \
+    '{
+      status: $status,
+      organization_id: $organization_id,
+      team_id: $team_id,
+      server_id: $server_id,
+      generated_at: $generated_at,
+      organization: ($organization[0] // {}),
+      team: ($team[0] // {}),
+      server: ($server[0] // {}),
+      rollout: ($rollout[0] // {})
+    }' >"$EVIDENCE_DIR/stage2-controller-drill-mcp-seed.json"
+
+  rm -f "$organization_file" "$team_file" "$server_file" "$rollout_file"
+  export MANDOFORGE_STAGE2_TEAM_ID="$team_id"
+}
+
+seed_stage2_controller_drill_eval_release_scope() {
+  local bootstrap_file
+  local agents_file
+  local run_file
+  local release_file
+  local dataset_id
+  local agent_id
+  local eval_run_id
+
+  bootstrap_file="$(mktemp)"
+  agents_file="$(mktemp)"
+  run_file="$(mktemp)"
+  release_file="$(mktemp)"
+
+  curl -fsS "${auth_headers[@]}" \
+    -H "content-type: application/json" \
+    -d '{"name":"Stage 2 Controller Drill Regression"}' \
+    "$BASE_URL/api/eval/suites/stage2-regression" >"$bootstrap_file"
+  dataset_id="$(jq -r '.dataset.id' "$bootstrap_file")"
+
+  curl -fsS "${auth_headers[@]}" "$BASE_URL/api/agents" >"$agents_file"
+  agent_id="$(jq -r '.[0].id // empty' "$agents_file")"
+  if [[ -z "$agent_id" ]]; then
+    echo "Stage 2 controller drill could not seed eval/release evidence: no agent exists" >&2
+    exit 1
+  fi
+
+  curl -fsS "${auth_headers[@]}" \
+    -H "content-type: application/json" \
+    -d "{\"agent_id\":\"$agent_id\"}" \
+    "$BASE_URL/api/eval/datasets/$dataset_id/runs" >"$run_file"
+  eval_run_id="$(jq -r '.id' "$run_file")"
+
+  curl -fsS "${auth_headers[@]}" \
+    -H "content-type: application/json" \
+    -d "{\"eval_run_id\":\"$eval_run_id\",\"environment\":\"stage2-controller-drill\",\"min_score\":1.0}" \
+    "$BASE_URL/api/agents/$agent_id/releases" >"$release_file"
+
+  mkdir -p "$EVIDENCE_DIR"
+  jq -n \
+    --arg status "seeded" \
+    --arg agent_id "$agent_id" \
+    --arg dataset_id "$dataset_id" \
+    --arg eval_run_id "$eval_run_id" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile bootstrap "$bootstrap_file" \
+    --slurpfile agents "$agents_file" \
+    --slurpfile run "$run_file" \
+    --slurpfile release "$release_file" \
+    '{
+      status: $status,
+      agent_id: $agent_id,
+      dataset_id: $dataset_id,
+      eval_run_id: $eval_run_id,
+      generated_at: $generated_at,
+      bootstrap: ($bootstrap[0] // {}),
+      agents: ($agents[0] // []),
+      run: ($run[0] // {}),
+      release: ($release[0] // {})
+    }' >"$EVIDENCE_DIR/stage2-controller-drill-eval-release-seed.json"
+
+  rm -f "$bootstrap_file" "$agents_file" "$run_file" "$release_file"
+}
 
 export ALLOW_BLOCKED="${ALLOW_BLOCKED:-1}"
 export RUN_STAGE2_PRODUCTION_VALIDATIONS=1
@@ -95,16 +252,27 @@ export MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_REQUIRED=true
 export MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL="$MOCK_BASE_URL/finance/reconcile"
 
 if [[ "$RUN_DRILL_ACTIONS" == "1" ]]; then
+  seed_stage2_controller_drill_mcp_scope
+  seed_stage2_controller_drill_eval_release_scope
   export RUN_STAGE2_SECRET_LIFECYCLE=1
   export RUN_STAGE2_PROVIDER_ROLLOUT=1
   export RUN_STAGE2_POLICY_DUE_RUN=1
+  export RUN_STAGE2_MCP_DUE_RUN=1
+  export RUN_STAGE2_MCP_ROLLBACK=1
   export RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1
   export RUN_STAGE2_APPROVAL_DELIVERY=1
   export RUN_STAGE2_CODEX_STALE_POLL=1
   export RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1
+  export RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1
   export RUN_STAGE2_OBSERVABILITY_REMEDIATION=1
   export RUN_STAGE2_FINANCE_CONTROLLERS=1
   export RUN_STAGE2_FINANCE_EXPORT=1
+  if command -v actionbook >/dev/null 2>&1; then
+    export RUN_STAGE2_UI_ACTIONBOOK=1
+    export RUN_STAGE2_UI_STATIC_ASSETS=1
+  else
+    echo "skipping Stage 2 UI smoke evidence in controller drill; actionbook is not installed" >&2
+  fi
 fi
 
 ./scripts/stage2-production-evidence-gate.sh

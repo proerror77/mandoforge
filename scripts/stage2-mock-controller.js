@@ -80,6 +80,29 @@ const server = http.createServer(async (request, response) => {
     response.end(JSON.stringify({ status: "ok" }));
     return;
   }
+  if (request.method === "GET" && /^\/v1\/servers\/[^/]+\/tools$/.test(url.pathname)) {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify([{ name: "search", description: "Stage 2 mock MCP search tool" }]));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/v1/call") {
+    try {
+      const payload = await readBody(request);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        result: {
+          status: "ok",
+          server: payload.server || null,
+          tool: payload.tool || null,
+          args: payload.args || {},
+        },
+      }));
+    } catch (error) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: "failed", error: error.message }));
+    }
+    return;
+  }
   if (request.method !== "POST") {
     response.writeHead(405, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: "method_not_allowed" }));
