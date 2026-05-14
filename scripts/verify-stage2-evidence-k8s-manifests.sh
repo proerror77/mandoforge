@@ -716,6 +716,11 @@ if ! grep -q "local_script_artifact_path" scripts/stage2-production-evidence-gat
   exit 1
 fi
 
+if ! grep -q "local_validation_endpoint_enabled" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must keep optional local script coverage gated by explicit UI validation flags" >&2
+  exit 1
+fi
+
 if ! grep -q "team-discovery.json" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit gate must reuse team discovery evidence for team-scoped endpoints" >&2
   exit 1

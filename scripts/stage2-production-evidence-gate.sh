@@ -39,6 +39,28 @@ local_script_artifact_path() {
   printf '%s/local-script-%s.json\n' "$EVIDENCE_DIR" "$(slugify "$script_path")"
 }
 
+local_validation_endpoint_enabled() {
+  local script_path="$1"
+  local artifact_path
+  artifact_path="$(local_script_artifact_path "$script_path")"
+
+  if [[ -s "$artifact_path" ]]; then
+    return 0
+  fi
+
+  case "$script_path" in
+    ./scripts/verify-static-ui-actionbook.sh)
+      [[ "${RUN_STAGE2_UI_ACTIONBOOK:-0}" == "1" ]]
+      ;;
+    ./scripts/verify-static-ui-assets.sh)
+      [[ "${RUN_STAGE2_UI_STATIC_ASSETS:-0}" == "1" ]]
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 file_mtime_epoch() {
   local path="$1"
   if stat -f %m "$path" >/dev/null 2>&1; then
@@ -990,6 +1012,9 @@ write_endpoint_coverage() {
       continue
     fi
     if [[ "$endpoint" == ./* ]]; then
+      if ! local_validation_endpoint_enabled "$endpoint"; then
+        continue
+      fi
       echo "$endpoint" >>"$declared_file"
       expected_file="$(local_script_artifact_path "$endpoint")"
       if artifact_is_fresh "$expected_file"; then
