@@ -5701,7 +5701,7 @@ function renderAgentReleaseAutomationRuns(runs) {
           : ""
       }
       <div class="muted">Deployment validation: ${escapeHtml(deploymentReadiness.status || "unknown")} · blocked ${deploymentReadiness.production_blocked ? "yes" : "no"} · validated ${deploymentReadiness.deployment_validated ? "yes" : "no"} · controller ${deploymentReadiness.controller_configured ? "configured" : "missing"} · required ${deploymentReadiness.controller_required ? "yes" : "no"}</div>
-      <div class="muted">Latest release deployment validation: ${escapeHtml(deploymentReadiness.latest_validation_at || "none")} · status ${escapeHtml(deploymentReadiness.latest_validation_status || "none")} · controller status ${escapeHtml(deploymentReadiness.latest_controller_status || "none")} · controller runs ${formatInteger(deploymentReadiness.controller_execution_count || 0)} · failed ${formatInteger(deploymentReadiness.controller_failed_count || 0)}</div>
+      <div class="muted">Latest release deployment validation: ${escapeHtml(deploymentReadiness.latest_validation_at || "none")} · status ${escapeHtml(deploymentReadiness.latest_validation_status || "none")} · controller status ${escapeHtml(deploymentReadiness.latest_controller_status || "none")} · fresh ${deploymentReadiness.controller_evidence_fresh ? "yes" : "no"} · age ${deploymentReadiness.latest_controller_age_hours ?? "n/a"}h · controller runs ${formatInteger(deploymentReadiness.controller_execution_count || 0)} · failed ${formatInteger(deploymentReadiness.controller_failed_count || 0)}</div>
       <div class="muted">${escapeHtml(deploymentReadiness.message || "Release deployment validation is not reported")}</div>
       ${
         deploymentValidation

@@ -403,6 +403,8 @@ struct AgentReleaseDeploymentReadiness {
     controller_required: bool,
     controller_configured: bool,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
+    controller_evidence_fresh: bool,
     latest_controller_validated: bool,
     controller_execution_count: usize,
     controller_failed_count: usize,
@@ -6442,6 +6444,11 @@ fn build_agent_release_deployment_readiness(
         .and_then(|execution| execution.get("status"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let latest_controller_age_hours = latest_validation
+        .filter(|_| latest_controller_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
 
@@ -6467,6 +6474,9 @@ fn build_agent_release_deployment_readiness(
         blocking_reasons.push(
             "agent release deployment controller evidence is missing or not validated".to_string(),
         );
+    }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons.push("agent release deployment controller evidence is stale".to_string());
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -6500,6 +6510,8 @@ fn build_agent_release_deployment_readiness(
         controller_required,
         controller_configured,
         latest_controller_status,
+        latest_controller_age_hours,
+        controller_evidence_fresh,
         latest_controller_validated,
         controller_execution_count,
         controller_failed_count,
@@ -38074,8 +38086,53 @@ not json
         assert!(!ready.production_blocked);
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
         assert_eq!(ready.controller_execution_count, 1);
         assert_eq!(ready.controller_failed_count, 0);
+
+        let mut stale_controller_audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "agent.release_deployment_validation_run",
+            "agent_release",
+            None,
+            json!({
+                "status": "healthy",
+                "release_count": 1,
+                "pending_count": 0,
+                "promoted_count": 1,
+                "rejected_count": 0,
+                "rolled_back_count": 0,
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "deployment_id": "agent-release-deployment-1"
+                }
+            }),
+        );
+        stale_controller_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = build_agent_release_deployment_readiness(
+            &[stale_controller_audit],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.production_blocked);
+        assert_eq!(stale.latest_controller_status.as_deref(), Some("validated"));
+        assert!(stale.latest_controller_validated);
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(
+            stale
+                .blocking_reasons
+                .iter()
+                .any(|reason| reason == "agent release deployment controller evidence is stale")
+        );
     }
 
     #[tokio::test]

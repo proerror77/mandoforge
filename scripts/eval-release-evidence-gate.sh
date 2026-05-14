@@ -87,6 +87,8 @@ write_summary() {
   local orchestration_controller_required
   local deployment_controller_configured
   local orchestration_controller_configured
+  local deployment_controller_fresh
+  local deployment_controller_age_hours
   local orchestration_controller_fresh
   local orchestration_controller_age_hours
   local blocked_count
@@ -129,6 +131,8 @@ write_summary() {
   orchestration_controller_required="$(jq -r '.production_orchestration.controller_required // false' "$automation_file")"
   deployment_controller_configured="$(jq -r '.deployment_readiness.controller_configured // false' "$automation_file")"
   orchestration_controller_configured="$(jq -r '.production_orchestration.controller_configured // false' "$automation_file")"
+  deployment_controller_fresh="$(jq -r '.deployment_readiness.controller_evidence_fresh // false' "$automation_file")"
+  deployment_controller_age_hours="$(jq -r '.deployment_readiness.latest_controller_age_hours // "none"' "$automation_file")"
   orchestration_controller_fresh="$(jq -r '.production_orchestration.controller_evidence_fresh // false' "$automation_file")"
   orchestration_controller_age_hours="$(jq -r '.production_orchestration.latest_controller_age_hours // "none"' "$automation_file")"
   blocked_count="$(jq -r '[
@@ -158,6 +162,8 @@ write_summary() {
     echo "due_run_status=$due_run_status"
     echo "deployment_controller_required=$deployment_controller_required"
     echo "deployment_controller_configured=$deployment_controller_configured"
+    echo "deployment_controller_evidence_fresh=$deployment_controller_fresh"
+    echo "deployment_controller_age_hours=$deployment_controller_age_hours"
     echo "orchestration_controller_required=$orchestration_controller_required"
     echo "orchestration_controller_configured=$orchestration_controller_configured"
     echo "orchestration_controller_evidence_fresh=$orchestration_controller_fresh"
