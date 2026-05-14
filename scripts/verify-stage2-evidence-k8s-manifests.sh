@@ -501,6 +501,16 @@ if ! grep -q "team-discovery.json" scripts/stage2-production-evidence-gate.sh; t
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_MCP_ROLLBACK" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must support optional MCP rollback evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "mcp-rollback-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must persist MCP rollback evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "local-script-" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit gate must map local script evidence artifacts" >&2
   exit 1
@@ -588,6 +598,16 @@ fi
 
 if ! grep -q '/api/teams/\$TEAM_ID/mcp-servers/rollouts/run-due' "$mcp_gateway_script"; then
   echo "MCP Gateway evidence script must capture due-run supervision evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_MCP_ROLLBACK" "$mcp_gateway_script"; then
+  echo "MCP Gateway evidence script must support optional rollback evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "mcp-rollback-evidence.json" "$mcp_gateway_script"; then
+  echo "MCP Gateway evidence script must persist rollback evidence metadata" >&2
   exit 1
 fi
 

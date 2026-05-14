@@ -201,6 +201,62 @@ run_local_validations() {
   fi
 }
 
+capture_mcp_rollback_validation() {
+  if [[ -z "$TEAM_ID" ]]; then
+    echo "skipping MCP connector rollback; set MANDOFORGE_STAGE2_TEAM_ID or create an active team to include rollback evidence" >&2
+    return 0
+  fi
+
+  local summary_file
+  local selected_file="$EVIDENCE_DIR/mcp-rollback-candidate.json"
+  local rollback_file="$EVIDENCE_DIR/mcp-rollback-evidence.json"
+  local server_id
+  local rollout_id
+
+  summary_file="$(fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/summary")"
+  jq '[
+      .latest_rollouts[]?
+      | select(.status == "applied")
+      | select((.server_id // null) != null)
+      | select((.rollout_id // null) != null)
+    ][0] // {}' "$summary_file" >"$selected_file"
+
+  server_id="$(jq -r '.server_id // empty' "$selected_file")"
+  rollout_id="$(jq -r '.rollout_id // empty' "$selected_file")"
+
+  if [[ -z "$server_id" || -z "$rollout_id" ]]; then
+    jq -n \
+      --arg status "blocked" \
+      --arg reason "no_applied_mcp_rollout_available_for_rollback" \
+      --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      '{
+        status: $status,
+        reason: $reason,
+        generated_at: $generated_at
+      }' >"$rollback_file"
+    echo "MCP connector rollback evidence requested, but no applied rollout is available to roll back" >&2
+    exit 1
+  fi
+
+  local rollback_response
+  rollback_response="$(fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/$server_id/rollouts/$rollout_id/rollback")"
+  jq -n \
+    --arg status "captured" \
+    --arg server_id "$server_id" \
+    --arg rollout_id "$rollout_id" \
+    --arg response_file "$rollback_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$rollback_response" \
+    '{
+      status: $status,
+      server_id: $server_id,
+      rollout_id: $rollout_id,
+      response_file: $response_file,
+      generated_at: $generated_at,
+      response: ($response[0] // {})
+    }' >"$rollback_file"
+}
+
 run_controller_validations() {
   fetch_json POST /api/tenant-isolation/routing/validate >/dev/null
   fetch_json POST /api/providers/policy-gate/run >/dev/null
@@ -224,6 +280,12 @@ run_controller_validations() {
     fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/rollouts/run-due" >/dev/null
   else
     echo "skipping MCP connector validation; set MANDOFORGE_STAGE2_TEAM_ID to include team-scoped MCP rollout evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_MCP_ROLLBACK:-0}" == "1" ]]; then
+    capture_mcp_rollback_validation
+  else
+    echo "skipping MCP connector rollback; set RUN_STAGE2_MCP_ROLLBACK=1 to include rollback evidence" >&2
   fi
 
   if [[ "${RUN_STAGE2_SECRET_LIFECYCLE:-0}" == "1" ]]; then

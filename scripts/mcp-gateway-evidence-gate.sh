@@ -8,6 +8,7 @@ TEAM_ID="${MANDOFORGE_STAGE2_TEAM_ID:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/mcp-gateway-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_MCP_DUE_RUN="${RUN_STAGE2_MCP_DUE_RUN:-0}"
+RUN_MCP_ROLLBACK="${RUN_STAGE2_MCP_ROLLBACK:-0}"
 
 auth_headers=(
   -H "x-mandoforge-subject: $SUBJECT"
@@ -107,6 +108,7 @@ write_summary() {
   local rollout_summary_file="$EVIDENCE_DIR/api-teams-$TEAM_ID-mcp-servers-rollouts-summary.json"
   local rollout_runs_file="$EVIDENCE_DIR/api-teams-$TEAM_ID-mcp-servers-rollouts-runs.json"
   local deployment_file="$EVIDENCE_DIR/api-teams-$TEAM_ID-mcp-servers-deployment-validate.json"
+  local rollback_file="$EVIDENCE_DIR/mcp-rollback-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local server_count
   local pending_rollout_count
@@ -159,6 +161,12 @@ write_summary() {
     echo "latest_deployment_controller_status=$latest_controller_status"
     echo "production_blocked_count=$blocked_count"
     echo "mcp_due_run=$RUN_MCP_DUE_RUN"
+    echo "mcp_rollback_run=$RUN_MCP_ROLLBACK"
+    if [[ -s "$rollback_file" ]]; then
+      echo "mcp_rollback_status=$(jq -r '.status // "unknown"' "$rollback_file")"
+      echo "mcp_rollback_server_id=$(jq -r '.server_id // "none"' "$rollback_file")"
+      echo "mcp_rollback_rollout_id=$(jq -r '.rollout_id // "none"' "$rollback_file")"
+    fi
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
     echo "rollout_attention_items:"
@@ -179,6 +187,56 @@ write_summary() {
   fi
 }
 
+capture_rollback_evidence() {
+  local rollout_summary_file="$EVIDENCE_DIR/api-teams-$TEAM_ID-mcp-servers-rollouts-summary.json"
+  local selected_file="$EVIDENCE_DIR/mcp-rollback-candidate.json"
+  local rollback_file="$EVIDENCE_DIR/mcp-rollback-evidence.json"
+  local server_id
+  local rollout_id
+
+  jq '[
+      .latest_rollouts[]?
+      | select(.status == "applied")
+      | select((.server_id // null) != null)
+      | select((.rollout_id // null) != null)
+    ][0] // {}' "$rollout_summary_file" >"$selected_file"
+
+  server_id="$(jq -r '.server_id // empty' "$selected_file")"
+  rollout_id="$(jq -r '.rollout_id // empty' "$selected_file")"
+
+  if [[ -z "$server_id" || -z "$rollout_id" ]]; then
+    jq -n \
+      --arg status "blocked" \
+      --arg reason "no_applied_mcp_rollout_available_for_rollback" \
+      --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      '{
+        status: $status,
+        reason: $reason,
+        generated_at: $generated_at
+      }' >"$rollback_file"
+    echo "MCP Gateway rollback evidence requested, but no applied rollout is available to roll back" >&2
+    exit 1
+  fi
+
+  local rollback_response
+  rollback_response="$(fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/$server_id/rollouts/$rollout_id/rollback")"
+  jq -n \
+    --arg status "captured" \
+    --arg server_id "$server_id" \
+    --arg rollout_id "$rollout_id" \
+    --arg response_file "$rollback_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$rollback_response" \
+    '{
+      status: $status,
+      server_id: $server_id,
+      rollout_id: $rollout_id,
+      response_file: $response_file,
+      generated_at: $generated_at,
+      response: ($response[0] // {})
+    }' >"$rollback_file"
+}
+
 require_cmd curl
 require_cmd jq
 
@@ -197,4 +255,12 @@ else
 fi
 
 fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/runs" >/dev/null
+fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/summary" >/dev/null
+if [[ "$RUN_MCP_ROLLBACK" == "1" ]]; then
+  capture_rollback_evidence
+  fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/runs" >/dev/null
+  fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/summary" >/dev/null
+else
+  echo "skipping MCP rollout rollback; set RUN_STAGE2_MCP_ROLLBACK=1 to include rollback evidence" >&2
+fi
 write_summary
