@@ -3760,7 +3760,9 @@ fn build_router(state: AppState) -> Router {
             "/api/teams/{id}/projects",
             get(list_projects).post(create_project),
         )
+        .route("/api/teams/{id}", delete(delete_team))
         .route("/api/teams/{id}/archive", post(archive_team))
+        .route("/api/projects/{id}", delete(delete_project))
         .route("/api/projects/{id}/archive", post(archive_project))
         .route(
             "/api/teams/{id}/provider-access",
@@ -8935,6 +8937,39 @@ async fn archive_team(
     Ok(Json(team))
 }
 
+async fn delete_team(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Team>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let team = state.delete_team(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "team.deleted",
+            "team",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": team.organization_id,
+                "slug": team.slug
+            }),
+        ))
+        .await?;
+    Ok(Json(team))
+}
+
 async fn archive_project(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -8959,6 +8994,39 @@ async fn archive_project(
             "project",
             Some(id),
             json!({"subject": principal.subject_id, "archived_at": project.archived_at}),
+        ))
+        .await?;
+    Ok(Json(project))
+}
+
+async fn delete_project(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Project>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "project".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let project = state.delete_project(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "project.deleted",
+            "project",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "team_id": project.team_id,
+                "slug": project.slug
+            }),
         ))
         .await?;
     Ok(Json(project))
@@ -33790,6 +33858,25 @@ not json
         )
         .await;
 
+        let (status, active_project_delete_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/projects/{}", project.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            active_project_delete_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("must be archived")
+        );
+
         let archived_project: Project = request_json(
             app.clone(),
             Request::builder()
@@ -33802,6 +33889,19 @@ not json
         )
         .await;
         assert!(archived_project.archived_at.is_some());
+
+        let deleted_project: Project = request_json(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/projects/{}", project.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(deleted_project.id, project.id);
 
         let (status, archived_project_membership_error) = request_value(
             app.clone(),
@@ -33834,6 +33934,25 @@ not json
                 .contains("project not found")
         );
 
+        let (status, active_team_delete_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/teams/{}", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            active_team_delete_error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("must be archived")
+        );
+
         let archived_team: Team = request_json(
             app.clone(),
             Request::builder()
@@ -33846,6 +33965,19 @@ not json
         )
         .await;
         assert!(archived_team.archived_at.is_some());
+
+        let deleted_team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/teams/{}", team.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(deleted_team.id, team.id);
 
         let (status, archived_team_project_error) = request_value(
             app.clone(),
@@ -34061,11 +34193,13 @@ not json
                 .any(|log| log.action == "organization.deleted")
         );
         assert!(audit_logs.iter().any(|log| log.action == "team.archived"));
+        assert!(audit_logs.iter().any(|log| log.action == "team.deleted"));
         assert!(
             audit_logs
                 .iter()
                 .any(|log| log.action == "project.archived")
         );
+        assert!(audit_logs.iter().any(|log| log.action == "project.deleted"));
     }
 
     #[tokio::test]

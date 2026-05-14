@@ -384,6 +384,84 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn delete_team(&self, team_id: Uuid) -> Result<Team, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let team = store
+                    .teams
+                    .get(&team_id)
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("team not found"))?;
+                if team.archived_at.is_none() {
+                    return Err(AppError::bad_request("team must be archived before delete"));
+                }
+                let has_children = store
+                    .projects
+                    .values()
+                    .any(|project| project.team_id == team_id)
+                    || store
+                        .memberships
+                        .values()
+                        .any(|membership| membership.team_id == Some(team_id))
+                    || store
+                        .tenant_invitations
+                        .values()
+                        .any(|invitation| invitation.team_id == Some(team_id))
+                    || store
+                        .provider_access
+                        .values()
+                        .any(|access| access.team_id == team_id)
+                    || store
+                        .mcp_servers
+                        .values()
+                        .any(|server| server.team_id == team_id)
+                    || store
+                        .agents
+                        .values()
+                        .any(|agent| agent.team_id == Some(team_id));
+                if has_children {
+                    return Err(AppError::bad_request(
+                        "team has child projects, memberships, invitations, provider access, MCP servers, or agents",
+                    ));
+                }
+                store.teams.remove(&team_id);
+                Ok(team)
+            }
+            StoreBackend::Postgres(pool) => {
+                let child_count: i64 = sqlx::query_scalar(
+                    "SELECT
+                        (SELECT count(*) FROM projects WHERE tenant_id = $1 AND team_id = $2)
+                      + (SELECT count(*) FROM memberships WHERE tenant_id = $1 AND team_id = $2)
+                      + (SELECT count(*) FROM tenant_invitations WHERE tenant_id = $1 AND team_id = $2)
+                      + (SELECT count(*) FROM provider_access WHERE tenant_id = $1 AND team_id = $2)
+                      + (SELECT count(*) FROM mcp_servers WHERE tenant_id = $1 AND team_id = $2)
+                      + (SELECT count(*) FROM agents WHERE tenant_id = $1 AND team_id = $2)",
+                )
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .fetch_one(pool)
+                .await?;
+                if child_count > 0 {
+                    return Err(AppError::bad_request(
+                        "team has child projects, memberships, invitations, provider access, MCP servers, or agents",
+                    ));
+                }
+                let row = sqlx::query(
+                    "DELETE FROM teams
+                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NOT NULL
+                     RETURNING id, organization_id, name, slug, created_at, archived_at",
+                )
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::bad_request("team must be archived before delete"))?;
+                team_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn archive_project(&self, project_id: Uuid) -> Result<Project, AppError> {
         let archived_at = Utc::now();
         match &self.store {
@@ -409,6 +487,71 @@ impl AppState {
                 .fetch_optional(pool)
                 .await?
                 .ok_or_else(|| AppError::not_found("project not found"))?;
+                project_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn delete_project(&self, project_id: Uuid) -> Result<Project, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let project = store
+                    .projects
+                    .get(&project_id)
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("project not found"))?;
+                if project.archived_at.is_none() {
+                    return Err(AppError::bad_request(
+                        "project must be archived before delete",
+                    ));
+                }
+                let has_children = store
+                    .memberships
+                    .values()
+                    .any(|membership| membership.project_id == Some(project_id))
+                    || store
+                        .tenant_invitations
+                        .values()
+                        .any(|invitation| invitation.project_id == Some(project_id))
+                    || store
+                        .agents
+                        .values()
+                        .any(|agent| agent.project_id == Some(project_id));
+                if has_children {
+                    return Err(AppError::bad_request(
+                        "project has child memberships, invitations, or agents",
+                    ));
+                }
+                store.projects.remove(&project_id);
+                Ok(project)
+            }
+            StoreBackend::Postgres(pool) => {
+                let child_count: i64 = sqlx::query_scalar(
+                    "SELECT
+                        (SELECT count(*) FROM memberships WHERE tenant_id = $1 AND project_id = $2)
+                      + (SELECT count(*) FROM tenant_invitations WHERE tenant_id = $1 AND project_id = $2)
+                      + (SELECT count(*) FROM agents WHERE tenant_id = $1 AND project_id = $2)",
+                )
+                .bind(self.tenant_id)
+                .bind(project_id)
+                .fetch_one(pool)
+                .await?;
+                if child_count > 0 {
+                    return Err(AppError::bad_request(
+                        "project has child memberships, invitations, or agents",
+                    ));
+                }
+                let row = sqlx::query(
+                    "DELETE FROM projects
+                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NOT NULL
+                     RETURNING id, team_id, name, slug, created_at, archived_at",
+                )
+                .bind(self.tenant_id)
+                .bind(project_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::bad_request("project must be archived before delete"))?;
                 project_from_row(row)
             }
         }

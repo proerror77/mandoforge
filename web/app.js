@@ -539,8 +539,21 @@ async function archiveTeam(teamId) {
   await refreshOps();
 }
 
+async function deleteTeam(teamId) {
+  await api(`/api/teams/${teamId}`, { method: "DELETE" });
+  if (state.selectedTeamId === teamId) {
+    state.selectedTeamId = "";
+  }
+  await refreshOps();
+}
+
 async function archiveProject(projectId) {
   await api(`/api/projects/${projectId}/archive`, { method: "POST" });
+  await refreshOps();
+}
+
+async function deleteProject(projectId) {
+  await api(`/api/projects/${projectId}`, { method: "DELETE" });
   await refreshOps();
 }
 
@@ -2737,7 +2750,7 @@ function renderTenantGovernance() {
                 </button>
                 ${
                   team.archived_at
-                    ? ""
+                    ? `<button type="button" class="secondary" data-delete-team="${escapeHtml(team.id)}">Delete Team</button>`
                     : `<button type="button" class="secondary" data-archive-team="${escapeHtml(team.id)}">Archive Team</button>`
                 }
               </div>
@@ -2755,6 +2768,9 @@ function renderTenantGovernance() {
   teamRoot.querySelectorAll("[data-archive-team]").forEach((button) => {
     button.addEventListener("click", () => archiveTeam(button.dataset.archiveTeam));
   });
+  teamRoot.querySelectorAll("[data-delete-team]").forEach((button) => {
+    button.addEventListener("click", () => deleteTeam(button.dataset.deleteTeam));
+  });
 
   projectRoot.innerHTML = state.selectedTeamId
     ? state.projects.length
@@ -2766,7 +2782,7 @@ function renderTenantGovernance() {
                 <div class="muted">${escapeHtml(project.slug)} · ${escapeHtml(project.id)} · ${escapeHtml(project.archived_at ? "archived" : "active")}</div>
                 ${
                   project.archived_at
-                    ? ""
+                    ? `<button type="button" class="secondary" data-delete-project="${escapeHtml(project.id)}">Delete Project</button>`
                     : `<button type="button" class="secondary" data-archive-project="${escapeHtml(project.id)}">Archive Project</button>`
                 }
               </div>
@@ -2777,6 +2793,9 @@ function renderTenantGovernance() {
     : `<div class="muted">Select a team to manage projects</div>`;
   projectRoot.querySelectorAll("[data-archive-project]").forEach((button) => {
     button.addEventListener("click", () => archiveProject(button.dataset.archiveProject));
+  });
+  projectRoot.querySelectorAll("[data-delete-project]").forEach((button) => {
+    button.addEventListener("click", () => deleteProject(button.dataset.deleteProject));
   });
 
   membershipRoot.innerHTML = state.selectedOrganizationId
