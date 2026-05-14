@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
 SUBJECT="${MANDOFORGE_STAGE2_GATE_SUBJECT:-stage2-production-evidence-gate}"
 ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
+SCHEDULER_TOKEN="${MANDOFORGE_SCHEDULER_TOKEN:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/stage2-production-evidence}"
 RUN_VALIDATIONS="${RUN_STAGE2_PRODUCTION_VALIDATIONS:-0}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
@@ -21,6 +22,10 @@ auth_headers=(
   -H "x-mandoforge-subject: $SUBJECT"
   -H "x-mandoforge-roles: $ROLES"
 )
+
+if [[ -n "$SCHEDULER_TOKEN" ]]; then
+  auth_headers+=(-H "x-mandoforge-scheduler-token: $SCHEDULER_TOKEN")
+fi
 
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
@@ -75,6 +80,7 @@ collect_readiness() {
   fetch_json GET /api/observability >/dev/null
   fetch_json GET /api/observability/collector-readiness >/dev/null
   fetch_json GET /api/scheduler/summary >/dev/null
+  fetch_json GET /api/scheduler/due-plan >/dev/null
   fetch_json GET /api/policy/rollout/orchestration/readiness >/dev/null
   fetch_json GET /api/agents/releases/automation-runs >/dev/null
 
@@ -100,6 +106,7 @@ run_controller_validations() {
   fetch_json POST /api/agents/releases/orchestration/validate >/dev/null
   fetch_json POST /api/observability/collector/deployment/validate >/dev/null
   fetch_json POST /api/observability/collector/cluster/validate >/dev/null
+  fetch_json POST /api/scheduler/run-due >/dev/null
 
   if [[ -n "$TEAM_ID" ]]; then
     fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/deployment/validate" >/dev/null

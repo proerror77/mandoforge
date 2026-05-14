@@ -438,6 +438,21 @@ if ! grep -q "x-mandoforge-scheduler-token" "$scheduler_script"; then
   exit 1
 fi
 
+if ! grep -q "/api/scheduler/due-plan" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must collect scheduler due-plan evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/scheduler/run-due" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must capture scheduler run-due evidence when validations run" >&2
+  exit 1
+fi
+
+if ! grep -q "x-mandoforge-scheduler-token" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must support scheduler shared-token authentication" >&2
+  exit 1
+fi
+
 if ! grep -q "policy-rollout-evidence-gate.sh" deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml; then
   echo "Policy rollout evidence Job does not run the dedicated evidence gate" >&2
   exit 1
