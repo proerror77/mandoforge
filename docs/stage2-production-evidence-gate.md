@@ -53,6 +53,15 @@ This fetches `GET /api/stage2/readiness`, maps every `evidence_requirements[]` e
 
 The matching in-cluster template is `deploy/stage2-evidence/stage2-completion-audit-job.example.yaml`. It mounts the same Stage 2 production evidence PVC, reads endpoint artifacts from `/evidence`, checks the packaged `scripts/` and `deploy/` metadata in the runtime image, writes the checklist to `/evidence/completion-audit`, and remains fail-closed unless the production readiness gate and artifact coverage are complete.
 
+After the strict evidence and completion-audit Jobs pass, archive the shared evidence PVC for the release record:
+
+```bash
+scripts/archive-stage2-production-evidence.sh .mandoforge/stage2-production-evidence-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
+scripts/verify-stage2-evidence-archive.sh .mandoforge/stage2-production-evidence-YYYYMMDDTHHMMSSZ.tar.gz
+```
+
+The archive verifier checks the tarball checksum and manifest, then extracts `completion-audit/checklist.json`. By default it fails if the checklist is still blocked or any endpoint, artifact, evidence script, evidence Job manifest, or required controller flag is missing. `ALLOW_BLOCKED=1` is only for inventory archive inspection.
+
 For a narrower collector rollout proof, run the dedicated observability collector gate:
 
 ```bash

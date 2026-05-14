@@ -138,7 +138,7 @@ write_summary() {
   export_status="$(jq -r '.export_status // "unknown"' "$operations_file")"
   alert_delivery_status="$(jq -r '.alert_delivery_status // "unknown"' "$operations_file")"
   production_close_status="$(jq -r '.production_close.status // "unknown"' "$operations_file")"
-  production_blocked="$(jq -r '.production_close.production_blocked // true' "$operations_file")"
+  production_blocked="$(jq -r 'if ((.production_close // {}) | has("production_blocked")) then .production_close.production_blocked else true end' "$operations_file")"
   close_controller_required="$(jq -r '.production_close.close_controller_required // false' "$operations_file")"
   close_controller_configured="$(jq -r '.production_close.close_controller_configured // false' "$operations_file")"
   latest_close_controller_status="$(jq -r '.production_close.latest_close_controller_status // "none"' "$operations_file")"

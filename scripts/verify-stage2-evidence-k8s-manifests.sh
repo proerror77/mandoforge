@@ -1041,6 +1041,26 @@ if ! grep -q "manifest_file=" "$archive_script"; then
   exit 1
 fi
 
+if ! grep -q "completion-audit/checklist.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require the completion audit checklist" >&2
+  exit 1
+fi
+
+if ! grep -q "missing_required_flag_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must reject archives with missing required controller flags" >&2
+  exit 1
+fi
+
+if grep -R "completion_blocked // true" scripts/stage2-completion-audit-gate.sh scripts/stage2-production-evidence-gate.sh scripts/verify-stage2-evidence-archive.sh >/dev/null; then
+  echo "Stage 2 scripts must not use jq // true for completion_blocked because false is a valid value" >&2
+  exit 1
+fi
+
+if grep -R "production_blocked // true" scripts/policy-rollout-evidence-gate.sh scripts/scheduler-evidence-gate.sh scripts/finance-evidence-gate.sh >/dev/null; then
+  echo "Stage 2 scripts must not use jq // true for production_blocked because false is a valid value" >&2
+  exit 1
+fi
+
 if ! grep -q "COPY deploy ./deploy" Dockerfile; then
   echo "Runtime image must package deploy metadata for in-cluster completion audits" >&2
   exit 1

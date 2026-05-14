@@ -971,7 +971,7 @@ write_summary() {
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
   open_gap_count="$(jq -r '.open_gap_count // 0' "$readiness_file")"
-  completion_blocked="$(jq -r '.completion_blocked // true' "$readiness_file")"
+  completion_blocked="$(jq -r 'if has("completion_blocked") then .completion_blocked else true end' "$readiness_file")"
   evidence_requirement_count="$(jq -r '.evidence_requirements | length' "$readiness_file")"
   validation_declared_count="$(grep -c . "$EVIDENCE_DIR/validation-declared-endpoints.txt" 2>/dev/null || true)"
   validation_missing_count="$(grep -c . "$EVIDENCE_DIR/validation-missing-endpoints.txt" 2>/dev/null || true)"

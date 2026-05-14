@@ -75,7 +75,7 @@ write_summary() {
 
   status="$(jq -r '.status // "unknown"' "$summary_file")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$summary_file")"
-  production_blocked="$(jq -r '.deployment_readiness.production_blocked // true' "$summary_file")"
+  production_blocked="$(jq -r 'if ((.deployment_readiness // {}) | has("production_blocked")) then .deployment_readiness.production_blocked else true end' "$summary_file")"
   actionable_count="$(jq -r '.actionable_count // .plan.actionable_count // 0' "$plan_file")"
   blocked_count="$(jq -r '.blocked_count // .plan.blocked_count // 0' "$plan_file")"
   run_status="$(jq -r '.status // "unknown"' "$run_file")"

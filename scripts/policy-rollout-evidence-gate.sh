@@ -89,7 +89,7 @@ write_summary() {
     due_run_evidence_status="$(jq -r '.status // "unknown"' "$due_run_evidence_file")"
     due_run_status="$(jq -r '.response.status // "unknown"' "$due_run_evidence_file")"
   fi
-  production_blocked="$(jq -r '.production_blocked // true' "$readiness_file")"
+  production_blocked="$(jq -r 'if has("production_blocked") then .production_blocked else true end' "$readiness_file")"
   rollout_active="$(jq -r '.rollout_active // false' "$readiness_file")"
   active_revision_id="$(jq -r '.active_revision_id // "none"' "$readiness_file")"
   staged_revision_id="$(jq -r '.staged_revision_id // "none"' "$readiness_file")"

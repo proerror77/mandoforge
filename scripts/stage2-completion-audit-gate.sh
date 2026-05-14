@@ -180,7 +180,7 @@ discover_team_id
 
 status="$(jq -r '.status // "unknown"' "$readiness_file")"
 objective="$(jq -r '.objective // ""' "$readiness_file")"
-completion_blocked="$(jq -r '.completion_blocked // true' "$readiness_file")"
+completion_blocked="$(jq -r 'if has("completion_blocked") then .completion_blocked else true end' "$readiness_file")"
 open_gap_count="$(jq -r '.open_gap_count // 0' "$readiness_file")"
 requirement_count="$(jq -r '.evidence_requirements | length' "$readiness_file")"
 
