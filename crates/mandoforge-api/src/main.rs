@@ -2345,10 +2345,14 @@ struct UsageFinanceProductionCloseReadiness {
     close_controller_required: bool,
     close_controller_configured: bool,
     latest_close_controller_status: Option<String>,
+    latest_close_controller_age_hours: Option<i64>,
+    close_controller_evidence_fresh: bool,
     latest_close_controller_closed: bool,
     reconciliation_controller_required: bool,
     reconciliation_controller_configured: bool,
     latest_reconciliation_status: Option<String>,
+    latest_reconciliation_age_hours: Option<i64>,
+    reconciliation_evidence_fresh: bool,
     latest_reconciliation_reconciled: bool,
     blocking_reasons: Vec<String>,
     message: String,
@@ -19929,26 +19933,38 @@ fn build_usage_finance_production_close_readiness(
         || last_alert_delivery
             .as_ref()
             .is_some_and(|audit| audit.status == "failed");
-    let latest_close_controller_status = audit_logs
+    let latest_close_controller_log = audit_logs
         .iter()
         .filter(|log| log.action == "usage.finance_operations_run")
-        .max_by_key(|log| log.created_at)
+        .max_by_key(|log| log.created_at);
+    let latest_close_controller_status = latest_close_controller_log
         .and_then(|log| log.details["close_controller_execution"]["status"].as_str())
         .map(str::to_string);
+    let latest_close_controller_age_hours = latest_close_controller_log
+        .filter(|_| latest_close_controller_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
+    let close_controller_evidence_fresh =
+        latest_close_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_close_controller_closed = latest_close_controller_status
         .as_deref()
         .map(|status| status == "closed")
         .unwrap_or(false);
-    let latest_reconciliation_status = audit_logs
+    let latest_reconciliation_log = audit_logs
         .iter()
         .filter(|log| log.action == "usage.finance_reconciliation_run")
-        .max_by_key(|log| log.created_at)
+        .max_by_key(|log| log.created_at);
+    let latest_reconciliation_status = latest_reconciliation_log
         .and_then(|log| {
             log.details["reconciliation_controller_execution"]["status"]
                 .as_str()
                 .or_else(|| log.details["status"].as_str())
         })
         .map(str::to_string);
+    let latest_reconciliation_age_hours = latest_reconciliation_log
+        .filter(|_| latest_reconciliation_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
+    let reconciliation_evidence_fresh =
+        latest_reconciliation_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_reconciliation_reconciled = latest_reconciliation_status
         .as_deref()
         .map(|status| status == "reconciled")
@@ -19981,6 +19997,12 @@ fn build_usage_finance_production_close_readiness(
     if close_controller_required && !latest_close_controller_closed {
         blocking_reasons.push("finance close controller has no recent closed evidence".to_string());
     }
+    if close_controller_required
+        && latest_close_controller_closed
+        && !close_controller_evidence_fresh
+    {
+        blocking_reasons.push("finance close controller evidence is stale".to_string());
+    }
     if reconciliation_controller_required && !reconciliation_controller_configured {
         blocking_reasons
             .push("finance reconciliation controller is required but not configured".to_string());
@@ -19989,6 +20011,12 @@ fn build_usage_finance_production_close_readiness(
         blocking_reasons.push(
             "finance reconciliation controller has no recent reconciled evidence".to_string(),
         );
+    }
+    if reconciliation_controller_required
+        && latest_reconciliation_reconciled
+        && !reconciliation_evidence_fresh
+    {
+        blocking_reasons.push("finance reconciliation controller evidence is stale".to_string());
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -20019,10 +20047,14 @@ fn build_usage_finance_production_close_readiness(
         close_controller_required,
         close_controller_configured,
         latest_close_controller_status,
+        latest_close_controller_age_hours,
+        close_controller_evidence_fresh,
         latest_close_controller_closed,
         reconciliation_controller_required,
         reconciliation_controller_configured,
         latest_reconciliation_status,
+        latest_reconciliation_age_hours,
+        reconciliation_evidence_fresh,
         latest_reconciliation_reconciled,
         blocking_reasons,
         message,
@@ -31455,7 +31487,7 @@ not json
             })
         );
 
-        let audit = new_audit_log(
+        let mut audit = new_audit_log(
             None,
             "user",
             None,
@@ -31472,11 +31504,12 @@ not json
                 }
             }),
         );
+        audit.created_at = generated_at;
         dashboard.attention_items.clear();
         let ready = build_usage_finance_production_close_readiness(
             &dashboard,
             &[],
-            &[audit],
+            &[audit.clone()],
             "fresh",
             "no_alerts",
             Some(&export),
@@ -31493,6 +31526,35 @@ not json
         assert_eq!(
             ready.latest_close_controller_status.as_deref(),
             Some("closed")
+        );
+        assert_eq!(ready.latest_close_controller_age_hours, Some(0));
+        assert!(ready.close_controller_evidence_fresh);
+
+        let mut stale_audit = audit.clone();
+        stale_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = build_usage_finance_production_close_readiness(
+            &dashboard,
+            &[],
+            &[stale_audit],
+            "fresh",
+            "no_alerts",
+            Some(&export),
+            Some(&delivery),
+            generated_at,
+            true,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.latest_close_controller_closed);
+        assert_eq!(stale.latest_close_controller_age_hours, Some(25));
+        assert!(!stale.close_controller_evidence_fresh);
+        assert!(
+            stale
+                .blocking_reasons
+                .iter()
+                .any(|reason| { reason == "finance close controller evidence is stale" })
         );
     }
 
@@ -31557,7 +31619,7 @@ not json
             reason == "finance reconciliation controller is required but not configured"
         }));
 
-        let reconciled_audit = new_audit_log(
+        let mut reconciled_audit = new_audit_log(
             None,
             "user",
             None,
@@ -31574,10 +31636,11 @@ not json
                 }
             }),
         );
+        reconciled_audit.created_at = generated_at;
         let ready = build_usage_finance_production_close_readiness(
             &dashboard,
             &[],
-            &[reconciled_audit],
+            &[reconciled_audit.clone()],
             "fresh",
             "no_alerts",
             Some(&export),
@@ -31594,6 +31657,35 @@ not json
         assert_eq!(
             ready.latest_reconciliation_status.as_deref(),
             Some("reconciled")
+        );
+        assert_eq!(ready.latest_reconciliation_age_hours, Some(0));
+        assert!(ready.reconciliation_evidence_fresh);
+
+        let mut stale_reconciled_audit = reconciled_audit.clone();
+        stale_reconciled_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = build_usage_finance_production_close_readiness(
+            &dashboard,
+            &[],
+            &[stale_reconciled_audit],
+            "fresh",
+            "no_alerts",
+            Some(&export),
+            Some(&delivery),
+            generated_at,
+            false,
+            false,
+            true,
+            true,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.latest_reconciliation_reconciled);
+        assert_eq!(stale.latest_reconciliation_age_hours, Some(25));
+        assert!(!stale.reconciliation_evidence_fresh);
+        assert!(
+            stale
+                .blocking_reasons
+                .iter()
+                .any(|reason| { reason == "finance reconciliation controller evidence is stale" })
         );
     }
 
@@ -32099,10 +32191,14 @@ not json
                 close_controller_required: false,
                 close_controller_configured: false,
                 latest_close_controller_status: None,
+                latest_close_controller_age_hours: None,
+                close_controller_evidence_fresh: false,
                 latest_close_controller_closed: false,
                 reconciliation_controller_required: false,
                 reconciliation_controller_configured: false,
                 latest_reconciliation_status: None,
+                latest_reconciliation_age_hours: None,
+                reconciliation_evidence_fresh: false,
                 latest_reconciliation_reconciled: false,
                 blocking_reasons: vec![],
                 message: "ready".to_string(),

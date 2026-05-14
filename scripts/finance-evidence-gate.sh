@@ -119,9 +119,13 @@ write_summary() {
   local close_controller_required
   local close_controller_configured
   local latest_close_controller_status
+  local latest_close_controller_age_hours
+  local close_controller_evidence_fresh
   local reconciliation_controller_required
   local reconciliation_controller_configured
   local latest_reconciliation_status
+  local latest_reconciliation_age_hours
+  local reconciliation_evidence_fresh
   local close_evidence_status
   local close_run_status
   local reconciliation_evidence_status
@@ -142,9 +146,13 @@ write_summary() {
   close_controller_required="$(jq -r '.production_close.close_controller_required // false' "$operations_file")"
   close_controller_configured="$(jq -r '.production_close.close_controller_configured // false' "$operations_file")"
   latest_close_controller_status="$(jq -r '.production_close.latest_close_controller_status // "none"' "$operations_file")"
+  latest_close_controller_age_hours="$(jq -r '.production_close.latest_close_controller_age_hours // "none"' "$operations_file")"
+  close_controller_evidence_fresh="$(jq -r '.production_close.close_controller_evidence_fresh // false' "$operations_file")"
   reconciliation_controller_required="$(jq -r '.production_close.reconciliation_controller_required // false' "$operations_file")"
   reconciliation_controller_configured="$(jq -r '.production_close.reconciliation_controller_configured // false' "$operations_file")"
   latest_reconciliation_status="$(jq -r '.production_close.latest_reconciliation_status // "none"' "$operations_file")"
+  latest_reconciliation_age_hours="$(jq -r '.production_close.latest_reconciliation_age_hours // "none"' "$operations_file")"
+  reconciliation_evidence_fresh="$(jq -r '.production_close.reconciliation_evidence_fresh // false' "$operations_file")"
   close_evidence_status="not_requested"
   close_run_status="not_run"
   if [[ -s "$close_evidence_file" ]]; then
@@ -175,9 +183,13 @@ write_summary() {
     echo "close_controller_required=$close_controller_required"
     echo "close_controller_configured=$close_controller_configured"
     echo "latest_close_controller_status=$latest_close_controller_status"
+    echo "latest_close_controller_age_hours=$latest_close_controller_age_hours"
+    echo "close_controller_evidence_fresh=$close_controller_evidence_fresh"
     echo "reconciliation_controller_required=$reconciliation_controller_required"
     echo "reconciliation_controller_configured=$reconciliation_controller_configured"
     echo "latest_reconciliation_status=$latest_reconciliation_status"
+    echo "latest_reconciliation_age_hours=$latest_reconciliation_age_hours"
+    echo "reconciliation_evidence_fresh=$reconciliation_evidence_fresh"
     echo "finance_close_evidence_status=$close_evidence_status"
     echo "finance_close_run_status=$close_run_status"
     echo "finance_reconciliation_evidence_status=$reconciliation_evidence_status"
