@@ -1774,6 +1774,7 @@ struct RemoteComputerReadinessReport {
     autoscaling: RemoteComputerAutoscalingReadiness,
     warm_pool: RemoteComputerWarmPoolReadiness,
     artifact_discovery_sidecar: RemoteComputerManifestReadiness,
+    artifact_discovery_sidecar_config: RemoteComputerArtifactDiscoverySidecarConfigReadiness,
     sidecar_supervision: RemoteComputerSidecarSupervisionReadiness,
     sidecar_recovery: RemoteComputerSidecarRecoveryReadiness,
     runner: RemoteComputerRunnerReadiness,
@@ -1860,6 +1861,16 @@ struct RemoteComputerWarmPoolReadiness {
     manifest_present: bool,
     manifest_path: String,
     status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteComputerArtifactDiscoverySidecarConfigReadiness {
+    status: String,
+    expected_api_url: String,
+    pod_template_api_url_configured: bool,
+    warm_pool_api_url_configured: bool,
+    configmap_default_api_url_configured: bool,
+    blocking_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27524,6 +27535,8 @@ async fn build_remote_computer_readiness(
         "deploy/k8s/remote-computer-artifact-discovery-sidecar.yaml",
         "artifact_discovery_sidecar",
     );
+    let artifact_discovery_sidecar_config =
+        remote_computer_artifact_discovery_sidecar_config_readiness();
     let sidecar_supervision =
         build_remote_computer_sidecar_supervision(state, artifact_discovery_sidecar.present)
             .await?;
@@ -27635,6 +27648,12 @@ async fn build_remote_computer_readiness(
             "artifact_discovery_sidecar_missing",
             "warning",
             "remote computer Pods need an artifact discovery sidecar before continuous artifact sync can be piloted",
+        ));
+    } else if artifact_discovery_sidecar_config.status != "configured" {
+        attention_items.push(remote_computer_attention(
+            "artifact_discovery_sidecar_api_url_mismatch",
+            "warning",
+            "remote computer artifact discovery sidecar must target the in-cluster mandoforge-api service on port 8787",
         ));
     } else if sidecar_supervision.missing_heartbeat_count > 0 {
         attention_items.push(remote_computer_attention(
@@ -27764,6 +27783,7 @@ async fn build_remote_computer_readiness(
         autoscaling,
         warm_pool,
         artifact_discovery_sidecar,
+        artifact_discovery_sidecar_config,
         sidecar_supervision,
         sidecar_recovery,
         runner,
@@ -28255,6 +28275,53 @@ fn remote_computer_manifest_readiness(
             "missing"
         }
         .to_string(),
+    }
+}
+
+fn remote_computer_artifact_discovery_sidecar_config_readiness()
+-> RemoteComputerArtifactDiscoverySidecarConfigReadiness {
+    let expected_api_url = "http://mandoforge-api:8787".to_string();
+    let pod_template_path = "deploy/k8s/agent-remote-computer.yaml";
+    let warm_pool_path = "deploy/k8s/remote-computer-warm-pool.yaml";
+    let sidecar_config_path = "deploy/k8s/remote-computer-artifact-discovery-sidecar.yaml";
+    let pod_template_api_url_configured =
+        project_file_contains(pod_template_path, expected_api_url.as_str());
+    let warm_pool_api_url_configured =
+        project_file_contains(warm_pool_path, expected_api_url.as_str());
+    let configmap_default_api_url_configured =
+        project_file_contains(sidecar_config_path, expected_api_url.as_str());
+    let mut blocking_reasons = Vec::new();
+    if !pod_template_api_url_configured {
+        blocking_reasons.push(
+            "Remote Computer Pod template artifact sidecar does not target mandoforge-api:8787"
+                .to_string(),
+        );
+    }
+    if !warm_pool_api_url_configured {
+        blocking_reasons.push(
+            "Remote Computer warm-pool artifact sidecar does not target mandoforge-api:8787"
+                .to_string(),
+        );
+    }
+    if !configmap_default_api_url_configured {
+        blocking_reasons.push(
+            "artifact discovery sidecar ConfigMap default does not target mandoforge-api:8787"
+                .to_string(),
+        );
+    }
+    let status = if blocking_reasons.is_empty() {
+        "configured"
+    } else {
+        "attention"
+    }
+    .to_string();
+    RemoteComputerArtifactDiscoverySidecarConfigReadiness {
+        status,
+        expected_api_url,
+        pod_template_api_url_configured,
+        warm_pool_api_url_configured,
+        configmap_default_api_url_configured,
+        blocking_reasons,
     }
 }
 
@@ -29283,6 +29350,12 @@ fn project_file_path(relative_path: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+fn project_file_contains(relative_path: &str, needle: &str) -> bool {
+    project_file_path(relative_path)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|content| content.contains(needle))
 }
 
 fn env_i64(key: &str) -> Option<i64> {
@@ -48650,6 +48723,27 @@ not json
         assert_eq!(
             remote_computer_readiness.artifact_discovery_sidecar.status,
             "artifact_discovery_sidecar"
+        );
+        assert_eq!(
+            remote_computer_readiness
+                .artifact_discovery_sidecar_config
+                .status,
+            "configured"
+        );
+        assert!(
+            remote_computer_readiness
+                .artifact_discovery_sidecar_config
+                .pod_template_api_url_configured
+        );
+        assert!(
+            remote_computer_readiness
+                .artifact_discovery_sidecar_config
+                .warm_pool_api_url_configured
+        );
+        assert!(
+            remote_computer_readiness
+                .artifact_discovery_sidecar_config
+                .configmap_default_api_url_configured
         );
         assert_eq!(
             remote_computer_readiness.sidecar_supervision.status,
