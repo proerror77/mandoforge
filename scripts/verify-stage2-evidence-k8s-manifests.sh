@@ -16,6 +16,7 @@ manifests=(
   deploy/stage2-evidence/provider-governance-evidence-job.example.yaml
   deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml
   deploy/stage2-evidence/vault-evidence-job.example.yaml
+  deploy/stage2-evidence/approval-notification-evidence-job.example.yaml
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
@@ -23,6 +24,7 @@ remote_computer_script="scripts/remote-computer-evidence-gate.sh"
 provider_script="scripts/provider-governance-evidence-gate.sh"
 tenant_script="scripts/tenant-isolation-evidence-gate.sh"
 vault_script="scripts/vault-evidence-gate.sh"
+approval_notification_script="scripts/approval-notification-evidence-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -58,6 +60,11 @@ fi
 
 if [[ ! -x "$vault_script" ]]; then
   echo "missing Vault evidence script: $vault_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$approval_notification_script" ]]; then
+  echo "missing approval notification evidence script: $approval_notification_script" >&2
   exit 1
 fi
 
@@ -107,6 +114,11 @@ fi
 
 if ! grep -q "name: mandoforge-vault-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the Vault evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-approval-notification-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the approval notification evidence Job" >&2
   exit 1
 fi
 
@@ -232,6 +244,31 @@ fi
 
 if ! grep -q "/api/vault/kms/rotation/run" "$vault_script"; then
   echo "Vault evidence script must capture KMS rotation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "approval-notification-evidence-gate.sh" deploy/stage2-evidence/approval-notification-evidence-job.example.yaml; then
+  echo "Approval notification evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/approval-notification-evidence-job.example.yaml; then
+  echo "Approval notification evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/approvals/notifications/deployment/validate" "$approval_notification_script"; then
+  echo "Approval notification evidence script must validate deployment readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/approvals/notifications/ops/validate" "$approval_notification_script"; then
+  echo "Approval notification evidence script must validate production ops readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/approvals/notifications/run" "$approval_notification_script"; then
+  echo "Approval notification evidence script must capture delivery evidence" >&2
   exit 1
 fi
 
