@@ -907,6 +907,29 @@
                 </label>
                 <button type="submit">Discover Remote Artifacts</button>
               </form>
+              <form id="remote-sidecar-heartbeat-form" class="stack-form compact-form">
+                <label>
+                  Remote computer ID
+                  <input name="remote_computer_id" required placeholder="Remote Computer UUID" />
+                </label>
+                <label>
+                  Session ID
+                  <input name="session_id" placeholder="Optional session UUID" />
+                </label>
+                <label>
+                  Assignment ID
+                  <input name="assignment_id" placeholder="Optional assignment UUID" />
+                </label>
+                <label>
+                  Sidecar name
+                  <input name="sidecar_name" value="artifact-discovery" />
+                </label>
+                <label>
+                  Status
+                  <input name="status" value="healthy" />
+                </label>
+                <button type="submit">Record Sidecar Heartbeat</button>
+              </form>
               <form id="remote-state-lock-form" class="stack-form compact-form">
                 <label>
                   Lock key

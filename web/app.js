@@ -180,6 +180,7 @@ const remoteComputerForm = document.querySelector("#remote-computer-form");
 const remoteComputerLeaseForm = document.querySelector("#remote-computer-lease-form");
 const remoteComputerAttachmentForm = document.querySelector("#remote-computer-attachment-form");
 const remoteArtifactDiscoveryForm = document.querySelector("#remote-artifact-discovery-form");
+const remoteSidecarHeartbeatForm = document.querySelector("#remote-sidecar-heartbeat-form");
 const remoteStateLockForm = document.querySelector("#remote-state-lock-form");
 const usageRoot = document.querySelector("#usage-summary");
 const observabilityRoot = document.querySelector("#observability-summary");
@@ -339,6 +340,7 @@ remoteComputerForm.addEventListener("submit", createRemoteComputer);
 remoteComputerLeaseForm.addEventListener("submit", createRemoteComputerLease);
 remoteComputerAttachmentForm.addEventListener("submit", attachRemoteComputerLease);
 remoteArtifactDiscoveryForm.addEventListener("submit", discoverRemoteArtifacts);
+remoteSidecarHeartbeatForm.addEventListener("submit", recordRemoteSidecarHeartbeat);
 remoteStateLockForm.addEventListener("submit", acquireRemoteStateLock);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
 deliverCostAlertsButton.addEventListener("click", deliverCostAlerts);
@@ -2734,7 +2736,7 @@ function renderRemoteComputerReadiness() {
           ? computerRows
               .map(
                 (computer) =>
-                  `<div class="muted">${escapeHtml(computer.name)} · ${escapeHtml(computer.profile)} · ${escapeHtml(computer.status)} · ${escapeHtml(computer.namespace || "no namespace")} · ${escapeHtml(computer.pod_name || "no pod")} <button class="secondary inline-button" data-fill-remote-lease="${escapeHtml(computer.id)}">Use for Lease</button></div>`,
+                  `<div class="muted">${escapeHtml(computer.name)} · ${escapeHtml(computer.profile)} · ${escapeHtml(computer.status)} · ${escapeHtml(computer.namespace || "no namespace")} · ${escapeHtml(computer.pod_name || "no pod")} <button class="secondary inline-button" data-fill-remote-lease="${escapeHtml(computer.id)}">Use for Lease</button> <button class="secondary inline-button" data-fill-remote-sidecar-heartbeat="${escapeHtml(computer.id)}">Use for Heartbeat</button></div>`,
               )
               .join("")
           : `<div class="muted">No remote computers registered</div>`
@@ -2871,6 +2873,12 @@ function renderRemoteComputerReadiness() {
   remoteComputerReadinessRoot.querySelectorAll("[data-fill-remote-lease]").forEach((button) => {
     button.addEventListener("click", () => fillRemoteLeaseComputer(button.dataset.fillRemoteLease));
   });
+  remoteComputerReadinessRoot.querySelectorAll("[data-fill-remote-sidecar-heartbeat]").forEach((button) => {
+    button.addEventListener("click", () => {
+      remoteSidecarHeartbeatForm.elements.remote_computer_id.value =
+        button.dataset.fillRemoteSidecarHeartbeat;
+    });
+  });
   remoteComputerReadinessRoot.querySelectorAll("[data-fill-execution-lease-assignment]").forEach((button) => {
     button.addEventListener("click", () => {
       executionJobRemoteLeaseForm.elements.lease_id.value =
@@ -2919,6 +2927,7 @@ function optionalNumberFormValue(form, name) {
 function fillRemoteLeaseComputer(remoteComputerId) {
   remoteComputerLeaseForm.elements.remote_computer_id.value = remoteComputerId;
   remoteRunnerForm.elements.remote_computer_id.value = remoteComputerId;
+  remoteSidecarHeartbeatForm.elements.remote_computer_id.value = remoteComputerId;
 }
 
 function remoteRunnerPayload() {
@@ -3067,6 +3076,26 @@ async function discoverRemoteArtifacts(event) {
       remote_computer_id: remoteComputerId,
       artifact_dir: optionalFormValue(form, "artifact_dir") || "artifacts",
       max_files: 10,
+    }),
+  });
+  await refreshOps();
+}
+
+async function recordRemoteSidecarHeartbeat(event) {
+  event.preventDefault();
+  const form = new FormData(remoteSidecarHeartbeatForm);
+  await api("/api/remote-computers/sidecars/heartbeats", {
+    method: "POST",
+    body: JSON.stringify({
+      remote_computer_id: optionalFormValue(form, "remote_computer_id"),
+      session_id: optionalFormValue(form, "session_id"),
+      assignment_id: optionalFormValue(form, "assignment_id"),
+      sidecar_name: optionalFormValue(form, "sidecar_name"),
+      status: optionalFormValue(form, "status"),
+      metadata: {
+        source: "static-admin-console",
+        execution_enabled: false,
+      },
     }),
   });
   await refreshOps();
