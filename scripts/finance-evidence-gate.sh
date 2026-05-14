@@ -100,8 +100,10 @@ fetch_file() {
 write_summary() {
   local finance_summary_file="$EVIDENCE_DIR/api-usage-finance-summary.json"
   local operations_file="$EVIDENCE_DIR/api-usage-finance-operations-summary.json"
+  local close_evidence_file="$EVIDENCE_DIR/finance-close-evidence.json"
+  local reconciliation_evidence_file="$EVIDENCE_DIR/finance-reconciliation-evidence.json"
   local export_metadata_file="$EVIDENCE_DIR/usage-export-csv-evidence.json"
-  local export_delivery_file="$EVIDENCE_DIR/api-usage-export-deliver.json"
+  local export_delivery_file="$EVIDENCE_DIR/finance-export-delivery-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local current_cost_cents
   local budget_pressure_status
@@ -120,6 +122,10 @@ write_summary() {
   local reconciliation_controller_required
   local reconciliation_controller_configured
   local latest_reconciliation_status
+  local close_evidence_status
+  local close_run_status
+  local reconciliation_evidence_status
+  local reconciliation_run_status
   local blocked_count
 
   current_cost_cents="$(jq -r '.current_cost_cents // 0' "$finance_summary_file")"
@@ -139,6 +145,18 @@ write_summary() {
   reconciliation_controller_required="$(jq -r '.production_close.reconciliation_controller_required // false' "$operations_file")"
   reconciliation_controller_configured="$(jq -r '.production_close.reconciliation_controller_configured // false' "$operations_file")"
   latest_reconciliation_status="$(jq -r '.production_close.latest_reconciliation_status // "none"' "$operations_file")"
+  close_evidence_status="not_requested"
+  close_run_status="not_run"
+  if [[ -s "$close_evidence_file" ]]; then
+    close_evidence_status="$(jq -r '.status // "unknown"' "$close_evidence_file")"
+    close_run_status="$(jq -r '.response.status // "unknown"' "$close_evidence_file")"
+  fi
+  reconciliation_evidence_status="not_requested"
+  reconciliation_run_status="not_run"
+  if [[ -s "$reconciliation_evidence_file" ]]; then
+    reconciliation_evidence_status="$(jq -r '.status // "unknown"' "$reconciliation_evidence_file")"
+    reconciliation_run_status="$(jq -r '.response.status // "unknown"' "$reconciliation_evidence_file")"
+  fi
   blocked_count="$(jq -r 'if .production_close.production_blocked == true then 1 else 0 end' "$operations_file")"
 
   {
@@ -160,14 +178,19 @@ write_summary() {
     echo "reconciliation_controller_required=$reconciliation_controller_required"
     echo "reconciliation_controller_configured=$reconciliation_controller_configured"
     echo "latest_reconciliation_status=$latest_reconciliation_status"
+    echo "finance_close_evidence_status=$close_evidence_status"
+    echo "finance_close_run_status=$close_run_status"
+    echo "finance_reconciliation_evidence_status=$reconciliation_evidence_status"
+    echo "finance_reconciliation_run_status=$reconciliation_run_status"
     echo "finance_controllers=$RUN_FINANCE_CONTROLLERS"
     echo "finance_export=$RUN_FINANCE_EXPORT"
     if [[ -s "$export_metadata_file" ]]; then
       echo "finance_export_csv_bytes=$(jq -r '.byte_count // 0' "$export_metadata_file")"
     fi
     if [[ -s "$export_delivery_file" ]]; then
-      echo "finance_export_delivery_status=$(jq -r '.status // "unknown"' "$export_delivery_file")"
-      echo "finance_export_delivery_target_configured=$(jq -r '.target_configured // false' "$export_delivery_file")"
+      echo "finance_export_delivery_evidence_status=$(jq -r '.status // "unknown"' "$export_delivery_file")"
+      echo "finance_export_delivery_status=$(jq -r '.response.status // "unknown"' "$export_delivery_file")"
+      echo "finance_export_delivery_target_configured=$(jq -r '.response.target_configured // false' "$export_delivery_file")"
     fi
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
@@ -189,6 +212,60 @@ write_summary() {
   fi
 }
 
+capture_finance_close_evidence() {
+  local close_response
+  local close_evidence_file="$EVIDENCE_DIR/finance-close-evidence.json"
+
+  close_response="$(fetch_json POST /api/usage/finance-operations/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$close_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$close_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$close_evidence_file"
+}
+
+capture_finance_reconciliation_evidence() {
+  local reconciliation_response
+  local reconciliation_evidence_file="$EVIDENCE_DIR/finance-reconciliation-evidence.json"
+
+  reconciliation_response="$(fetch_json POST /api/usage/finance-operations/reconcile)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$reconciliation_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$reconciliation_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$reconciliation_evidence_file"
+}
+
+capture_finance_export_delivery_evidence() {
+  local delivery_response
+  local delivery_evidence_file="$EVIDENCE_DIR/finance-export-delivery-evidence.json"
+
+  delivery_response="$(fetch_json POST /api/usage/export/deliver)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$delivery_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$delivery_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$delivery_evidence_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -198,15 +275,15 @@ fetch_json GET /api/usage/finance-summary >/dev/null
 fetch_json GET /api/usage/finance-operations/summary >/dev/null
 
 if [[ "$RUN_FINANCE_CONTROLLERS" == "1" ]]; then
-  fetch_json POST /api/usage/finance-operations/run >/dev/null
-  fetch_json POST /api/usage/finance-operations/reconcile >/dev/null
+  capture_finance_close_evidence
+  capture_finance_reconciliation_evidence
 else
   echo "skipping finance close/reconciliation controllers; set RUN_STAGE2_FINANCE_CONTROLLERS=1 to include accounting evidence" >&2
 fi
 
 if [[ "$RUN_FINANCE_EXPORT" == "1" ]]; then
   fetch_file GET /api/usage/export.csv "$EVIDENCE_DIR/api-usage-export.csv" "$EVIDENCE_DIR/usage-export-csv-evidence.json"
-  fetch_json POST /api/usage/export/deliver >/dev/null
+  capture_finance_export_delivery_evidence
 else
   echo "skipping finance export capture; set RUN_STAGE2_FINANCE_EXPORT=1 to include CSV and delivery evidence" >&2
 fi

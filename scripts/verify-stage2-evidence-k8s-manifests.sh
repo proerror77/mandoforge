@@ -961,6 +961,41 @@ if ! grep -q "/api/usage/export/deliver" "$finance_script"; then
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_FINANCE_CONTROLLERS" "$finance_script"; then
+  echo "finance evidence script must support optional finance controller evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-close-evidence.json" "$finance_script"; then
+  echo "finance evidence script must write explicit close evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-close-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit finance close evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-reconciliation-evidence.json" "$finance_script"; then
+  echo "finance evidence script must write explicit reconciliation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-reconciliation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit finance reconciliation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-export-delivery-evidence.json" "$finance_script"; then
+  echo "finance evidence script must write explicit export delivery evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-export-delivery-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit finance export delivery evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "MANDOFORGE_STAGE2_EVIDENCE_PVC:-mandoforge-stage2-production-evidence" "$archive_script"; then
   echo "Stage 2 production evidence archive script does not default to the production evidence PVC" >&2
   exit 1

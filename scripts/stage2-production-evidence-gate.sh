@@ -470,6 +470,60 @@ capture_eval_release_due_run() {
     }' >"$due_run_file"
 }
 
+capture_finance_close_validation() {
+  local close_response
+  local close_file="$EVIDENCE_DIR/finance-close-evidence.json"
+
+  close_response="$(fetch_json POST /api/usage/finance-operations/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$close_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$close_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$close_file"
+}
+
+capture_finance_reconciliation_validation() {
+  local reconciliation_response
+  local reconciliation_file="$EVIDENCE_DIR/finance-reconciliation-evidence.json"
+
+  reconciliation_response="$(fetch_json POST /api/usage/finance-operations/reconcile)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$reconciliation_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$reconciliation_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$reconciliation_file"
+}
+
+capture_finance_export_delivery_validation() {
+  local delivery_response
+  local delivery_file="$EVIDENCE_DIR/finance-export-delivery-evidence.json"
+
+  delivery_response="$(fetch_json POST /api/usage/export/deliver)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$delivery_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$delivery_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$delivery_file"
+}
+
 capture_remote_computer_state_sync_validation() {
   local state_sync_response
   local state_sync_file="$EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
@@ -810,15 +864,15 @@ run_controller_validations() {
   fi
 
   if [[ "${RUN_STAGE2_FINANCE_CONTROLLERS:-0}" == "1" ]]; then
-    fetch_json POST /api/usage/finance-operations/run >/dev/null
-    fetch_json POST /api/usage/finance-operations/reconcile >/dev/null
+    capture_finance_close_validation
+    capture_finance_reconciliation_validation
   else
     echo "skipping finance close/reconciliation controllers; set RUN_STAGE2_FINANCE_CONTROLLERS=1 to include accounting evidence" >&2
   fi
 
   if [[ "${RUN_STAGE2_FINANCE_EXPORT:-0}" == "1" ]]; then
     fetch_file GET /api/usage/export.csv "$EVIDENCE_DIR/api-usage-export.csv" "$EVIDENCE_DIR/usage-export-csv-evidence.json"
-    fetch_json POST /api/usage/export/deliver >/dev/null
+    capture_finance_export_delivery_validation
   else
     echo "skipping finance export capture; set RUN_STAGE2_FINANCE_EXPORT=1 to include CSV and delivery evidence" >&2
   fi
