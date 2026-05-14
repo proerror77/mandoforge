@@ -18,6 +18,7 @@ manifests=(
   deploy/stage2-evidence/vault-evidence-job.example.yaml
   deploy/stage2-evidence/approval-notification-evidence-job.example.yaml
   deploy/stage2-evidence/worker-evidence-job.example.yaml
+  deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
@@ -27,6 +28,7 @@ tenant_script="scripts/tenant-isolation-evidence-gate.sh"
 vault_script="scripts/vault-evidence-gate.sh"
 approval_notification_script="scripts/approval-notification-evidence-gate.sh"
 worker_script="scripts/worker-evidence-gate.sh"
+policy_rollout_script="scripts/policy-rollout-evidence-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -72,6 +74,11 @@ fi
 
 if [[ ! -x "$worker_script" ]]; then
   echo "missing worker evidence script: $worker_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$policy_rollout_script" ]]; then
+  echo "missing policy rollout evidence script: $policy_rollout_script" >&2
   exit 1
 fi
 
@@ -131,6 +138,11 @@ fi
 
 if ! grep -q "name: mandoforge-worker-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the worker evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-policy-rollout-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the policy rollout evidence Job" >&2
   exit 1
 fi
 
@@ -301,6 +313,31 @@ fi
 
 if ! grep -q "/api/execution-jobs/worker-load-validation/run" "$worker_script"; then
   echo "Worker evidence script must validate worker load readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "policy-rollout-evidence-gate.sh" deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml; then
+  echo "Policy rollout evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml; then
+  echo "Policy rollout evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/policy/rollout/orchestration/readiness" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must collect orchestration readiness" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/policy/rollout/orchestration/validate" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must validate rollout orchestration" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/policy/rollout/run-due" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must capture due-run evidence" >&2
   exit 1
 fi
 
