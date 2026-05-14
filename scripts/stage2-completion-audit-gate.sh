@@ -39,6 +39,11 @@ resolve_endpoint() {
   printf '%s\n' "$endpoint"
 }
 
+local_script_artifact_path() {
+  local endpoint="$1"
+  printf '%s/local-script-%s.json\n' "$SOURCE_EVIDENCE_DIR" "$(slugify "$endpoint")"
+}
+
 json_array_from_file() {
   local path="$1"
   jq -R -s 'split("\n") | map(select(length > 0))' "$path"
@@ -108,6 +113,16 @@ while IFS= read -r encoded; do
 
   while IFS= read -r endpoint; do
     [[ -z "$endpoint" ]] && continue
+    if [[ "$endpoint" == ./* ]]; then
+      echo "$endpoint" >>"$readiness_declared"
+      artifact="$(local_script_artifact_path "$endpoint")"
+      if [[ -s "$artifact" ]]; then
+        echo "$artifact" >>"$readiness_artifacts"
+      else
+        echo "$endpoint" >>"$missing_readiness"
+      fi
+      continue
+    fi
     if ! resolved="$(resolve_endpoint "$endpoint")"; then
       echo "$endpoint" >>"$unresolved_endpoints"
       echo "$endpoint" >>"$missing_readiness"
@@ -124,6 +139,16 @@ while IFS= read -r encoded; do
 
   while IFS= read -r endpoint; do
     [[ -z "$endpoint" ]] && continue
+    if [[ "$endpoint" == ./* ]]; then
+      echo "$endpoint" >>"$validation_declared"
+      artifact="$(local_script_artifact_path "$endpoint")"
+      if [[ -s "$artifact" ]]; then
+        echo "$artifact" >>"$validation_artifacts"
+      else
+        echo "$endpoint" >>"$missing_validation"
+      fi
+      continue
+    fi
     if ! resolved="$(resolve_endpoint "$endpoint")"; then
       echo "$endpoint" >>"$unresolved_endpoints"
       echo "$endpoint" >>"$missing_validation"

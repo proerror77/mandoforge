@@ -453,6 +453,16 @@ if ! grep -q "x-mandoforge-scheduler-token" scripts/stage2-production-evidence-g
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_UI_ACTIONBOOK" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must support optional static UI Actionbook evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "local-script-" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must map local script evidence artifacts" >&2
+  exit 1
+fi
+
 if ! grep -q "policy-rollout-evidence-gate.sh" deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml; then
   echo "Policy rollout evidence Job does not run the dedicated evidence gate" >&2
   exit 1

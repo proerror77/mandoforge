@@ -62,6 +62,57 @@ fetch_json() {
   echo "$target"
 }
 
+run_local_script_validation() {
+  local script_path="$1"
+  local label
+  label="local-script-$(slugify "$script_path")"
+  local target="$EVIDENCE_DIR/$label.json"
+  local stdout_file
+  local stderr_file
+  local status="passed"
+  local exit_code=0
+  stdout_file="$(mktemp)"
+  stderr_file="$(mktemp)"
+
+  if [[ ! -x "$script_path" ]]; then
+    status="failed"
+    exit_code=127
+    printf 'local validation script is missing or not executable: %s\n' "$script_path" >"$stderr_file"
+  else
+    set +e
+    "$script_path" >"$stdout_file" 2>"$stderr_file"
+    exit_code="$?"
+    set -e
+    if [[ "$exit_code" != "0" ]]; then
+      status="failed"
+    fi
+  fi
+
+  jq -n \
+    --arg script "$script_path" \
+    --arg status "$status" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --arg stdout "$(sed -n '1,80p' "$stdout_file")" \
+    --arg stderr "$(sed -n '1,80p' "$stderr_file")" \
+    --argjson exit_code "$exit_code" \
+    '{
+      script: $script,
+      status: $status,
+      generated_at: $generated_at,
+      exit_code: $exit_code,
+      stdout: $stdout,
+      stderr: $stderr
+    }' >"$target"
+
+  rm -f "$stdout_file" "$stderr_file"
+
+  if [[ "$status" != "passed" ]]; then
+    echo "local validation script failed: $script_path" >&2
+    cat "$target" >&2
+    exit 1
+  fi
+}
+
 collect_readiness() {
   fetch_json GET /api/stage2/readiness >/dev/null
   fetch_json GET /api/tenant-isolation/readiness >/dev/null
@@ -87,6 +138,14 @@ collect_readiness() {
   if [[ -n "$TEAM_ID" ]]; then
     fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/summary" >/dev/null
     fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/runs" >/dev/null
+  fi
+}
+
+run_local_validations() {
+  if [[ "${RUN_STAGE2_UI_ACTIONBOOK:-0}" == "1" ]]; then
+    run_local_script_validation ./scripts/verify-static-ui-actionbook.sh
+  else
+    echo "skipping static UI Actionbook validation; set RUN_STAGE2_UI_ACTIONBOOK=1 to include UI smoke evidence" >&2
   fi
 }
 
@@ -299,6 +358,7 @@ write_endpoint_coverage "validation_endpoints" "validation" "0"
 
 if [[ "$RUN_VALIDATIONS" == "1" ]]; then
   run_controller_validations
+  run_local_validations
   collect_readiness
   verify_readiness_inventory_coverage
   write_endpoint_coverage "validation_endpoints" "validation" "$VERIFY_VALIDATION_COVERAGE"
