@@ -7,7 +7,7 @@ Stage 2 is complete only when `/api/stage2/readiness` reports no open gaps and t
 ## Files
 
 - `stage2-evidence-gate-job.yaml` runs the default blocked inventory gate. It keeps `ALLOW_BLOCKED=1` and leaves production validations disabled, so it is useful for collecting current readiness evidence without claiming completion.
-- `stage2-production-controllers.env.example` lists the controller and KMS environment contract required for strict production validation. It intentionally contains placeholder URLs and empty token/team/key values.
+- `stage2-production-controllers.env.example` lists the controller and KMS environment contract required for strict production validation. It intentionally contains placeholder URLs and empty token/key values; `MANDOFORGE_STAGE2_TEAM_ID` may stay empty so evidence gates can auto-discover the first active team.
 - `stage2-controller-env-secret.example.yaml` is the Kubernetes Secret shape for those controller settings. Replace placeholders through your secret manager or deployment pipeline; do not commit real values.
 - `stage2-production-evidence-pvc.example.yaml` is the persistent evidence volume shape for strict production runs.
 - `stage2-production-evidence-gate-job.example.yaml` runs the strict production gate and reads validation flags from `mandoforge-stage2-controller-env`.
@@ -51,7 +51,7 @@ scripts/archive-stage2-production-evidence.sh .mandoforge/stage2-production-evid
 scripts/verify-stage2-evidence-archive.sh .mandoforge/stage2-production-evidence-YYYYMMDDTHHMMSSZ.tar.gz
 ```
 
-For a real run, create `/secure/path/stage2-production-controllers.env` from the same keys but with production controller URLs, tokens, team id, and KMS settings supplied outside git. The render script refuses `example.com` placeholders and empty token/key/team values by default. The strict Job sets `ALLOW_BLOCKED=0` through that Secret and fails closed if required controller evidence is missing, stale, or unhealthy. Keep the `mandoforge-stage2-production-evidence` PVC until the evidence directory has been archived with the release record, including the generated `.sha256` checksum and `.manifest.txt` release manifest.
+For a real run, create `/secure/path/stage2-production-controllers.env` from the same keys but with production controller URLs, tokens, and KMS settings supplied outside git. Set `MANDOFORGE_STAGE2_TEAM_ID` only when you want to pin MCP evidence to a specific team; otherwise the evidence gates discover the first active team through the governance APIs and write `team-discovery.json`. The render script refuses `example.com` placeholders and empty token/key values by default. The strict Job sets `ALLOW_BLOCKED=0` through that Secret and fails closed if required controller evidence is missing, stale, or unhealthy. Keep the `mandoforge-stage2-production-evidence` PVC until the evidence directory has been archived with the release record, including the generated `.sha256` checksum and `.manifest.txt` release manifest.
 
 The production kustomize bundle references the reviewed PVC and Job examples under `deploy/stage2-evidence`, so `kubectl kustomize` needs `--load-restrictor LoadRestrictionsNone`. It does not include the example Secret; render and apply the real Secret first.
 

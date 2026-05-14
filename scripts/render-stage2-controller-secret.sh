@@ -22,9 +22,9 @@ if [[ "$allow_placeholders" != "1" ]]; then
     exit 1
   fi
 
-  if grep -E '^(MANDOFORGE_STAGE2_TEAM_ID|MANDOFORGE_KMS_KEY_ID|.*_TOKEN)=$' "$env_file" >/dev/null; then
-    echo "Stage 2 controller env file still contains empty team id, KMS key id, or token values" >&2
-    grep -nE '^(MANDOFORGE_STAGE2_TEAM_ID|MANDOFORGE_KMS_KEY_ID|.*_TOKEN)=$' "$env_file" >&2
+  if grep -E '^(MANDOFORGE_KMS_KEY_ID|.*_TOKEN)=$' "$env_file" >/dev/null; then
+    echo "Stage 2 controller env file still contains empty KMS key id or token values" >&2
+    grep -nE '^(MANDOFORGE_KMS_KEY_ID|.*_TOKEN)=$' "$env_file" >&2
     exit 1
   fi
 fi
