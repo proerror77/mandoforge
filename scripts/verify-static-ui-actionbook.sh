@@ -69,7 +69,7 @@ wait_for_static_ui() {
     hasApprovalNotificationRouting: Boolean(document.querySelector('#approval-notification-routing')) && Boolean(document.querySelector('#approval-notification-runs')) && text.includes('ROUTING') && text.includes('UNROUTABLE') && text.includes('Run Notifications') && text.includes('NOTIFICATION RUNS') && text.includes('Production ops:'),
     hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Load Codex Runs') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering') && text.includes('LONG-RUNNING STEERING'),
     hasMcpLifecycle: text.includes('MCP Servers') && text.includes('Config JSON') && Array.from(document.querySelectorAll('#mcp-form textarea')).some((textarea) => textarea.value.includes('vault:mcp/docs#api_key')) && text.includes('Load Team Servers') && text.includes('Run Team Health') && text.includes('Run Due Health') && text.includes('MCP ROLLOUT RUNS'),
-    hasTenantGovernance: text.includes('Tenant Governance') && text.includes('Archive Organization') && text.includes('Delete Organization') && text.includes('Archive Team') && text.includes('Archive Project') && text.includes('Bootstrap Tenant') && text.includes('Transfer Ownership') && text.includes('Create Invitation') && text.includes('Accept Invitation') && (text.includes('No tenant invitations') || text.includes('Select an organization to manage invitations')),
+    hasTenantGovernance: text.includes('Tenant Governance') && text.includes('Archive Organization') && text.includes('Delete Organization') && text.includes('Archive Team') && text.includes('Archive Project') && text.includes('Bootstrap Tenant') && text.includes('Transfer Ownership') && text.includes('Create Membership') && text.includes('Delete Membership') && text.includes('Create Invitation') && text.includes('Accept Invitation') && (text.includes('No tenant invitations') || text.includes('Select an organization to manage invitations')),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
     hasEvalJudgeProfiles: text.includes('Create Judge Profile') && text.includes('Judge profile') && Array.from(document.querySelectorAll('#eval-judge-profile-form input')).some((input) => input.value.includes('vault:eval/judges/default#api_key')) && Boolean(document.querySelector('#eval-judge-profiles')),
@@ -197,6 +197,9 @@ grep -q "Discover Remote Artifacts" /tmp/mandoforge-actionbook-index.html
 grep -q "acceptTenantInvitation" /tmp/mandoforge-actionbook-app.js
 grep -q "data-accept-invitation" /tmp/mandoforge-actionbook-app.js
 grep -q "/api/invitations/accept" /tmp/mandoforge-actionbook-app.js
+grep -q "deleteMembership" /tmp/mandoforge-actionbook-app.js
+grep -q "data-delete-membership" /tmp/mandoforge-actionbook-app.js
+grep -q "/api/memberships/" /tmp/mandoforge-actionbook-app.js
 curl -fsS "$BASE_URL/api/usage" \
   -H 'x-mandoforge-subject: actionbook-smoke' \
   -H 'x-mandoforge-roles: admin' \

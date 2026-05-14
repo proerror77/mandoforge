@@ -503,6 +503,83 @@ impl AppState {
         Ok(membership)
     }
 
+    pub(crate) async fn delete_membership(
+        &self,
+        membership_id: Uuid,
+    ) -> Result<Membership, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let membership = store
+                    .memberships
+                    .get(&membership_id)
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("membership not found"))?;
+                if membership.role == "admin" {
+                    if let Some(organization_id) = membership.organization_id {
+                        let remaining_admin_count = store
+                            .memberships
+                            .values()
+                            .filter(|candidate| {
+                                candidate.id != membership_id
+                                    && candidate.organization_id == Some(organization_id)
+                                    && candidate.role == "admin"
+                            })
+                            .count();
+                        if remaining_admin_count == 0 {
+                            return Err(AppError::bad_request(
+                                "cannot delete the last admin membership",
+                            ));
+                        }
+                    }
+                }
+                store.memberships.remove(&membership_id);
+                Ok(membership)
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, user_id, organization_id, team_id, project_id, role, created_at
+                     FROM memberships
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.tenant_id)
+                .bind(membership_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("membership not found"))?;
+                let membership = membership_from_row(row)?;
+                if membership.role == "admin" {
+                    if let Some(organization_id) = membership.organization_id {
+                        let remaining_admin_count: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*)
+                             FROM memberships
+                             WHERE tenant_id = $1
+                               AND organization_id = $2
+                               AND role = 'admin'
+                               AND id <> $3",
+                        )
+                        .bind(self.tenant_id)
+                        .bind(organization_id)
+                        .bind(membership_id)
+                        .fetch_one(pool)
+                        .await?;
+                        if remaining_admin_count == 0 {
+                            return Err(AppError::bad_request(
+                                "cannot delete the last admin membership",
+                            ));
+                        }
+                    }
+                }
+                sqlx::query("DELETE FROM memberships WHERE tenant_id = $1 AND id = $2")
+                    .bind(self.tenant_id)
+                    .bind(membership_id)
+                    .execute(pool)
+                    .await?;
+                Ok(membership)
+            }
+        }
+    }
+
     pub(crate) async fn list_tenant_invitations(
         &self,
         organization_id: Uuid,

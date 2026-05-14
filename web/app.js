@@ -459,6 +459,11 @@ async function createMembership(event) {
   await refreshOps();
 }
 
+async function deleteMembership(membershipId) {
+  await api(`/api/memberships/${membershipId}`, { method: "DELETE" });
+  await refreshOps();
+}
+
 async function createTenantInvitation(event) {
   event.preventDefault();
   const form = new FormData(tenantInvitationForm);
@@ -2782,6 +2787,7 @@ function renderTenantGovernance() {
               <div class="item">
                 <strong>${escapeHtml(membership.user_id)}</strong>
                 <div class="muted">${escapeHtml(membership.role)} · ${escapeHtml(membership.id)}</div>
+                <button type="button" class="secondary reject" data-delete-membership="${escapeHtml(membership.id)}">Delete Membership</button>
                 <pre>${escapeHtml(
                   JSON.stringify(
                     {
@@ -2798,6 +2804,9 @@ function renderTenantGovernance() {
           .join("")
       : `<div class="muted">No memberships for selected organization</div>`
     : `<div class="muted">Select an organization to manage memberships</div>`;
+  membershipRoot.querySelectorAll("[data-delete-membership]").forEach((button) => {
+    button.addEventListener("click", () => deleteMembership(button.dataset.deleteMembership));
+  });
 
   tenantInvitationRoot.innerHTML = state.selectedOrganizationId
     ? state.tenantInvitations.length

@@ -3746,6 +3746,7 @@ fn build_router(state: AppState) -> Router {
             "/api/organizations/{id}/memberships",
             get(list_memberships).post(create_membership),
         )
+        .route("/api/memberships/{id}", delete(delete_membership))
         .route(
             "/api/organizations/{id}/invitations",
             get(list_tenant_invitations).post(create_tenant_invitation),
@@ -8994,6 +8995,41 @@ async fn create_membership(
     )
     .await?;
     Ok(Json(state.create_membership(id, input).await?))
+}
+
+async fn delete_membership(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Membership>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "membership".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    let membership = state.delete_membership(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "membership.deleted",
+            "membership",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "user_id": membership.user_id,
+                "organization_id": membership.organization_id,
+                "team_id": membership.team_id,
+                "project_id": membership.project_id,
+                "role": membership.role
+            }),
+        ))
+        .await?;
+    Ok(Json(membership))
 }
 
 async fn list_tenant_invitations(
@@ -43861,6 +43897,60 @@ not json
         assert_eq!(project_membership.team_id, Some(team.id));
         assert_eq!(project_membership.project_id, Some(project.id));
 
+        let disposable_membership: Membership = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/organizations/{}/memberships",
+                    organization.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "user_id": "disposable-viewer-1",
+                        "team_id": team.id,
+                        "project_id": project.id,
+                        "role": "viewer"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let deleted_project_membership: Membership = request_json(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/memberships/{}", disposable_membership.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(deleted_project_membership.id, disposable_membership.id);
+        let memberships_after_delete: Vec<Membership> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/organizations/{}/memberships",
+                    organization.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            !memberships_after_delete
+                .iter()
+                .any(|candidate| candidate.id == disposable_membership.id)
+        );
+
         let (status, project_membership_error) = request_value(
             app.clone(),
             Request::builder()
@@ -44469,6 +44559,11 @@ not json
                 .iter()
                 .any(|log| log.action == "policy.rollout_cancelled")
         );
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "membership.deleted"
+                && log.resource_id == Some(disposable_membership.id)
+                && log.details["user_id"] == "disposable-viewer-1"
+        }));
 
         let reserved_secret_health = secret_provider_health_from_lookup(|_| None).await;
         assert_eq!(reserved_secret_health.provider_kind, "reserved");
