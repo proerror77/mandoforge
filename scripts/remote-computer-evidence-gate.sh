@@ -58,6 +58,8 @@ fetch_json() {
 write_summary() {
   local readiness_file="$EVIDENCE_DIR/api-remote-computers-readiness.json"
   local runner_file="$EVIDENCE_DIR/api-remote-computers-runner-readiness.json"
+  local state_sync_evidence_file="$EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
+  local sidecar_recovery_evidence_file="$EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local status
   local score
@@ -65,6 +67,10 @@ write_summary() {
   local sidecar_supervision_status
   local sidecar_recovery_status
   local runner_status
+  local state_sync_evidence_status
+  local state_sync_validation_status
+  local sidecar_recovery_evidence_status
+  local sidecar_recovery_run_status
   local blocked_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
@@ -73,6 +79,18 @@ write_summary() {
   sidecar_supervision_status="$(jq -r '.sidecar_supervision.status // "unknown"' "$readiness_file")"
   sidecar_recovery_status="$(jq -r '.sidecar_recovery.status // "unknown"' "$readiness_file")"
   runner_status="$(jq -r '.status // "unknown"' "$runner_file")"
+  state_sync_evidence_status="missing"
+  state_sync_validation_status="unknown"
+  if [[ -s "$state_sync_evidence_file" ]]; then
+    state_sync_evidence_status="$(jq -r '.status // "unknown"' "$state_sync_evidence_file")"
+    state_sync_validation_status="$(jq -r '.response.status // "unknown"' "$state_sync_evidence_file")"
+  fi
+  sidecar_recovery_evidence_status="not_requested"
+  sidecar_recovery_run_status="not_run"
+  if [[ -s "$sidecar_recovery_evidence_file" ]]; then
+    sidecar_recovery_evidence_status="$(jq -r '.status // "unknown"' "$sidecar_recovery_evidence_file")"
+    sidecar_recovery_run_status="$(jq -r '.response.status // "unknown"' "$sidecar_recovery_evidence_file")"
+  fi
   blocked_count="$(jq -r '[
       .production_state_sync.production_blocked,
       (.sidecar_recovery.status == "blocked")
@@ -85,6 +103,10 @@ write_summary() {
     echo "sidecar_supervision_status=$sidecar_supervision_status"
     echo "sidecar_recovery_status=$sidecar_recovery_status"
     echo "runner_status=$runner_status"
+    echo "state_sync_evidence_status=$state_sync_evidence_status"
+    echo "state_sync_validation_status=$state_sync_validation_status"
+    echo "sidecar_recovery_evidence_status=$sidecar_recovery_evidence_status"
+    echo "sidecar_recovery_run_status=$sidecar_recovery_run_status"
     echo "production_blocked_count=$blocked_count"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "sidecar_recovery_run=$RUN_SIDECAR_RECOVERY"
@@ -107,6 +129,42 @@ write_summary() {
   fi
 }
 
+capture_state_sync_evidence() {
+  local state_sync_response
+  local state_sync_evidence_file="$EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
+
+  state_sync_response="$(fetch_json POST /api/remote-computers/state-sync/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$state_sync_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$state_sync_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$state_sync_evidence_file"
+}
+
+capture_sidecar_recovery_evidence() {
+  local sidecar_recovery_response
+  local sidecar_recovery_evidence_file="$EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
+
+  sidecar_recovery_response="$(fetch_json POST /api/remote-computers/sidecars/recovery/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$sidecar_recovery_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$sidecar_recovery_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$sidecar_recovery_evidence_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -114,10 +172,10 @@ mkdir -p "$EVIDENCE_DIR"
 curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/remote-computers/readiness >/dev/null
 fetch_json GET /api/remote-computers/runner/readiness >/dev/null
-fetch_json POST /api/remote-computers/state-sync/validate >/dev/null
+capture_state_sync_evidence
 
 if [[ "$RUN_SIDECAR_RECOVERY" == "1" ]]; then
-  fetch_json POST /api/remote-computers/sidecars/recovery/run >/dev/null
+  capture_sidecar_recovery_evidence
 else
   echo "skipping Remote Computer sidecar recovery; set RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 to include replacement evidence" >&2
 fi

@@ -331,8 +331,33 @@ if ! grep -q "/api/remote-computers/state-sync/validate" "$remote_computer_scrip
   exit 1
 fi
 
+if ! grep -q "remote-computer-state-sync-evidence.json" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must write explicit state-sync evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "remote-computer-state-sync-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit Remote Computer state-sync evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "/api/remote-computers/sidecars/recovery/run" "$remote_computer_script"; then
   echo "Remote Computer evidence script must capture sidecar recovery evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must support optional sidecar recovery evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "remote-computer-sidecar-recovery-evidence.json" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must write explicit sidecar recovery evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "remote-computer-sidecar-recovery-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit Remote Computer sidecar recovery evidence metadata" >&2
   exit 1
 fi
 

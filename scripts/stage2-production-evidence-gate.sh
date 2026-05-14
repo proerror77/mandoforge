@@ -348,6 +348,42 @@ capture_eval_release_rollback_validation() {
     }' >"$rollback_file"
 }
 
+capture_remote_computer_state_sync_validation() {
+  local state_sync_response
+  local state_sync_file="$EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
+
+  state_sync_response="$(fetch_json POST /api/remote-computers/state-sync/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$state_sync_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$state_sync_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$state_sync_file"
+}
+
+capture_remote_computer_sidecar_recovery_validation() {
+  local sidecar_response
+  local sidecar_file="$EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
+
+  sidecar_response="$(fetch_json POST /api/remote-computers/sidecars/recovery/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$sidecar_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$sidecar_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$sidecar_file"
+}
+
 capture_approval_notification_delivery_validation() {
   local delivery_response
   local delivery_file="$EVIDENCE_DIR/approval-notification-delivery-evidence.json"
@@ -391,7 +427,7 @@ run_controller_validations() {
   fetch_json POST /api/policy/rollout/orchestration/validate >/dev/null
   fetch_json POST /api/vault/kms/recovery/validate >/dev/null
   fetch_json POST /api/execution-jobs/worker-load-validation/run >/dev/null
-  fetch_json POST /api/remote-computers/state-sync/validate >/dev/null
+  capture_remote_computer_state_sync_validation
   fetch_json POST /api/approvals/notifications/deployment/validate >/dev/null
   fetch_json POST /api/approvals/notifications/ops/validate >/dev/null
   fetch_json POST /api/codex-app-server/deployment/validate >/dev/null
@@ -429,7 +465,7 @@ run_controller_validations() {
   fi
 
   if [[ "${RUN_STAGE2_REMOTE_SIDECAR_RECOVERY:-0}" == "1" ]]; then
-    fetch_json POST /api/remote-computers/sidecars/recovery/run >/dev/null
+    capture_remote_computer_sidecar_recovery_validation
   else
     echo "skipping Remote Computer sidecar recovery; set RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 to include replacement evidence" >&2
   fi
