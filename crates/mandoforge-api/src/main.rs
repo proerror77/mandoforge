@@ -1610,6 +1610,8 @@ struct WorkerLoadValidationEvidence {
     controller_required: bool,
     controller_configured: bool,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
+    controller_evidence_fresh: bool,
     latest_controller_validated: bool,
     required_profile: String,
     message: String,
@@ -29019,6 +29021,7 @@ async fn worker_load_validation_evidence(
     let audit_logs = state.list_audit_logs(None).await?;
     Ok(worker_load_validation_evidence_from_audit_logs(
         &audit_logs,
+        Utc::now(),
         worker_load_validation_controller_required(&|key| std::env::var(key).ok()),
         worker_load_validation_controller_configured(&|key| std::env::var(key).ok()),
         worker_isolated_pool_configured_from_manifests(),
@@ -29027,6 +29030,7 @@ async fn worker_load_validation_evidence(
 
 fn worker_load_validation_evidence_from_audit_logs(
     audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
     controller_required: bool,
     controller_configured: bool,
     manifest_isolated_worker_pool_configured: bool,
@@ -29045,9 +29049,15 @@ fn worker_load_validation_evidence_from_audit_logs(
         .as_ref()
         .and_then(|log| log.details["controller_execution"]["status"].as_str())
         .map(str::to_string);
+    let latest_controller_age_hours = latest_run
+        .as_ref()
+        .filter(|_| latest_controller_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let load_validated = latest_run_status.as_deref() == Some("validated")
-        && (!controller_required || latest_controller_validated);
+        && (!controller_required || (latest_controller_validated && controller_evidence_fresh));
     let isolated_worker_pool_configured = latest_run
         .as_ref()
         .and_then(|log| log.details.get("isolated_worker_pool_configured"))
@@ -29070,6 +29080,8 @@ fn worker_load_validation_evidence_from_audit_logs(
         "worker load validation controller is required but not configured".to_string()
     } else if controller_required && !latest_controller_validated {
         "worker load validation controller has no recent validated evidence".to_string()
+    } else if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        "worker load validation controller evidence is stale".to_string()
     } else if latest_run.is_some() {
         "latest worker load validation run did not prove production load and worker-pool isolation"
             .to_string()
@@ -29085,6 +29097,8 @@ fn worker_load_validation_evidence_from_audit_logs(
         controller_required,
         controller_configured,
         latest_controller_status,
+        latest_controller_age_hours,
+        controller_evidence_fresh,
         latest_controller_validated,
         required_profile:
             "durable queue + hardened worker Pod + queue-depth autoscaling + isolated worker pool + production-like load test"
@@ -31162,8 +31176,13 @@ not json
                 "checked_at": generated_at,
             }),
         );
-        let blocked =
-            worker_load_validation_evidence_from_audit_logs(&[env_only_audit], true, false, true);
+        let blocked = worker_load_validation_evidence_from_audit_logs(
+            &[env_only_audit],
+            generated_at,
+            true,
+            false,
+            true,
+        );
         assert_eq!(blocked.status, "attention");
         assert!(!blocked.load_validated);
         assert!(
@@ -31172,7 +31191,7 @@ not json
                 .contains("controller is required but not configured")
         );
 
-        let controller_audit = new_audit_log(
+        let mut controller_audit = new_audit_log(
             None,
             "system",
             None,
@@ -31192,12 +31211,59 @@ not json
                 "checked_at": generated_at,
             }),
         );
-        let ready =
-            worker_load_validation_evidence_from_audit_logs(&[controller_audit], true, true, true);
+        controller_audit.created_at = generated_at;
+        let ready = worker_load_validation_evidence_from_audit_logs(
+            &[controller_audit],
+            generated_at,
+            true,
+            true,
+            true,
+        );
         assert_eq!(ready.status, "validated");
         assert!(ready.load_validated);
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+
+        let mut stale_controller_audit = new_audit_log(
+            None,
+            "system",
+            None,
+            "worker.load_validation_run",
+            "execution_worker",
+            None,
+            json!({
+                "status": "validated",
+                "load_validated": true,
+                "isolated_worker_pool_configured": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "validation_id": "worker-load-validation-stale"
+                },
+                "checked_at": generated_at - chrono::Duration::hours(25),
+            }),
+        );
+        stale_controller_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = worker_load_validation_evidence_from_audit_logs(
+            &[stale_controller_audit],
+            generated_at,
+            true,
+            true,
+            true,
+        );
+        assert_eq!(stale.status, "attention");
+        assert!(!stale.load_validated);
+        assert!(stale.latest_controller_validated);
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(
+            stale
+                .message
+                .contains("worker load validation controller evidence is stale")
+        );
     }
 
     #[test]

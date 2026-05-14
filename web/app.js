@@ -2582,7 +2582,7 @@ function renderWorkerReadiness() {
     <div class="item">
       <strong>WORKER LOAD VALIDATION</strong>
       <div class="muted">${escapeHtml(loadValidation.status || "unknown")} · latest ${escapeHtml(loadValidation.latest_run_status || "none")} · isolated pool ${loadValidation.isolated_worker_pool_configured ? "configured" : "missing"} · load validated ${loadValidation.load_validated ? "yes" : "no"}</div>
-      <div class="muted">Controller required ${loadValidation.controller_required ? "yes" : "no"} · configured ${loadValidation.controller_configured ? "yes" : "no"} · status ${escapeHtml(loadValidation.latest_controller_status || "none")} · validated ${loadValidation.latest_controller_validated ? "yes" : "no"}</div>
+      <div class="muted">Controller required ${loadValidation.controller_required ? "yes" : "no"} · configured ${loadValidation.controller_configured ? "yes" : "no"} · status ${escapeHtml(loadValidation.latest_controller_status || "none")} · validated ${loadValidation.latest_controller_validated ? "yes" : "no"} · fresh ${loadValidation.controller_evidence_fresh ? "yes" : "no"} · age ${loadValidation.latest_controller_age_hours ?? "n/a"}h</div>
       <div class="muted">${escapeHtml(loadValidation.message || "Load validation has not been reported")}</div>
       <div class="muted">Required: ${escapeHtml(loadValidation.required_profile || "not reported")}</div>
       ${

@@ -69,6 +69,8 @@ write_summary() {
   local load_validation_evidence_status
   local load_validation_run_status
   local isolated_pool
+  local load_validation_controller_fresh
+  local load_validation_controller_age_hours
   local production_ops_status
   local blocked_count
 
@@ -87,6 +89,8 @@ write_summary() {
     load_validation_run_status="$(jq -r '.response.status // "unknown"' "$load_validation_evidence_file")"
   fi
   isolated_pool="$(jq -r '.load_validation.isolated_worker_pool_configured // false' "$readiness_file")"
+  load_validation_controller_fresh="$(jq -r '.load_validation.controller_evidence_fresh // false' "$readiness_file")"
+  load_validation_controller_age_hours="$(jq -r '.load_validation.latest_controller_age_hours // "none"' "$readiness_file")"
   production_ops_status="$(jq -r '.production_ops.status // "unknown"' "$readiness_file")"
   blocked_count="$(jq -r 'if .production_ops.production_blocked == true then 1 else 0 end' "$readiness_file")"
 
@@ -102,6 +106,8 @@ write_summary() {
     echo "load_validation_evidence_status=$load_validation_evidence_status"
     echo "load_validation_run_status=$load_validation_run_status"
     echo "isolated_worker_pool_configured=$isolated_pool"
+    echo "load_validation_controller_evidence_fresh=$load_validation_controller_fresh"
+    echo "load_validation_controller_age_hours=$load_validation_controller_age_hours"
     echo "production_ops_status=$production_ops_status"
     echo "production_blocked_count=$blocked_count"
     echo "evidence_dir=$EVIDENCE_DIR"
