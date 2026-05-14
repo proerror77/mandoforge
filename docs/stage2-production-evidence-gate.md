@@ -53,6 +53,8 @@ This fetches `GET /api/stage2/readiness`, maps every `evidence_requirements[]` e
 
 The strict production evidence gate runs this completion audit automatically by default after evidence collection and writes it under `$EVIDENCE_DIR/completion-audit/`. Set `RUN_STAGE2_COMPLETION_AUDIT=0` only for a narrow debugging run where an archive-ready checklist is not expected.
 
+The same freshness window is applied to the production evidence gate's endpoint coverage inventory. `validation-missing-endpoints.txt` includes stale validation snapshots, and `summary.txt` reports `validation_stale_endpoint_count` plus `max_evidence_age_hours` so an old evidence PVC cannot produce a green validation coverage summary.
+
 The matching in-cluster template is `deploy/stage2-evidence/stage2-completion-audit-job.example.yaml`. It mounts the same Stage 2 production evidence PVC, reads endpoint artifacts from `/evidence`, checks the packaged `scripts/` and `deploy/` metadata in the runtime image, writes the checklist to `/evidence/completion-audit`, and remains fail-closed unless the production readiness gate and artifact coverage are complete.
 
 After the strict evidence and completion-audit Jobs pass, archive the shared evidence PVC for the release record:

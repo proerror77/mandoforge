@@ -641,6 +641,16 @@ if ! grep -q "RUN_STAGE2_COMPLETION_AUDIT" scripts/stage2-production-evidence-ga
   exit 1
 fi
 
+if ! grep -q "STAGE2_EVIDENCE_MAX_AGE_HOURS" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must enforce freshness for endpoint coverage artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "validation_stale_endpoint_count" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must report stale validation endpoint coverage" >&2
+  exit 1
+fi
+
 if ! grep -q "completion-audit/checklist.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must write completion audit checklist evidence" >&2
   exit 1

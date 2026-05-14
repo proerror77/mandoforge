@@ -11,6 +11,7 @@ ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 TEAM_ID="${MANDOFORGE_STAGE2_TEAM_ID:-}"
 VERIFY_VALIDATION_COVERAGE="${VERIFY_STAGE2_VALIDATION_COVERAGE:-0}"
 RUN_COMPLETION_AUDIT="${RUN_STAGE2_COMPLETION_AUDIT:-1}"
+MAX_EVIDENCE_AGE_HOURS="${STAGE2_EVIDENCE_MAX_AGE_HOURS:-24}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -30,6 +31,32 @@ fi
 
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
+}
+
+file_mtime_epoch() {
+  local path="$1"
+  if stat -f %m "$path" >/dev/null 2>&1; then
+    stat -f %m "$path"
+    return 0
+  fi
+  stat -c %Y "$path"
+}
+
+artifact_is_fresh() {
+  local path="$1"
+  local now_epoch
+  local mtime_epoch
+  local max_age_seconds
+
+  [[ -s "$path" ]] || return 1
+  if [[ "$MAX_EVIDENCE_AGE_HOURS" == "0" ]]; then
+    return 0
+  fi
+
+  now_epoch="$(date -u +%s)"
+  mtime_epoch="$(file_mtime_epoch "$path")"
+  max_age_seconds=$((MAX_EVIDENCE_AGE_HOURS * 3600))
+  [[ $((now_epoch - mtime_epoch)) -le "$max_age_seconds" ]]
 }
 
 fetch_json() {
@@ -901,6 +928,7 @@ resolve_requirement_endpoint() {
 verify_readiness_inventory_coverage() {
   local readiness_file="$EVIDENCE_DIR/api-stage2-readiness.json"
   local missing=()
+  local stale=()
   local endpoint
   local resolved
   local expected_file
@@ -913,13 +941,22 @@ verify_readiness_inventory_coverage() {
       continue
     fi
     expected_file="$EVIDENCE_DIR/$(slugify "$resolved").json"
-    if [[ ! -s "$expected_file" ]]; then
+    if artifact_is_fresh "$expected_file"; then
+      continue
+    elif [[ -s "$expected_file" ]]; then
+      stale+=("$resolved")
+    else
       missing+=("$resolved")
     fi
   done < <(jq -r '.evidence_requirements[]?.readiness_endpoints[]?' "$readiness_file" | sort -u)
 
   if (( ${#missing[@]} > 0 )); then
     printf 'stage2 evidence gate did not collect declared readiness endpoint: %s\n' "${missing[@]}" >&2
+    exit 1
+  fi
+
+  if (( ${#stale[@]} > 0 )); then
+    printf 'stage2 evidence gate has stale declared readiness endpoint evidence: %s\n' "${stale[@]}" >&2
     exit 1
   fi
 }
@@ -931,13 +968,16 @@ write_endpoint_coverage() {
   local readiness_file="$EVIDENCE_DIR/api-stage2-readiness.json"
   local declared_file="$EVIDENCE_DIR/${label}-declared-endpoints.txt"
   local missing_file="$EVIDENCE_DIR/${label}-missing-endpoints.txt"
+  local stale_file="$EVIDENCE_DIR/${label}-stale-endpoints.txt"
   local endpoint
   local resolved
   local expected_file
   local missing_count
+  local stale_count
 
   : >"$declared_file"
   : >"$missing_file"
+  : >"$stale_file"
 
   while IFS= read -r endpoint; do
     if [[ -z "$endpoint" ]]; then
@@ -948,15 +988,25 @@ write_endpoint_coverage() {
     fi
     echo "$resolved" >>"$declared_file"
     expected_file="$EVIDENCE_DIR/$(slugify "$resolved").json"
-    if [[ ! -s "$expected_file" ]]; then
+    if artifact_is_fresh "$expected_file"; then
+      continue
+    elif [[ -s "$expected_file" ]]; then
+      echo "$resolved" >>"$stale_file"
+      echo "$resolved" >>"$missing_file"
+    else
       echo "$resolved" >>"$missing_file"
     fi
   done < <(jq -r ".evidence_requirements[]?.${field}[]?" "$readiness_file" | sort -u)
 
   missing_count="$(grep -c . "$missing_file" || true)"
+  stale_count="$(grep -c . "$stale_file" || true)"
   if [[ "$fail_on_missing" == "1" && "$missing_count" != "0" ]]; then
     echo "stage2 evidence gate is missing declared $label endpoint evidence:" >&2
     sed 's/^/- /' "$missing_file" >&2
+    if [[ "$stale_count" != "0" ]]; then
+      echo "stale declared $label endpoint evidence:" >&2
+      sed 's/^/- /' "$stale_file" >&2
+    fi
     exit 1
   fi
 }
@@ -970,6 +1020,7 @@ write_summary() {
   local evidence_requirement_count
   local validation_declared_count
   local validation_missing_count
+  local validation_stale_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
   open_gap_count="$(jq -r '.open_gap_count // 0' "$readiness_file")"
@@ -977,6 +1028,7 @@ write_summary() {
   evidence_requirement_count="$(jq -r '.evidence_requirements | length' "$readiness_file")"
   validation_declared_count="$(grep -c . "$EVIDENCE_DIR/validation-declared-endpoints.txt" 2>/dev/null || true)"
   validation_missing_count="$(grep -c . "$EVIDENCE_DIR/validation-missing-endpoints.txt" 2>/dev/null || true)"
+  validation_stale_count="$(grep -c . "$EVIDENCE_DIR/validation-stale-endpoints.txt" 2>/dev/null || true)"
 
   {
     echo "stage2_status=$status"
@@ -985,6 +1037,8 @@ write_summary() {
     echo "evidence_requirement_count=$evidence_requirement_count"
     echo "validation_declared_endpoint_count=$validation_declared_count"
     echo "validation_missing_endpoint_count=$validation_missing_count"
+    echo "validation_stale_endpoint_count=$validation_stale_count"
+    echo "max_evidence_age_hours=$MAX_EVIDENCE_AGE_HOURS"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "validations_run=$RUN_VALIDATIONS"
     echo "validation_coverage_required=$VERIFY_VALIDATION_COVERAGE"
@@ -995,6 +1049,9 @@ write_summary() {
     echo
     echo "missing_validation_endpoints:"
     sed 's/^/- /' "$EVIDENCE_DIR/validation-missing-endpoints.txt" 2>/dev/null || true
+    echo
+    echo "stale_validation_endpoints:"
+    sed 's/^/- /' "$EVIDENCE_DIR/validation-stale-endpoints.txt" 2>/dev/null || true
   } >"$summary_file"
 
   cat "$summary_file"
