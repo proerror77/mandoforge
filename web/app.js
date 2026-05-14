@@ -178,6 +178,7 @@ const dryRunRemoteRunnerButton = document.querySelector("#dry-run-remote-runner"
 const mutateRemoteRunnerButton = document.querySelector("#mutate-remote-runner");
 const remoteComputerForm = document.querySelector("#remote-computer-form");
 const remoteComputerLeaseForm = document.querySelector("#remote-computer-lease-form");
+const remoteComputerAttachmentForm = document.querySelector("#remote-computer-attachment-form");
 const remoteArtifactDiscoveryForm = document.querySelector("#remote-artifact-discovery-form");
 const remoteStateLockForm = document.querySelector("#remote-state-lock-form");
 const usageRoot = document.querySelector("#usage-summary");
@@ -336,6 +337,7 @@ dryRunRemoteRunnerButton.addEventListener("click", dryRunRemoteRunner);
 mutateRemoteRunnerButton.addEventListener("click", mutateRemoteRunner);
 remoteComputerForm.addEventListener("submit", createRemoteComputer);
 remoteComputerLeaseForm.addEventListener("submit", createRemoteComputerLease);
+remoteComputerAttachmentForm.addEventListener("submit", attachRemoteComputerLease);
 remoteArtifactDiscoveryForm.addEventListener("submit", discoverRemoteArtifacts);
 remoteStateLockForm.addEventListener("submit", acquireRemoteStateLock);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
@@ -2744,7 +2746,7 @@ function renderRemoteComputerReadiness() {
                 (lease) =>
                   `<div class="muted">lease ${escapeHtml(lease.id)} · ${escapeHtml(lease.status)} · session ${escapeHtml(lease.session_id || "none")} · worker ${escapeHtml(lease.worker_id || "none")} · expires ${escapeHtml(lease.lease_expires_at || "none")} ${
                     lease.status === "leased"
-                      ? `<button class="secondary inline-button" data-fill-execution-lease-assignment="${escapeHtml(lease.id)}">Use for Assignment</button> <button class="secondary inline-button" data-heartbeat-remote-lease="${escapeHtml(lease.id)}">Heartbeat Lease</button> <button class="secondary inline-button" data-release-remote-lease="${escapeHtml(lease.id)}">Release Lease</button> <button class="secondary inline-button" data-fail-remote-lease="${escapeHtml(lease.id)}">Fail Lease</button>`
+                      ? `<button class="secondary inline-button" data-fill-execution-lease-assignment="${escapeHtml(lease.id)}">Use for Assignment</button> <button class="secondary inline-button" data-fill-remote-attachment="${escapeHtml(lease.id)}">Use for Attachment</button> <button class="secondary inline-button" data-heartbeat-remote-lease="${escapeHtml(lease.id)}">Heartbeat Lease</button> <button class="secondary inline-button" data-release-remote-lease="${escapeHtml(lease.id)}">Release Lease</button> <button class="secondary inline-button" data-fail-remote-lease="${escapeHtml(lease.id)}">Fail Lease</button>`
                       : ""
                   }</div>`,
               )
@@ -2759,7 +2761,11 @@ function renderRemoteComputerReadiness() {
           ? attachmentRows
               .map(
                 (attachment) =>
-                  `<div class="muted">${escapeHtml(attachment.status)} · session ${escapeHtml(attachment.session_id)} · lease ${escapeHtml(attachment.lease_id)} · stale after ${escapeHtml(attachment.stale_after || "none")}</div>`,
+                  `<div class="muted">${escapeHtml(attachment.status)} · session ${escapeHtml(attachment.session_id)} · lease ${escapeHtml(attachment.lease_id)} · stale after ${escapeHtml(attachment.stale_after || "none")} ${
+                    attachment.status === "attached"
+                      ? `<button class="secondary inline-button" data-release-remote-attachment="${escapeHtml(attachment.id)}">Release Attachment</button>`
+                      : ""
+                  }</div>`,
               )
               .join("")
           : `<div class="muted">No remote computer session attachments</div>`
@@ -2871,6 +2877,11 @@ function renderRemoteComputerReadiness() {
         button.dataset.fillExecutionLeaseAssignment;
     });
   });
+  remoteComputerReadinessRoot.querySelectorAll("[data-fill-remote-attachment]").forEach((button) => {
+    button.addEventListener("click", () => {
+      remoteComputerAttachmentForm.elements.lease_id.value = button.dataset.fillRemoteAttachment;
+    });
+  });
   remoteComputerReadinessRoot.querySelectorAll("[data-heartbeat-remote-lease]").forEach((button) => {
     button.addEventListener("click", () => heartbeatRemoteComputerLease(button.dataset.heartbeatRemoteLease));
   });
@@ -2882,6 +2893,11 @@ function renderRemoteComputerReadiness() {
   });
   remoteComputerReadinessRoot.querySelectorAll("[data-run-remote-sidecar-recovery]").forEach((button) => {
     button.addEventListener("click", runRemoteSidecarRecovery);
+  });
+  remoteComputerReadinessRoot.querySelectorAll("[data-release-remote-attachment]").forEach((button) => {
+    button.addEventListener("click", () =>
+      releaseRemoteComputerAttachment(button.dataset.releaseRemoteAttachment),
+    );
   });
 }
 
@@ -2964,6 +2980,40 @@ async function createRemoteComputerLease(event) {
       session_id: optionalFormValue(form, "session_id"),
       worker_id: optionalFormValue(form, "worker_id"),
       lease_seconds: optionalNumberFormValue(form, "lease_seconds"),
+      metadata: {
+        source: "static-admin-console",
+        execution_enabled: false,
+      },
+    }),
+  });
+  await refreshOps();
+}
+
+async function attachRemoteComputerLease(event) {
+  event.preventDefault();
+  const form = new FormData(remoteComputerAttachmentForm);
+  const leaseId = optionalFormValue(form, "lease_id");
+  if (!leaseId) return;
+  await api(`/api/remote-computer-leases/${leaseId}/attach`, {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: optionalFormValue(form, "session_id"),
+      attached_by: optionalFormValue(form, "attached_by"),
+      stale_after_seconds: optionalNumberFormValue(form, "stale_after_seconds"),
+      metadata: {
+        source: "static-admin-console",
+        execution_enabled: false,
+      },
+    }),
+  });
+  await refreshOps();
+}
+
+async function releaseRemoteComputerAttachment(attachmentId) {
+  await api(`/api/remote-computer-attachments/${attachmentId}/release`, {
+    method: "POST",
+    body: JSON.stringify({
+      reason: "released-from-static-admin-console",
       metadata: {
         source: "static-admin-console",
         execution_enabled: false,

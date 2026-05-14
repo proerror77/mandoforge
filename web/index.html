@@ -873,6 +873,25 @@
                 </label>
                 <button type="submit">Create Remote Lease</button>
               </form>
+              <form id="remote-computer-attachment-form" class="stack-form compact-form">
+                <label>
+                  Remote lease ID
+                  <input name="lease_id" required placeholder="Remote computer lease UUID" />
+                </label>
+                <label>
+                  Session ID
+                  <input name="session_id" required placeholder="Session UUID" />
+                </label>
+                <label>
+                  Attached by
+                  <input name="attached_by" value="static-admin-console" />
+                </label>
+                <label>
+                  Stale after seconds
+                  <input name="stale_after_seconds" type="number" min="1" max="86400" value="900" />
+                </label>
+                <button type="submit">Attach Remote Lease</button>
+              </form>
               <form id="remote-artifact-discovery-form" class="stack-form compact-form">
                 <label>
                   Session ID

@@ -65,6 +65,7 @@ MCP team-scoped evidence now auto-discovers the first active team through `/api/
 strict validation coverage gate fails closed without production validation evidence and reports missing endpoints; controller-backed validation mode reports missing controller configuration, for example POST /api/tenant-isolation/routing/validate returned HTTP 400 with MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL required
 static UI actionbook smoke ok
 Remote Computer static Admin UI now exposes runner dry-run/mutate intent, register computer, create lease, lease heartbeat/release/fail, and stale reclaim controls against the audited Remote Computer APIs; Actionbook verifies these lifecycle controls without Playwright/Chrome DevTools MCP
+Remote Computer attachment lifecycle is now UI-visible: operators can attach a lease to a session and release active attachments against the audited attachment APIs; Actionbook verifies the attachment controls and routes without Playwright/Chrome DevTools MCP
 Worker Dashboard static Admin UI now exposes execution-job cancellation and manual Remote Computer lease assignment against the audited worker handoff APIs; Actionbook verifies the controls and routes without Playwright/Chrome DevTools MCP
 Stage 2 controller env template verifier ok; Stage 2 evidence K8s manifest verifier ok; Remote Computer K8s manifest verifier ok
 kustomize deploy/k8s rendered 816 lines; kustomize deploy/stage2-evidence rendered 85 lines; kustomize deploy/stage2-production-evidence rendered 988 lines; kustomize deploy rendered 947 lines

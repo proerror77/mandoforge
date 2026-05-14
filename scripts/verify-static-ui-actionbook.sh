@@ -84,6 +84,7 @@ wait_for_static_ui() {
     hasWorkerRemoteLeaseControls: text.includes('Assign Remote Lease') && typeof assignExecutionJobRemoteLease === 'function' && typeof assignExecutionJobRemoteLeaseFromForm === 'function' && typeof cancelExecutionJob === 'function' && Boolean(document.querySelector('#execution-job-remote-lease-form')),
     hasRemoteComputerReadiness: text.includes('Remote Computers') && text.includes('REMOTE COMPUTER READINESS') && text.includes('STATE FILESYSTEM') && text.includes('Production profile:') && text.includes('RUNNER BOUNDARY') && text.includes('REMOTE COMPUTER LEASE STORE') && text.includes('REMOTE COMPUTER ATTACHMENTS') && text.includes('REMOTE COMPUTER STATE LOCKS') && text.includes('REMOTE ARTIFACT DISCOVERY') && text.includes('REMOTE COMPUTER SIDECAR HEARTBEATS') && text.includes('Supervision:') && text.includes('Artifact discovery sidecar') && text.includes('Discover Remote Artifacts') && text.includes('Acquire State Lock') && text.includes('Validate State Sync') && text.includes('REMOTE COMPUTER RUNBOOK') && Boolean(document.querySelector('#remote-computer-readiness')) && Boolean(document.querySelector('#validate-remote-state-sync')),
     hasRemoteComputerLifecycle: text.includes('Register Remote Computer') && text.includes('Create Remote Lease') && text.includes('Reclaim Stale Remote Computers') && typeof createRemoteComputer === 'function' && typeof createRemoteComputerLease === 'function' && typeof updateRemoteComputerLease === 'function' && typeof reclaimStaleRemoteComputers === 'function' && Boolean(document.querySelector('#remote-computer-form')) && Boolean(document.querySelector('#remote-computer-lease-form')) && Boolean(document.querySelector('#reclaim-remote-computers')),
+    hasRemoteComputerAttachmentControls: text.includes('Attach Remote Lease') && typeof attachRemoteComputerLease === 'function' && typeof releaseRemoteComputerAttachment === 'function' && Boolean(document.querySelector('#remote-computer-attachment-form')),
     hasRemoteComputerRunnerOps: text.includes('Dry-run Runner') && text.includes('Mutate Runner') && text.includes('Supported operations:') && typeof dryRunRemoteRunner === 'function' && typeof mutateRemoteRunner === 'function' && typeof remoteRunnerPayload === 'function' && Boolean(document.querySelector('#remote-runner-form')) && Boolean(document.querySelector('#dry-run-remote-runner')) && Boolean(document.querySelector('#mutate-remote-runner')),
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
     metricCards: document.querySelectorAll('.metric').length,
@@ -125,6 +126,7 @@ wait_for_static_ui() {
     && result.hasWorkerRemoteLeaseControls
     && result.hasRemoteComputerReadiness
     && result.hasRemoteComputerLifecycle
+    && result.hasRemoteComputerAttachmentControls
     && result.hasRemoteComputerRunnerOps
     && result.hasProviderHealthAction
     && result.hasStage2ReadinessGate
@@ -222,6 +224,8 @@ grep -q "/cancel" /tmp/mandoforge-actionbook-app.js
 grep -q "remote-computer-readiness" /tmp/mandoforge-actionbook-index.html
 grep -q "remote-computer-form" /tmp/mandoforge-actionbook-index.html
 grep -q "remote-computer-lease-form" /tmp/mandoforge-actionbook-index.html
+grep -q "remote-computer-attachment-form" /tmp/mandoforge-actionbook-index.html
+grep -q "Attach Remote Lease" /tmp/mandoforge-actionbook-index.html
 grep -q "remote-runner-form" /tmp/mandoforge-actionbook-index.html
 grep -q "dry-run-remote-runner" /tmp/mandoforge-actionbook-index.html
 grep -q "mutate-remote-runner" /tmp/mandoforge-actionbook-index.html
@@ -234,6 +238,11 @@ grep -q "/api/remote-computers/runner/mutate" /tmp/mandoforge-actionbook-app.js
 grep -q "createRemoteComputer" /tmp/mandoforge-actionbook-app.js
 grep -q "createRemoteComputerLease" /tmp/mandoforge-actionbook-app.js
 grep -q "updateRemoteComputerLease" /tmp/mandoforge-actionbook-app.js
+grep -q "attachRemoteComputerLease" /tmp/mandoforge-actionbook-app.js
+grep -q "releaseRemoteComputerAttachment" /tmp/mandoforge-actionbook-app.js
+grep -q "/api/remote-computer-leases/" /tmp/mandoforge-actionbook-app.js
+grep -q "/attach" /tmp/mandoforge-actionbook-app.js
+grep -q "/api/remote-computer-attachments/" /tmp/mandoforge-actionbook-app.js
 grep -q "reclaimStaleRemoteComputers" /tmp/mandoforge-actionbook-app.js
 grep -q "/api/remote-computers/reclaim-stale" /tmp/mandoforge-actionbook-app.js
 grep -q "remoteComputerStateLocks" /tmp/mandoforge-actionbook-app.js
