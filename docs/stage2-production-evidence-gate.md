@@ -136,29 +136,32 @@ For a narrower MCP Gateway proof, run:
 
 ```bash
 RUN_STAGE2_MCP_DUE_RUN=1 \
+RUN_STAGE2_MCP_ROLLBACK=1 \
 MANDOFORGE_STAGE2_TEAM_ID=<team_uuid> \
 ./scripts/mcp-gateway-evidence-gate.sh
 ```
 
-That gate collects team-scoped MCP rollout summary, rollout run history, deployment validation, and optional due-run supervision evidence into `.mandoforge/mcp-gateway-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects team-scoped MCP rollout summary, rollout run history, deployment validation, optional due-run supervision, and optional rollback evidence into `.mandoforge/mcp-gateway-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml`, which explicitly enables due-run and rollback proof and persists its output under the Stage 2 production evidence PVC.
 
 For a narrower eval/release proof, run:
 
 ```bash
 RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 \
+RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1 \
 ./scripts/eval-release-evidence-gate.sh
 ```
 
-That gate collects agent release rollout summary, release automation history, deployment validation, orchestration validation, and optional Stage 2 regression/due-run evidence into `.mandoforge/eval-release-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/eval-release-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects agent release rollout summary, release automation history, deployment validation, orchestration validation, optional Stage 2 regression/due-run evidence, and optional rollback evidence into `.mandoforge/eval-release-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/eval-release-evidence-job.example.yaml`, which explicitly enables automation and rollback proof and persists its output under the Stage 2 production evidence PVC.
 
 For a narrower finance proof, run:
 
 ```bash
 RUN_STAGE2_FINANCE_CONTROLLERS=1 \
+RUN_STAGE2_FINANCE_EXPORT=1 \
 ./scripts/finance-evidence-gate.sh
 ```
 
-That gate collects finance dashboard summary, finance operations readiness, and optional finance close/accounting reconciliation controller evidence into `.mandoforge/finance-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/finance-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects finance dashboard summary, finance operations readiness, optional finance close/accounting reconciliation controller evidence, and optional export/delivery evidence into `.mandoforge/finance-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/finance-evidence-job.example.yaml`, which explicitly enables controller and export proof and persists its output under the Stage 2 production evidence PVC.
 
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
@@ -168,9 +171,12 @@ The script deliberately skips higher-impact production actions unless explicitly
 - `RUN_STAGE2_APPROVAL_DELIVERY=1` runs approval notification delivery.
 - `RUN_STAGE2_CODEX_STALE_POLL=1` runs Codex App Server stale-run supervision.
 - `RUN_STAGE2_MCP_DUE_RUN=1` runs MCP connector due-rollout supervision.
+- `RUN_STAGE2_MCP_ROLLBACK=1` runs MCP connector rollback proof.
 - `RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1` bootstraps the Stage 2 regression suite and runs due release automation.
+- `RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1` runs eval/release rollback proof.
 - `RUN_STAGE2_OBSERVABILITY_REMEDIATION=1` runs observability remediation supervision.
 - `RUN_STAGE2_FINANCE_CONTROLLERS=1` runs finance close and accounting reconciliation endpoints.
+- `RUN_STAGE2_FINANCE_EXPORT=1` runs usage export CSV capture and export delivery proof.
 - `VERIFY_STAGE2_VALIDATION_COVERAGE=1` fails the gate when any declared validation endpoint from `/api/stage2/readiness` is missing from the collected evidence. Leave this off for read-only inventory or partial validation runs.
 
 ## Exit Rules
