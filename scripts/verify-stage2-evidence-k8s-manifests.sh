@@ -416,6 +416,26 @@ if ! grep -q "/api/providers/production-rollout/run" "$provider_script"; then
   exit 1
 fi
 
+if ! grep -q "provider-production-rollout-evidence.json" "$provider_script"; then
+  echo "Provider governance evidence script must write explicit provider rollout evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "provider-production-rollout-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit provider rollout evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "provider-production-rollback-evidence.json" "$provider_script"; then
+  echo "Provider governance evidence script must write explicit provider rollback evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "provider-production-rollback-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit provider rollback evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "tenant-isolation-evidence-gate.sh" deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml; then
   echo "Tenant isolation evidence Job does not run the dedicated evidence gate" >&2
   exit 1

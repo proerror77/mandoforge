@@ -528,6 +528,42 @@ capture_observability_remediation_validation() {
     }' >"$remediation_file"
 }
 
+capture_provider_production_rollout() {
+  local rollout_response
+  local rollout_file="$EVIDENCE_DIR/provider-production-rollout-evidence.json"
+
+  rollout_response="$(fetch_json POST /api/providers/production-rollout/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$rollout_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$rollout_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$rollout_file"
+}
+
+capture_provider_production_rollback() {
+  local rollback_response
+  local rollback_file="$EVIDENCE_DIR/provider-production-rollback-evidence.json"
+
+  rollback_response="$(fetch_json POST /api/providers/production-rollout/rollback)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$rollback_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$rollback_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$rollback_file"
+}
+
 run_controller_validations() {
   fetch_json POST /api/tenant-isolation/routing/validate >/dev/null
   fetch_json POST /api/providers/policy-gate/run >/dev/null
@@ -566,8 +602,8 @@ run_controller_validations() {
   fi
 
   if [[ "${RUN_STAGE2_PROVIDER_ROLLOUT:-0}" == "1" ]]; then
-    fetch_json POST /api/providers/production-rollout/run >/dev/null
-    fetch_json POST /api/providers/production-rollout/rollback >/dev/null
+    capture_provider_production_rollout
+    capture_provider_production_rollback
   else
     echo "skipping provider production rollout/rollback; set RUN_STAGE2_PROVIDER_ROLLOUT=1 to include provider rollout evidence" >&2
   fi

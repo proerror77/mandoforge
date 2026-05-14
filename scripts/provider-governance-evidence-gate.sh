@@ -59,12 +59,18 @@ write_summary() {
   local summary_json="$EVIDENCE_DIR/api-providers-summary.json"
   local gate_json="$EVIDENCE_DIR/api-providers-policy-gate.json"
   local runs_json="$EVIDENCE_DIR/api-providers-policy-gate-runs.json"
+  local rollout_evidence_file="$EVIDENCE_DIR/provider-production-rollout-evidence.json"
+  local rollback_evidence_file="$EVIDENCE_DIR/provider-production-rollback-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local provider_count
   local active_count
   local deployment_status
   local gate_status
   local gate_enforcement_status
+  local rollout_evidence_status
+  local rollout_run_status
+  local rollback_evidence_status
+  local rollback_run_status
   local blocked_count
 
   provider_count="$(jq -r '.provider_count // 0' "$summary_json")"
@@ -72,6 +78,18 @@ write_summary() {
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$summary_json")"
   gate_status="$(jq -r '.status // "unknown"' "$gate_json")"
   gate_enforcement_status="$(jq -r '.production_enforcement.status // "unknown"' "$runs_json")"
+  rollout_evidence_status="not_requested"
+  rollout_run_status="not_run"
+  if [[ -s "$rollout_evidence_file" ]]; then
+    rollout_evidence_status="$(jq -r '.status // "unknown"' "$rollout_evidence_file")"
+    rollout_run_status="$(jq -r '.response.status // "unknown"' "$rollout_evidence_file")"
+  fi
+  rollback_evidence_status="not_requested"
+  rollback_run_status="not_run"
+  if [[ -s "$rollback_evidence_file" ]]; then
+    rollback_evidence_status="$(jq -r '.status // "unknown"' "$rollback_evidence_file")"
+    rollback_run_status="$(jq -r '.response.status // "unknown"' "$rollback_evidence_file")"
+  fi
   blocked_count="$(jq -r '[
       .deployment_readiness.production_blocked
     ] | map(select(. == true)) | length' "$summary_json")"
@@ -83,6 +101,10 @@ write_summary() {
     echo "provider_policy_gate_status=$gate_status"
     echo "provider_policy_gate_enforcement_status=$gate_enforcement_status"
     echo "deployment_readiness_status=$deployment_status"
+    echo "provider_rollout_evidence_status=$rollout_evidence_status"
+    echo "provider_rollout_run_status=$rollout_run_status"
+    echo "provider_rollback_evidence_status=$rollback_evidence_status"
+    echo "provider_rollback_run_status=$rollback_run_status"
     echo "production_blocked_count=$blocked_count"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "provider_rollout_run=$RUN_PROVIDER_ROLLOUT"
@@ -105,6 +127,42 @@ write_summary() {
   fi
 }
 
+capture_provider_rollout_evidence() {
+  local rollout_response
+  local rollout_evidence_file="$EVIDENCE_DIR/provider-production-rollout-evidence.json"
+
+  rollout_response="$(fetch_json POST /api/providers/production-rollout/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$rollout_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$rollout_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$rollout_evidence_file"
+}
+
+capture_provider_rollback_evidence() {
+  local rollback_response
+  local rollback_evidence_file="$EVIDENCE_DIR/provider-production-rollback-evidence.json"
+
+  rollback_response="$(fetch_json POST /api/providers/production-rollout/rollback)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$rollback_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$rollback_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$rollback_evidence_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -117,8 +175,8 @@ fetch_json POST /api/providers/policy-gate/run >/dev/null
 fetch_json POST /api/providers/deployment/validate >/dev/null
 
 if [[ "$RUN_PROVIDER_ROLLOUT" == "1" ]]; then
-  fetch_json POST /api/providers/production-rollout/run >/dev/null
-  fetch_json POST /api/providers/production-rollout/rollback >/dev/null
+  capture_provider_rollout_evidence
+  capture_provider_rollback_evidence
 else
   echo "skipping provider production rollout/rollback; set RUN_STAGE2_PROVIDER_ROLLOUT=1 to include provider rollout evidence" >&2
 fi
