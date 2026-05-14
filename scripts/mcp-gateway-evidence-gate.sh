@@ -127,6 +127,8 @@ write_summary() {
   local controller_required
   local controller_configured
   local latest_controller_status
+  local deployment_controller_fresh
+  local deployment_controller_age_hours
   local blocked_count
 
   server_count="$(jq -r '.server_count // 0' "$rollout_summary_file")"
@@ -153,6 +155,8 @@ write_summary() {
   controller_required="$(jq -r '.deployment_readiness.controller_required // false' "$rollout_runs_file")"
   controller_configured="$(jq -r '.deployment_readiness.controller_configured // false' "$rollout_runs_file")"
   latest_controller_status="$(jq -r '.deployment_readiness.latest_controller_status // "none"' "$rollout_runs_file")"
+  deployment_controller_fresh="$(jq -r '.deployment_readiness.controller_evidence_fresh // false' "$rollout_runs_file")"
+  deployment_controller_age_hours="$(jq -r '.deployment_readiness.latest_controller_age_hours // "none"' "$rollout_runs_file")"
   blocked_count="$(jq -r '[
       .production_ops.production_blocked,
       .production_orchestration.production_blocked,
@@ -177,6 +181,8 @@ write_summary() {
     echo "deployment_controller_required=$controller_required"
     echo "deployment_controller_configured=$controller_configured"
     echo "latest_deployment_controller_status=$latest_controller_status"
+    echo "deployment_controller_evidence_fresh=$deployment_controller_fresh"
+    echo "deployment_controller_age_hours=$deployment_controller_age_hours"
     echo "production_blocked_count=$blocked_count"
     echo "mcp_due_run=$RUN_MCP_DUE_RUN"
     echo "mcp_rollback_run=$RUN_MCP_ROLLBACK"
