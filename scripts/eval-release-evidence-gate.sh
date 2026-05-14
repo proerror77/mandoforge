@@ -7,6 +7,7 @@ ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/eval-release-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_EVAL_RELEASE_AUTOMATION="${RUN_STAGE2_EVAL_RELEASE_AUTOMATION:-0}"
+RUN_EVAL_RELEASE_ROLLBACK="${RUN_STAGE2_EVAL_RELEASE_ROLLBACK:-0}"
 
 auth_headers=(
   -H "x-mandoforge-subject: $SUBJECT"
@@ -60,6 +61,7 @@ write_summary() {
   local automation_file="$EVIDENCE_DIR/api-agents-releases-automation-runs.json"
   local deployment_file="$EVIDENCE_DIR/api-agents-releases-deployment-validate.json"
   local orchestration_file="$EVIDENCE_DIR/api-agents-releases-orchestration-validate.json"
+  local rollback_file="$EVIDENCE_DIR/eval-release-rollback-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local release_count
   local pending_count
@@ -120,6 +122,12 @@ write_summary() {
     echo "orchestration_controller_configured=$orchestration_controller_configured"
     echo "production_blocked_count=$blocked_count"
     echo "eval_release_automation=$RUN_EVAL_RELEASE_AUTOMATION"
+    echo "eval_release_rollback=$RUN_EVAL_RELEASE_ROLLBACK"
+    if [[ -s "$rollback_file" ]]; then
+      echo "eval_release_rollback_status=$(jq -r '.status // "unknown"' "$rollback_file")"
+      echo "eval_release_rollback_agent_id=$(jq -r '.agent_id // "none"' "$rollback_file")"
+      echo "eval_release_rollback_release_id=$(jq -r '.release_id // "none"' "$rollback_file")"
+    fi
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
     echo "release_attention_items:"
@@ -143,6 +151,55 @@ write_summary() {
   fi
 }
 
+capture_rollback_evidence() {
+  local rollout_summary_file="$EVIDENCE_DIR/api-agents-releases-summary.json"
+  local selected_file="$EVIDENCE_DIR/eval-release-rollback-candidate.json"
+  local rollback_file="$EVIDENCE_DIR/eval-release-rollback-evidence.json"
+  local agent_id
+  local release_id
+
+  jq '[
+      .latest_promoted_by_environment[]?
+      | select((.agent_id // null) != null)
+      | select((.release_id // null) != null)
+    ][0] // {}' "$rollout_summary_file" >"$selected_file"
+
+  agent_id="$(jq -r '.agent_id // empty' "$selected_file")"
+  release_id="$(jq -r '.release_id // empty' "$selected_file")"
+
+  if [[ -z "$agent_id" || -z "$release_id" ]]; then
+    jq -n \
+      --arg status "blocked" \
+      --arg reason "no_promoted_agent_release_available_for_rollback" \
+      --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      '{
+        status: $status,
+        reason: $reason,
+        generated_at: $generated_at
+      }' >"$rollback_file"
+    echo "eval/release rollback evidence requested, but no promoted release is available to roll back" >&2
+    exit 1
+  fi
+
+  local rollback_response
+  rollback_response="$(fetch_json POST "/api/agents/$agent_id/releases/$release_id/rollback")"
+  jq -n \
+    --arg status "captured" \
+    --arg agent_id "$agent_id" \
+    --arg release_id "$release_id" \
+    --arg response_file "$rollback_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$rollback_response" \
+    '{
+      status: $status,
+      agent_id: $agent_id,
+      release_id: $release_id,
+      response_file: $response_file,
+      generated_at: $generated_at,
+      response: ($response[0] // {})
+    }' >"$rollback_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -161,4 +218,12 @@ else
 fi
 
 fetch_json GET /api/agents/releases/automation-runs >/dev/null
+fetch_json GET /api/agents/releases/summary >/dev/null
+if [[ "$RUN_EVAL_RELEASE_ROLLBACK" == "1" ]]; then
+  capture_rollback_evidence
+  fetch_json GET /api/agents/releases/automation-runs >/dev/null
+  fetch_json GET /api/agents/releases/summary >/dev/null
+else
+  echo "skipping eval/release rollback; set RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1 to include rollback evidence" >&2
+fi
 write_summary

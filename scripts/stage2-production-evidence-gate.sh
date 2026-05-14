@@ -257,6 +257,56 @@ capture_mcp_rollback_validation() {
     }' >"$rollback_file"
 }
 
+capture_eval_release_rollback_validation() {
+  local summary_file
+  local selected_file="$EVIDENCE_DIR/eval-release-rollback-candidate.json"
+  local rollback_file="$EVIDENCE_DIR/eval-release-rollback-evidence.json"
+  local agent_id
+  local release_id
+
+  summary_file="$(fetch_json GET /api/agents/releases/summary)"
+  jq '[
+      .latest_promoted_by_environment[]?
+      | select((.agent_id // null) != null)
+      | select((.release_id // null) != null)
+    ][0] // {}' "$summary_file" >"$selected_file"
+
+  agent_id="$(jq -r '.agent_id // empty' "$selected_file")"
+  release_id="$(jq -r '.release_id // empty' "$selected_file")"
+
+  if [[ -z "$agent_id" || -z "$release_id" ]]; then
+    jq -n \
+      --arg status "blocked" \
+      --arg reason "no_promoted_agent_release_available_for_rollback" \
+      --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      '{
+        status: $status,
+        reason: $reason,
+        generated_at: $generated_at
+      }' >"$rollback_file"
+    echo "eval/release rollback evidence requested, but no promoted release is available to roll back" >&2
+    exit 1
+  fi
+
+  local rollback_response
+  rollback_response="$(fetch_json POST "/api/agents/$agent_id/releases/$release_id/rollback")"
+  jq -n \
+    --arg status "captured" \
+    --arg agent_id "$agent_id" \
+    --arg release_id "$release_id" \
+    --arg response_file "$rollback_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$rollback_response" \
+    '{
+      status: $status,
+      agent_id: $agent_id,
+      release_id: $release_id,
+      response_file: $response_file,
+      generated_at: $generated_at,
+      response: ($response[0] // {})
+    }' >"$rollback_file"
+}
+
 run_controller_validations() {
   fetch_json POST /api/tenant-isolation/routing/validate >/dev/null
   fetch_json POST /api/providers/policy-gate/run >/dev/null
@@ -324,6 +374,12 @@ run_controller_validations() {
     fetch_json POST /api/agents/releases/run-due >/dev/null
   else
     echo "skipping eval/release automation; set RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 to include regression and release due-run evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_EVAL_RELEASE_ROLLBACK:-0}" == "1" ]]; then
+    capture_eval_release_rollback_validation
+  else
+    echo "skipping eval/release rollback; set RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1 to include rollback evidence" >&2
   fi
 
   if [[ "${RUN_STAGE2_OBSERVABILITY_REMEDIATION:-0}" == "1" ]]; then

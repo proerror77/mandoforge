@@ -511,6 +511,16 @@ if ! grep -q "mcp-rollback-evidence.json" scripts/stage2-production-evidence-gat
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_EVAL_RELEASE_ROLLBACK" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must support optional eval/release rollback evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-rollback-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must persist eval/release rollback evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "local-script-" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit gate must map local script evidence artifacts" >&2
   exit 1
@@ -648,6 +658,16 @@ fi
 
 if ! grep -q "/api/eval/suites/stage2-regression" "$eval_release_script"; then
   echo "eval/release evidence script must capture Stage 2 regression suite evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_EVAL_RELEASE_ROLLBACK" "$eval_release_script"; then
+  echo "eval/release evidence script must support optional rollback evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "eval-release-rollback-evidence.json" "$eval_release_script"; then
+  echo "eval/release evidence script must persist rollback evidence metadata" >&2
   exit 1
 fi
 
