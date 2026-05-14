@@ -3729,7 +3729,10 @@ fn build_router(state: AppState) -> Router {
             "/api/tenant-isolation/routing/validate",
             post(validate_tenant_production_routing),
         )
-        .route("/api/organizations/{id}", delete(delete_organization))
+        .route(
+            "/api/organizations/{id}",
+            patch(update_organization).delete(delete_organization),
+        )
         .route(
             "/api/organizations/{id}/archive",
             post(archive_organization),
@@ -3760,9 +3763,12 @@ fn build_router(state: AppState) -> Router {
             "/api/teams/{id}/projects",
             get(list_projects).post(create_project),
         )
-        .route("/api/teams/{id}", delete(delete_team))
+        .route("/api/teams/{id}", patch(update_team).delete(delete_team))
         .route("/api/teams/{id}/archive", post(archive_team))
-        .route("/api/projects/{id}", delete(delete_project))
+        .route(
+            "/api/projects/{id}",
+            patch(update_project).delete(delete_project),
+        )
         .route("/api/projects/{id}/archive", post(archive_project))
         .route(
             "/api/teams/{id}/provider-access",
@@ -8746,6 +8752,40 @@ async fn bootstrap_tenant_provisioning(
     Ok(Json(result))
 }
 
+async fn update_organization(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateOrganization>,
+) -> Result<Json<Organization>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let organization = state.update_organization(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.updated",
+            "organization",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "name": organization.name,
+                "slug": organization.slug
+            }),
+        ))
+        .await?;
+    Ok(Json(organization))
+}
+
 async fn archive_organization(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -8889,6 +8929,41 @@ async fn create_team(
     Ok(Json(state.create_team(id, input).await?))
 }
 
+async fn update_team(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateTeam>,
+) -> Result<Json<Team>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let team = state.update_team(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "team.updated",
+            "team",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": team.organization_id,
+                "name": team.name,
+                "slug": team.slug
+            }),
+        ))
+        .await?;
+    Ok(Json(team))
+}
+
 async fn list_projects(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -8906,6 +8981,41 @@ async fn create_project(
 ) -> Result<Json<Project>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     Ok(Json(state.create_project(id, input).await?))
+}
+
+async fn update_project(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateProject>,
+) -> Result<Json<Project>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "project".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let project = state.update_project(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "project.updated",
+            "project",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "team_id": project.team_id,
+                "name": project.name,
+                "slug": project.slug
+            }),
+        ))
+        .await?;
+    Ok(Json(project))
 }
 
 async fn archive_team(
@@ -33750,6 +33860,23 @@ not json
         )
         .await;
         assert_eq!(organization.owner_subject.as_deref(), Some("admin-1"));
+        let updated_organization: Organization = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/organizations/{}", organization.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Archive Org Updated", "slug": "archive-org-updated"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(updated_organization.id, organization.id);
+        assert_eq!(updated_organization.slug, "archive-org-updated");
         let transferred_organization: Organization = request_json(
             app.clone(),
             Request::builder()
@@ -33843,6 +33970,23 @@ not json
                 .expect("valid request"),
         )
         .await;
+        let updated_team: Team = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/teams/{}", team.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Archive Team Updated", "slug": "archive-team-updated"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(updated_team.id, team.id);
+        assert_eq!(updated_team.slug, "archive-team-updated");
         let project: Project = request_json(
             app.clone(),
             Request::builder()
@@ -33857,6 +34001,23 @@ not json
                 .expect("valid request"),
         )
         .await;
+        let updated_project: Project = request_json(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/projects/{}", project.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"name": "Archive Project Updated", "slug": "archive-project-updated"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(updated_project.id, project.id);
+        assert_eq!(updated_project.slug, "archive-project-updated");
 
         let (status, active_project_delete_error) = request_value(
             app.clone(),
@@ -34190,10 +34351,17 @@ not json
         assert!(
             audit_logs
                 .iter()
+                .any(|log| log.action == "organization.updated")
+        );
+        assert!(
+            audit_logs
+                .iter()
                 .any(|log| log.action == "organization.deleted")
         );
+        assert!(audit_logs.iter().any(|log| log.action == "team.updated"));
         assert!(audit_logs.iter().any(|log| log.action == "team.archived"));
         assert!(audit_logs.iter().any(|log| log.action == "team.deleted"));
+        assert!(audit_logs.iter().any(|log| log.action == "project.updated"));
         assert!(
             audit_logs
                 .iter()

@@ -69,7 +69,8 @@ wait_for_static_ui() {
     hasApprovalNotificationRouting: Boolean(document.querySelector('#approval-notification-routing')) && Boolean(document.querySelector('#approval-notification-runs')) && text.includes('ROUTING') && text.includes('UNROUTABLE') && text.includes('Run Notifications') && text.includes('NOTIFICATION RUNS') && text.includes('Production ops:'),
     hasCodexAppServer: text.includes('Codex App Server') && text.includes('Check Codex Health') && text.includes('Load Codex Runs') && text.includes('Create Codex Thread') && text.includes('Create Codex Turn') && text.includes('Execute Codex Command') && text.includes('Interrupt Codex Turn') && text.includes('Sync Codex Artifacts') && text.includes('Codex steering') && text.includes('LONG-RUNNING STEERING'),
     hasMcpLifecycle: text.includes('MCP Servers') && text.includes('Config JSON') && Array.from(document.querySelectorAll('#mcp-form textarea')).some((textarea) => textarea.value.includes('vault:mcp/docs#api_key')) && text.includes('Load Team Servers') && text.includes('Run Team Health') && text.includes('Run Due Health') && text.includes('MCP ROLLOUT RUNS'),
-    hasTenantGovernance: text.includes('Tenant Governance') && text.includes('Archive Organization') && text.includes('Delete Organization') && text.includes('Archive Team') && text.includes('Delete Team') && text.includes('Archive Project') && text.includes('Delete Project') && text.includes('Bootstrap Tenant') && text.includes('Transfer Ownership') && text.includes('Create Membership') && text.includes('Delete Membership') && text.includes('Create Invitation') && text.includes('Accept Invitation') && (text.includes('No tenant invitations') || text.includes('Select an organization to manage invitations')),
+    hasTenantGovernance: text.includes('Tenant Governance') && text.includes('Archive Organization') && text.includes('Delete Organization') && text.includes('Archive Team') && text.includes('Delete Team') && text.includes('Archive Project') && text.includes('Delete Project') && text.includes('Bootstrap Tenant') && text.includes('Transfer Ownership') && text.includes('Update Organization') && text.includes('Update Team') && text.includes('Update Project') && text.includes('Create Membership') && text.includes('Delete Membership') && text.includes('Create Invitation') && text.includes('Accept Invitation') && (text.includes('No tenant invitations') || text.includes('Select an organization to manage invitations')),
+    hasTenantScopeUpdate: typeof updateOrganization === 'function' && typeof updateTeam === 'function' && typeof updateProject === 'function' && Boolean(document.querySelector('#organization-update-form')) && Boolean(document.querySelector('#team-update-form')) && Boolean(document.querySelector('#project-update-form')),
     hasTenantScopeDelete: typeof deleteTeam === 'function' && typeof deleteProject === 'function' && text.includes('Delete Team') && text.includes('Delete Project'),
     hasEvalGateAction: text.includes('Gate 100') || text.includes('No eval runs'),
     hasEvalDriftAction: text.includes('Check Drift') || text.includes('No eval runs'),
@@ -105,6 +106,7 @@ wait_for_static_ui() {
     && result.hasCodexAppServer
     && result.hasMcpLifecycle
     && result.hasTenantGovernance
+    && result.hasTenantScopeUpdate
     && result.hasTenantScopeDelete
     && result.hasEvalGateAction
     && result.hasEvalDriftAction

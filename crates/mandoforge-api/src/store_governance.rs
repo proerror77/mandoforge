@@ -79,6 +79,42 @@ impl AppState {
         Ok(organization)
     }
 
+    pub(crate) async fn update_organization(
+        &self,
+        organization_id: Uuid,
+        input: CreateOrganization,
+    ) -> Result<Organization, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let organization = store
+                    .organizations
+                    .get_mut(&organization_id)
+                    .filter(|organization| organization.archived_at.is_none())
+                    .ok_or_else(|| AppError::not_found("active organization not found"))?;
+                organization.name = input.name;
+                organization.slug = input.slug;
+                Ok(organization.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE organizations
+                     SET name = $1, slug = $2
+                     WHERE tenant_id = $3 AND id = $4 AND archived_at IS NULL
+                     RETURNING id, name, slug, owner_subject, created_at, archived_at",
+                )
+                .bind(input.name)
+                .bind(input.slug)
+                .bind(self.tenant_id)
+                .bind(organization_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("active organization not found"))?;
+                organization_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn list_teams(&self, organization_id: Uuid) -> Result<Vec<Team>, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -144,6 +180,62 @@ impl AppState {
             }
         }
         Ok(team)
+    }
+
+    pub(crate) async fn update_team(
+        &self,
+        team_id: Uuid,
+        input: CreateTeam,
+    ) -> Result<Team, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let organization_id = store
+                    .teams
+                    .get(&team_id)
+                    .map(|team| team.organization_id)
+                    .ok_or_else(|| AppError::not_found("active team not found"))?;
+                if !store
+                    .organizations
+                    .get(&organization_id)
+                    .is_some_and(|organization| organization.archived_at.is_none())
+                {
+                    return Err(AppError::not_found("active team not found"));
+                }
+                let team = store
+                    .teams
+                    .get_mut(&team_id)
+                    .filter(|team| team.archived_at.is_none())
+                    .ok_or_else(|| AppError::not_found("active team not found"))?;
+                team.name = input.name;
+                team.slug = input.slug;
+                Ok(team.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE teams
+                     SET name = $1, slug = $2
+                     WHERE tenant_id = $3
+                       AND id = $4
+                       AND archived_at IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM organizations
+                           WHERE organizations.tenant_id = $3
+                             AND organizations.id = teams.organization_id
+                             AND organizations.archived_at IS NULL
+                       )
+                     RETURNING id, organization_id, name, slug, created_at, archived_at",
+                )
+                .bind(input.name)
+                .bind(input.slug)
+                .bind(self.tenant_id)
+                .bind(team_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("active team not found"))?;
+                team_from_row(row)
+            }
+        }
     }
 
     pub(crate) async fn list_projects(&self, team_id: Uuid) -> Result<Vec<Project>, AppError> {
@@ -215,6 +307,68 @@ impl AppState {
             }
         }
         Ok(project)
+    }
+
+    pub(crate) async fn update_project(
+        &self,
+        project_id: Uuid,
+        input: CreateProject,
+    ) -> Result<Project, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let team_id = store
+                    .projects
+                    .get(&project_id)
+                    .map(|project| project.team_id)
+                    .ok_or_else(|| AppError::not_found("project not found for team"))?;
+                let active_team = store.teams.get(&team_id).is_some_and(|team| {
+                    team.archived_at.is_none()
+                        && store
+                            .organizations
+                            .get(&team.organization_id)
+                            .is_some_and(|organization| organization.archived_at.is_none())
+                });
+                if !active_team {
+                    return Err(AppError::not_found("project not found for team"));
+                }
+                let project = store
+                    .projects
+                    .get_mut(&project_id)
+                    .filter(|project| project.archived_at.is_none())
+                    .ok_or_else(|| AppError::not_found("project not found for team"))?;
+                project.name = input.name;
+                project.slug = input.slug;
+                Ok(project.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE projects
+                     SET name = $1, slug = $2
+                     WHERE tenant_id = $3
+                       AND id = $4
+                       AND archived_at IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM teams
+                           JOIN organizations ON organizations.id = teams.organization_id
+                           WHERE teams.tenant_id = $3
+                             AND organizations.tenant_id = $3
+                             AND teams.id = projects.team_id
+                             AND teams.archived_at IS NULL
+                             AND organizations.archived_at IS NULL
+                       )
+                     RETURNING id, team_id, name, slug, created_at, archived_at",
+                )
+                .bind(input.name)
+                .bind(input.slug)
+                .bind(self.tenant_id)
+                .bind(project_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("project not found for team"))?;
+                project_from_row(row)
+            }
+        }
     }
 
     pub(crate) async fn archive_organization(

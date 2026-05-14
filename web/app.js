@@ -189,8 +189,11 @@ const agentForm = document.querySelector("#agent-form");
 const organizationForm = document.querySelector("#organization-form");
 const tenantProvisioningForm = document.querySelector("#tenant-provisioning-form");
 const organizationOwnerForm = document.querySelector("#organization-owner-form");
+const organizationUpdateForm = document.querySelector("#organization-update-form");
 const teamForm = document.querySelector("#team-form");
+const teamUpdateForm = document.querySelector("#team-update-form");
 const projectForm = document.querySelector("#project-form");
+const projectUpdateForm = document.querySelector("#project-update-form");
 const membershipForm = document.querySelector("#membership-form");
 const tenantInvitationForm = document.querySelector("#tenant-invitation-form");
 const approvalGroupForm = document.querySelector("#approval-group-form");
@@ -252,8 +255,11 @@ organizationForm.addEventListener("submit", createOrganization);
 validateTenantRoutingButton.addEventListener("click", validateTenantRouting);
 tenantProvisioningForm.addEventListener("submit", bootstrapTenantProvisioning);
 organizationOwnerForm.addEventListener("submit", transferOrganizationOwnership);
+organizationUpdateForm.addEventListener("submit", updateOrganization);
 teamForm.addEventListener("submit", createTeam);
+teamUpdateForm.addEventListener("submit", updateTeam);
 projectForm.addEventListener("submit", createProject);
+projectUpdateForm.addEventListener("submit", updateProject);
 membershipForm.addEventListener("submit", createMembership);
 tenantInvitationForm.addEventListener("submit", createTenantInvitation);
 approvalGroupForm.addEventListener("submit", createApprovalGroup);
@@ -419,6 +425,50 @@ async function createTeam(event) {
   });
   setOrganizationId(organizationId);
   setTeamId(team.id);
+  await refreshOps();
+}
+
+async function updateOrganization(event) {
+  event.preventDefault();
+  const form = new FormData(organizationUpdateForm);
+  const organizationId = String(form.get("organization_id") || "").trim();
+  await api(`/api/organizations/${organizationId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      name: String(form.get("name") || "").trim(),
+      slug: String(form.get("slug") || "").trim(),
+    }),
+  });
+  setOrganizationId(organizationId);
+  await refreshOps();
+}
+
+async function updateTeam(event) {
+  event.preventDefault();
+  const form = new FormData(teamUpdateForm);
+  const teamId = String(form.get("team_id") || "").trim();
+  await api(`/api/teams/${teamId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      name: String(form.get("name") || "").trim(),
+      slug: String(form.get("slug") || "").trim(),
+    }),
+  });
+  setTeamId(teamId);
+  await refreshOps();
+}
+
+async function updateProject(event) {
+  event.preventDefault();
+  const form = new FormData(projectUpdateForm);
+  const projectId = String(form.get("project_id") || "").trim();
+  await api(`/api/projects/${projectId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      name: String(form.get("name") || "").trim(),
+      slug: String(form.get("slug") || "").trim(),
+    }),
+  });
   await refreshOps();
 }
 
