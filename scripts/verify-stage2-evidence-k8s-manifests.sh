@@ -22,6 +22,7 @@ manifests=(
   deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml
   deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml
   deploy/stage2-evidence/eval-release-evidence-job.example.yaml
+  deploy/stage2-evidence/finance-evidence-job.example.yaml
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
@@ -35,6 +36,7 @@ policy_rollout_script="scripts/policy-rollout-evidence-gate.sh"
 codex_app_server_script="scripts/codex-app-server-evidence-gate.sh"
 mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
 eval_release_script="scripts/eval-release-evidence-gate.sh"
+finance_script="scripts/finance-evidence-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -100,6 +102,11 @@ fi
 
 if [[ ! -x "$eval_release_script" ]]; then
   echo "missing eval/release evidence script: $eval_release_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$finance_script" ]]; then
+  echo "missing finance evidence script: $finance_script" >&2
   exit 1
 fi
 
@@ -179,6 +186,11 @@ fi
 
 if ! grep -q "name: mandoforge-eval-release-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the eval/release evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-finance-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the finance evidence Job" >&2
   exit 1
 fi
 
@@ -459,6 +471,31 @@ fi
 
 if ! grep -q "/api/eval/suites/stage2-regression" "$eval_release_script"; then
   echo "eval/release evidence script must capture Stage 2 regression suite evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-evidence-gate.sh" deploy/stage2-evidence/finance-evidence-job.example.yaml; then
+  echo "finance evidence Job does not run the dedicated evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/finance-evidence-job.example.yaml; then
+  echo "finance evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/usage/finance-operations/summary" "$finance_script"; then
+  echo "finance evidence script must collect finance operations summary" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/usage/finance-operations/run" "$finance_script"; then
+  echo "finance evidence script must capture finance close evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/usage/finance-operations/reconcile" "$finance_script"; then
+  echo "finance evidence script must capture accounting reconciliation evidence" >&2
   exit 1
 fi
 

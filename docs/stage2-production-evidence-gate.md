@@ -122,6 +122,15 @@ RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 \
 
 That gate collects agent release rollout summary, release automation history, deployment validation, orchestration validation, and optional Stage 2 regression/due-run evidence into `.mandoforge/eval-release-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/eval-release-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower finance proof, run:
+
+```bash
+RUN_STAGE2_FINANCE_CONTROLLERS=1 \
+./scripts/finance-evidence-gate.sh
+```
+
+That gate collects finance dashboard summary, finance operations readiness, and optional finance close/accounting reconciliation controller evidence into `.mandoforge/finance-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/finance-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.

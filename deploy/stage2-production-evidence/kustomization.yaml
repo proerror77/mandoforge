@@ -15,3 +15,4 @@ resources:
   - ../stage2-evidence/codex-app-server-evidence-job.example.yaml
   - ../stage2-evidence/mcp-gateway-evidence-job.example.yaml
   - ../stage2-evidence/eval-release-evidence-job.example.yaml
+  - ../stage2-evidence/finance-evidence-job.example.yaml
