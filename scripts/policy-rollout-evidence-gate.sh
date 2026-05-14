@@ -57,10 +57,14 @@ fetch_json() {
 
 write_summary() {
   local readiness_file="$EVIDENCE_DIR/api-policy-rollout-orchestration-readiness.json"
-  local validation_file="$EVIDENCE_DIR/api-policy-rollout-orchestration-validate.json"
+  local validation_evidence_file="$EVIDENCE_DIR/policy-rollout-orchestration-validation-evidence.json"
+  local due_run_evidence_file="$EVIDENCE_DIR/policy-rollout-due-run-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local readiness_status
   local validation_status
+  local validation_evidence_status
+  local due_run_evidence_status
+  local due_run_status
   local production_blocked
   local rollout_active
   local active_revision_id
@@ -73,7 +77,18 @@ write_summary() {
   local blocked_count
 
   readiness_status="$(jq -r '.status // "unknown"' "$readiness_file")"
-  validation_status="$(jq -r '.status // "unknown"' "$validation_file")"
+  validation_status="unknown"
+  validation_evidence_status="missing"
+  if [[ -s "$validation_evidence_file" ]]; then
+    validation_evidence_status="$(jq -r '.status // "unknown"' "$validation_evidence_file")"
+    validation_status="$(jq -r '.response.status // "unknown"' "$validation_evidence_file")"
+  fi
+  due_run_evidence_status="not_requested"
+  due_run_status="not_run"
+  if [[ -s "$due_run_evidence_file" ]]; then
+    due_run_evidence_status="$(jq -r '.status // "unknown"' "$due_run_evidence_file")"
+    due_run_status="$(jq -r '.response.status // "unknown"' "$due_run_evidence_file")"
+  fi
   production_blocked="$(jq -r '.production_blocked // true' "$readiness_file")"
   rollout_active="$(jq -r '.rollout_active // false' "$readiness_file")"
   active_revision_id="$(jq -r '.active_revision_id // "none"' "$readiness_file")"
@@ -88,6 +103,9 @@ write_summary() {
   {
     echo "policy_rollout_readiness_status=$readiness_status"
     echo "policy_rollout_validation_status=$validation_status"
+    echo "policy_rollout_validation_evidence_status=$validation_evidence_status"
+    echo "policy_rollout_due_run_evidence_status=$due_run_evidence_status"
+    echo "policy_rollout_due_run_status=$due_run_status"
     echo "production_blocked=$production_blocked"
     echo "production_blocked_count=$blocked_count"
     echo "rollout_active=$rollout_active"
@@ -105,7 +123,9 @@ write_summary() {
     jq -r '.blocking_reasons[]? | "- \(.)"' "$readiness_file"
     echo
     echo "validation_issues:"
-    jq -r '.issues[]? | "- \(.)"' "$validation_file"
+    if [[ -s "$validation_evidence_file" ]]; then
+      jq -r '.response.issues[]? | "- \(.)"' "$validation_evidence_file"
+    fi
   } >"$summary_file"
 
   cat "$summary_file"
@@ -116,6 +136,42 @@ write_summary() {
   fi
 }
 
+capture_policy_due_run_evidence() {
+  local due_run_response
+  local due_run_evidence_file="$EVIDENCE_DIR/policy-rollout-due-run-evidence.json"
+
+  due_run_response="$(fetch_json POST /api/policy/rollout/run-due)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$due_run_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$due_run_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$due_run_evidence_file"
+}
+
+capture_policy_orchestration_validation_evidence() {
+  local validation_response
+  local validation_evidence_file="$EVIDENCE_DIR/policy-rollout-orchestration-validation-evidence.json"
+
+  validation_response="$(fetch_json POST /api/policy/rollout/orchestration/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$validation_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$validation_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$validation_evidence_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -124,11 +180,11 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/policy/rollout/orchestration/readiness >/dev/null
 
 if [[ "$RUN_POLICY_DUE_RUN" == "1" ]]; then
-  fetch_json POST /api/policy/rollout/run-due >/dev/null
+  capture_policy_due_run_evidence
 else
   echo "skipping policy rollout due-run; set RUN_STAGE2_POLICY_DUE_RUN=1 to include due-run evidence" >&2
 fi
 
-fetch_json POST /api/policy/rollout/orchestration/validate >/dev/null
+capture_policy_orchestration_validation_evidence
 fetch_json GET /api/policy/rollout/orchestration/readiness >/dev/null
 write_summary

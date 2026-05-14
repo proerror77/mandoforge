@@ -696,6 +696,31 @@ if ! grep -q "/api/policy/rollout/run-due" "$policy_rollout_script"; then
   exit 1
 fi
 
+if ! grep -q "policy-rollout-orchestration-validation-evidence.json" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must write explicit orchestration validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "policy-rollout-orchestration-validation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit policy rollout orchestration validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_POLICY_DUE_RUN" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must support optional due-run evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "policy-rollout-due-run-evidence.json" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must write explicit due-run evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit policy rollout due-run evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "codex-app-server-evidence-gate.sh" deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml; then
   echo "Codex App Server evidence Job does not run the dedicated evidence gate" >&2
   exit 1

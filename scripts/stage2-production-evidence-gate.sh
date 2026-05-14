@@ -564,11 +564,47 @@ capture_provider_production_rollback() {
     }' >"$rollback_file"
 }
 
+capture_policy_rollout_orchestration_validation() {
+  local validation_response
+  local validation_file="$EVIDENCE_DIR/policy-rollout-orchestration-validation-evidence.json"
+
+  validation_response="$(fetch_json POST /api/policy/rollout/orchestration/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$validation_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$validation_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$validation_file"
+}
+
+capture_policy_rollout_due_run() {
+  local due_run_response
+  local due_run_file="$EVIDENCE_DIR/policy-rollout-due-run-evidence.json"
+
+  due_run_response="$(fetch_json POST /api/policy/rollout/run-due)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$due_run_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$due_run_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$due_run_file"
+}
+
 run_controller_validations() {
   fetch_json POST /api/tenant-isolation/routing/validate >/dev/null
   fetch_json POST /api/providers/policy-gate/run >/dev/null
   fetch_json POST /api/providers/deployment/validate >/dev/null
-  fetch_json POST /api/policy/rollout/orchestration/validate >/dev/null
+  capture_policy_rollout_orchestration_validation
   capture_vault_kms_recovery_validation
   capture_worker_load_validation
   capture_remote_computer_state_sync_validation
@@ -606,6 +642,12 @@ run_controller_validations() {
     capture_provider_production_rollback
   else
     echo "skipping provider production rollout/rollback; set RUN_STAGE2_PROVIDER_ROLLOUT=1 to include provider rollout evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_POLICY_DUE_RUN:-0}" == "1" ]]; then
+    capture_policy_rollout_due_run
+  else
+    echo "skipping policy rollout due-run; set RUN_STAGE2_POLICY_DUE_RUN=1 to include policy due-run evidence" >&2
   fi
 
   if [[ "${RUN_STAGE2_REMOTE_SIDECAR_RECOVERY:-0}" == "1" ]]; then
