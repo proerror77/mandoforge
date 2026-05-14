@@ -29,6 +29,16 @@ if ! grep -q "claimName: mandoforge-remote-computer-state" /tmp/mandoforge-k8s-r
   exit 1
 fi
 
+if grep -q "mandoforge-api:8080" /tmp/mandoforge-k8s-render.out /tmp/mandoforge-remote-computer-pilot-render.out deploy/k8s/remote-computer-artifact-discovery-sidecar.yaml; then
+  echo "Remote Computer artifact sidecar must target the mandoforge-api service port 8787, not 8080" >&2
+  exit 1
+fi
+
+if ! grep -q "http://mandoforge-api:8787" /tmp/mandoforge-k8s-render.out; then
+  echo "base Remote Computer render is missing the in-cluster API URL on port 8787" >&2
+  exit 1
+fi
+
 if ! grep -q "driver: csi.juicefs.com" /tmp/mandoforge-remote-computer-pilot-render.out; then
   echo "Remote Computer pilot render is missing JuiceFS CSI storage" >&2
   exit 1

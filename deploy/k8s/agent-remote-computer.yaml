@@ -55,7 +55,7 @@ spec:
             - name: MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED
               value: "false"
             - name: MANDOFORGE_API_URL
-              value: "http://mandoforge-api:8080"
+              value: "http://mandoforge-api:8787"
             - name: MANDOFORGE_ARTIFACT_DIR
               value: "/workspace/artifacts"
             - name: MANDOFORGE_ARTIFACT_DISCOVERY_INTERVAL_SECONDS

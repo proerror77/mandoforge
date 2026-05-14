@@ -17,7 +17,7 @@ data:
         "yes",
         "on",
     }
-    api_url = os.getenv("MANDOFORGE_API_URL", "http://mandoforge-api:8080").rstrip("/")
+    api_url = os.getenv("MANDOFORGE_API_URL", "http://mandoforge-api:8787").rstrip("/")
     session_id = os.getenv("MANDOFORGE_SESSION_ID", "")
     remote_computer_id = os.getenv("MANDOFORGE_REMOTE_COMPUTER_ID", "")
     assignment_id = os.getenv("MANDOFORGE_ASSIGNMENT_ID", "")
