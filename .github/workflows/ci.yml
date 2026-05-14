@@ -38,6 +38,7 @@ jobs:
       - run: bash -n scripts/eval-release-evidence-gate.sh
       - run: bash -n scripts/finance-evidence-gate.sh
       - run: bash -n scripts/stage2-controller-drill.sh
+      - run: bash -n scripts/stage2-controller-drill-live-gate.sh
       - run: bash -n scripts/verify-stage2-controller-drill.sh
       - run: node --check scripts/stage2-mock-controller.js
       - run: bash -n scripts/archive-stage2-production-evidence.sh
@@ -50,6 +51,7 @@ jobs:
       - run: scripts/verify-stage2-controller-env-template.sh
       - run: scripts/verify-stage2-evidence-k8s-manifests.sh
       - run: scripts/verify-stage2-controller-drill.sh
+      - run: scripts/stage2-controller-drill-live-gate.sh
       - run: scripts/verify-stage2-evidence-archive.sh --self-test
       - run: scripts/verify-observability-k8s-manifests.sh
       - run: scripts/verify-remote-computer-k8s-manifests.sh

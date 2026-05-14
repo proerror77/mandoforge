@@ -33,6 +33,14 @@ BASE_URL=http://127.0.0.1:8787 \
 
 The drill starts `scripts/stage2-mock-controller.js`, points every Stage 2 external controller URL at it, enables validation coverage checking, and writes evidence into `.mandoforge/stage2-controller-drill-evidence/`. It defaults to `ALLOW_BLOCKED=1` because mock-controller evidence proves the HTTP controller boundaries are wired, not that Stage 2 is production-complete. Set `RUN_STAGE2_CONTROLLER_DRILL_ACTIONS=1` only when you also want the optional rollout, recovery, stale-poll, regression, remediation, and finance controller actions included in the rehearsal.
 
+To run the same rehearsal without manually starting the API:
+
+```bash
+./scripts/stage2-controller-drill-live-gate.sh
+```
+
+This starts a temporary local API on `127.0.0.1:8794`, injects mock controller URLs into that API process, runs `scripts/stage2-controller-drill.sh` against a mock controller on `127.0.0.1:18082` with optional controller actions enabled by default, and records evidence under `.mandoforge/stage2-controller-drill-live-evidence/`. It is a CI/local wiring proof only; it does not replace real production controller evidence.
+
 For a narrower collector rollout proof, run the dedicated observability collector gate:
 
 ```bash

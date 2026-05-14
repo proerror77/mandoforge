@@ -154,6 +154,14 @@ BASE_URL=http://127.0.0.1:8787 ./scripts/stage2-controller-drill.sh
 
 This starts a local mock controller, sets the Stage 2 controller URL environment variables for the current process, runs the production evidence gate with validation coverage enabled, and writes evidence under `.mandoforge/stage2-controller-drill-evidence/`. It is a wiring drill, not production completion proof.
 
+For a self-contained local rehearsal that starts an ephemeral API process first:
+
+```bash
+./scripts/stage2-controller-drill-live-gate.sh
+```
+
+The live gate uses the in-memory API store by default, injects mock controller URLs into the temporary API, runs the same mock-controller evidence path with optional controller actions enabled, and writes `.mandoforge/stage2-controller-drill-live-evidence/`. It is useful for CI and local wiring checks when you do not already have a running API.
+
 For in-cluster inventory runs, render or apply the opt-in Kubernetes Job:
 
 ```bash

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GATE_ADDR="${GATE_ADDR:-127.0.0.1:8794}"
+BASE_URL="${BASE_URL:-http://$GATE_ADDR}"
+GATE_WORKSPACE_ROOT="${GATE_WORKSPACE_ROOT:-.mandoforge/stage2-controller-drill-workspaces}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/stage2-controller-drill-live-evidence}"
+STAGE2_MOCK_CONTROLLER_PORT="${STAGE2_MOCK_CONTROLLER_PORT:-18082}"
+STAGE2_MOCK_CONTROLLER_HOST="${STAGE2_MOCK_CONTROLLER_HOST:-127.0.0.1}"
+MOCK_BASE_URL="http://$STAGE2_MOCK_CONTROLLER_HOST:$STAGE2_MOCK_CONTROLLER_PORT"
+API_PID=""
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Stage 2 controller drill live gate requires $1" >&2
+    exit 1
+  fi
+}
+
+cleanup() {
+  if [[ -n "${API_PID:-}" ]]; then
+    kill "$API_PID" >/dev/null 2>&1 || true
+    wait "$API_PID" 2>/dev/null || true
+  fi
+}
+
+start_gate_api() {
+  local log_file="$1"
+  env \
+    "MANDOFORGE_ADDR=$GATE_ADDR" \
+    "MANDOFORGE_WORKSPACE_ROOT=$GATE_WORKSPACE_ROOT" \
+    "MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL=$MOCK_BASE_URL/tenant/routing/validate" \
+    "MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_URL=$MOCK_BASE_URL/provider/deployment/validate" \
+    "MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL=$MOCK_BASE_URL/provider/rollout/apply" \
+    "MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL=$MOCK_BASE_URL/provider/rollout/rollback" \
+    "MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL=$MOCK_BASE_URL/policy/rollout/orchestration/validate" \
+    "MANDOFORGE_KMS_RECOVERY_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_KMS_RECOVERY_CONTROLLER_URL=$MOCK_BASE_URL/vault/kms/recovery/validate" \
+    "MANDOFORGE_KMS_PROVIDER=mock-kms" \
+    "MANDOFORGE_KMS_KEY_ID=stage2-controller-drill-key" \
+    "MANDOFORGE_KMS_ROTATION_POLICY=manual-confirmed" \
+    "MANDOFORGE_KMS_ENDPOINT=$MOCK_BASE_URL/vault/kms/rotate" \
+    "MANDOFORGE_KMS_TOKEN=stage2-controller-drill-token" \
+    "MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL=$MOCK_BASE_URL/worker/load/validate" \
+    "MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_REMOTE_COMPUTER_STATE_SYNC_CONTROLLER_URL=$MOCK_BASE_URL/remote-computer/state-sync/validate" \
+    "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_REQUIRED=true" \
+    "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_URL=$MOCK_BASE_URL/remote-computer/sidecar/validate" \
+    "MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_URL=$MOCK_BASE_URL/approval-notification/deployment/validate" \
+    "MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_URL=$MOCK_BASE_URL/approval-notification/ops/validate" \
+    "MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_URL=$MOCK_BASE_URL/mcp/deployment/validate" \
+    "MANDOFORGE_MCP_ROLLOUT_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_MCP_ROLLOUT_CONTROLLER_URL=$MOCK_BASE_URL/mcp/rollout/apply" \
+    "MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL=$MOCK_BASE_URL/mcp/rollout/rollback" \
+    "MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL=$MOCK_BASE_URL/codex-app-server/deployment/validate" \
+    "MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL=$MOCK_BASE_URL/codex-app-server/ops/validate" \
+    "MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL=$MOCK_BASE_URL/agents/releases/rollout/apply" \
+    "MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_URL=$MOCK_BASE_URL/agents/releases/deployment/validate" \
+    "MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_URL=$MOCK_BASE_URL/agents/releases/orchestration/validate" \
+    "MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL=$MOCK_BASE_URL/agents/releases/rollout/rollback" \
+    "MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL=$MOCK_BASE_URL/observability/collector/deployment/validate" \
+    "MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_URL=$MOCK_BASE_URL/observability/collector/cluster/validate" \
+    "MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_URL=$MOCK_BASE_URL/observability/remediation/run" \
+    "MANDOFORGE_FINANCE_CLOSE_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL=$MOCK_BASE_URL/finance/close" \
+    "MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_REQUIRED=true" \
+    "MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL=$MOCK_BASE_URL/finance/reconcile" \
+    cargo run -p mandoforge-api >"$log_file" 2>&1 &
+  API_PID="$!"
+
+  for _ in $(seq 1 80); do
+    if curl -fsS "$BASE_URL/healthz" >/dev/null 2>&1; then
+      return 0
+    fi
+    if ! kill -0 "$API_PID" >/dev/null 2>&1; then
+      echo "Stage 2 controller drill API exited early; log follows:" >&2
+      cat "$log_file" >&2
+      exit 1
+    fi
+    sleep 0.5
+  done
+
+  echo "Stage 2 controller drill API did not become healthy; log follows:" >&2
+  cat "$log_file" >&2
+  exit 1
+}
+
+require_cmd cargo
+require_cmd curl
+require_cmd jq
+require_cmd node
+
+trap cleanup EXIT
+
+log_file="$(mktemp -t mandoforge-stage2-controller-drill-api.XXXXXX.log)"
+start_gate_api "$log_file"
+
+BASE_URL="$BASE_URL" \
+EVIDENCE_DIR="$EVIDENCE_DIR" \
+STAGE2_MOCK_CONTROLLER_PORT="$STAGE2_MOCK_CONTROLLER_PORT" \
+STAGE2_MOCK_CONTROLLER_HOST="$STAGE2_MOCK_CONTROLLER_HOST" \
+RUN_STAGE2_CONTROLLER_DRILL_ACTIONS="${RUN_STAGE2_CONTROLLER_DRILL_ACTIONS:-1}" \
+./scripts/stage2-controller-drill.sh
+
+echo "stage2 controller drill live gate ok"
