@@ -416,6 +416,21 @@ if ! grep -q "/api/approvals/notifications/run" "$approval_notification_script";
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_APPROVAL_DELIVERY" "$approval_notification_script"; then
+  echo "Approval notification evidence script must support optional delivery evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "approval-notification-delivery-evidence.json" "$approval_notification_script"; then
+  echo "Approval notification evidence script must write explicit delivery evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "approval-notification-delivery-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit approval notification delivery evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "worker-evidence-gate.sh" deploy/stage2-evidence/worker-evidence-job.example.yaml; then
   echo "Worker evidence Job does not run the dedicated evidence gate" >&2
   exit 1

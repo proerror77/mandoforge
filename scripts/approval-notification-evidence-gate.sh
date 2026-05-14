@@ -58,6 +58,7 @@ fetch_json() {
 write_summary() {
   local routing_file="$EVIDENCE_DIR/api-approvals-notification-routing-summary.json"
   local runs_file="$EVIDENCE_DIR/api-approvals-notifications-runs.json"
+  local delivery_evidence_file="$EVIDENCE_DIR/approval-notification-delivery-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local routing_status
   local configured_channels
@@ -66,6 +67,10 @@ write_summary() {
   local unroutable_pending
   local production_ops_status
   local deployment_status
+  local delivery_evidence_status
+  local delivery_status
+  local delivery_target_count
+  local delivery_delivered
   local blocked_count
 
   routing_status="$(jq -r '.status // "unknown"' "$routing_file")"
@@ -75,6 +80,16 @@ write_summary() {
   unroutable_pending="$(jq -r '.unroutable_pending_approval_count // .unroutable_pending_count // 0' "$routing_file")"
   production_ops_status="$(jq -r '.production_ops.status // "unknown"' "$runs_file")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$runs_file")"
+  delivery_evidence_status="not_requested"
+  delivery_status="not_run"
+  delivery_target_count="0"
+  delivery_delivered="false"
+  if [[ -s "$delivery_evidence_file" ]]; then
+    delivery_evidence_status="$(jq -r '.status // "unknown"' "$delivery_evidence_file")"
+    delivery_status="$(jq -r '.response.status // "unknown"' "$delivery_evidence_file")"
+    delivery_target_count="$(jq -r '.response.target_count // 0' "$delivery_evidence_file")"
+    delivery_delivered="$(jq -r '.response.delivered // false' "$delivery_evidence_file")"
+  fi
   blocked_count="$(jq -r '[
       .production_ops.production_blocked,
       .deployment_readiness.production_blocked
@@ -88,6 +103,10 @@ write_summary() {
     echo "unroutable_pending_approval_count=$unroutable_pending"
     echo "production_ops_status=$production_ops_status"
     echo "deployment_readiness_status=$deployment_status"
+    echo "delivery_evidence_status=$delivery_evidence_status"
+    echo "delivery_status=$delivery_status"
+    echo "delivery_target_count=$delivery_target_count"
+    echo "delivery_delivered=$delivery_delivered"
     echo "production_blocked_count=$blocked_count"
     echo "approval_delivery_run=$RUN_APPROVAL_DELIVERY"
     echo "evidence_dir=$EVIDENCE_DIR"
@@ -113,6 +132,24 @@ write_summary() {
   fi
 }
 
+capture_delivery_evidence() {
+  local delivery_response
+  local delivery_evidence_file="$EVIDENCE_DIR/approval-notification-delivery-evidence.json"
+
+  delivery_response="$(fetch_json POST /api/approvals/notifications/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$delivery_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$delivery_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$delivery_evidence_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -124,7 +161,7 @@ fetch_json POST /api/approvals/notifications/deployment/validate >/dev/null
 fetch_json POST /api/approvals/notifications/ops/validate >/dev/null
 
 if [[ "$RUN_APPROVAL_DELIVERY" == "1" ]]; then
-  fetch_json POST /api/approvals/notifications/run >/dev/null
+  capture_delivery_evidence
 else
   echo "skipping approval notification delivery; set RUN_STAGE2_APPROVAL_DELIVERY=1 to include delivery evidence" >&2
 fi

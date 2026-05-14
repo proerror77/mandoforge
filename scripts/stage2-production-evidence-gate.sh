@@ -348,6 +348,24 @@ capture_eval_release_rollback_validation() {
     }' >"$rollback_file"
 }
 
+capture_approval_notification_delivery_validation() {
+  local delivery_response
+  local delivery_file="$EVIDENCE_DIR/approval-notification-delivery-evidence.json"
+
+  delivery_response="$(fetch_json POST /api/approvals/notifications/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$delivery_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$delivery_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$delivery_file"
+}
+
 run_controller_validations() {
   fetch_json POST /api/tenant-isolation/routing/validate >/dev/null
   fetch_json POST /api/providers/policy-gate/run >/dev/null
@@ -399,7 +417,7 @@ run_controller_validations() {
   fi
 
   if [[ "${RUN_STAGE2_APPROVAL_DELIVERY:-0}" == "1" ]]; then
-    fetch_json POST /api/approvals/notifications/run >/dev/null
+    capture_approval_notification_delivery_validation
   else
     echo "skipping approval notification delivery; set RUN_STAGE2_APPROVAL_DELIVERY=1 to include delivery evidence" >&2
   fi
