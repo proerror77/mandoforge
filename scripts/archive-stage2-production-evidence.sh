@@ -6,6 +6,7 @@ pvc_name="${MANDOFORGE_STAGE2_EVIDENCE_PVC:-mandoforge-stage2-production-evidenc
 pod_name="${MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_POD:-mandoforge-stage2-evidence-archive}"
 archive_path="${1:-.mandoforge/stage2-production-evidence-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"
 image="${MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_IMAGE:-busybox:1.36}"
+VERIFY_ARCHIVE="${VERIFY_STAGE2_EVIDENCE_ARCHIVE:-1}"
 
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "kubectl is required to archive Stage 2 production evidence" >&2
@@ -123,3 +124,14 @@ printf '%s  %s\n' "$archive_sha" "$archive_path" >"$sha256_file"
 echo "Stage 2 production evidence archived to $archive_path" >&2
 echo "Stage 2 production evidence checksum written to $sha256_file" >&2
 echo "Stage 2 production evidence manifest written to $manifest_file" >&2
+
+if [[ "$VERIFY_ARCHIVE" == "1" ]]; then
+  verifier="scripts/verify-stage2-evidence-archive.sh"
+  if [[ ! -x "$verifier" ]]; then
+    echo "Stage 2 evidence archive verifier is missing or not executable: $verifier" >&2
+    exit 1
+  fi
+  "$verifier" "$archive_path" >&2
+else
+  echo "Stage 2 production evidence archive verification skipped; set VERIFY_STAGE2_EVIDENCE_ARCHIVE=1 to enable it" >&2
+fi

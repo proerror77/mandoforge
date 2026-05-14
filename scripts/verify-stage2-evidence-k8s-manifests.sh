@@ -1051,6 +1051,11 @@ if ! grep -q "manifest_file=" "$archive_script"; then
   exit 1
 fi
 
+if ! grep -q "verify-stage2-evidence-archive.sh" "$archive_script"; then
+  echo "Stage 2 production evidence archive script must verify the archive after creation" >&2
+  exit 1
+fi
+
 if ! grep -q "completion-audit/checklist.json" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require the completion audit checklist" >&2
   exit 1
