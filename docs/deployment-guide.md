@@ -146,6 +146,14 @@ BASE_URL=http://127.0.0.1:8787 \
 
 This gate remains fail-closed until `/api/stage2/readiness` reports no open completion gaps. See `docs/stage2-production-evidence-gate.md` for the optional flags that enable higher-impact KMS rotation, Remote Computer sidecar recovery, and finance close/reconciliation checks.
 
+To rehearse the controller wiring locally before pointing at real controller systems:
+
+```bash
+BASE_URL=http://127.0.0.1:8787 ./scripts/stage2-controller-drill.sh
+```
+
+This starts a local mock controller, sets the Stage 2 controller URL environment variables for the current process, runs the production evidence gate with validation coverage enabled, and writes evidence under `.mandoforge/stage2-controller-drill-evidence/`. It is a wiring drill, not production completion proof.
+
 For in-cluster inventory runs, render or apply the opt-in Kubernetes Job:
 
 ```bash

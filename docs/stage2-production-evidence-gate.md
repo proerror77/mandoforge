@@ -24,6 +24,15 @@ This mode calls the bounded validation endpoints for tenant routing, provider de
 
 Use `deploy/stage2-evidence/stage2-production-controllers.env.example` as the operator checklist for the external controller URLs, required flags, and opt-in validation switches. `deploy/stage2-evidence/stage2-controller-env-secret.example.yaml` shows the matching Kubernetes Secret shape, and `deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml` shows the strict production-validation Job that consumes that Secret through `envFrom`. These are templates only; real URLs and tokens belong in your secret manager, CI environment, or Kubernetes Secret generation pipeline.
 
+For local controller-path rehearsal without real deployment targets, start the API and run:
+
+```bash
+BASE_URL=http://127.0.0.1:8787 \
+./scripts/stage2-controller-drill.sh
+```
+
+The drill starts `scripts/stage2-mock-controller.js`, points every Stage 2 external controller URL at it, enables validation coverage checking, and writes evidence into `.mandoforge/stage2-controller-drill-evidence/`. It defaults to `ALLOW_BLOCKED=1` because mock-controller evidence proves the HTTP controller boundaries are wired, not that Stage 2 is production-complete. Set `RUN_STAGE2_CONTROLLER_DRILL_ACTIONS=1` only when you also want the optional rollout, recovery, stale-poll, regression, remediation, and finance controller actions included in the rehearsal.
+
 For a narrower collector rollout proof, run the dedicated observability collector gate:
 
 ```bash
