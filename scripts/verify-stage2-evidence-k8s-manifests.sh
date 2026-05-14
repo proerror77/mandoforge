@@ -521,6 +521,16 @@ if ! grep -q "eval-release-rollback-evidence.json" scripts/stage2-production-evi
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_FINANCE_EXPORT" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must support optional finance export evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "usage-export-csv-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must persist finance export CSV metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "local-script-" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit gate must map local script evidence artifacts" >&2
   exit 1
@@ -693,6 +703,21 @@ fi
 
 if ! grep -q "/api/usage/finance-operations/reconcile" "$finance_script"; then
   echo "finance evidence script must capture accounting reconciliation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_FINANCE_EXPORT" "$finance_script"; then
+  echo "finance evidence script must support optional finance export evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/usage/export.csv" "$finance_script"; then
+  echo "finance evidence script must capture CSV export evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/usage/export/deliver" "$finance_script"; then
+  echo "finance evidence script must capture export delivery evidence" >&2
   exit 1
 fi
 

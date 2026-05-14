@@ -62,6 +62,47 @@ fetch_json() {
   echo "$target"
 }
 
+fetch_file() {
+  local method="$1"
+  local path="$2"
+  local target="$3"
+  local metadata="$4"
+  local response_body
+  local http_status
+  response_body="$(mktemp)"
+
+  if [[ "$method" == "GET" ]]; then
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "${auth_headers[@]}" "$BASE_URL$path")"
+  else
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" -X "$method" "${auth_headers[@]}" "$BASE_URL$path")"
+  fi
+
+  if [[ "$http_status" != 2* ]]; then
+    echo "stage2 evidence gate request failed: $method $path returned HTTP $http_status" >&2
+    sed -n '1,40p' "$response_body" >&2
+    rm -f "$response_body"
+    exit 1
+  fi
+
+  cp "$response_body" "$target"
+  local byte_count
+  byte_count="$(wc -c <"$target" | tr -d ' ')"
+  jq -n \
+    --arg path "$path" \
+    --arg target "$target" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --argjson http_status "$http_status" \
+    --argjson byte_count "$byte_count" \
+    '{
+      path: $path,
+      target: $target,
+      generated_at: $generated_at,
+      http_status: $http_status,
+      byte_count: $byte_count
+    }' >"$metadata"
+  rm -f "$response_body"
+}
+
 write_team_discovery() {
   local status="$1"
   local source="$2"
@@ -393,6 +434,13 @@ run_controller_validations() {
     fetch_json POST /api/usage/finance-operations/reconcile >/dev/null
   else
     echo "skipping finance close/reconciliation controllers; set RUN_STAGE2_FINANCE_CONTROLLERS=1 to include accounting evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_FINANCE_EXPORT:-0}" == "1" ]]; then
+    fetch_file GET /api/usage/export.csv "$EVIDENCE_DIR/api-usage-export.csv" "$EVIDENCE_DIR/usage-export-csv-evidence.json"
+    fetch_json POST /api/usage/export/deliver >/dev/null
+  else
+    echo "skipping finance export capture; set RUN_STAGE2_FINANCE_EXPORT=1 to include CSV and delivery evidence" >&2
   fi
 }
 

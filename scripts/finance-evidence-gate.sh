@@ -7,6 +7,7 @@ ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/finance-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_FINANCE_CONTROLLERS="${RUN_STAGE2_FINANCE_CONTROLLERS:-0}"
+RUN_FINANCE_EXPORT="${RUN_STAGE2_FINANCE_EXPORT:-0}"
 
 auth_headers=(
   -H "x-mandoforge-subject: $SUBJECT"
@@ -55,9 +56,52 @@ fetch_json() {
   echo "$target"
 }
 
+fetch_file() {
+  local method="$1"
+  local path="$2"
+  local target="$3"
+  local metadata="$4"
+  local response_body
+  local http_status
+  response_body="$(mktemp)"
+
+  if [[ "$method" == "GET" ]]; then
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "${auth_headers[@]}" "$BASE_URL$path")"
+  else
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" -X "$method" "${auth_headers[@]}" "$BASE_URL$path")"
+  fi
+
+  if [[ "$http_status" != 2* ]]; then
+    echo "finance evidence request failed: $method $path returned HTTP $http_status" >&2
+    sed -n '1,40p' "$response_body" >&2
+    rm -f "$response_body"
+    exit 1
+  fi
+
+  cp "$response_body" "$target"
+  local byte_count
+  byte_count="$(wc -c <"$target" | tr -d ' ')"
+  jq -n \
+    --arg path "$path" \
+    --arg target "$target" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --argjson http_status "$http_status" \
+    --argjson byte_count "$byte_count" \
+    '{
+      path: $path,
+      target: $target,
+      generated_at: $generated_at,
+      http_status: $http_status,
+      byte_count: $byte_count
+    }' >"$metadata"
+  rm -f "$response_body"
+}
+
 write_summary() {
   local finance_summary_file="$EVIDENCE_DIR/api-usage-finance-summary.json"
   local operations_file="$EVIDENCE_DIR/api-usage-finance-operations-summary.json"
+  local export_metadata_file="$EVIDENCE_DIR/usage-export-csv-evidence.json"
+  local export_delivery_file="$EVIDENCE_DIR/api-usage-export-deliver.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local current_cost_cents
   local budget_pressure_status
@@ -117,6 +161,14 @@ write_summary() {
     echo "reconciliation_controller_configured=$reconciliation_controller_configured"
     echo "latest_reconciliation_status=$latest_reconciliation_status"
     echo "finance_controllers=$RUN_FINANCE_CONTROLLERS"
+    echo "finance_export=$RUN_FINANCE_EXPORT"
+    if [[ -s "$export_metadata_file" ]]; then
+      echo "finance_export_csv_bytes=$(jq -r '.byte_count // 0' "$export_metadata_file")"
+    fi
+    if [[ -s "$export_delivery_file" ]]; then
+      echo "finance_export_delivery_status=$(jq -r '.status // "unknown"' "$export_delivery_file")"
+      echo "finance_export_delivery_target_configured=$(jq -r '.target_configured // false' "$export_delivery_file")"
+    fi
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
     echo "finance_attention_items:"
@@ -150,6 +202,13 @@ if [[ "$RUN_FINANCE_CONTROLLERS" == "1" ]]; then
   fetch_json POST /api/usage/finance-operations/reconcile >/dev/null
 else
   echo "skipping finance close/reconciliation controllers; set RUN_STAGE2_FINANCE_CONTROLLERS=1 to include accounting evidence" >&2
+fi
+
+if [[ "$RUN_FINANCE_EXPORT" == "1" ]]; then
+  fetch_file GET /api/usage/export.csv "$EVIDENCE_DIR/api-usage-export.csv" "$EVIDENCE_DIR/usage-export-csv-evidence.json"
+  fetch_json POST /api/usage/export/deliver >/dev/null
+else
+  echo "skipping finance export capture; set RUN_STAGE2_FINANCE_EXPORT=1 to include CSV and delivery evidence" >&2
 fi
 
 fetch_json GET /api/usage/finance-operations/summary >/dev/null
