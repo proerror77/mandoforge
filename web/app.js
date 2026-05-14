@@ -167,6 +167,7 @@ const validateAgentReleaseDeploymentButton = document.querySelector("#validate-a
 const validateAgentReleaseOrchestrationButton = document.querySelector("#validate-agent-release-orchestration");
 const mcpServerRoot = document.querySelector("#mcp-servers");
 const executionJobRoot = document.querySelector("#execution-jobs");
+const executionJobRemoteLeaseForm = document.querySelector("#execution-job-remote-lease-form");
 const workerReadinessRoot = document.querySelector("#worker-readiness");
 const runWorkerLoadValidationButton = document.querySelector("#run-worker-load-validation");
 const remoteComputerReadinessRoot = document.querySelector("#remote-computer-readiness");
@@ -327,6 +328,7 @@ validateMcpDeploymentButton.addEventListener("click", validateMcpDeployment);
 runDueMcpRolloutsButton.addEventListener("click", runDueMcpRollouts);
 loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
+executionJobRemoteLeaseForm.addEventListener("submit", assignExecutionJobRemoteLeaseFromForm);
 runWorkerLoadValidationButton.addEventListener("click", runWorkerLoadValidation);
 validateRemoteStateSyncButton.addEventListener("click", validateRemoteStateSync);
 reclaimRemoteComputersButton.addEventListener("click", reclaimStaleRemoteComputers);
@@ -1742,6 +1744,40 @@ async function runExecutionJob(jobId) {
   await refreshOps();
 }
 
+async function cancelExecutionJob(jobId) {
+  await api(`/api/execution-jobs/${jobId}/cancel`, { method: "POST" });
+  await refreshExecutionJobs();
+  await refreshApprovals();
+  await refreshSession();
+  await refreshOps();
+}
+
+async function assignExecutionJobRemoteLeaseFromForm(event) {
+  event.preventDefault();
+  const form = new FormData(executionJobRemoteLeaseForm);
+  await assignExecutionJobRemoteLease(
+    optionalFormValue(form, "execution_job_id"),
+    optionalFormValue(form, "lease_id"),
+  );
+}
+
+async function assignExecutionJobRemoteLease(jobId, leaseId) {
+  if (!jobId || !leaseId) return;
+  await api(`/api/execution-jobs/${jobId}/remote-computer-lease`, {
+    method: "POST",
+    body: JSON.stringify({
+      lease_id: leaseId,
+      assigned_by: "static-admin-console",
+      metadata: {
+        source: "static-admin-console",
+        execution_enabled: false,
+      },
+    }),
+  });
+  await refreshExecutionJobs();
+  await refreshOps();
+}
+
 async function runDemo() {
   const agent = state.agents[0];
   const session = await api("/api/sessions", {
@@ -2708,7 +2744,7 @@ function renderRemoteComputerReadiness() {
                 (lease) =>
                   `<div class="muted">lease ${escapeHtml(lease.id)} · ${escapeHtml(lease.status)} · session ${escapeHtml(lease.session_id || "none")} · worker ${escapeHtml(lease.worker_id || "none")} · expires ${escapeHtml(lease.lease_expires_at || "none")} ${
                     lease.status === "leased"
-                      ? `<button class="secondary inline-button" data-heartbeat-remote-lease="${escapeHtml(lease.id)}">Heartbeat Lease</button> <button class="secondary inline-button" data-release-remote-lease="${escapeHtml(lease.id)}">Release Lease</button> <button class="secondary inline-button" data-fail-remote-lease="${escapeHtml(lease.id)}">Fail Lease</button>`
+                      ? `<button class="secondary inline-button" data-fill-execution-lease-assignment="${escapeHtml(lease.id)}">Use for Assignment</button> <button class="secondary inline-button" data-heartbeat-remote-lease="${escapeHtml(lease.id)}">Heartbeat Lease</button> <button class="secondary inline-button" data-release-remote-lease="${escapeHtml(lease.id)}">Release Lease</button> <button class="secondary inline-button" data-fail-remote-lease="${escapeHtml(lease.id)}">Fail Lease</button>`
                       : ""
                   }</div>`,
               )
@@ -2828,6 +2864,12 @@ function renderRemoteComputerReadiness() {
   });
   remoteComputerReadinessRoot.querySelectorAll("[data-fill-remote-lease]").forEach((button) => {
     button.addEventListener("click", () => fillRemoteLeaseComputer(button.dataset.fillRemoteLease));
+  });
+  remoteComputerReadinessRoot.querySelectorAll("[data-fill-execution-lease-assignment]").forEach((button) => {
+    button.addEventListener("click", () => {
+      executionJobRemoteLeaseForm.elements.lease_id.value =
+        button.dataset.fillExecutionLeaseAssignment;
+    });
   });
   remoteComputerReadinessRoot.querySelectorAll("[data-heartbeat-remote-lease]").forEach((button) => {
     button.addEventListener("click", () => heartbeatRemoteComputerLease(button.dataset.heartbeatRemoteLease));
@@ -3034,6 +3076,11 @@ function renderExecutionJobs() {
                   ? `<button class="secondary" data-run-execution-job="${job.id}">Run Job</button>`
                   : ""
               }
+              ${
+                job.status === "queued" || job.status === "running"
+                  ? `<button class="secondary" data-fill-execution-job-assignment="${job.id}">Use for Remote Lease</button> <button class="secondary" data-cancel-execution-job="${job.id}">Cancel Job</button>`
+                  : ""
+              }
               <pre>${escapeHtml(
                 JSON.stringify(
                   {
@@ -3058,6 +3105,15 @@ function renderExecutionJobs() {
     : `<div class="muted">No execution jobs</div>`;
   executionJobRoot.querySelectorAll("[data-run-execution-job]").forEach((button) => {
     button.addEventListener("click", () => runExecutionJob(button.dataset.runExecutionJob));
+  });
+  executionJobRoot.querySelectorAll("[data-fill-execution-job-assignment]").forEach((button) => {
+    button.addEventListener("click", () => {
+      executionJobRemoteLeaseForm.elements.execution_job_id.value =
+        button.dataset.fillExecutionJobAssignment;
+    });
+  });
+  executionJobRoot.querySelectorAll("[data-cancel-execution-job]").forEach((button) => {
+    button.addEventListener("click", () => cancelExecutionJob(button.dataset.cancelExecutionJob));
   });
 }
 

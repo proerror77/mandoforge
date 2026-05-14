@@ -784,6 +784,17 @@
               <div class="muted">Queue readiness / leases / attempts / last error</div>
               <button type="button" class="secondary form-inline-action" id="refresh-execution-jobs">Refresh Jobs</button>
               <button type="button" class="secondary form-inline-action" id="run-worker-load-validation">Run Load Validation</button>
+              <form id="execution-job-remote-lease-form" class="stack-form compact-form">
+                <label>
+                  Execution job ID
+                  <input name="execution_job_id" required placeholder="Execution job UUID" />
+                </label>
+                <label>
+                  Remote lease ID
+                  <input name="lease_id" required placeholder="Remote computer lease UUID" />
+                </label>
+                <button type="submit">Assign Remote Lease</button>
+              </form>
               <div id="worker-readiness" class="list"></div>
               <div id="execution-jobs" class="list"></div>
             </div>

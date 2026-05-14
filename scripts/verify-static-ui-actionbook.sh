@@ -81,6 +81,7 @@ wait_for_static_ui() {
     hasReleasePromotionWorkflow: (text.includes('Request Prod Approval') || text.includes('No eval runs')) && Boolean(document.querySelector('#agent-releases')) && text.includes('RELEASE AUTOMATION RUNS'),
     hasAgentReleases: text.includes('AGENT RELEASES') && Boolean(document.querySelector('#agent-releases')),
     hasWorkerDashboard: text.includes('Worker Dashboard') && text.includes('Queue readiness') && text.includes('QUEUE DURABILITY') && text.includes('AUTOSCALING SKELETON') && text.includes('WORKER LOAD VALIDATION') && text.includes('WORKER RUNBOOK ACTIONS') && Boolean(document.querySelector('#worker-readiness')),
+    hasWorkerRemoteLeaseControls: text.includes('Assign Remote Lease') && typeof assignExecutionJobRemoteLease === 'function' && typeof assignExecutionJobRemoteLeaseFromForm === 'function' && typeof cancelExecutionJob === 'function' && Boolean(document.querySelector('#execution-job-remote-lease-form')),
     hasRemoteComputerReadiness: text.includes('Remote Computers') && text.includes('REMOTE COMPUTER READINESS') && text.includes('STATE FILESYSTEM') && text.includes('Production profile:') && text.includes('RUNNER BOUNDARY') && text.includes('REMOTE COMPUTER LEASE STORE') && text.includes('REMOTE COMPUTER ATTACHMENTS') && text.includes('REMOTE COMPUTER STATE LOCKS') && text.includes('REMOTE ARTIFACT DISCOVERY') && text.includes('REMOTE COMPUTER SIDECAR HEARTBEATS') && text.includes('Supervision:') && text.includes('Artifact discovery sidecar') && text.includes('Discover Remote Artifacts') && text.includes('Acquire State Lock') && text.includes('Validate State Sync') && text.includes('REMOTE COMPUTER RUNBOOK') && Boolean(document.querySelector('#remote-computer-readiness')) && Boolean(document.querySelector('#validate-remote-state-sync')),
     hasRemoteComputerLifecycle: text.includes('Register Remote Computer') && text.includes('Create Remote Lease') && text.includes('Reclaim Stale Remote Computers') && typeof createRemoteComputer === 'function' && typeof createRemoteComputerLease === 'function' && typeof updateRemoteComputerLease === 'function' && typeof reclaimStaleRemoteComputers === 'function' && Boolean(document.querySelector('#remote-computer-form')) && Boolean(document.querySelector('#remote-computer-lease-form')) && Boolean(document.querySelector('#reclaim-remote-computers')),
     hasRemoteComputerRunnerOps: text.includes('Dry-run Runner') && text.includes('Mutate Runner') && text.includes('Supported operations:') && typeof dryRunRemoteRunner === 'function' && typeof mutateRemoteRunner === 'function' && typeof remoteRunnerPayload === 'function' && Boolean(document.querySelector('#remote-runner-form')) && Boolean(document.querySelector('#dry-run-remote-runner')) && Boolean(document.querySelector('#mutate-remote-runner')),
@@ -121,6 +122,7 @@ wait_for_static_ui() {
     && result.hasReleasePromotionWorkflow
     && result.hasAgentReleases
     && result.hasWorkerDashboard
+    && result.hasWorkerRemoteLeaseControls
     && result.hasRemoteComputerReadiness
     && result.hasRemoteComputerLifecycle
     && result.hasRemoteComputerRunnerOps
@@ -210,6 +212,13 @@ grep -q "workerReadiness" /tmp/mandoforge-actionbook-app.js
 grep -q "workerLoadValidationRun" /tmp/mandoforge-actionbook-app.js
 grep -q "worker-readiness" /tmp/mandoforge-actionbook-index.html
 grep -q "run-worker-load-validation" /tmp/mandoforge-actionbook-index.html
+grep -q "execution-job-remote-lease-form" /tmp/mandoforge-actionbook-index.html
+grep -q "Assign Remote Lease" /tmp/mandoforge-actionbook-index.html
+grep -q "assignExecutionJobRemoteLease" /tmp/mandoforge-actionbook-app.js
+grep -q "cancelExecutionJob" /tmp/mandoforge-actionbook-app.js
+grep -q "/api/execution-jobs/" /tmp/mandoforge-actionbook-app.js
+grep -q "/remote-computer-lease" /tmp/mandoforge-actionbook-app.js
+grep -q "/cancel" /tmp/mandoforge-actionbook-app.js
 grep -q "remote-computer-readiness" /tmp/mandoforge-actionbook-index.html
 grep -q "remote-computer-form" /tmp/mandoforge-actionbook-index.html
 grep -q "remote-computer-lease-form" /tmp/mandoforge-actionbook-index.html
