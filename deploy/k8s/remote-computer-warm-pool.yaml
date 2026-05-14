@@ -49,6 +49,41 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+        - name: artifact-discovery
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/opt/mandoforge/discover-artifacts.py"]
+          env:
+            - name: MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED
+              value: "false"
+            - name: MANDOFORGE_API_URL
+              value: "http://mandoforge-api:8080"
+            - name: MANDOFORGE_ARTIFACT_DIR
+              value: "/workspace/artifacts"
+            - name: MANDOFORGE_ARTIFACT_DISCOVERY_INTERVAL_SECONDS
+              value: "30"
+            - name: MANDOFORGE_ARTIFACT_DISCOVERY_MAX_FILES
+              value: "50"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+            - name: artifact-discovery
+              mountPath: /opt/mandoforge
+              readOnly: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
       volumes:
         - name: state
           persistentVolumeClaim:
@@ -58,3 +93,6 @@ spec:
             name: mandoforge-remote-computer-state-contract
         - name: workspace
           emptyDir: {}
+        - name: artifact-discovery
+          configMap:
+            name: mandoforge-remote-computer-artifact-discovery

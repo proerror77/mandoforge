@@ -51,7 +51,7 @@ Covered today:
 - K8s Remote Computer manifests exist for the Pod template, service account, state PVC placeholder, and NetworkPolicy skeleton.
 - A mounted state-contract ConfigMap now defines the `/agent-state` layout for Memory, Notes, Skills, artifacts, lock files, and manifests. The contract records the current conflict rule: one active writer per session workspace, with shared Memory/Notes/Skills kept read-mostly until a lock-aware sync manager is configured.
 - A JuiceFS CSI example manifest documents the target shared `/agent-state` provider shape, but it is not included in the default kustomization and must be configured explicitly before use.
-- A warm-pool Deployment example documents the cold-start mitigation shape, but it is not included in the default kustomization and does not yet assign sessions to prestarted Pods.
+- A warm-pool Deployment example documents the cold-start mitigation shape, but it is not included in the default kustomization and does not yet assign sessions to prestarted Pods. It now keeps the same fail-closed artifact discovery sidecar shape as the regular Remote Computer Pod template so prewarmed Pods do not diverge from the eventual session Pod contract.
 - A KEDA ScaledObject example documents the queue-pressure scaling shape for the warm pool, but it is not included in the default kustomization and depends on production metrics work.
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
@@ -75,7 +75,7 @@ Not covered today:
 - No real distributed Memory/Notes/Skills mount in the default deployment; the default deployment now has only the mounted state layout and conflict contract.
 - No production distributed filesystem integration yet; JuiceFS exists as an example manifest only, while CephFS, Longhorn RWX, cloud file storage, or object-backed sync remain future provider options.
 - No production warm pool assignment; the warm-pool manifest is an opt-in skeleton only.
-- No artifact/state sync daemon inside the Pod.
+- The artifact discovery sidecar is present but disabled by default; there is still no production artifact/state sync daemon running against real leased Pods.
 - No production KEDA/HPA queue-depth scaling for remote computer pools; the KEDA manifest is an opt-in example only.
 - No production Kubernetes mutation rollout; the current adapter has a gated Pod API create/delete boundary only.
 - No Kubernetes Pod mutation from the scheduler; reclaim remains metadata-only.
@@ -209,6 +209,7 @@ Stage 2 acceptance for this slice:
 
 - Readiness endpoint accurately reports whether Pod template, PVC/RWX storage, service account, NetworkPolicy, and autoscaling manifests exist.
 - Kustomize renders the remote computer manifest.
+- The opt-in warm-pool render keeps artifact discovery sidecar parity with the regular Remote Computer Pod template.
 - UI renders readiness without requiring a live cluster.
 - Runner readiness and dry-run routes are Admin-only, audited, and fail closed without mutating Kubernetes.
 - Session attachment APIs persist attach/release/stale evidence without creating jobs or tool calls.

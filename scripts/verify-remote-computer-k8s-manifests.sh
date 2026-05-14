@@ -44,4 +44,14 @@ if ! grep -q "kind: ScaledObject" /tmp/mandoforge-remote-computer-pilot-render.o
   exit 1
 fi
 
+if ! awk '
+  /name: mandoforge-agent-remote-computer-warm-pool/ { in_warm_pool = 1 }
+  in_warm_pool && /name: artifact-discovery/ { found_sidecar = 1 }
+  in_warm_pool && /name: mandoforge-remote-computer-artifact-discovery/ { found_config = 1 }
+  END { exit !(found_sidecar && found_config) }
+' /tmp/mandoforge-remote-computer-pilot-render.out; then
+  echo "Remote Computer warm-pool render is missing artifact discovery sidecar parity" >&2
+  exit 1
+fi
+
 echo "remote computer k8s manifests ok"
