@@ -221,7 +221,13 @@ while IFS= read -r encoded; do
   : >"$missing_required_evidence_artifacts"
 
   jq -r '.required_evidence[]?' <<<"$req_json" >"$required_evidence"
-  required_evidence_artifacts_for_requirement "$req_id" >"$required_evidence_artifacts"
+  if jq -e '(.required_artifacts // []) | length > 0' <<<"$req_json" >/dev/null; then
+    jq -r --arg evidence_dir "$SOURCE_EVIDENCE_DIR" \
+      '(.required_artifacts // [])[] | $evidence_dir + "/" + .' \
+      <<<"$req_json" >"$required_evidence_artifacts"
+  else
+    required_evidence_artifacts_for_requirement "$req_id" >"$required_evidence_artifacts"
+  fi
 
   while IFS= read -r endpoint; do
     [[ -z "$endpoint" ]] && continue

@@ -19,6 +19,13 @@ cleanup() {
   fi
   if [[ -n "${CHROME_PID:-}" ]]; then
     kill "$CHROME_PID" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      if ! kill -0 "$CHROME_PID" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+    kill -9 "$CHROME_PID" >/dev/null 2>&1 || true
     wait "$CHROME_PID" 2>/dev/null || true
   fi
 }
@@ -200,6 +207,10 @@ grep -q "validateObservabilityCollectorCluster" /tmp/mandoforge-actionbook-app.j
 grep -q "validate-observability-collector-cluster" /tmp/mandoforge-actionbook-index.html
 grep -q "stage2Readiness" /tmp/mandoforge-actionbook-app.js
 grep -q "evidence_requirements" /tmp/mandoforge-actionbook-app.js
+grep -q "evidence_scripts" /tmp/mandoforge-actionbook-app.js
+grep -q "evidence_job_manifests" /tmp/mandoforge-actionbook-app.js
+grep -q "required_flags" /tmp/mandoforge-actionbook-app.js
+grep -q "required_artifacts" /tmp/mandoforge-actionbook-app.js
 grep -q "Stage 2 Evidence Checklist" /tmp/mandoforge-actionbook-app.js
 grep -q "/api/stage2/readiness" /tmp/mandoforge-actionbook-app.js
 grep -q "Create Judge Profile" /tmp/mandoforge-actionbook-index.html

@@ -2174,8 +2174,11 @@ function renderOps() {
                 <tr>
                   <th>Area</th>
                   <th>Target</th>
+                  <th>Evidence Gate</th>
                   <th>Readiness</th>
                   <th>Validation</th>
+                  <th>Flags</th>
+                  <th>Artifacts</th>
                 </tr>
               </thead>
               <tbody>
@@ -2187,8 +2190,14 @@ function renderOps() {
                         <div class="muted">${escapeHtml(requirement.gap || "No open gap mapped")}</div>
                       </td>
                       <td>${escapeHtml(requirement.production_target || "unknown")}</td>
+                      <td>
+                        ${(requirement.evidence_scripts || []).map((script) => `<code>${escapeHtml(script)}</code>`).join("<br>")}
+                        ${(requirement.evidence_job_manifests || []).map((manifest) => `<div><code>${escapeHtml(manifest)}</code></div>`).join("")}
+                      </td>
                       <td>${(requirement.readiness_endpoints || []).map((endpoint) => `<code>${escapeHtml(endpoint)}</code>`).join("<br>")}</td>
                       <td>${(requirement.validation_endpoints || []).map((endpoint) => `<code>${escapeHtml(endpoint)}</code>`).join("<br>")}</td>
+                      <td>${(requirement.required_flags || []).map((flag) => `<code>${escapeHtml(flag)}</code>`).join("<br>")}</td>
+                      <td>${(requirement.required_artifacts || []).map((artifact) => `<code>${escapeHtml(artifact)}</code>`).join("<br>")}</td>
                     </tr>`
                   )
                   .join("")}

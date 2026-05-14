@@ -58,6 +58,10 @@ index_patterns=(
 app_patterns=(
   "stage2Readiness"
   "evidence_requirements"
+  "evidence_scripts"
+  "evidence_job_manifests"
+  "required_flags"
+  "required_artifacts"
   "createRemoteComputer"
   "createRemoteComputerLease"
   "attachRemoteComputerLease"
