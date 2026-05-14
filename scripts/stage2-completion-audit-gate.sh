@@ -8,6 +8,8 @@ SOURCE_EVIDENCE_DIR="${SOURCE_EVIDENCE_DIR:-${STAGE2_EVIDENCE_DIR:-.mandoforge/s
 AUDIT_DIR="${AUDIT_DIR:-.mandoforge/stage2-completion-audit}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 TEAM_ID="${MANDOFORGE_STAGE2_TEAM_ID:-}"
+CONTROLLER_ENV_TEMPLATE="${CONTROLLER_ENV_TEMPLATE:-deploy/stage2-evidence/stage2-production-controllers.env.example}"
+CONTROLLER_SECRET_TEMPLATE="${CONTROLLER_SECRET_TEMPLATE:-deploy/stage2-evidence/stage2-controller-env-secret.example.yaml}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -189,6 +191,9 @@ total_missing_readiness=0
 total_missing_validation=0
 total_missing_required_evidence=0
 total_unresolved=0
+total_missing_evidence_scripts=0
+total_missing_evidence_job_manifests=0
+total_missing_required_flags=0
 
 while IFS= read -r encoded; do
   req_json="$(printf '%s' "$encoded" | base64 -d)"
@@ -205,6 +210,12 @@ while IFS= read -r encoded; do
   missing_validation="$tmp_dir/$req_id.missing-validation"
   unresolved_endpoints="$tmp_dir/$req_id.unresolved"
   required_evidence="$tmp_dir/$req_id.required-evidence"
+  evidence_scripts="$tmp_dir/$req_id.evidence-scripts"
+  evidence_job_manifests="$tmp_dir/$req_id.evidence-job-manifests"
+  required_flags="$tmp_dir/$req_id.required-flags"
+  missing_evidence_scripts="$tmp_dir/$req_id.missing-evidence-scripts"
+  missing_evidence_job_manifests="$tmp_dir/$req_id.missing-evidence-job-manifests"
+  missing_required_flags="$tmp_dir/$req_id.missing-required-flags"
   required_evidence_artifacts="$tmp_dir/$req_id.required-evidence-artifacts"
   present_required_evidence_artifacts="$tmp_dir/$req_id.present-required-evidence-artifacts"
   missing_required_evidence_artifacts="$tmp_dir/$req_id.missing-required-evidence-artifacts"
@@ -216,11 +227,20 @@ while IFS= read -r encoded; do
   : >"$missing_readiness"
   : >"$missing_validation"
   : >"$unresolved_endpoints"
+  : >"$evidence_scripts"
+  : >"$evidence_job_manifests"
+  : >"$required_flags"
+  : >"$missing_evidence_scripts"
+  : >"$missing_evidence_job_manifests"
+  : >"$missing_required_flags"
   : >"$required_evidence_artifacts"
   : >"$present_required_evidence_artifacts"
   : >"$missing_required_evidence_artifacts"
 
   jq -r '.required_evidence[]?' <<<"$req_json" >"$required_evidence"
+  jq -r '.evidence_scripts[]?' <<<"$req_json" >"$evidence_scripts"
+  jq -r '.evidence_job_manifests[]?' <<<"$req_json" >"$evidence_job_manifests"
+  jq -r '.required_flags[]?' <<<"$req_json" >"$required_flags"
   if jq -e '(.required_artifacts // []) | length > 0' <<<"$req_json" >/dev/null; then
     jq -r --arg evidence_dir "$SOURCE_EVIDENCE_DIR" \
       '(.required_artifacts // [])[] | $evidence_dir + "/" + .' \
@@ -290,10 +310,42 @@ while IFS= read -r encoded; do
     fi
   done <"$required_evidence_artifacts"
 
+  while IFS= read -r script_path; do
+    [[ -z "$script_path" ]] && continue
+    if [[ ! -x "$script_path" ]]; then
+      echo "$script_path" >>"$missing_evidence_scripts"
+    fi
+  done <"$evidence_scripts"
+
+  while IFS= read -r manifest_path; do
+    [[ -z "$manifest_path" ]] && continue
+    if [[ ! -s "$manifest_path" ]]; then
+      echo "$manifest_path" >>"$missing_evidence_job_manifests"
+    fi
+  done <"$evidence_job_manifests"
+
+  while IFS= read -r required_flag; do
+    [[ -z "$required_flag" ]] && continue
+    flag_name="${required_flag%%=*}"
+    missing_reasons=()
+    if [[ ! -s "$CONTROLLER_ENV_TEMPLATE" ]] || ! grep -q "^${flag_name}=" "$CONTROLLER_ENV_TEMPLATE"; then
+      missing_reasons+=("env-template")
+    fi
+    if [[ ! -s "$CONTROLLER_SECRET_TEMPLATE" ]] || ! grep -q "^[[:space:]]*${flag_name}:" "$CONTROLLER_SECRET_TEMPLATE"; then
+      missing_reasons+=("secret-template")
+    fi
+    if [[ "${#missing_reasons[@]}" -gt 0 ]]; then
+      printf '%s missing:%s\n' "$required_flag" "$(IFS=,; echo "${missing_reasons[*]}")" >>"$missing_required_flags"
+    fi
+  done <"$required_flags"
+
   missing_readiness_count="$(grep -c . "$missing_readiness" || true)"
   missing_validation_count="$(grep -c . "$missing_validation" || true)"
   missing_required_evidence_count="$(grep -c . "$missing_required_evidence_artifacts" || true)"
   unresolved_count="$(grep -c . "$unresolved_endpoints" || true)"
+  missing_evidence_script_count="$(grep -c . "$missing_evidence_scripts" || true)"
+  missing_evidence_job_manifest_count="$(grep -c . "$missing_evidence_job_manifests" || true)"
+  missing_required_flag_count="$(grep -c . "$missing_required_flags" || true)"
   readiness_artifact_count="$(grep -c . "$readiness_artifacts" || true)"
   validation_artifact_count="$(grep -c . "$validation_artifacts" || true)"
   required_evidence_artifact_count="$(grep -c . "$present_required_evidence_artifacts" || true)"
@@ -302,9 +354,12 @@ while IFS= read -r encoded; do
   total_missing_validation=$((total_missing_validation + missing_validation_count))
   total_missing_required_evidence=$((total_missing_required_evidence + missing_required_evidence_count))
   total_unresolved=$((total_unresolved + unresolved_count))
+  total_missing_evidence_scripts=$((total_missing_evidence_scripts + missing_evidence_script_count))
+  total_missing_evidence_job_manifests=$((total_missing_evidence_job_manifests + missing_evidence_job_manifest_count))
+  total_missing_required_flags=$((total_missing_required_flags + missing_required_flag_count))
 
   req_status="blocked"
-  if [[ "$completion_blocked" != "true" && "$missing_readiness_count" == "0" && "$missing_validation_count" == "0" ]]; then
+  if [[ "$completion_blocked" != "true" && "$missing_readiness_count" == "0" && "$missing_validation_count" == "0" && "$missing_required_evidence_count" == "0" && "$missing_evidence_script_count" == "0" && "$missing_evidence_job_manifest_count" == "0" && "$missing_required_flag_count" == "0" ]]; then
     req_status="ready"
   fi
 
@@ -314,9 +369,15 @@ while IFS= read -r encoded; do
     --arg gap "$req_gap" \
     --arg production_target "$production_target" \
     --arg status "$req_status" \
+    --argjson evidence_scripts "$(json_array_from_file "$evidence_scripts")" \
+    --argjson evidence_job_manifests "$(json_array_from_file "$evidence_job_manifests")" \
+    --argjson required_flags "$(json_array_from_file "$required_flags")" \
     --argjson readiness_endpoints "$(json_array_from_file "$readiness_declared")" \
     --argjson validation_endpoints "$(json_array_from_file "$validation_declared")" \
     --argjson required_evidence "$(json_array_from_file "$required_evidence")" \
+    --argjson missing_evidence_scripts "$(json_array_from_file "$missing_evidence_scripts")" \
+    --argjson missing_evidence_job_manifests "$(json_array_from_file "$missing_evidence_job_manifests")" \
+    --argjson missing_required_flags "$(json_array_from_file "$missing_required_flags")" \
     --argjson readiness_artifacts "$(json_array_from_file "$readiness_artifacts")" \
     --argjson validation_artifacts "$(json_array_from_file "$validation_artifacts")" \
     --argjson required_evidence_artifacts "$(json_array_from_file "$required_evidence_artifacts")" \
@@ -328,6 +389,9 @@ while IFS= read -r encoded; do
     --argjson readiness_artifact_count "$readiness_artifact_count" \
     --argjson validation_artifact_count "$validation_artifact_count" \
     --argjson required_evidence_artifact_count "$required_evidence_artifact_count" \
+    --argjson missing_evidence_script_count "$missing_evidence_script_count" \
+    --argjson missing_evidence_job_manifest_count "$missing_evidence_job_manifest_count" \
+    --argjson missing_required_flag_count "$missing_required_flag_count" \
     --argjson missing_readiness_count "$missing_readiness_count" \
     --argjson missing_validation_count "$missing_validation_count" \
     --argjson missing_required_evidence_count "$missing_required_evidence_count" \
@@ -337,9 +401,15 @@ while IFS= read -r encoded; do
       gap: $gap,
       production_target: $production_target,
       status: $status,
+      evidence_scripts: $evidence_scripts,
+      evidence_job_manifests: $evidence_job_manifests,
+      required_flags: $required_flags,
       readiness_endpoints: $readiness_endpoints,
       validation_endpoints: $validation_endpoints,
       required_evidence: $required_evidence,
+      missing_evidence_scripts: $missing_evidence_scripts,
+      missing_evidence_job_manifests: $missing_evidence_job_manifests,
+      missing_required_flags: $missing_required_flags,
       readiness_artifacts: $readiness_artifacts,
       validation_artifacts: $validation_artifacts,
       required_evidence_artifacts: $required_evidence_artifacts,
@@ -351,6 +421,9 @@ while IFS= read -r encoded; do
       readiness_artifact_count: $readiness_artifact_count,
       validation_artifact_count: $validation_artifact_count,
       required_evidence_artifact_count: $required_evidence_artifact_count,
+      missing_evidence_script_count: $missing_evidence_script_count,
+      missing_evidence_job_manifest_count: $missing_evidence_job_manifest_count,
+      missing_required_flag_count: $missing_required_flag_count,
       missing_readiness_count: $missing_readiness_count,
       missing_validation_count: $missing_validation_count,
       missing_required_evidence_count: $missing_required_evidence_count
@@ -363,6 +436,8 @@ jq -s \
   --arg base_url "$BASE_URL" \
   --arg source_evidence_dir "$SOURCE_EVIDENCE_DIR" \
   --arg audit_dir "$AUDIT_DIR" \
+  --arg controller_env_template "$CONTROLLER_ENV_TEMPLATE" \
+  --arg controller_secret_template "$CONTROLLER_SECRET_TEMPLATE" \
   --arg status "$status" \
   --arg objective "$objective" \
   --arg completion_blocked "$completion_blocked" \
@@ -372,11 +447,16 @@ jq -s \
   --argjson missing_validation_endpoint_count "$total_missing_validation" \
   --argjson missing_required_evidence_artifact_count "$total_missing_required_evidence" \
   --argjson unresolved_endpoint_count "$total_unresolved" \
+  --argjson missing_evidence_script_count "$total_missing_evidence_scripts" \
+  --argjson missing_evidence_job_manifest_count "$total_missing_evidence_job_manifests" \
+  --argjson missing_required_flag_count "$total_missing_required_flags" \
   '{
     generated_at: $generated_at,
     base_url: $base_url,
     source_evidence_dir: $source_evidence_dir,
     audit_dir: $audit_dir,
+    controller_env_template: $controller_env_template,
+    controller_secret_template: $controller_secret_template,
     stage2_status: $status,
     objective: $objective,
     completion_blocked: ($completion_blocked == "true"),
@@ -386,6 +466,9 @@ jq -s \
     missing_validation_endpoint_count: $missing_validation_endpoint_count,
     missing_required_evidence_artifact_count: $missing_required_evidence_artifact_count,
     unresolved_endpoint_count: $unresolved_endpoint_count,
+    missing_evidence_script_count: $missing_evidence_script_count,
+    missing_evidence_job_manifest_count: $missing_evidence_job_manifest_count,
+    missing_required_flag_count: $missing_required_flag_count,
     requirements: .
   }' "$requirements_jsonl" >"$checklist_json"
 
@@ -396,6 +479,8 @@ checklist_md="$AUDIT_DIR/checklist.md"
   echo "- generated_at: $(jq -r '.generated_at' "$checklist_json")"
   echo "- base_url: $BASE_URL"
   echo "- source_evidence_dir: $SOURCE_EVIDENCE_DIR"
+  echo "- controller_env_template: $CONTROLLER_ENV_TEMPLATE"
+  echo "- controller_secret_template: $CONTROLLER_SECRET_TEMPLATE"
   echo "- stage2_status: $status"
   echo "- completion_blocked: $completion_blocked"
   echo "- open_gap_count: $open_gap_count"
@@ -404,6 +489,9 @@ checklist_md="$AUDIT_DIR/checklist.md"
   echo "- missing_validation_endpoint_count: $total_missing_validation"
   echo "- missing_required_evidence_artifact_count: $total_missing_required_evidence"
   echo "- unresolved_endpoint_count: $total_unresolved"
+  echo "- missing_evidence_script_count: $total_missing_evidence_scripts"
+  echo "- missing_evidence_job_manifest_count: $total_missing_evidence_job_manifests"
+  echo "- missing_required_flag_count: $total_missing_required_flags"
   echo
   echo "## Requirements"
   jq -r '
@@ -415,18 +503,33 @@ checklist_md="$AUDIT_DIR/checklist.md"
       + "- missing_readiness_count: " + (.missing_readiness_count | tostring) + "\n"
       + "- missing_validation_count: " + (.missing_validation_count | tostring) + "\n"
       + "- missing_required_evidence_count: " + (.missing_required_evidence_count | tostring) + "\n"
+      + "- missing_evidence_script_count: " + (.missing_evidence_script_count | tostring) + "\n"
+      + "- missing_evidence_job_manifest_count: " + (.missing_evidence_job_manifest_count | tostring) + "\n"
+      + "- missing_required_flag_count: " + (.missing_required_flag_count | tostring) + "\n"
       + "- readiness_artifacts: " + (.readiness_artifact_count | tostring) + "\n"
       + "- validation_artifacts: " + (.validation_artifact_count | tostring) + "\n"
       + "- required_evidence_artifacts: " + (.required_evidence_artifact_count | tostring) + "\n"
       + "- gap: " + .gap + "\n"
       + "- required_evidence:\n"
       + ((.required_evidence // []) | map("  - " + .) | join("\n")) + "\n"
+      + "- evidence_scripts:\n"
+      + ((.evidence_scripts // []) | map("  - " + .) | join("\n")) + "\n"
+      + "- evidence_job_manifests:\n"
+      + ((.evidence_job_manifests // []) | map("  - " + .) | join("\n")) + "\n"
+      + "- required_flags:\n"
+      + ((.required_flags // []) | map("  - " + .) | join("\n")) + "\n"
       + "- missing_readiness_endpoints:\n"
       + (if (.missing_readiness_endpoints | length) == 0 then "  - <none>" else ((.missing_readiness_endpoints // []) | map("  - " + .) | join("\n")) end) + "\n"
       + "- missing_validation_endpoints:\n"
       + (if (.missing_validation_endpoints | length) == 0 then "  - <none>" else ((.missing_validation_endpoints // []) | map("  - " + .) | join("\n")) end) + "\n"
       + "- missing_required_evidence_artifacts:\n"
       + (if (.missing_required_evidence_artifacts | length) == 0 then "  - <none>" else ((.missing_required_evidence_artifacts // []) | map("  - " + .) | join("\n")) end) + "\n"
+      + "- missing_evidence_scripts:\n"
+      + (if (.missing_evidence_scripts | length) == 0 then "  - <none>" else ((.missing_evidence_scripts // []) | map("  - " + .) | join("\n")) end) + "\n"
+      + "- missing_evidence_job_manifests:\n"
+      + (if (.missing_evidence_job_manifests | length) == 0 then "  - <none>" else ((.missing_evidence_job_manifests // []) | map("  - " + .) | join("\n")) end) + "\n"
+      + "- missing_required_flags:\n"
+      + (if (.missing_required_flags | length) == 0 then "  - <none>" else ((.missing_required_flags // []) | map("  - " + .) | join("\n")) end) + "\n"
   ' "$checklist_json"
 } >"$checklist_md"
 
@@ -437,9 +540,9 @@ if [[ "$completion_blocked" == "true" && "$ALLOW_BLOCKED" != "1" ]]; then
   exit 1
 fi
 
-if [[ "$total_missing_readiness" != "0" || "$total_missing_validation" != "0" || "$total_missing_required_evidence" != "0" || "$total_unresolved" != "0" ]]; then
+if [[ "$total_missing_readiness" != "0" || "$total_missing_validation" != "0" || "$total_missing_required_evidence" != "0" || "$total_unresolved" != "0" || "$total_missing_evidence_scripts" != "0" || "$total_missing_evidence_job_manifests" != "0" || "$total_missing_required_flags" != "0" ]]; then
   if [[ "$ALLOW_BLOCKED" != "1" ]]; then
-    echo "Stage 2 completion audit gate failed closed because required evidence artifacts are missing." >&2
+    echo "Stage 2 completion audit gate failed closed because required evidence metadata or artifacts are missing." >&2
     exit 1
   fi
 fi

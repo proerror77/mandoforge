@@ -1041,4 +1041,24 @@ if ! grep -q "manifest_file=" "$archive_script"; then
   exit 1
 fi
 
+if ! grep -q "COPY deploy ./deploy" Dockerfile; then
+  echo "Runtime image must package deploy metadata for in-cluster completion audits" >&2
+  exit 1
+fi
+
+if ! grep -q "missing_evidence_script_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must report missing evidence scripts" >&2
+  exit 1
+fi
+
+if ! grep -q "missing_evidence_job_manifest_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must report missing evidence Job manifests" >&2
+  exit 1
+fi
+
+if ! grep -q "missing_required_flag_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must report missing required controller flags" >&2
+  exit 1
+fi
+
 echo "stage2 evidence k8s manifests ok"

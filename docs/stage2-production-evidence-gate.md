@@ -49,9 +49,9 @@ SOURCE_EVIDENCE_DIR=.mandoforge/stage2-production-evidence \
 ./scripts/stage2-completion-audit-gate.sh
 ```
 
-This fetches `GET /api/stage2/readiness`, maps every `evidence_requirements[]` entry to the endpoint JSON artifacts in the source evidence directory, and writes `.mandoforge/stage2-completion-audit/checklist.md` plus `.mandoforge/stage2-completion-audit/checklist.json`. It exits non-zero by default while Stage 2 readiness is blocked or required endpoint artifacts are missing. `ALLOW_BLOCKED=1` is only for inventory and should not be used as completion proof.
+This fetches `GET /api/stage2/readiness`, maps every `evidence_requirements[]` entry to the endpoint JSON artifacts in the source evidence directory, verifies declared evidence scripts, Job manifests, required controller flags, and required evidence artifacts, and writes `.mandoforge/stage2-completion-audit/checklist.md` plus `.mandoforge/stage2-completion-audit/checklist.json`. It exits non-zero by default while Stage 2 readiness is blocked or required endpoint artifacts, scripts, manifests, or flags are missing. `ALLOW_BLOCKED=1` is only for inventory and should not be used as completion proof.
 
-The matching in-cluster template is `deploy/stage2-evidence/stage2-completion-audit-job.example.yaml`. It mounts the same Stage 2 production evidence PVC, reads endpoint artifacts from `/evidence`, writes the checklist to `/evidence/completion-audit`, and remains fail-closed unless the production readiness gate and artifact coverage are complete.
+The matching in-cluster template is `deploy/stage2-evidence/stage2-completion-audit-job.example.yaml`. It mounts the same Stage 2 production evidence PVC, reads endpoint artifacts from `/evidence`, checks the packaged `scripts/` and `deploy/` metadata in the runtime image, writes the checklist to `/evidence/completion-audit`, and remains fail-closed unless the production readiness gate and artifact coverage are complete.
 
 For a narrower collector rollout proof, run the dedicated observability collector gate:
 

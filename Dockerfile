@@ -13,6 +13,7 @@ COPY --from=builder /app/target/release/mandoforge-api /usr/local/bin/mandoforge
 COPY --from=builder /app/target/release/mandoforge-worker /usr/local/bin/mandoforge-worker
 COPY web ./web
 COPY scripts ./scripts
+COPY deploy ./deploy
 USER mandoforge
 EXPOSE 8787
 CMD ["mandoforge-api"]
