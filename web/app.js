@@ -2194,6 +2194,11 @@ function renderCodexAppServer() {
   const deploymentReadiness = controlSummary?.deployment_readiness || {};
   const controlAttention = controlSummary?.attention_items || [];
   const traceDetail = codex.traceDetail;
+  const traceStatusBreakdown = renderCountTable("Trace Status Breakdown", traceSummary?.by_status);
+  const traceOperationBreakdown = renderCountTable(
+    "Trace Operation Breakdown",
+    traceSummary?.by_operation,
+  );
   const traceRows = (traceSummary?.traces || [])
     .slice(0, 8)
     .map(
@@ -2206,6 +2211,7 @@ function renderCodexAppServer() {
           <td>${escapeHtml(trace.next_action || "none")}</td>
           <td>${formatDurationSeconds(trace.duration_seconds)}</td>
           <td>${escapeHtml((trace.operations || []).join(", "))}</td>
+          <td>${escapeHtml((trace.command_ids || []).join(", ") || "none")}</td>
           <td>${escapeHtml(trace.last_seen_at)}</td>
           <td><button type="button" class="secondary" data-codex-trace="${escapeHtml(trace.trace_key)}">Detail</button></td>
         </tr>
@@ -2220,6 +2226,12 @@ function renderCodexAppServer() {
         <div class="metric"><span>Active</span><strong>${formatInteger(traceSummary.active_turn_count)}</strong></div>
         <div class="metric"><span>Failed</span><strong>${formatInteger(traceSummary.failed_turn_count)}</strong></div>
       </div>
+      <div class="muted">Status: ${escapeHtml(formatCounts(traceSummary.by_status))}</div>
+      <div class="muted">Operations: ${escapeHtml(formatCounts(traceSummary.by_operation))}</div>
+      <div class="trace-breakdown-grid">
+        ${traceStatusBreakdown}
+        ${traceOperationBreakdown}
+      </div>
       ${
         traceRows
           ? `<table class="usage-table">
@@ -2232,6 +2244,7 @@ function renderCodexAppServer() {
                   <th>Next</th>
                   <th>Duration</th>
                   <th>Operations</th>
+                  <th>Commands</th>
                   <th>Last Seen</th>
                   <th>Detail</th>
                 </tr>
@@ -2261,6 +2274,35 @@ function renderCodexAppServer() {
           )
           .join("")}
       </div>
+      <div class="trace-breakdown-grid">
+        ${renderCountTable("Trace Detail Operations", traceDetail.by_operation)}
+        ${renderCountTable("Trace Detail Status", traceDetail.by_status)}
+      </div>
+      ${
+        (traceDetail.errors || []).length
+          ? `<h5>Trace Errors</h5>
+            <table class="usage-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${(traceDetail.errors || [])
+                  .map(
+                    (error, index) => `
+                      <tr>
+                        <td>${formatInteger(index + 1)}</td>
+                        <td>${escapeHtml(JSON.stringify(error))}</td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>`
+          : `<div class="muted">No trace errors recorded.</div>`
+      }
       ${
         (traceDetail.status_timeline || []).length
           ? `<table class="usage-table">
@@ -3980,6 +4022,41 @@ function formatCounts(counts) {
   return entries.length
     ? entries.map(([key, value]) => `${key}: ${formatInteger(value)}`).join(" · ")
     : "none";
+}
+
+function renderCountTable(title, counts) {
+  const entries = Object.entries(counts || {}).sort((left, right) => {
+    const countDelta = Number(right[1] || 0) - Number(left[1] || 0);
+    return countDelta || left[0].localeCompare(right[0]);
+  });
+  if (!entries.length) {
+    return `<div class="detail-panel"><h5>${escapeHtml(title)}</h5><div class="muted">No counts recorded.</div></div>`;
+  }
+  return `
+    <div class="detail-panel">
+      <h5>${escapeHtml(title)}</h5>
+      <table class="compact-table">
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>Count</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${entries
+            .map(
+              ([key, value]) => `
+                <tr>
+                  <td>${escapeHtml(key)}</td>
+                  <td>${formatInteger(value)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function formatCents(value) {
