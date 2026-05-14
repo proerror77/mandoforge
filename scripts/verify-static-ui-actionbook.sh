@@ -58,7 +58,7 @@ wait_for_static_ui() {
     hasObservabilityDashboard: text.includes('Observability') && text.includes('Telemetry / Backpressure / Error Events') && text.includes('Run Remediation') && text.includes('Validate Collector Cluster') && Boolean(document.querySelector('#observability-summary')),
     hasCollectorReadiness: text.includes('COLLECTOR READINESS') && text.includes('COLLECTOR ENDPOINT') && text.includes('HEALTH MESSAGE') && (text.includes('CLUSTER ROLLOUT') || text.includes('Cluster rollout')) && Boolean(document.querySelector('#validate-observability-collector-cluster')),
     hasCostAlertRoutes: text.includes('Create Alert Route') && Array.from(document.querySelectorAll('#cost-alert-route-form input')).some((input) => input.placeholder.includes('SMTP recipient email')) && text.includes('No cost alert routes'),
-    hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref'),
+    hasProviderCredentialFields: text.includes('API key env var') && text.includes('API key ref') && text.includes('Rotate Provider API Key Ref') && typeof rotateProviderApiKeyRefFromForm === 'function' && Boolean(document.querySelector('#provider-api-key-ref-rotate-form')),
     hasProviderUpdateWorkflow: text.includes('Update Provider') && typeof updateProvider === 'function' && Boolean(document.querySelector('#provider-update-form')),
     hasProviderAccessWorkflow: text.includes('Provider Access') && text.includes('Create Provider Access') && text.includes('Update Provider Access') && text.includes('Archive Provider Access') && typeof createProviderAccess === 'function' && typeof updateProviderAccess === 'function' && typeof archiveProviderAccess === 'function' && Boolean(document.querySelector('#provider-access-form')) && Boolean(document.querySelector('#provider-access-update-form')),
     hasProviderApprovalWorkflow: text.includes('Request Provider Approval') && text.includes('Approver subject'),
@@ -173,6 +173,8 @@ grep -q "renderPolicyDiffSummary" /tmp/mandoforge-actionbook-app.js
 grep -q "policy-diff-table" /tmp/mandoforge-actionbook-app.js
 grep -q "cancelPolicyRollout" /tmp/mandoforge-actionbook-app.js
 grep -q "Archive Provider" /tmp/mandoforge-actionbook-index.html
+grep -q "provider-api-key-ref-rotate-form" /tmp/mandoforge-actionbook-index.html
+grep -q "rotateProviderApiKeyRefFromForm" /tmp/mandoforge-actionbook-app.js
 grep -q "pollCodexRun" /tmp/mandoforge-actionbook-app.js
 grep -q "data-poll-codex-run" /tmp/mandoforge-actionbook-app.js
 grep -q "createEvalJudgeProfile" /tmp/mandoforge-actionbook-app.js

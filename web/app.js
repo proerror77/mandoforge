@@ -214,6 +214,7 @@ const providerUpdateForm = document.querySelector("#provider-update-form");
 const providerAccessForm = document.querySelector("#provider-access-form");
 const providerAccessUpdateForm = document.querySelector("#provider-access-update-form");
 const providerStatusApprovalForm = document.querySelector("#provider-status-approval-form");
+const providerApiKeyRefRotateForm = document.querySelector("#provider-api-key-ref-rotate-form");
 const runProviderPolicyGateButton = document.querySelector("#run-provider-policy-gate");
 const validateProviderDeploymentButton = document.querySelector("#validate-provider-deployment");
 const runProviderProductionRolloutButton = document.querySelector("#run-provider-production-rollout");
@@ -283,6 +284,7 @@ providerUpdateForm.addEventListener("submit", updateProvider);
 providerAccessForm.addEventListener("submit", createProviderAccess);
 providerAccessUpdateForm.addEventListener("submit", updateProviderAccess);
 providerStatusApprovalForm.addEventListener("submit", requestProviderStatusApproval);
+providerApiKeyRefRotateForm.addEventListener("submit", rotateProviderApiKeyRefFromForm);
 runProviderPolicyGateButton.addEventListener("click", runProviderPolicyGate);
 validateProviderDeploymentButton.addEventListener("click", validateProviderDeployment);
 runProviderProductionRolloutButton.addEventListener("click", runProviderProductionRollout);
@@ -789,6 +791,25 @@ async function requestProviderStatusApproval(event) {
     }),
   });
   await refreshOps();
+}
+
+async function rotateProviderApiKeyRefFromForm(event) {
+  event.preventDefault();
+  const form = new FormData(providerApiKeyRefRotateForm);
+  const providerId = String(form.get("provider_id") || "").trim();
+  const apiKeyRef = String(form.get("api_key_ref") || "").trim();
+  await api(`/api/providers/${providerId}/api-key-ref/rotate`, {
+    method: "POST",
+    body: JSON.stringify({ api_key_ref: apiKeyRef }),
+  });
+  await refreshOps();
+}
+
+function selectProviderForApiKeyRefRotation(providerId) {
+  const provider = state.providers.find((item) => item.id === providerId);
+  providerApiKeyRefRotateForm.elements.provider_id.value = providerId;
+  const currentRef = provider?.config?.api_key_ref || "vault:providers/openai/rotated#api_key";
+  providerApiKeyRefRotateForm.elements.api_key_ref.value = currentRef;
 }
 
 async function runProviderPolicyGate() {
@@ -4587,6 +4608,7 @@ function renderProviders() {
               <button class="secondary reject" data-provider-status="${provider.id}" data-status="disabled">Disable</button>
               <button class="secondary reject" data-provider-status="${provider.id}" data-status="archived">Archive Provider</button>
               <button class="secondary" data-provider-health="${provider.id}">Check Health</button>
+              <button class="secondary" data-provider-api-key-ref-rotate="${provider.id}">Rotate API Key Ref</button>
               ${
                 pendingApproval
                   ? `<div class="item">
@@ -4631,6 +4653,11 @@ function renderProviders() {
   });
   providerRoot.querySelectorAll("[data-provider-health]").forEach((button) => {
     button.addEventListener("click", () => checkProviderHealth(button.dataset.providerHealth));
+  });
+  providerRoot.querySelectorAll("[data-provider-api-key-ref-rotate]").forEach((button) => {
+    button.addEventListener("click", () =>
+      selectProviderForApiKeyRefRotation(button.dataset.providerApiKeyRefRotate),
+    );
   });
   providerRoot.querySelectorAll("[data-provider-approval]").forEach((button) => {
     button.addEventListener("click", () =>

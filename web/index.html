@@ -571,6 +571,17 @@
                 </label>
                 <button type="submit">Request Provider Approval</button>
               </form>
+              <form id="provider-api-key-ref-rotate-form" class="stack-form compact-form">
+                <label>
+                  Provider ID
+                  <input name="provider_id" required placeholder="Provider UUID" />
+                </label>
+                <label>
+                  New API key ref
+                  <input name="api_key_ref" required value="vault:providers/openai/rotated#api_key" />
+                </label>
+                <button type="submit">Rotate Provider API Key Ref</button>
+              </form>
               <form id="provider-access-form" class="stack-form compact-form">
                 <label>
                   Team ID
