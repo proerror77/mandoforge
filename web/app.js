@@ -62,6 +62,7 @@ const state = {
   remoteComputerSidecarHeartbeats: [],
   remoteComputerArtifactDiscovery: null,
   remoteComputerSidecarRecoveryRun: null,
+  remoteComputerReclaimRun: null,
   usageRollups: [],
   usageTrend: null,
   usageFinanceSummary: null,
@@ -168,6 +169,9 @@ const workerReadinessRoot = document.querySelector("#worker-readiness");
 const runWorkerLoadValidationButton = document.querySelector("#run-worker-load-validation");
 const remoteComputerReadinessRoot = document.querySelector("#remote-computer-readiness");
 const validateRemoteStateSyncButton = document.querySelector("#validate-remote-state-sync");
+const reclaimRemoteComputersButton = document.querySelector("#reclaim-remote-computers");
+const remoteComputerForm = document.querySelector("#remote-computer-form");
+const remoteComputerLeaseForm = document.querySelector("#remote-computer-lease-form");
 const remoteArtifactDiscoveryForm = document.querySelector("#remote-artifact-discovery-form");
 const remoteStateLockForm = document.querySelector("#remote-state-lock-form");
 const usageRoot = document.querySelector("#usage-summary");
@@ -320,6 +324,9 @@ loadEvalCasesButton.addEventListener("click", loadEvalCases);
 refreshExecutionJobsButton.addEventListener("click", refreshExecutionJobs);
 runWorkerLoadValidationButton.addEventListener("click", runWorkerLoadValidation);
 validateRemoteStateSyncButton.addEventListener("click", validateRemoteStateSync);
+reclaimRemoteComputersButton.addEventListener("click", reclaimStaleRemoteComputers);
+remoteComputerForm.addEventListener("submit", createRemoteComputer);
+remoteComputerLeaseForm.addEventListener("submit", createRemoteComputerLease);
 remoteArtifactDiscoveryForm.addEventListener("submit", discoverRemoteArtifacts);
 remoteStateLockForm.addEventListener("submit", acquireRemoteStateLock);
 createUsageRollupButton.addEventListener("click", createUsageRollup);
@@ -2581,6 +2588,7 @@ function renderRemoteComputerReadiness() {
   const artifactDiscovery = state.remoteComputerArtifactDiscovery;
   const sidecarRecoveryRun = state.remoteComputerSidecarRecoveryRun;
   const stateSyncValidation = state.remoteComputerStateSyncValidation;
+  const reclaimRun = state.remoteComputerReclaimRun;
   remoteComputerReadinessRoot.innerHTML = `
     <div class="metrics compact-metrics">
       <div class="metric">
@@ -2659,11 +2667,16 @@ function renderRemoteComputerReadiness() {
       <strong>REMOTE COMPUTER LEASE STORE</strong>
       <div class="muted">${formatInteger(computerRows.length)} computers · ${formatInteger(leaseRows.length)} leases · ${formatInteger(attachmentRows.length)} attachments · ${formatInteger(assignmentRows.length)} job handoffs · ${formatInteger(stateLockRows.length)} state locks · execution remains on approved worker path</div>
       ${
+        reclaimRun
+          ? `<div class="muted">Last reclaim: ${escapeHtml(reclaimRun.status || "unknown")} · stale attachments ${formatInteger(reclaimRun.stale_attachment_count || 0)} · reclaimed attachments ${formatInteger(reclaimRun.reclaimed_attachment_count || 0)} · expired leases ${formatInteger(reclaimRun.expired_lease_count || 0)} · reclaimed leases ${formatInteger(reclaimRun.reclaimed_lease_count || 0)}</div>`
+          : `<div class="muted">No stale Remote Computer reclaim run in this console session</div>`
+      }
+      ${
         computerRows.length
           ? computerRows
               .map(
                 (computer) =>
-                  `<div class="muted">${escapeHtml(computer.name)} · ${escapeHtml(computer.profile)} · ${escapeHtml(computer.status)} · ${escapeHtml(computer.pod_name || "no pod")}</div>`,
+                  `<div class="muted">${escapeHtml(computer.name)} · ${escapeHtml(computer.profile)} · ${escapeHtml(computer.status)} · ${escapeHtml(computer.namespace || "no namespace")} · ${escapeHtml(computer.pod_name || "no pod")} <button class="secondary inline-button" data-fill-remote-lease="${escapeHtml(computer.id)}">Use for Lease</button></div>`,
               )
               .join("")
           : `<div class="muted">No remote computers registered</div>`
@@ -2673,7 +2686,11 @@ function renderRemoteComputerReadiness() {
           ? leaseRows
               .map(
                 (lease) =>
-                  `<div class="muted">lease ${escapeHtml(lease.id)} · ${escapeHtml(lease.status)} · session ${escapeHtml(lease.session_id || "none")}</div>`,
+                  `<div class="muted">lease ${escapeHtml(lease.id)} · ${escapeHtml(lease.status)} · session ${escapeHtml(lease.session_id || "none")} · worker ${escapeHtml(lease.worker_id || "none")} · expires ${escapeHtml(lease.lease_expires_at || "none")} ${
+                    lease.status === "leased"
+                      ? `<button class="secondary inline-button" data-heartbeat-remote-lease="${escapeHtml(lease.id)}">Heartbeat Lease</button> <button class="secondary inline-button" data-release-remote-lease="${escapeHtml(lease.id)}">Release Lease</button> <button class="secondary inline-button" data-fail-remote-lease="${escapeHtml(lease.id)}">Fail Lease</button>`
+                      : ""
+                  }</div>`,
               )
               .join("")
           : `<div class="muted">No remote computer leases</div>`
@@ -2789,6 +2806,18 @@ function renderRemoteComputerReadiness() {
   remoteComputerReadinessRoot.querySelectorAll("[data-release-remote-state-lock]").forEach((button) => {
     button.addEventListener("click", () => releaseRemoteStateLock(button.dataset.releaseRemoteStateLock));
   });
+  remoteComputerReadinessRoot.querySelectorAll("[data-fill-remote-lease]").forEach((button) => {
+    button.addEventListener("click", () => fillRemoteLeaseComputer(button.dataset.fillRemoteLease));
+  });
+  remoteComputerReadinessRoot.querySelectorAll("[data-heartbeat-remote-lease]").forEach((button) => {
+    button.addEventListener("click", () => heartbeatRemoteComputerLease(button.dataset.heartbeatRemoteLease));
+  });
+  remoteComputerReadinessRoot.querySelectorAll("[data-release-remote-lease]").forEach((button) => {
+    button.addEventListener("click", () => updateRemoteComputerLease(button.dataset.releaseRemoteLease, "release"));
+  });
+  remoteComputerReadinessRoot.querySelectorAll("[data-fail-remote-lease]").forEach((button) => {
+    button.addEventListener("click", () => updateRemoteComputerLease(button.dataset.failRemoteLease, "fail"));
+  });
   remoteComputerReadinessRoot.querySelectorAll("[data-run-remote-sidecar-recovery]").forEach((button) => {
     button.addEventListener("click", runRemoteSidecarRecovery);
   });
@@ -2802,6 +2831,81 @@ function formatOptionalSeconds(value) {
 function optionalFormValue(form, name) {
   const value = String(form.get(name) || "").trim();
   return value || undefined;
+}
+
+function optionalNumberFormValue(form, name) {
+  const value = optionalFormValue(form, name);
+  return value ? Number(value) : undefined;
+}
+
+function fillRemoteLeaseComputer(remoteComputerId) {
+  remoteComputerLeaseForm.elements.remote_computer_id.value = remoteComputerId;
+}
+
+async function createRemoteComputer(event) {
+  event.preventDefault();
+  const form = new FormData(remoteComputerForm);
+  await api("/api/remote-computers", {
+    method: "POST",
+    body: JSON.stringify({
+      name: optionalFormValue(form, "name"),
+      profile: optionalFormValue(form, "profile"),
+      namespace: optionalFormValue(form, "namespace"),
+      pod_name: optionalFormValue(form, "pod_name"),
+      workspace_path: optionalFormValue(form, "workspace_path"),
+      state_mount_path: optionalFormValue(form, "state_mount_path"),
+      metadata: {
+        source: "static-admin-console",
+        execution_enabled: false,
+      },
+    }),
+  });
+  await refreshOps();
+}
+
+async function createRemoteComputerLease(event) {
+  event.preventDefault();
+  const form = new FormData(remoteComputerLeaseForm);
+  const remoteComputerId = optionalFormValue(form, "remote_computer_id");
+  if (!remoteComputerId) return;
+  await api(`/api/remote-computers/${remoteComputerId}/leases`, {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: optionalFormValue(form, "session_id"),
+      worker_id: optionalFormValue(form, "worker_id"),
+      lease_seconds: optionalNumberFormValue(form, "lease_seconds"),
+      metadata: {
+        source: "static-admin-console",
+        execution_enabled: false,
+      },
+    }),
+  });
+  await refreshOps();
+}
+
+async function heartbeatRemoteComputerLease(leaseId) {
+  await updateRemoteComputerLease(leaseId, "heartbeat");
+}
+
+async function updateRemoteComputerLease(leaseId, action) {
+  await api(`/api/remote-computer-leases/${leaseId}/${action}`, {
+    method: "POST",
+    body: JSON.stringify({
+      reason: `${action}-from-static-admin-console`,
+      metadata: {
+        source: "static-admin-console",
+        execution_enabled: false,
+      },
+    }),
+  });
+  await refreshOps();
+}
+
+async function reclaimStaleRemoteComputers() {
+  state.remoteComputerReclaimRun = await api("/api/remote-computers/reclaim-stale", {
+    method: "POST",
+  });
+  await refreshOps();
 }
 
 async function discoverRemoteArtifacts(event) {

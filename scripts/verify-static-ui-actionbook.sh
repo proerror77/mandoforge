@@ -82,6 +82,7 @@ wait_for_static_ui() {
     hasAgentReleases: text.includes('AGENT RELEASES') && Boolean(document.querySelector('#agent-releases')),
     hasWorkerDashboard: text.includes('Worker Dashboard') && text.includes('Queue readiness') && text.includes('QUEUE DURABILITY') && text.includes('AUTOSCALING SKELETON') && text.includes('WORKER LOAD VALIDATION') && text.includes('WORKER RUNBOOK ACTIONS') && Boolean(document.querySelector('#worker-readiness')),
     hasRemoteComputerReadiness: text.includes('Remote Computers') && text.includes('REMOTE COMPUTER READINESS') && text.includes('STATE FILESYSTEM') && text.includes('Production profile:') && text.includes('RUNNER BOUNDARY') && text.includes('REMOTE COMPUTER LEASE STORE') && text.includes('REMOTE COMPUTER ATTACHMENTS') && text.includes('REMOTE COMPUTER STATE LOCKS') && text.includes('REMOTE ARTIFACT DISCOVERY') && text.includes('REMOTE COMPUTER SIDECAR HEARTBEATS') && text.includes('Supervision:') && text.includes('Artifact discovery sidecar') && text.includes('Discover Remote Artifacts') && text.includes('Acquire State Lock') && text.includes('Validate State Sync') && text.includes('REMOTE COMPUTER RUNBOOK') && Boolean(document.querySelector('#remote-computer-readiness')) && Boolean(document.querySelector('#validate-remote-state-sync')),
+    hasRemoteComputerLifecycle: text.includes('Register Remote Computer') && text.includes('Create Remote Lease') && text.includes('Reclaim Stale Remote Computers') && typeof createRemoteComputer === 'function' && typeof createRemoteComputerLease === 'function' && typeof updateRemoteComputerLease === 'function' && typeof reclaimStaleRemoteComputers === 'function' && Boolean(document.querySelector('#remote-computer-form')) && Boolean(document.querySelector('#remote-computer-lease-form')) && Boolean(document.querySelector('#reclaim-remote-computers')),
     hasProviderHealthAction: text.includes('Check Health') || text.includes('No stored providers'),
     metricCards: document.querySelectorAll('.metric').length,
     hasUsageRoot: Boolean(document.querySelector('#usage-summary')),
@@ -120,6 +121,7 @@ wait_for_static_ui() {
     && result.hasAgentReleases
     && result.hasWorkerDashboard
     && result.hasRemoteComputerReadiness
+    && result.hasRemoteComputerLifecycle
     && result.hasProviderHealthAction
     && result.hasStage2ReadinessGate
     && result.metricCards >= 4
@@ -207,6 +209,14 @@ grep -q "workerLoadValidationRun" /tmp/mandoforge-actionbook-app.js
 grep -q "worker-readiness" /tmp/mandoforge-actionbook-index.html
 grep -q "run-worker-load-validation" /tmp/mandoforge-actionbook-index.html
 grep -q "remote-computer-readiness" /tmp/mandoforge-actionbook-index.html
+grep -q "remote-computer-form" /tmp/mandoforge-actionbook-index.html
+grep -q "remote-computer-lease-form" /tmp/mandoforge-actionbook-index.html
+grep -q "reclaim-remote-computers" /tmp/mandoforge-actionbook-index.html
+grep -q "createRemoteComputer" /tmp/mandoforge-actionbook-app.js
+grep -q "createRemoteComputerLease" /tmp/mandoforge-actionbook-app.js
+grep -q "updateRemoteComputerLease" /tmp/mandoforge-actionbook-app.js
+grep -q "reclaimStaleRemoteComputers" /tmp/mandoforge-actionbook-app.js
+grep -q "/api/remote-computers/reclaim-stale" /tmp/mandoforge-actionbook-app.js
 grep -q "remoteComputerStateLocks" /tmp/mandoforge-actionbook-app.js
 grep -q "validateRemoteStateSync" /tmp/mandoforge-actionbook-app.js
 grep -q "validate-remote-state-sync" /tmp/mandoforge-actionbook-index.html
