@@ -41,10 +41,22 @@ mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
 eval_release_script="scripts/eval-release-evidence-gate.sh"
 finance_script="scripts/finance-evidence-gate.sh"
 completion_audit_script="scripts/stage2-completion-audit-gate.sh"
+worker_isolated_pool_manifests=(
+  deploy/k8s/worker-isolated-pool.yaml
+  deploy/k8s/worker-isolated-pool-networkpolicy.yaml
+  deploy/k8s/worker-isolated-pool-keda.yaml
+)
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
     echo "missing Stage 2 evidence manifest: $manifest" >&2
+    exit 1
+  fi
+done
+
+for manifest in "${worker_isolated_pool_manifests[@]}"; do
+  if [[ ! -f "$manifest" ]]; then
+    echo "missing isolated worker-pool manifest: $manifest" >&2
     exit 1
   fi
 done
@@ -127,6 +139,7 @@ fi
 kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out
 kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone \
   >/tmp/mandoforge-stage2-production-evidence-kustomize.out
+kubectl kustomize deploy/k8s >/tmp/mandoforge-deploy-kustomize.out
 
 if [[ ! -s /tmp/mandoforge-stage2-evidence-kustomize.out ]]; then
   echo "Stage 2 evidence kustomize render produced no output" >&2
@@ -135,6 +148,21 @@ fi
 
 if [[ ! -s /tmp/mandoforge-stage2-production-evidence-kustomize.out ]]; then
   echo "Stage 2 production evidence kustomize render produced no output" >&2
+  exit 1
+fi
+
+if [[ ! -s /tmp/mandoforge-deploy-kustomize.out ]]; then
+  echo "deploy/k8s kustomize render produced no output" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-worker-isolated" /tmp/mandoforge-deploy-kustomize.out; then
+  echo "deploy/k8s render is missing isolated worker-pool Deployment/NetworkPolicy" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-worker-isolated-queue-depth" /tmp/mandoforge-deploy-kustomize.out; then
+  echo "deploy/k8s render is missing isolated worker-pool KEDA ScaledObject" >&2
   exit 1
 fi
 

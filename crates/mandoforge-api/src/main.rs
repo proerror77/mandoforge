@@ -28111,6 +28111,7 @@ async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessRepor
         "deploy/k8s/worker-hpa.yaml",
         "deploy/k8s/worker-keda.yaml",
         "deploy/k8s/keda.yaml",
+        "deploy/k8s/worker-isolated-pool-keda.yaml",
     ]);
     let load_validation = worker_load_validation_evidence(state).await?;
     let production_ops = build_worker_production_ops_readiness(
@@ -28415,6 +28416,7 @@ where
         "deploy/k8s/worker-hpa.yaml",
         "deploy/k8s/worker-keda.yaml",
         "deploy/k8s/keda.yaml",
+        "deploy/k8s/worker-isolated-pool-keda.yaml",
     ]);
     let controller_configured = worker_load_validation_controller_configured(&lookup);
     let controller_required = worker_load_validation_controller_required(&lookup);
@@ -28429,7 +28431,8 @@ where
     });
     let mut load_validated = lookup_bool(&lookup, "MANDOFORGE_WORKER_LOAD_VALIDATED");
     let mut isolated_worker_pool_configured =
-        lookup_bool(&lookup, "MANDOFORGE_WORKER_ISOLATED_POOL");
+        lookup_bool(&lookup, "MANDOFORGE_WORKER_ISOLATED_POOL")
+            || worker_isolated_pool_configured_from_manifests();
     if controller_configured {
         match execute_worker_load_validation_controller(
             &lookup,
@@ -28617,6 +28620,7 @@ where
             "scale_target_refs": autoscaling.scale_target_refs,
             "trigger_types": autoscaling.trigger_types,
         },
+        "isolated_worker_pool_manifest_configured": worker_isolated_pool_configured_from_manifests(),
     });
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_seconds))
@@ -28660,6 +28664,7 @@ async fn worker_load_validation_evidence(
         &audit_logs,
         worker_load_validation_controller_required(&|key| std::env::var(key).ok()),
         worker_load_validation_controller_configured(&|key| std::env::var(key).ok()),
+        worker_isolated_pool_configured_from_manifests(),
     ))
 }
 
@@ -28667,6 +28672,7 @@ fn worker_load_validation_evidence_from_audit_logs(
     audit_logs: &[AuditLog],
     controller_required: bool,
     controller_configured: bool,
+    manifest_isolated_worker_pool_configured: bool,
 ) -> WorkerLoadValidationEvidence {
     let latest_run = audit_logs
         .iter()
@@ -28689,7 +28695,9 @@ fn worker_load_validation_evidence_from_audit_logs(
         .as_ref()
         .and_then(|log| log.details.get("isolated_worker_pool_configured"))
         .and_then(Value::as_bool)
-        .unwrap_or_else(|| env_bool("MANDOFORGE_WORKER_ISOLATED_POOL"));
+        .unwrap_or_else(|| {
+            env_bool("MANDOFORGE_WORKER_ISOLATED_POOL") || manifest_isolated_worker_pool_configured
+        });
     let status = if load_validated {
         "validated"
     } else if latest_run.is_some() {
@@ -28988,6 +28996,27 @@ fn worker_autoscaling_readiness_from_manifests(paths: &[&str]) -> WorkerAutoscal
         queue_depth_scaling_present,
         validation_status,
     }
+}
+
+fn worker_isolated_pool_configured_from_manifests() -> bool {
+    let isolated_deployment_path = "deploy/k8s/worker-isolated-pool.yaml";
+    let isolated_network_policy_path = "deploy/k8s/worker-isolated-pool-networkpolicy.yaml";
+    let isolated_keda_path = "deploy/k8s/worker-isolated-pool-keda.yaml";
+    let deployment_present = manifest_has_kind_name(
+        isolated_deployment_path,
+        "Deployment",
+        "mandoforge-worker-isolated",
+    );
+    let network_policy_present =
+        network_policy_targets_app(isolated_network_policy_path, "mandoforge-worker-isolated");
+    let autoscaling = worker_autoscaling_readiness_from_manifests(&[isolated_keda_path]);
+    deployment_present
+        && network_policy_present
+        && autoscaling.queue_depth_scaling_present
+        && autoscaling
+            .scale_target_refs
+            .iter()
+            .any(|target| target == "Deployment/mandoforge-worker-isolated")
 }
 
 fn project_file_path(relative_path: &str) -> Option<PathBuf> {
@@ -30316,6 +30345,10 @@ not json
         assert_eq!(payloads[0]["type"], "mandoforge.worker_load_validation");
         assert_eq!(payloads[0]["queue_backend"]["kind"], "nats_jetstream");
         assert_eq!(payloads[0]["worker_mode"], "queue");
+        assert_eq!(
+            payloads[0]["isolated_worker_pool_manifest_configured"],
+            true
+        );
         assert!(payloads[0]["secret"].is_null());
 
         controller_server.abort();
@@ -30446,7 +30479,7 @@ not json
             }),
         );
         let blocked =
-            worker_load_validation_evidence_from_audit_logs(&[env_only_audit], true, false);
+            worker_load_validation_evidence_from_audit_logs(&[env_only_audit], true, false, true);
         assert_eq!(blocked.status, "attention");
         assert!(!blocked.load_validated);
         assert!(
@@ -30476,7 +30509,7 @@ not json
             }),
         );
         let ready =
-            worker_load_validation_evidence_from_audit_logs(&[controller_audit], true, true);
+            worker_load_validation_evidence_from_audit_logs(&[controller_audit], true, true, true);
         assert_eq!(ready.status, "validated");
         assert!(ready.load_validated);
         assert!(ready.latest_controller_validated);
@@ -47914,7 +47947,7 @@ not json
         assert!(worker_readiness.production_ops.queue_depth_autoscaling);
         assert!(!worker_readiness.production_ops.load_validated);
         assert!(
-            !worker_readiness
+            worker_readiness
                 .production_ops
                 .isolated_worker_pool_configured
         );
@@ -47952,6 +47985,12 @@ not json
                 .actions
                 .iter()
                 .any(|action| action == "run_queue_pressure_load_validation")
+        );
+        assert!(
+            !worker_load_validation
+                .actions
+                .iter()
+                .any(|action| action == "configure_isolated_worker_pool")
         );
         let worker_readiness_after_load_run: WorkerReadinessReport = request_json(
             app.clone(),

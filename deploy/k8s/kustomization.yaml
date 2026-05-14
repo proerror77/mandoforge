@@ -14,6 +14,9 @@ resources:
   - worker-networkpolicy.yaml
   - worker-hpa.yaml
   - worker-keda.yaml
+  - worker-isolated-pool.yaml
+  - worker-isolated-pool-networkpolicy.yaml
+  - worker-isolated-pool-keda.yaml
   - scheduler-serviceaccount.yaml
   - scheduler.yaml
   - remote-computer-serviceaccount.yaml

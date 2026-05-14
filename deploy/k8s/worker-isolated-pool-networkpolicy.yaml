@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mandoforge-worker-isolated
+spec:
+  podSelector:
+    matchLabels:
+      app: mandoforge-worker-isolated
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mandoforge-api
+      ports:
+        - protocol: TCP
+          port: 8787
+    - to:
+        - podSelector:
+            matchLabels:
+              app: agent-remote-computer
+      ports:
+        - protocol: TCP
+          port: 8080

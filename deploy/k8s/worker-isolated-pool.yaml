@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mandoforge-worker-isolated
+  labels:
+    app: mandoforge-worker-isolated
+    mandoforge.io/worker-pool: isolated
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mandoforge-worker-isolated
+      mandoforge.io/worker-pool: isolated
+  template:
+    metadata:
+      labels:
+        app: mandoforge-worker-isolated
+        mandoforge.io/worker-pool: isolated
+    spec:
+      serviceAccountName: mandoforge-worker
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/proerror77/mandoforge:latest
+          imagePullPolicy: IfNotPresent
+          command: ["mandoforge-worker"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: BASE_URL
+              value: "http://mandoforge-api:8787"
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WORKER_POOL
+              value: isolated
+            - name: MANDOFORGE_REMOTE_COMPUTER_ASSIGNMENT_MODE
+              value: required
+            - name: POLL_INTERVAL_SECONDS
+              value: "2"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
