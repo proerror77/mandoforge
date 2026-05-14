@@ -193,6 +193,12 @@ run_local_validations() {
   else
     echo "skipping static UI Actionbook validation; set RUN_STAGE2_UI_ACTIONBOOK=1 to include UI smoke evidence" >&2
   fi
+
+  if [[ "${RUN_STAGE2_UI_STATIC_ASSETS:-0}" == "1" ]]; then
+    run_local_script_validation ./scripts/verify-static-ui-assets.sh
+  else
+    echo "skipping static UI asset validation; set RUN_STAGE2_UI_STATIC_ASSETS=1 to include browserless UI asset evidence" >&2
+  fi
 }
 
 run_controller_validations() {

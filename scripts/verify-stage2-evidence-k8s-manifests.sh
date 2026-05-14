@@ -458,6 +458,11 @@ if ! grep -q "RUN_STAGE2_UI_ACTIONBOOK" scripts/stage2-production-evidence-gate.
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_UI_STATIC_ASSETS" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must support optional browserless static UI asset evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "/api/organizations" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must auto-discover a team for team-scoped MCP evidence" >&2
   exit 1

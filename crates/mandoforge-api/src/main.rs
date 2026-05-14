@@ -4610,11 +4610,15 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             "Production UI CRUD and dashboard polish",
             "Operator UI flows for production governance tasks",
             vec!["/api/stage2/readiness"],
-            vec!["./scripts/verify-static-ui-actionbook.sh"],
+            vec![
+                "./scripts/verify-static-ui-actionbook.sh",
+                "./scripts/verify-static-ui-assets.sh",
+            ],
             vec![
                 "admin CRUD flows expose create/update/archive/delete where applicable",
                 "dashboard surfaces production gate evidence without relying on green proxy checks",
                 "static UI smoke covers Stage 2 readiness and key operator panels",
+                "browserless static asset smoke covers key labels, routes, and form-based controls",
             ],
         ),
     ];
