@@ -65,6 +65,8 @@ write_summary() {
   local provider_count
   local active_count
   local deployment_status
+  local deployment_controller_fresh
+  local deployment_controller_age_hours
   local gate_status
   local gate_enforcement_status
   local rollout_evidence_status
@@ -76,6 +78,8 @@ write_summary() {
   provider_count="$(jq -r '.provider_count // 0' "$summary_json")"
   active_count="$(jq -r '.active_provider_count // 0' "$summary_json")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$summary_json")"
+  deployment_controller_fresh="$(jq -r '.deployment_readiness.controller_evidence_fresh // false' "$summary_json")"
+  deployment_controller_age_hours="$(jq -r '.deployment_readiness.latest_controller_age_hours // "none"' "$summary_json")"
   gate_status="$(jq -r '.status // "unknown"' "$gate_json")"
   gate_enforcement_status="$(jq -r '.production_enforcement.status // "unknown"' "$runs_json")"
   rollout_evidence_status="not_requested"
@@ -101,6 +105,8 @@ write_summary() {
     echo "provider_policy_gate_status=$gate_status"
     echo "provider_policy_gate_enforcement_status=$gate_enforcement_status"
     echo "deployment_readiness_status=$deployment_status"
+    echo "deployment_controller_evidence_fresh=$deployment_controller_fresh"
+    echo "deployment_controller_age_hours=$deployment_controller_age_hours"
     echo "provider_rollout_evidence_status=$rollout_evidence_status"
     echo "provider_rollout_run_status=$rollout_run_status"
     echo "provider_rollback_evidence_status=$rollback_evidence_status"
