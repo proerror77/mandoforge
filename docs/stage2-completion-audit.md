@@ -58,10 +58,12 @@ lsof -nP -iTCP:9324 -sTCP:LISTEN || true
 Latest evidence:
 
 ```text
-cargo test -p mandoforge-api: 213 passed
+cargo test -p mandoforge-api: 215 passed
 cargo test -p mandoforge-api stage2_readiness -- --nocapture: 2 passed
-stage2 production evidence gate local inventory: stage2_status=blocked; open_gap_count=12; evidence_requirement_count=12; validation_declared_endpoint_count=26; validation_missing_endpoint_count=26
+stage2 production evidence gate local inventory: stage2_status=blocked; open_gap_count=12; evidence_requirement_count=12; validation_declared_endpoint_count=30; validation_missing_endpoint_count=30
+Stage 2 completion audit local inventory against a temporary in-memory API on `127.0.0.1:8793`: completion_blocked=true; open_gap_count=12; evidence_requirement_count=12; missing_readiness_endpoint_count=0; missing_validation_endpoint_count=30; missing_required_evidence_artifact_count=35; unresolved_endpoint_count=0; missing_evidence_script_count=0; missing_evidence_job_manifest_count=0; missing_required_flag_count=0
 Stage 2 completion audit gate writes `.mandoforge/stage2-completion-audit/checklist.md` and `.mandoforge/stage2-completion-audit/checklist.json`, mapping every readiness `evidence_requirements[]` item to discovered readiness/validation endpoint artifacts and failing closed while readiness remains blocked or evidence artifacts are missing
+Agent release deployment readiness now reports deployment-controller age and freshness; required deployment-controller evidence is blocked when older than 24 hours, and the static Eval/Release panel plus focused eval/release evidence gate summary render those fields
 MCP team-scoped evidence now auto-discovers the first active team through `/api/organizations` and `/api/organizations/{id}/teams` when `MANDOFORGE_STAGE2_TEAM_ID` is empty, writes `team-discovery.json`, and lets the completion audit gate resolve `{team_id}` endpoints from that artifact; local smoke with a temporary org/team resolved `unresolved_endpoint_count=0` while Stage 2 stayed blocked on missing production validation evidence
 MCP Gateway evidence can now opt into rollback proof with `RUN_STAGE2_MCP_ROLLBACK=1`; the focused MCP gate and strict production evidence gate select an applied rollout from `latest_rollouts`, call the audited rollback API, and write `mcp-rollback-evidence.json`, failing closed when no applied rollout exists instead of inventing rollback evidence
 Eval/release evidence can now opt into rollback proof with `RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1`; the focused eval/release gate and strict production evidence gate select a promoted release from `latest_promoted_by_environment`, call the audited release rollback API, and write `eval-release-rollback-evidence.json`, failing closed when no promoted release exists instead of inventing rollback evidence
@@ -106,6 +108,7 @@ Production evidence PVC now has a standard read-only archive helper that streams
 Remote Computer pilot bundle now binds the Pod-mounted `mandoforge-remote-computer-state` PVC to the JuiceFS PV through `remote-computer-state-juicefs-pvc-patch.yaml` instead of rendering only a separate reference PVC
 GitHub Actions run 25830961757 passed the expanded CI gate on commit 3f77b5969fcfa439110980da652f132a86e829a4: fmt, check, test, node syntax, Stage 1/2 script syntax, controller env verifier, Stage 2 evidence K8s verifier, Remote Computer K8s verifier, K8s/evidence overlay render, and strict production evidence bundle render
 GitHub Actions run 25842918427 passed the expanded CI gate on commit 15276aff26dec361dc9f2420922bbbf377f2c327: fmt, check, test, node syntax, Stage 1/2 script syntax, controller env verifier, Stage 2 evidence K8s verifier, controller drill live gate, archive self-test, Remote Computer K8s verifier, K8s/evidence overlay render, and strict production evidence bundle render
+GitHub Actions run 25851809470 passed the expanded CI gate on commit 2d433080ec7f82ee264a0b3126ad3e60f1326381 after adding fresh release deployment-controller evidence: fmt, check, `cargo test -p mandoforge-api`, node syntax, Stage 1/2 script syntax, controller env verifier, controller drill live gate, archive self-test, K8s/evidence overlay render, and strict production evidence bundle render
 ports 8791 and 9324 had no residual listeners after Actionbook verification
 ```
 
