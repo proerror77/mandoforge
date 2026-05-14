@@ -61,6 +61,8 @@ write_summary() {
   local score
   local runtime_mode
   local routing_status
+  local routing_controller_fresh
+  local routing_controller_age_hours
   local rls_enabled
   local rls_forced
   local tenant_context
@@ -70,6 +72,8 @@ write_summary() {
   score="$(jq -r '.readiness_score // 0' "$readiness_file")"
   runtime_mode="$(jq -r '.runtime_tenant_mode // "unknown"' "$readiness_file")"
   routing_status="$(jq -r '.production_routing.status // "unknown"' "$readiness_file")"
+  routing_controller_fresh="$(jq -r '.production_routing.controller_evidence_fresh // false' "$readiness_file")"
+  routing_controller_age_hours="$(jq -r '.production_routing.latest_controller_age_hours // "none"' "$readiness_file")"
   rls_enabled="$(jq -r '.rls.enabled // false' "$readiness_file")"
   rls_forced="$(jq -r '.rls.forced // false' "$readiness_file")"
   tenant_context="$(jq -r '.rls.tenant_context_configured // false' "$readiness_file")"
@@ -80,6 +84,8 @@ write_summary() {
     echo "readiness_score=$score"
     echo "runtime_tenant_mode=$runtime_mode"
     echo "production_routing_status=$routing_status"
+    echo "production_routing_controller_evidence_fresh=$routing_controller_fresh"
+    echo "production_routing_controller_age_hours=$routing_controller_age_hours"
     echo "rls_enabled=$rls_enabled"
     echo "rls_forced=$rls_forced"
     echo "tenant_context_configured=$tenant_context"
