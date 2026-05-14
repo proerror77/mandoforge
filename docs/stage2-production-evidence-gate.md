@@ -103,6 +103,16 @@ RUN_STAGE2_CODEX_STALE_POLL=1 \
 
 That gate collects Codex App Server health, control-plane summary, run/trace inventory, deployment validation, ops validation, and optional stale-poll evidence into `.mandoforge/codex-app-server-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower MCP Gateway proof, run:
+
+```bash
+RUN_STAGE2_MCP_DUE_RUN=1 \
+MANDOFORGE_STAGE2_TEAM_ID=<team_uuid> \
+./scripts/mcp-gateway-evidence-gate.sh
+```
+
+That gate collects team-scoped MCP rollout summary, rollout run history, deployment validation, and optional due-run supervision evidence into `.mandoforge/mcp-gateway-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.
@@ -110,6 +120,7 @@ The script deliberately skips higher-impact production actions unless explicitly
 - `RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1` runs the Remote Computer sidecar recovery endpoint.
 - `RUN_STAGE2_APPROVAL_DELIVERY=1` runs approval notification delivery.
 - `RUN_STAGE2_CODEX_STALE_POLL=1` runs Codex App Server stale-run supervision.
+- `RUN_STAGE2_MCP_DUE_RUN=1` runs MCP connector due-rollout supervision.
 - `RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1` bootstraps the Stage 2 regression suite and runs due release automation.
 - `RUN_STAGE2_OBSERVABILITY_REMEDIATION=1` runs observability remediation supervision.
 - `RUN_STAGE2_FINANCE_CONTROLLERS=1` runs finance close and accounting reconciliation endpoints.
