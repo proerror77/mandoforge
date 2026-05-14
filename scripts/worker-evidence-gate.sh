@@ -56,6 +56,7 @@ fetch_json() {
 
 write_summary() {
   local readiness_file="$EVIDENCE_DIR/api-execution-jobs-worker-readiness.json"
+  local load_validation_evidence_file="$EVIDENCE_DIR/worker-load-validation-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local status
   local readiness_score
@@ -65,6 +66,8 @@ write_summary() {
   local k8s_hardening
   local autoscaling_status
   local load_validated
+  local load_validation_evidence_status
+  local load_validation_run_status
   local isolated_pool
   local production_ops_status
   local blocked_count
@@ -77,6 +80,12 @@ write_summary() {
   k8s_hardening="$(jq -r '.k8s.hardening_status // "unknown"' "$readiness_file")"
   autoscaling_status="$(jq -r '.autoscaling.validation_status // "unknown"' "$readiness_file")"
   load_validated="$(jq -r '.load_validation.load_validated // false' "$readiness_file")"
+  load_validation_evidence_status="missing"
+  load_validation_run_status="unknown"
+  if [[ -s "$load_validation_evidence_file" ]]; then
+    load_validation_evidence_status="$(jq -r '.status // "unknown"' "$load_validation_evidence_file")"
+    load_validation_run_status="$(jq -r '.response.status // "unknown"' "$load_validation_evidence_file")"
+  fi
   isolated_pool="$(jq -r '.load_validation.isolated_worker_pool_configured // false' "$readiness_file")"
   production_ops_status="$(jq -r '.production_ops.status // "unknown"' "$readiness_file")"
   blocked_count="$(jq -r 'if .production_ops.production_blocked == true then 1 else 0 end' "$readiness_file")"
@@ -90,6 +99,8 @@ write_summary() {
     echo "k8s_hardening_status=$k8s_hardening"
     echo "autoscaling_status=$autoscaling_status"
     echo "load_validated=$load_validated"
+    echo "load_validation_evidence_status=$load_validation_evidence_status"
+    echo "load_validation_run_status=$load_validation_run_status"
     echo "isolated_worker_pool_configured=$isolated_pool"
     echo "production_ops_status=$production_ops_status"
     echo "production_blocked_count=$blocked_count"
@@ -113,12 +124,30 @@ write_summary() {
   fi
 }
 
+capture_load_validation_evidence() {
+  local load_validation_response
+  local load_validation_evidence_file="$EVIDENCE_DIR/worker-load-validation-evidence.json"
+
+  load_validation_response="$(fetch_json POST /api/execution-jobs/worker-load-validation/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$load_validation_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$load_validation_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$load_validation_evidence_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/execution-jobs/worker-readiness >/dev/null
-fetch_json POST /api/execution-jobs/worker-load-validation/run >/dev/null
+capture_load_validation_evidence
 fetch_json GET /api/execution-jobs/worker-readiness >/dev/null
 write_summary

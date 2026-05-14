@@ -501,6 +501,16 @@ if ! grep -q "/api/execution-jobs/worker-load-validation/run" "$worker_script"; 
   exit 1
 fi
 
+if ! grep -q "worker-load-validation-evidence.json" "$worker_script"; then
+  echo "Worker evidence script must write explicit load-validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit worker load-validation evidence metadata" >&2
+  exit 1
+fi
+
 if ! grep -q "scheduler-evidence-gate.sh" deploy/stage2-evidence/scheduler-evidence-job.example.yaml; then
   echo "Scheduler evidence Job does not run the dedicated evidence gate" >&2
   exit 1

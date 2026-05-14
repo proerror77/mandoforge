@@ -366,6 +366,24 @@ capture_remote_computer_state_sync_validation() {
     }' >"$state_sync_file"
 }
 
+capture_worker_load_validation() {
+  local load_validation_response
+  local load_validation_file="$EVIDENCE_DIR/worker-load-validation-evidence.json"
+
+  load_validation_response="$(fetch_json POST /api/execution-jobs/worker-load-validation/run)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$load_validation_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$load_validation_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$load_validation_file"
+}
+
 capture_remote_computer_sidecar_recovery_validation() {
   local sidecar_response
   local sidecar_file="$EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
@@ -462,7 +480,7 @@ run_controller_validations() {
   fetch_json POST /api/providers/deployment/validate >/dev/null
   fetch_json POST /api/policy/rollout/orchestration/validate >/dev/null
   capture_vault_kms_recovery_validation
-  fetch_json POST /api/execution-jobs/worker-load-validation/run >/dev/null
+  capture_worker_load_validation
   capture_remote_computer_state_sync_validation
   fetch_json POST /api/approvals/notifications/deployment/validate >/dev/null
   fetch_json POST /api/approvals/notifications/ops/validate >/dev/null
