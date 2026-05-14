@@ -77,6 +77,14 @@ RUN_STAGE2_APPROVAL_DELIVERY=1 \
 
 That gate collects approval notification routing, notification run history, deployment validation, ops validation, and optional delivery-run evidence into `.mandoforge/approval-notification-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/approval-notification-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower worker proof, run:
+
+```bash
+./scripts/worker-evidence-gate.sh
+```
+
+That gate collects worker readiness, runs the bounded worker load-validation endpoint, and writes queue/hardening/autoscaling/load-validation evidence into `.mandoforge/worker-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/worker-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
 - `RUN_STAGE2_SECRET_LIFECYCLE=1` runs the KMS rotation endpoint.

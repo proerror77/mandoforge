@@ -10,3 +10,4 @@ resources:
   - ../stage2-evidence/tenant-isolation-evidence-job.example.yaml
   - ../stage2-evidence/vault-evidence-job.example.yaml
   - ../stage2-evidence/approval-notification-evidence-job.example.yaml
+  - ../stage2-evidence/worker-evidence-job.example.yaml

@@ -31,6 +31,7 @@ jobs:
       - run: bash -n scripts/tenant-isolation-evidence-gate.sh
       - run: bash -n scripts/vault-evidence-gate.sh
       - run: bash -n scripts/approval-notification-evidence-gate.sh
+      - run: bash -n scripts/worker-evidence-gate.sh
       - run: bash -n scripts/archive-stage2-production-evidence.sh
       - run: bash -n scripts/verify-stage2-evidence-archive.sh
       - run: bash -n scripts/render-stage2-controller-secret.sh
