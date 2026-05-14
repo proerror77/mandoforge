@@ -25,6 +25,42 @@ slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
 
+discover_team_id() {
+  if [[ -n "$TEAM_ID" ]]; then
+    return 0
+  fi
+
+  local discovery_file="$SOURCE_EVIDENCE_DIR/team-discovery.json"
+  if [[ -s "$discovery_file" ]]; then
+    TEAM_ID="$(jq -r '.team_id // empty' "$discovery_file")"
+    if [[ -n "$TEAM_ID" ]]; then
+      return 0
+    fi
+  fi
+
+  local organizations_body="$tmp_dir/organizations.json"
+  local http_status
+  http_status="$(curl -sS -o "$organizations_body" -w "%{http_code}" "${auth_headers[@]}" "$BASE_URL/api/organizations")"
+  if [[ "$http_status" != 2* ]]; then
+    echo "stage2 completion audit gate could not auto-discover teams: /api/organizations returned HTTP $http_status" >&2
+    return 0
+  fi
+
+  local organization_id
+  while IFS= read -r organization_id; do
+    [[ -z "$organization_id" ]] && continue
+    local teams_body="$tmp_dir/teams-$organization_id.json"
+    http_status="$(curl -sS -o "$teams_body" -w "%{http_code}" "${auth_headers[@]}" "$BASE_URL/api/organizations/$organization_id/teams")"
+    if [[ "$http_status" != 2* ]]; then
+      continue
+    fi
+    TEAM_ID="$(jq -r 'map(select((.archived_at // null) == null)) | .[0].id // empty' "$teams_body")"
+    if [[ -n "$TEAM_ID" ]]; then
+      return 0
+    fi
+  done < <(jq -r 'map(select((.archived_at // null) == null)) | .[].id' "$organizations_body")
+}
+
 resolve_endpoint() {
   local endpoint="$1"
   if [[ "$endpoint" == ./* ]]; then
@@ -71,6 +107,8 @@ if [[ "$http_status" != 2* ]]; then
 fi
 tee "$readiness_file" <"$response_body" >/dev/null
 rm -f "$response_body"
+
+discover_team_id
 
 status="$(jq -r '.status // "unknown"' "$readiness_file")"
 objective="$(jq -r '.objective // ""' "$readiness_file")"

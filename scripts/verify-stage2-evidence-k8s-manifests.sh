@@ -458,8 +458,23 @@ if ! grep -q "RUN_STAGE2_UI_ACTIONBOOK" scripts/stage2-production-evidence-gate.
   exit 1
 fi
 
+if ! grep -q "/api/organizations" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must auto-discover a team for team-scoped MCP evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "team-discovery.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must persist team discovery evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "local-script-" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit gate must map local script evidence artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "team-discovery.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must reuse team discovery evidence for team-scoped endpoints" >&2
   exit 1
 fi
 
@@ -540,6 +555,16 @@ fi
 
 if ! grep -q '/api/teams/\$TEAM_ID/mcp-servers/rollouts/run-due' "$mcp_gateway_script"; then
   echo "MCP Gateway evidence script must capture due-run supervision evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/organizations" "$mcp_gateway_script"; then
+  echo "MCP Gateway evidence script must auto-discover a team when MANDOFORGE_STAGE2_TEAM_ID is absent" >&2
+  exit 1
+fi
+
+if ! grep -q "team-discovery.json" "$mcp_gateway_script"; then
+  echo "MCP Gateway evidence script must persist team discovery evidence" >&2
   exit 1
 fi
 

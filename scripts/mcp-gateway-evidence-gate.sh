@@ -56,6 +56,53 @@ fetch_json() {
   echo "$target"
 }
 
+write_team_discovery() {
+  local status="$1"
+  local source="$2"
+  local team_id="$3"
+  local organization_id="${4:-}"
+  local target="$EVIDENCE_DIR/team-discovery.json"
+
+  jq -n \
+    --arg status "$status" \
+    --arg source "$source" \
+    --arg team_id "$team_id" \
+    --arg organization_id "$organization_id" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    '{
+      status: $status,
+      source: $source,
+      team_id: (if $team_id == "" then null else $team_id end),
+      organization_id: (if $organization_id == "" then null else $organization_id end),
+      generated_at: $generated_at
+    }' >"$target"
+}
+
+discover_team_id() {
+  if [[ -n "$TEAM_ID" ]]; then
+    write_team_discovery "configured" "MANDOFORGE_STAGE2_TEAM_ID" "$TEAM_ID"
+    return 0
+  fi
+
+  local organizations_file
+  organizations_file="$(fetch_json GET /api/organizations)"
+  local organization_id
+  while IFS= read -r organization_id; do
+    [[ -z "$organization_id" ]] && continue
+    local teams_file
+    teams_file="$(fetch_json GET "/api/organizations/$organization_id/teams")"
+    TEAM_ID="$(jq -r 'map(select((.archived_at // null) == null)) | .[0].id // empty' "$teams_file")"
+    if [[ -n "$TEAM_ID" ]]; then
+      write_team_discovery "discovered" "api" "$TEAM_ID" "$organization_id"
+      return 0
+    fi
+  done < <(jq -r 'map(select((.archived_at // null) == null)) | .[].id' "$organizations_file")
+
+  write_team_discovery "unavailable" "api" ""
+  echo "MCP Gateway evidence gate could not discover an active team; set MANDOFORGE_STAGE2_TEAM_ID or create an organization team first" >&2
+  exit 1
+}
+
 write_summary() {
   local rollout_summary_file="$EVIDENCE_DIR/api-teams-$TEAM_ID-mcp-servers-rollouts-summary.json"
   local rollout_runs_file="$EVIDENCE_DIR/api-teams-$TEAM_ID-mcp-servers-rollouts-runs.json"
@@ -115,10 +162,10 @@ write_summary() {
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
     echo "rollout_attention_items:"
-    jq -r '.attention_items[]? | "- \(.reason // .message // .kind // \"attention\")"' "$rollout_summary_file"
+    jq -r '.attention_items[]? | "- \(.reason // .message // .kind // "attention")"' "$rollout_summary_file"
     echo
     echo "run_attention_items:"
-    jq -r '.attention_items[]? | "- \(.message // .kind // \"attention\")"' "$rollout_runs_file"
+    jq -r '.attention_items[]? | "- \(.message // .kind // "attention")"' "$rollout_runs_file"
     echo
     echo "deployment_blocking_reasons:"
     jq -r '.deployment_readiness.blocking_reasons[]? | "- \(.)"' "$rollout_runs_file"
@@ -135,14 +182,10 @@ write_summary() {
 require_cmd curl
 require_cmd jq
 
-if [[ -z "$TEAM_ID" ]]; then
-  echo "MCP Gateway evidence gate requires MANDOFORGE_STAGE2_TEAM_ID" >&2
-  exit 1
-fi
-
 mkdir -p "$EVIDENCE_DIR"
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
+discover_team_id
 fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/summary" >/dev/null
 fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/runs" >/dev/null
 fetch_json POST "/api/teams/$TEAM_ID/mcp-servers/deployment/validate" >/dev/null
