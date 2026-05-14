@@ -88,6 +88,9 @@ verify_archive() {
       .missing_readiness_endpoint_count,
       .missing_validation_endpoint_count,
       .missing_required_evidence_artifact_count,
+      .stale_readiness_artifact_count,
+      .stale_validation_artifact_count,
+      .stale_required_evidence_artifact_count,
       .unresolved_endpoint_count,
       .missing_evidence_script_count,
       .missing_evidence_job_manifest_count,
@@ -103,7 +106,7 @@ verify_archive() {
   fi
 
   if [[ "$missing_total" != "0" && "$ALLOW_BLOCKED" != "1" ]]; then
-    echo "Stage 2 evidence archive checklist still has missing evidence metadata or artifacts: $missing_total" >&2
+    echo "Stage 2 evidence archive checklist still has missing or stale evidence metadata/artifacts: $missing_total" >&2
     exit 1
   fi
 }
@@ -122,6 +125,9 @@ self_test() {
   "missing_readiness_endpoint_count": 0,
   "missing_validation_endpoint_count": 0,
   "missing_required_evidence_artifact_count": 0,
+  "stale_readiness_artifact_count": 0,
+  "stale_validation_artifact_count": 0,
+  "stale_required_evidence_artifact_count": 0,
   "unresolved_endpoint_count": 0,
   "missing_evidence_script_count": 0,
   "missing_evidence_job_manifest_count": 0,

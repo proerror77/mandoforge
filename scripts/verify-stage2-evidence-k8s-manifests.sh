@@ -706,6 +706,16 @@ if ! grep -q "missing_required_evidence_artifact_count" scripts/stage2-completio
   exit 1
 fi
 
+if ! grep -q "STAGE2_EVIDENCE_MAX_AGE_HOURS" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must enforce freshness for evidence artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "stale_required_evidence_artifact_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must report stale explicit evidence metadata artifacts" >&2
+  exit 1
+fi
+
 if ! grep -q "policy-rollout-evidence-gate.sh" deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml; then
   echo "Policy rollout evidence Job does not run the dedicated evidence gate" >&2
   exit 1
@@ -1078,6 +1088,11 @@ fi
 
 if ! grep -q "missing_required_flag_count" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject archives with missing required controller flags" >&2
+  exit 1
+fi
+
+if ! grep -q "stale_required_evidence_artifact_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must reject archives with stale required evidence artifacts" >&2
   exit 1
 fi
 
