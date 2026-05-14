@@ -29893,6 +29893,10 @@ mod tests {
         body::{Body, to_bytes},
         http::{Method, Request, StatusCode},
     };
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use tower::ServiceExt;
 
     #[test]
@@ -30016,6 +30020,182 @@ Stage 2 is not complete.
                 .required_flags
                 .contains(&"RUN_STAGE2_FINANCE_EXPORT=1".to_string())
         );
+    }
+
+    #[test]
+    fn stage2_readiness_evidence_metadata_matches_repo_contract() {
+        let root = repo_root();
+        let readiness = build_stage2_completion_readiness();
+        let production_gate = read_repo_file(&root, "scripts/stage2-production-evidence-gate.sh");
+        let completion_audit = read_repo_file(&root, "scripts/stage2-completion-audit-gate.sh");
+        let controller_env = read_repo_file(
+            &root,
+            "deploy/stage2-evidence/stage2-production-controllers.env.example",
+        );
+        let controller_secret = read_repo_file(
+            &root,
+            "deploy/stage2-evidence/stage2-controller-env-secret.example.yaml",
+        );
+
+        for requirement in &readiness.evidence_requirements {
+            assert!(
+                !requirement.evidence_scripts.is_empty(),
+                "{} must declare evidence scripts",
+                requirement.id
+            );
+            assert!(
+                !requirement.evidence_job_manifests.is_empty(),
+                "{} must declare evidence Job manifests",
+                requirement.id
+            );
+            assert!(
+                !requirement.required_artifacts.is_empty(),
+                "{} must declare required evidence artifacts",
+                requirement.id
+            );
+
+            let mut focused_sources = String::new();
+            for script in &requirement.evidence_scripts {
+                let script_path = repo_path(&root, script);
+                assert!(
+                    script_path.is_file(),
+                    "{} declares missing evidence script {}",
+                    requirement.id,
+                    script
+                );
+                assert_executable(&script_path, script);
+                focused_sources.push_str(&read_repo_file(&root, script));
+                focused_sources.push('\n');
+            }
+
+            for manifest in &requirement.evidence_job_manifests {
+                let manifest_path = repo_path(&root, manifest);
+                assert!(
+                    manifest_path.is_file(),
+                    "{} declares missing evidence Job manifest {}",
+                    requirement.id,
+                    manifest
+                );
+                let manifest_source = read_repo_file(&root, manifest);
+                assert!(
+                    manifest_source.contains("claimName: mandoforge-stage2-production-evidence"),
+                    "{} manifest {} must persist evidence to the production PVC",
+                    requirement.id,
+                    manifest
+                );
+            }
+
+            for required_flag in &requirement.required_flags {
+                let flag_name = required_flag
+                    .split_once('=')
+                    .map_or(required_flag.as_str(), |(name, _)| name);
+                assert!(
+                    controller_env.contains(&format!("{flag_name}=")),
+                    "{} required flag {} is missing from controller env example",
+                    requirement.id,
+                    flag_name
+                );
+                assert!(
+                    controller_secret.contains(&format!("{flag_name}:")),
+                    "{} required flag {} is missing from controller Secret example",
+                    requirement.id,
+                    flag_name
+                );
+            }
+
+            let endpoint_artifacts = requirement
+                .readiness_endpoints
+                .iter()
+                .chain(requirement.validation_endpoints.iter())
+                .filter(|endpoint| !endpoint.starts_with("./"))
+                .map(|endpoint| format!("{}.json", slugify_for_stage2_evidence(endpoint)))
+                .collect::<Vec<_>>();
+            let local_script_artifacts = requirement
+                .evidence_scripts
+                .iter()
+                .map(|script| {
+                    format!(
+                        "local-script-{}.json",
+                        slugify_for_stage2_evidence(script.trim_start_matches("./"))
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            for artifact in &requirement.required_artifacts {
+                let has_literal_writer = focused_sources.contains(artifact)
+                    || production_gate.contains(artifact)
+                    || completion_audit.contains(artifact);
+                let has_endpoint_writer = endpoint_artifacts
+                    .iter()
+                    .any(|candidate| candidate == artifact);
+                let has_local_script_writer = local_script_artifacts
+                    .iter()
+                    .any(|candidate| candidate == artifact);
+                assert!(
+                    has_literal_writer || has_endpoint_writer || has_local_script_writer,
+                    "{} required artifact {} is not backed by a focused script, strict gate endpoint capture, or local-script capture",
+                    requirement.id,
+                    artifact
+                );
+            }
+        }
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("api crate must live under crates/mandoforge-api")
+            .to_path_buf()
+    }
+
+    fn repo_path(root: &Path, relative: &str) -> PathBuf {
+        root.join(relative.trim_start_matches("./"))
+    }
+
+    fn read_repo_file(root: &Path, relative: &str) -> String {
+        let path = repo_path(root, relative);
+        fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+    }
+
+    #[cfg(unix)]
+    fn assert_executable(path: &Path, label: &str) {
+        let mode = fs::metadata(path)
+            .unwrap_or_else(|error| panic!("failed to stat {}: {error}", path.display()))
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "evidence script {label} must be executable"
+        );
+    }
+
+    #[cfg(not(unix))]
+    fn assert_executable(path: &Path, _label: &str) {
+        assert!(path.is_file());
+    }
+
+    fn slugify_for_stage2_evidence(value: &str) -> String {
+        let mut output = String::new();
+        let mut previous_separator = false;
+        for ch in value.trim_start_matches('/').chars() {
+            if ch == '/' || ch == ':' {
+                if !previous_separator {
+                    output.push('-');
+                    previous_separator = true;
+                }
+            } else if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+                output.push(ch);
+                previous_separator = false;
+            } else {
+                if !previous_separator {
+                    output.push('-');
+                    previous_separator = true;
+                }
+            }
+        }
+        output
     }
 
     #[test]
