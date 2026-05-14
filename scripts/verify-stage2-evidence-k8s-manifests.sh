@@ -596,6 +596,11 @@ if ! grep -q "/api/scheduler/run-due" "$scheduler_script"; then
   exit 1
 fi
 
+if ! grep -q "/api/scheduler/deployment/validate" "$scheduler_script"; then
+  echo "Scheduler evidence script must validate scheduler deployment readiness" >&2
+  exit 1
+fi
+
 if ! grep -q "x-mandoforge-scheduler-token" "$scheduler_script"; then
   echo "Scheduler evidence script must support shared-token authentication" >&2
   exit 1
@@ -608,6 +613,11 @@ fi
 
 if ! grep -q "/api/scheduler/run-due" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must capture scheduler run-due evidence when validations run" >&2
+  exit 1
+fi
+
+if ! grep -q "/api/scheduler/deployment/validate" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must validate scheduler deployment readiness" >&2
   exit 1
 fi
 

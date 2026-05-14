@@ -3637,6 +3637,8 @@ function renderObservability() {
             <dd>${escapeHtml(schedulerDeployment.message || "scheduler deployment readiness is not reported")}</dd>
             <dt>Scheduler auth</dt>
             <dd>subject secret ${schedulerDeployment.subject_from_secret ? "yes" : "no"} · roles secret ${schedulerDeployment.roles_from_secret ? "yes" : "no"} · token secret ${schedulerDeployment.token_from_secret ? "yes" : "no"} · token runtime ${schedulerDeployment.shared_token_runtime_configured ? "yes" : "no"} · hardcoded demo headers ${schedulerDeployment.hardcoded_admin_headers_absent ? "absent" : "present"}</dd>
+            <dt>Deployment controller</dt>
+            <dd>required ${schedulerDeployment.controller_required ? "yes" : "no"} · configured ${schedulerDeployment.controller_configured ? "yes" : "no"} · status ${escapeHtml(schedulerDeployment.latest_controller_status || "none")} · fresh ${schedulerDeployment.controller_evidence_fresh ? "yes" : "no"} · age ${schedulerDeployment.latest_controller_age_hours ?? "none"}h</dd>
           </dl>
           ${
             schedulerAttention.length

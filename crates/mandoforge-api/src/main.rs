@@ -969,8 +969,25 @@ struct SchedulerDeploymentReadiness {
     token_header_present: bool,
     hardcoded_admin_headers_absent: bool,
     shared_token_runtime_configured: bool,
+    controller_required: bool,
+    controller_configured: bool,
+    latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
+    controller_evidence_fresh: bool,
+    latest_controller_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchedulerDeploymentValidationRun {
+    status: String,
+    checked_at: DateTime<Utc>,
+    controller_required: bool,
+    controller_configured: bool,
+    controller_execution: Value,
+    readiness_status: String,
+    blocking_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4089,6 +4106,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
         .route("/api/scheduler/summary", get(get_scheduler_summary))
         .route("/api/scheduler/due-plan", get(get_scheduler_due_plan))
+        .route(
+            "/api/scheduler/deployment/validate",
+            post(validate_scheduler_deployment),
+        )
         .route("/api/scheduler/run-due", post(run_scheduler_due_tasks))
         .route(
             "/api/usage/alert-routes",
@@ -20287,6 +20308,105 @@ async fn run_scheduler_due_tasks(
     Ok(Json(execute_scheduler_due_tasks(&state).await?))
 }
 
+async fn validate_scheduler_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SchedulerDeploymentValidationRun>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.tenant_id,
+        permission: Permission::Admin,
+        resource_type: "scheduler".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let checked_at = Utc::now();
+    let lookup = |key: &str| std::env::var(key).ok();
+    let audit_logs = state.list_audit_logs(None).await?;
+    let readiness = scheduler_deployment_readiness_from_manifests(&audit_logs, checked_at, &lookup);
+    let controller_required = scheduler_deployment_controller_required(&lookup);
+    let controller_configured = scheduler_deployment_controller_configured(&lookup);
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": if controller_configured {
+            "not_attempted"
+        } else {
+            "controller_not_configured"
+        }
+    });
+    if controller_configured {
+        match execute_scheduler_deployment_controller(
+            &lookup,
+            Some(principal.subject_id.as_str()),
+            checked_at,
+            &readiness,
+        )
+        .await
+        {
+            Ok(execution) => {
+                controller_execution = execution;
+            }
+            Err(error) => {
+                controller_execution = json!({
+                    "attempted": true,
+                    "status": "failed",
+                    "error": error.message,
+                });
+            }
+        }
+    }
+    let controller_status = controller_execution
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("skipped");
+    let status = if readiness.blocking_reasons.iter().any(|reason| {
+        reason != "scheduler deployment controller has no recent validated evidence"
+            && reason != "scheduler deployment controller evidence is stale"
+    }) {
+        "blocked"
+    } else if controller_required && !controller_configured {
+        "blocked"
+    } else if controller_required && controller_status != "validated" {
+        "blocked"
+    } else if controller_configured && controller_status != "validated" {
+        "failed"
+    } else {
+        "validated"
+    }
+    .to_string();
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "scheduler.deployment_validation_run",
+            "scheduler",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+                "readiness_status": readiness.status.clone(),
+                "blocking_reasons": readiness.blocking_reasons.clone(),
+                "checked_at": checked_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(SchedulerDeploymentValidationRun {
+        status,
+        checked_at,
+        controller_required,
+        controller_configured,
+        controller_execution,
+        readiness_status: readiness.status,
+        blocking_reasons: readiness.blocking_reasons,
+    }))
+}
+
 async fn get_scheduler_due_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -20308,10 +20428,12 @@ async fn build_scheduler_orchestration_summary(
 ) -> Result<SchedulerOrchestrationSummary, AppError> {
     let generated_at = Utc::now();
     let plan = build_scheduler_due_plan(state).await?;
-    let deployment_readiness = scheduler_deployment_readiness_from_manifests();
-    let mut recent_runs: Vec<_> = state
-        .list_audit_logs(None)
-        .await?
+    let audit_logs = state.list_audit_logs(None).await?;
+    let deployment_readiness =
+        scheduler_deployment_readiness_from_manifests(&audit_logs, generated_at, &|key| {
+            std::env::var(key).ok()
+        });
+    let mut recent_runs: Vec<_> = audit_logs
         .into_iter()
         .filter(|log| log.action == "scheduler.run_due")
         .filter_map(scheduler_run_history_item)
@@ -20401,7 +20523,14 @@ fn scheduler_shared_token_from_env() -> Option<String> {
         })
 }
 
-fn scheduler_deployment_readiness_from_manifests() -> SchedulerDeploymentReadiness {
+fn scheduler_deployment_readiness_from_manifests<F>(
+    audit_logs: &[AuditLog],
+    generated_at: DateTime<Utc>,
+    lookup: &F,
+) -> SchedulerDeploymentReadiness
+where
+    F: Fn(&str) -> Option<String>,
+{
     let scheduler_manifest_path = "deploy/k8s/scheduler.yaml";
     let service_account_manifest_path = "deploy/k8s/scheduler-serviceaccount.yaml";
     let secret_manifest_path = "deploy/k8s/secret.example.yaml";
@@ -20468,7 +20597,28 @@ fn scheduler_deployment_readiness_from_manifests() -> SchedulerDeploymentReadine
         && args_text.contains("MANDOFORGE_SCHEDULER_TOKEN");
     let hardcoded_admin_headers_absent = !args_text.contains("x-mandoforge-roles: admin")
         && !args_text.contains("x-mandoforge-subject: scheduler");
-    let shared_token_runtime_configured = scheduler_shared_token_from_env().is_some();
+    let shared_token_runtime_configured = lookup("MANDOFORGE_SCHEDULER_TOKEN")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let controller_required = scheduler_deployment_controller_required(lookup);
+    let controller_configured = scheduler_deployment_controller_configured(lookup);
+    let latest_controller_log = audit_logs
+        .iter()
+        .filter(|log| log.action == "scheduler.deployment_validation_run")
+        .max_by_key(|log| log.created_at);
+    let latest_controller_status = latest_controller_log
+        .and_then(|log| {
+            log.details["controller_execution"]["status"]
+                .as_str()
+                .or_else(|| log.details["status"].as_str())
+        })
+        .map(str::to_string);
+    let latest_controller_age_hours = latest_controller_log
+        .filter(|_| latest_controller_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
+    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
     let mut blocking_reasons = Vec::new();
 
     if !scheduler_manifest_present {
@@ -20501,6 +20651,17 @@ fn scheduler_deployment_readiness_from_manifests() -> SchedulerDeploymentReadine
         blocking_reasons
             .push("MANDOFORGE_SCHEDULER_TOKEN is not configured in the API runtime".to_string());
     }
+    if controller_required && !controller_configured {
+        blocking_reasons
+            .push("scheduler deployment controller is required but not configured".to_string());
+    }
+    if controller_required && controller_configured && !latest_controller_validated {
+        blocking_reasons
+            .push("scheduler deployment controller has no recent validated evidence".to_string());
+    }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons.push("scheduler deployment controller evidence is stale".to_string());
+    }
 
     let production_blocked = !blocking_reasons.is_empty();
     let status = if production_blocked {
@@ -20531,9 +20692,91 @@ fn scheduler_deployment_readiness_from_manifests() -> SchedulerDeploymentReadine
         token_header_present,
         hardcoded_admin_headers_absent,
         shared_token_runtime_configured,
+        controller_required,
+        controller_configured,
+        latest_controller_status,
+        latest_controller_age_hours,
+        controller_evidence_fresh,
+        latest_controller_validated,
         blocking_reasons,
         message,
     }
+}
+
+fn scheduler_deployment_controller_configured<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn scheduler_deployment_controller_required<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+async fn execute_scheduler_deployment_controller<F>(
+    lookup: &F,
+    subject: Option<&str>,
+    checked_at: DateTime<Utc>,
+    readiness: &SchedulerDeploymentReadiness,
+) -> Result<Value, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_URL is required")
+        })?;
+    let timeout_seconds = lookup("MANDOFORGE_SCHEDULER_DEPLOYMENT_TIMEOUT_SECONDS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| (1..=120).contains(seconds))
+        .unwrap_or(15);
+    let token = lookup("MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let payload = json!({
+        "type": "mandoforge.scheduler_deployment_validation",
+        "subject": subject,
+        "checked_at": checked_at,
+        "readiness": readiness,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()?;
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let http_status = response.status();
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "scheduler deployment controller failed with status {http_status}"
+        )));
+    }
+    Ok(json!({
+        "attempted": true,
+        "status": body
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("validated"),
+        "controller_response": body,
+    }))
 }
 
 fn scheduler_container_env_uses_secret(
@@ -31047,6 +31290,141 @@ not json
     }
 
     #[tokio::test]
+    async fn scheduler_deployment_controller_executes_external_boundary() {
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("scheduler deployment listener");
+        let controller_addr = listener.local_addr().expect("scheduler deployment addr");
+        let controller = Router::new()
+            .route(
+                "/scheduler-deployment",
+                post(mock_scheduler_deployment_controller),
+            )
+            .with_state(payloads.clone());
+        let controller_server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .await
+                .expect("mock scheduler deployment controller");
+        });
+        let checked_at = Utc::now();
+        let lookup = |key: &str| match key {
+            "MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_URL" => {
+                Some(format!("http://{controller_addr}/scheduler-deployment"))
+            }
+            "MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_TOKEN" => {
+                Some("scheduler-deploy-token".to_string())
+            }
+            _ => None,
+        };
+        let readiness =
+            scheduler_deployment_readiness_from_manifests(&[], checked_at, &|key| match key {
+                "MANDOFORGE_SCHEDULER_TOKEN" => Some("scheduler-token".to_string()),
+                _ => None,
+            });
+
+        let execution = execute_scheduler_deployment_controller(
+            &lookup,
+            Some("admin-1"),
+            checked_at,
+            &readiness,
+        )
+        .await
+        .expect("scheduler deployment controller");
+
+        assert_eq!(execution["status"], "validated");
+        let payloads = payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["type"],
+            "mandoforge.scheduler_deployment_validation"
+        );
+        assert_eq!(payloads[0]["subject"], "admin-1");
+        assert_eq!(payloads[0]["readiness"]["status"], "ready");
+
+        controller_server.abort();
+    }
+
+    #[test]
+    fn scheduler_deployment_readiness_requires_controller_when_configured() {
+        let generated_at = Utc::now();
+        let missing_controller =
+            scheduler_deployment_readiness_from_manifests(&[], generated_at, &|key| match key {
+                "MANDOFORGE_SCHEDULER_TOKEN" => Some("scheduler-token".to_string()),
+                "MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_REQUIRED" => Some("true".to_string()),
+                _ => None,
+            });
+        assert_eq!(missing_controller.status, "blocked");
+        assert!(missing_controller.controller_required);
+        assert!(!missing_controller.controller_configured);
+        assert!(missing_controller.blocking_reasons.iter().any(|reason| {
+            reason == "scheduler deployment controller is required but not configured"
+        }));
+
+        let mut audit = new_audit_log(
+            None,
+            "user",
+            None,
+            "scheduler.deployment_validation_run",
+            "scheduler",
+            None,
+            json!({
+                "status": "validated",
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated"
+                }
+            }),
+        );
+        audit.created_at = generated_at;
+        let ready =
+            scheduler_deployment_readiness_from_manifests(&[audit.clone()], generated_at, &|key| {
+                match key {
+                    "MANDOFORGE_SCHEDULER_TOKEN" => Some("scheduler-token".to_string()),
+                    "MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_REQUIRED" => {
+                        Some("true".to_string())
+                    }
+                    "MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_URL" => {
+                        Some("http://controller.example/validate".to_string())
+                    }
+                    _ => None,
+                }
+            });
+        assert_eq!(ready.status, "ready");
+        assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
+
+        let mut stale_audit = audit.clone();
+        stale_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale =
+            scheduler_deployment_readiness_from_manifests(&[stale_audit], generated_at, &|key| {
+                match key {
+                    "MANDOFORGE_SCHEDULER_TOKEN" => Some("scheduler-token".to_string()),
+                    "MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_REQUIRED" => {
+                        Some("true".to_string())
+                    }
+                    "MANDOFORGE_SCHEDULER_DEPLOYMENT_CONTROLLER_URL" => {
+                        Some("http://controller.example/validate".to_string())
+                    }
+                    _ => None,
+                }
+            });
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.latest_controller_validated);
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(
+            stale
+                .blocking_reasons
+                .iter()
+                .any(|reason| { reason == "scheduler deployment controller evidence is stale" })
+        );
+    }
+
+    #[tokio::test]
     async fn finance_reconciliation_controller_executes_external_boundary() {
         let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -39528,6 +39906,30 @@ not json
                 {"name": "rollup", "status": "verified"},
                 {"name": "export", "status": "delivered"},
                 {"name": "alerts", "status": "acknowledged"}
+            ]
+        }))
+    }
+
+    async fn mock_scheduler_deployment_controller(
+        State(payloads): State<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer scheduler-deploy-token")
+        );
+        payloads.lock().await.push(payload);
+        Json(json!({
+            "status": "validated",
+            "deployment_id": "scheduler-deployment-1",
+            "message": "scheduler deployment accepted",
+            "checks": [
+                {"name": "cronjob", "status": "validated"},
+                {"name": "service_account", "status": "validated"},
+                {"name": "shared_token", "status": "validated"}
             ]
         }))
     }

@@ -793,6 +793,7 @@ run_controller_validations() {
   capture_eval_release_orchestration_validation
   capture_observability_collector_deployment_validation
   capture_observability_collector_cluster_validation
+  fetch_json POST /api/scheduler/deployment/validate >/dev/null
   fetch_json POST /api/scheduler/run-due >/dev/null
 
   if [[ -n "$TEAM_ID" ]]; then

@@ -67,6 +67,11 @@ write_summary() {
   local status
   local deployment_status
   local production_blocked
+  local deployment_controller_required
+  local deployment_controller_configured
+  local latest_deployment_controller_status
+  local deployment_controller_fresh
+  local deployment_controller_age_hours
   local actionable_count
   local blocked_count
   local run_status
@@ -76,6 +81,11 @@ write_summary() {
   status="$(jq -r '.status // "unknown"' "$summary_file")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$summary_file")"
   production_blocked="$(jq -r 'if ((.deployment_readiness // {}) | has("production_blocked")) then .deployment_readiness.production_blocked else true end' "$summary_file")"
+  deployment_controller_required="$(jq -r '.deployment_readiness.controller_required // false' "$summary_file")"
+  deployment_controller_configured="$(jq -r '.deployment_readiness.controller_configured // false' "$summary_file")"
+  latest_deployment_controller_status="$(jq -r '.deployment_readiness.latest_controller_status // "none"' "$summary_file")"
+  deployment_controller_fresh="$(jq -r '.deployment_readiness.controller_evidence_fresh // false' "$summary_file")"
+  deployment_controller_age_hours="$(jq -r '.deployment_readiness.latest_controller_age_hours // "none"' "$summary_file")"
   actionable_count="$(jq -r '.actionable_count // .plan.actionable_count // 0' "$plan_file")"
   blocked_count="$(jq -r '.blocked_count // .plan.blocked_count // 0' "$plan_file")"
   run_status="$(jq -r '.status // "unknown"' "$run_file")"
@@ -86,6 +96,11 @@ write_summary() {
     echo "scheduler_summary_status=$status"
     echo "deployment_readiness_status=$deployment_status"
     echo "deployment_production_blocked=$production_blocked"
+    echo "deployment_controller_required=$deployment_controller_required"
+    echo "deployment_controller_configured=$deployment_controller_configured"
+    echo "latest_deployment_controller_status=$latest_deployment_controller_status"
+    echo "deployment_controller_fresh=$deployment_controller_fresh"
+    echo "deployment_controller_age_hours=$deployment_controller_age_hours"
     echo "due_plan_actionable_count=$actionable_count"
     echo "due_plan_blocked_count=$blocked_count"
     echo "run_due_status=$run_status"
@@ -122,5 +137,7 @@ mkdir -p "$EVIDENCE_DIR"
 curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/scheduler/summary >/dev/null
 fetch_json GET /api/scheduler/due-plan >/dev/null
+fetch_json POST /api/scheduler/deployment/validate >/dev/null
+fetch_json GET /api/scheduler/summary >/dev/null
 fetch_json POST /api/scheduler/run-due >/dev/null
 write_summary
