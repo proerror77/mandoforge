@@ -4,6 +4,7 @@ metadata:
   name: mandoforge-config
 data:
   MANDOFORGE_ADDR: "0.0.0.0:8787"
+  MANDOFORGE_TENANT_ID: "00000000-0000-4000-8000-000000000001"
   MANDOFORGE_WORKSPACE_ROOT: "/var/lib/mandoforge/workspaces"
   MANDOFORGE_EXECUTION_WORKER: "queue"
   MANDOFORGE_SERVICE_NAME: "mandoforge-api"

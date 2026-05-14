@@ -81,7 +81,7 @@ Context / Data Foundation
 
 The code supports two backends:
 
-- Postgres backend: enabled when `DATABASE_URL` is set. Startup connects through SQLx, executes Stage 1 migrations, seeds the demo tenant, and inserts the Generic Orchestrator Agent.
+- Postgres backend: enabled when `DATABASE_URL` is set. Startup connects through SQLx, executes Stage 1 migrations, sets the Postgres `mandoforge.tenant_id` session context from `MANDOFORGE_TENANT_ID` (or the default demo tenant), seeds that tenant, and inserts the Generic Orchestrator Agent.
 - Memory backend: enabled when `DATABASE_URL` is missing. This keeps local UI/API demos fast and avoids requiring Docker for every small change.
 
 The public API shape is identical for both backends. Route handlers call `AppState` methods instead of touching storage directly.

@@ -166,6 +166,11 @@ if ! grep -q "name: mandoforge-worker-isolated-queue-depth" /tmp/mandoforge-depl
   exit 1
 fi
 
+if ! grep -q "MANDOFORGE_TENANT_ID" /tmp/mandoforge-deploy-kustomize.out; then
+  echo "deploy/k8s render is missing configurable runtime tenant id" >&2
+  exit 1
+fi
+
 if ! grep -q "kind: Job" /tmp/mandoforge-stage2-evidence-kustomize.out; then
   echo "Stage 2 evidence kustomize render is missing a Job" >&2
   exit 1

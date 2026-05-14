@@ -30,6 +30,8 @@ use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
+
 mod authorization;
 mod codex_app_server;
 mod eval_judge;
@@ -3518,7 +3520,7 @@ async fn main() -> Result<()> {
     tokio::fs::create_dir_all(&workspace_root).await?;
     let policy = load_policy_config("config/policy.stage1.yaml").await?;
 
-    let tenant_id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid");
+    let tenant_id = runtime_tenant_id_from_env()?;
     let store = match std::env::var("DATABASE_URL") {
         Ok(database_url) if !database_url.trim().is_empty() => {
             let tenant_setting = format!("SET mandoforge.tenant_id = '{}'", tenant_id);
@@ -3615,6 +3617,20 @@ fn select_execution_queue_backend(
             );
         }
     }
+}
+
+fn runtime_tenant_id_from_env() -> Result<Uuid> {
+    runtime_tenant_id_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn runtime_tenant_id_from_lookup<F>(lookup: F) -> Result<Uuid>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let raw = lookup("MANDOFORGE_TENANT_ID")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_TENANT_ID.to_string());
+    Uuid::parse_str(raw.trim()).with_context(|| "MANDOFORGE_TENANT_ID must be a valid UUID")
 }
 
 fn execution_queue_from_env(store: &StoreBackend, tenant_id: Uuid) -> Result<ExecutionQueue> {
@@ -29919,6 +29935,41 @@ mod tests {
         ] {
             assert!(ensure_read_only_sql(sql).is_err(), "{sql}");
         }
+    }
+
+    #[test]
+    fn runtime_tenant_id_defaults_and_parses_env_override() {
+        let default_tenant = runtime_tenant_id_from_lookup(|_| None).expect("default tenant id");
+        assert_eq!(
+            default_tenant,
+            Uuid::parse_str(DEFAULT_TENANT_ID).expect("valid default tenant id")
+        );
+
+        let configured_tenant = Uuid::parse_str("00000000-0000-4000-8000-000000000042")
+            .expect("valid configured tenant id");
+        let parsed = runtime_tenant_id_from_lookup(|key| {
+            if key == "MANDOFORGE_TENANT_ID" {
+                Some(format!(" {configured_tenant} "))
+            } else {
+                None
+            }
+        })
+        .expect("configured tenant id");
+        assert_eq!(parsed, configured_tenant);
+
+        let error = runtime_tenant_id_from_lookup(|key| {
+            if key == "MANDOFORGE_TENANT_ID" {
+                Some("not-a-uuid".to_string())
+            } else {
+                None
+            }
+        })
+        .expect_err("invalid tenant id should fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("MANDOFORGE_TENANT_ID must be a valid UUID")
+        );
     }
 
     #[test]
