@@ -51,6 +51,8 @@ SOURCE_EVIDENCE_DIR=.mandoforge/stage2-production-evidence \
 
 This fetches `GET /api/stage2/readiness`, maps every `evidence_requirements[]` entry to the endpoint JSON artifacts in the source evidence directory, and writes `.mandoforge/stage2-completion-audit/checklist.md` plus `.mandoforge/stage2-completion-audit/checklist.json`. It exits non-zero by default while Stage 2 readiness is blocked or required endpoint artifacts are missing. `ALLOW_BLOCKED=1` is only for inventory and should not be used as completion proof.
 
+The matching in-cluster template is `deploy/stage2-evidence/stage2-completion-audit-job.example.yaml`. It mounts the same Stage 2 production evidence PVC, reads endpoint artifacts from `/evidence`, writes the checklist to `/evidence/completion-audit`, and remains fail-closed unless the production readiness gate and artifact coverage are complete.
+
 For a narrower collector rollout proof, run the dedicated observability collector gate:
 
 ```bash

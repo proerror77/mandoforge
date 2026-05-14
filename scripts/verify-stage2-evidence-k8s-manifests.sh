@@ -11,6 +11,7 @@ manifests=(
   deploy/stage2-evidence/stage2-evidence-gate-job.yaml
   deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml
   deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml
+  deploy/stage2-evidence/stage2-completion-audit-job.example.yaml
   deploy/stage2-evidence/observability-collector-evidence-job.example.yaml
   deploy/stage2-evidence/remote-computer-evidence-job.example.yaml
   deploy/stage2-evidence/provider-governance-evidence-job.example.yaml
@@ -37,6 +38,7 @@ codex_app_server_script="scripts/codex-app-server-evidence-gate.sh"
 mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
 eval_release_script="scripts/eval-release-evidence-gate.sh"
 finance_script="scripts/finance-evidence-gate.sh"
+completion_audit_script="scripts/stage2-completion-audit-gate.sh"
 
 for manifest in "${manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -110,6 +112,11 @@ if [[ ! -x "$finance_script" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$completion_audit_script" ]]; then
+  echo "missing Stage 2 completion audit script: $completion_audit_script" >&2
+  exit 1
+fi
+
 kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out
 kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone \
   >/tmp/mandoforge-stage2-production-evidence-kustomize.out
@@ -131,6 +138,11 @@ fi
 
 if ! grep -q "name: mandoforge-stage2-production-evidence-gate" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the strict production Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-stage2-completion-audit" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the completion audit Job" >&2
   exit 1
 fi
 
@@ -226,6 +238,26 @@ fi
 
 if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml; then
   echo "Stage 2 production evidence Job example does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "stage2-completion-audit-gate.sh" deploy/stage2-evidence/stage2-completion-audit-job.example.yaml; then
+  echo "Stage 2 completion audit Job does not run the completion audit gate" >&2
+  exit 1
+fi
+
+if ! grep -q "SOURCE_EVIDENCE_DIR" deploy/stage2-evidence/stage2-completion-audit-job.example.yaml; then
+  echo "Stage 2 completion audit Job does not point at the shared evidence directory" >&2
+  exit 1
+fi
+
+if ! grep -q "AUDIT_DIR" deploy/stage2-evidence/stage2-completion-audit-job.example.yaml; then
+  echo "Stage 2 completion audit Job does not configure an output audit directory" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/stage2-completion-audit-job.example.yaml; then
+  echo "Stage 2 completion audit Job does not persist the checklist to the production evidence PVC" >&2
   exit 1
 fi
 
