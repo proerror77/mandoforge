@@ -3511,13 +3511,13 @@ function renderObservability() {
             <dt>Deployment validation</dt>
             <dd>${escapeHtml(collectorDeploymentReadiness.status || "unknown")} · blocked ${collectorDeploymentReadiness.production_blocked ? "yes" : "no"} · validated ${collectorDeploymentReadiness.deployment_validated ? "yes" : "no"} · healthy ${collectorDeploymentReadiness.latest_validation_healthy ? "yes" : "no"} · controller ${collectorDeploymentReadiness.controller_configured ? "configured" : "missing"} · latest ${escapeHtml(collectorDeploymentReadiness.latest_validation_at || "none")}</dd>
             <dt>Deployment controller</dt>
-            <dd>required ${collectorDeploymentReadiness.controller_required ? "yes" : "no"} · status ${escapeHtml(collectorDeploymentReadiness.latest_controller_status || "none")} · validated ${collectorDeploymentReadiness.latest_controller_validated ? "yes" : "no"}</dd>
+            <dd>required ${collectorDeploymentReadiness.controller_required ? "yes" : "no"} · status ${escapeHtml(collectorDeploymentReadiness.latest_controller_status || "none")} · validated ${collectorDeploymentReadiness.latest_controller_validated ? "yes" : "no"} · fresh ${collectorDeploymentReadiness.controller_evidence_fresh ? "yes" : "no"} · age ${collectorDeploymentReadiness.latest_controller_age_hours ?? "n/a"}h</dd>
             <dt>Deployment message</dt>
             <dd>${escapeHtml(collectorDeploymentReadiness.message || "collector deployment validation is not reported")}</dd>
             <dt>Cluster rollout</dt>
             <dd>${escapeHtml(collectorClusterRollout.status || "unknown")} · blocked ${collectorClusterRollout.production_blocked ? "yes" : "no"} · deployment ${collectorClusterRollout.deployment_validated ? "validated" : "not ready"} · controller ${collectorClusterRollout.controller_configured ? "configured" : "missing"} · latest ${escapeHtml(collectorClusterRollout.latest_rollout_at || "none")}</dd>
             <dt>Cluster controller</dt>
-            <dd>required ${collectorClusterRollout.controller_required ? "yes" : "no"} · status ${escapeHtml(collectorClusterRollout.latest_controller_status || "none")} · validated ${collectorClusterRollout.latest_controller_validated ? "yes" : "no"}</dd>
+            <dd>required ${collectorClusterRollout.controller_required ? "yes" : "no"} · status ${escapeHtml(collectorClusterRollout.latest_controller_status || "none")} · validated ${collectorClusterRollout.latest_controller_validated ? "yes" : "no"} · fresh ${collectorClusterRollout.controller_evidence_fresh ? "yes" : "no"} · age ${collectorClusterRollout.latest_controller_age_hours ?? "n/a"}h</dd>
             <dt>Cluster message</dt>
             <dd>${escapeHtml(collectorClusterRollout.message || "collector cluster rollout is not reported")}</dd>
             <dt>Remediation supervision</dt>

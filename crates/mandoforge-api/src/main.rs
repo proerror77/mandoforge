@@ -1506,7 +1506,9 @@ struct ObservabilityCollectorDeploymentReadiness {
     latest_validation_status: Option<String>,
     latest_validation_healthy: bool,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
     latest_controller_validated: bool,
+    controller_evidence_fresh: bool,
     blocking_reasons: Vec<String>,
     message: String,
 }
@@ -1520,7 +1522,9 @@ struct ObservabilityCollectorClusterRolloutReadiness {
     latest_rollout_at: Option<DateTime<Utc>>,
     latest_rollout_status: Option<String>,
     latest_controller_status: Option<String>,
+    latest_controller_age_hours: Option<i64>,
     latest_controller_validated: bool,
+    controller_evidence_fresh: bool,
     deployment_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
@@ -22118,10 +22122,15 @@ fn build_observability_collector_deployment_readiness(
     let latest_controller_status = latest_validation
         .and_then(|log| log.details["controller_execution"]["status"].as_str())
         .map(str::to_string);
+    let latest_controller_age_hours = latest_validation
+        .filter(|_| latest_controller_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
     let latest_controller_validated = latest_controller_status
         .as_deref()
         .map(|status| status == "validated")
         .unwrap_or(false);
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let mut blocking_reasons = Vec::new();
 
     if !otlp_enabled {
@@ -22146,6 +22155,9 @@ fn build_observability_collector_deployment_readiness(
     if controller_required && latest_validation.is_some() && !latest_controller_validated {
         blocking_reasons
             .push("latest collector deployment controller execution was not validated".to_string());
+    }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons.push("collector deployment controller evidence is stale".to_string());
     }
 
     let production_blocked = !blocking_reasons.is_empty();
@@ -22177,7 +22189,9 @@ fn build_observability_collector_deployment_readiness(
         latest_validation_status,
         latest_validation_healthy,
         latest_controller_status,
+        latest_controller_age_hours,
         latest_controller_validated,
+        controller_evidence_fresh,
         blocking_reasons,
         message,
     }
@@ -22204,7 +22218,12 @@ fn build_observability_collector_cluster_rollout_readiness(
         .and_then(|execution| execution.get("status"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let latest_controller_age_hours = latest_rollout
+        .filter(|_| latest_controller_status.is_some())
+        .map(|log| (generated_at - log.created_at).num_hours());
     let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
+    let controller_evidence_fresh =
+        latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
     let mut blocking_reasons = Vec::new();
     if !deployment_readiness.deployment_validated {
         blocking_reasons.push("collector deployment validation is not ready".to_string());
@@ -22228,6 +22247,9 @@ fn build_observability_collector_cluster_rollout_readiness(
         blocking_reasons.push(
             "collector cluster rollout controller evidence is missing or not validated".to_string(),
         );
+    }
+    if controller_required && latest_controller_validated && !controller_evidence_fresh {
+        blocking_reasons.push("collector cluster rollout controller evidence is stale".to_string());
     }
     let production_blocked = controller_required && !blocking_reasons.is_empty();
     let status = if production_blocked {
@@ -22261,7 +22283,9 @@ fn build_observability_collector_cluster_rollout_readiness(
         latest_rollout_at,
         latest_rollout_status,
         latest_controller_status,
+        latest_controller_age_hours,
         latest_controller_validated,
+        controller_evidence_fresh,
         deployment_validated: deployment_readiness.deployment_validated,
         blocking_reasons,
         message,
@@ -31823,7 +31847,7 @@ not json
             reason == "collector deployment controller is required but not configured"
         }));
 
-        let audit = new_audit_log(
+        let mut audit = new_audit_log(
             None,
             "user",
             None,
@@ -31842,25 +31866,49 @@ not json
                 }
             }),
         );
+        audit.created_at = generated_at;
         let ready = build_observability_collector_deployment_readiness(
             true,
             true,
             true,
             true,
-            &[audit],
+            &[audit.clone()],
             generated_at,
         );
         assert_eq!(ready.status, "ready");
         assert!(!ready.production_blocked);
         assert!(ready.deployment_validated);
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
+
+        let mut stale_audit = audit;
+        stale_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = build_observability_collector_deployment_readiness(
+            true,
+            true,
+            true,
+            true,
+            &[stale_audit],
+            generated_at,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.production_blocked);
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(
+            stale
+                .blocking_reasons
+                .iter()
+                .any(|reason| { reason == "collector deployment controller evidence is stale" })
+        );
     }
 
     #[test]
     fn observability_collector_cluster_readiness_requires_controller_when_configured() {
         let generated_at = Utc::now();
-        let deployment_audit = new_audit_log(
+        let mut deployment_audit = new_audit_log(
             None,
             "user",
             None,
@@ -31877,6 +31925,7 @@ not json
                 }
             }),
         );
+        deployment_audit.created_at = generated_at;
         let deployment_readiness = build_observability_collector_deployment_readiness(
             true,
             true,
@@ -31899,7 +31948,7 @@ not json
             reason == "collector cluster rollout controller is required but not configured"
         }));
 
-        let rollout_audit = new_audit_log(
+        let mut rollout_audit = new_audit_log(
             None,
             "user",
             None,
@@ -31918,9 +31967,10 @@ not json
                 "deployment_validated": true
             }),
         );
+        rollout_audit.created_at = generated_at;
         let ready = build_observability_collector_cluster_rollout_readiness(
             &deployment_readiness,
-            &[rollout_audit],
+            &[rollout_audit.clone()],
             generated_at,
             true,
             true,
@@ -31928,8 +31978,29 @@ not json
         assert_eq!(ready.status, "ready");
         assert!(!ready.production_blocked);
         assert!(ready.latest_controller_validated);
+        assert!(ready.controller_evidence_fresh);
+        assert_eq!(ready.latest_controller_age_hours, Some(0));
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
         assert!(ready.deployment_validated);
+
+        let mut stale_rollout_audit = rollout_audit;
+        stale_rollout_audit.created_at = generated_at - chrono::Duration::hours(25);
+        let stale = build_observability_collector_cluster_rollout_readiness(
+            &deployment_readiness,
+            &[stale_rollout_audit],
+            generated_at,
+            true,
+            true,
+        );
+        assert_eq!(stale.status, "blocked");
+        assert!(stale.production_blocked);
+        assert!(!stale.controller_evidence_fresh);
+        assert_eq!(stale.latest_controller_age_hours, Some(25));
+        assert!(
+            stale.blocking_reasons.iter().any(|reason| {
+                reason == "collector cluster rollout controller evidence is stale"
+            })
+        );
     }
 
     fn ready_finance_operations_summary(

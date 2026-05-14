@@ -66,8 +66,12 @@ write_summary() {
   local deployment_status
   local cluster_status
   local remediation_status
+  local deployment_controller_fresh
+  local deployment_controller_age_hours
   local deployment_evidence_status
   local deployment_validation_status
+  local cluster_controller_fresh
+  local cluster_controller_age_hours
   local cluster_evidence_status
   local cluster_validation_status
   local remediation_evidence_status
@@ -79,6 +83,10 @@ write_summary() {
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$readiness_file")"
   cluster_status="$(jq -r '.cluster_rollout.status // "unknown"' "$readiness_file")"
   remediation_status="$(jq -r '.remediation_supervision.status // "unknown"' "$readiness_file")"
+  deployment_controller_fresh="$(jq -r '.deployment_readiness.controller_evidence_fresh // false' "$readiness_file")"
+  deployment_controller_age_hours="$(jq -r '.deployment_readiness.latest_controller_age_hours // "none"' "$readiness_file")"
+  cluster_controller_fresh="$(jq -r '.cluster_rollout.controller_evidence_fresh // false' "$readiness_file")"
+  cluster_controller_age_hours="$(jq -r '.cluster_rollout.latest_controller_age_hours // "none"' "$readiness_file")"
   deployment_evidence_status="missing"
   deployment_validation_status="unknown"
   if [[ -s "$deployment_evidence_file" ]]; then
@@ -108,7 +116,11 @@ write_summary() {
     echo "observability_collector_status=$status"
     echo "production_ops_status=$production_ops_status"
     echo "deployment_readiness_status=$deployment_status"
+    echo "deployment_controller_evidence_fresh=$deployment_controller_fresh"
+    echo "deployment_controller_age_hours=$deployment_controller_age_hours"
     echo "cluster_rollout_status=$cluster_status"
+    echo "cluster_controller_evidence_fresh=$cluster_controller_fresh"
+    echo "cluster_controller_age_hours=$cluster_controller_age_hours"
     echo "remediation_supervision_status=$remediation_status"
     echo "deployment_evidence_status=$deployment_evidence_status"
     echo "deployment_validation_status=$deployment_validation_status"
