@@ -85,6 +85,7 @@
 ## Stage 2 / 3 Boundary Work
 
 - [x] Close Stage 2 as a repo-controlled Governed Runtime Pilot with completion audit, controller-drill evidence, CI, and an explicit external production adoption backlog.
+- [x] Add Agent Team operating model for parallel lane ownership, integration gates, and merge discipline.
 - [x] Add reserved MCP Gateway config and client boundary before enabling `mcp.call`.
 - [x] Add reserved OTel observability config and exporter boundary before enabling telemetry export.
 - [x] Add RBAC principal, permission, and authorizer boundary before request-path enforcement.
