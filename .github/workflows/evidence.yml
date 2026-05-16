@@ -1,0 +1,61 @@
+name: Evidence Gates
+
+on:
+  workflow_dispatch:
+    inputs:
+      live_stack:
+        description: Run the Stage 1 gate with Docker/Postgres live stack
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  schedule:
+    - cron: "21 19 * * *"
+
+concurrency:
+  group: evidence-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  stage1-final-gate:
+    name: Stage 1 final gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-${{ runner.os }}-
+      - run: cargo fetch --locked
+      - name: Run static/demo Stage 1 final gate
+        if: github.event_name == 'schedule' || inputs.live_stack != 'true'
+        run: ./scripts/stage1-final-gate.sh
+      - name: Run live Stage 1 final gate
+        if: github.event_name == 'workflow_dispatch' && inputs.live_stack == 'true'
+        run: RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh
+
+  docker-image-dry-run:
+    name: Docker image dry run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker build -t mandoforge-api:ci .

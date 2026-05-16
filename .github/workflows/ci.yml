@@ -4,51 +4,40 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  rust:
+  static:
+    name: Static gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
       - name: Install kubectl
         run: |
           KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
           curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/kubectl
-      - run: cargo fmt --all -- --check
-      - run: cargo check --workspace
-      - run: cargo test -p mandoforge-api
-      - run: node --check web/app.js
-      - run: bash -n scripts/stage1-final-gate.sh
-      - run: bash -n scripts/stage2-production-evidence-gate.sh
-      - run: bash -n scripts/stage2-completion-audit-gate.sh
-      - run: bash -n scripts/observability-collector-evidence-gate.sh
-      - run: bash -n scripts/remote-computer-evidence-gate.sh
-      - run: bash -n scripts/provider-governance-evidence-gate.sh
-      - run: bash -n scripts/tenant-isolation-evidence-gate.sh
-      - run: bash -n scripts/vault-evidence-gate.sh
-      - run: bash -n scripts/approval-notification-evidence-gate.sh
-      - run: bash -n scripts/worker-evidence-gate.sh
-      - run: bash -n scripts/policy-rollout-evidence-gate.sh
-      - run: bash -n scripts/codex-app-server-evidence-gate.sh
-      - run: bash -n scripts/mcp-gateway-evidence-gate.sh
-      - run: bash -n scripts/eval-release-evidence-gate.sh
-      - run: bash -n scripts/finance-evidence-gate.sh
-      - run: bash -n scripts/stage2-controller-drill.sh
-      - run: bash -n scripts/stage2-controller-drill-live-gate.sh
-      - run: bash -n scripts/verify-stage2-controller-drill.sh
-      - run: node --check scripts/stage2-mock-controller.js
-      - run: bash -n scripts/archive-stage2-production-evidence.sh
-      - run: bash -n scripts/verify-stage2-evidence-archive.sh
-      - run: bash -n scripts/render-stage2-controller-secret.sh
-      - run: bash -n scripts/verify-stage2-controller-env-template.sh
-      - run: bash -n scripts/verify-stage2-evidence-k8s-manifests.sh
-      - run: bash -n scripts/verify-observability-k8s-manifests.sh
-      - run: bash -n scripts/verify-remote-computer-k8s-manifests.sh
+      - name: Check JavaScript syntax
+        run: |
+          node --check web/app.js
+          node --check scripts/stage2-mock-controller.js
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print0 | sort -z)
       - run: scripts/verify-stage2-controller-env-template.sh
       - run: scripts/verify-stage2-evidence-k8s-manifests.sh
       - run: scripts/verify-stage2-controller-drill.sh
@@ -59,3 +48,25 @@ jobs:
       - run: kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out
       - run: kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out && wc -l /tmp/mandoforge-stage2-evidence-kustomize.out
       - run: kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone >/tmp/mandoforge-stage2-production-evidence-kustomize.out && wc -l /tmp/mandoforge-stage2-production-evidence-kustomize.out
+
+  rust:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-${{ runner.os }}-
+      - run: cargo fetch --locked
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --locked --all-targets
