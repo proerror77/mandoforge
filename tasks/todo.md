@@ -84,6 +84,7 @@
 
 ## Stage 2 / 3 Boundary Work
 
+- [x] Close Stage 2 as a repo-controlled Governed Runtime Pilot with completion audit, controller-drill evidence, CI, and an explicit external production adoption backlog.
 - [x] Add reserved MCP Gateway config and client boundary before enabling `mcp.call`.
 - [x] Add reserved OTel observability config and exporter boundary before enabling telemetry export.
 - [x] Add RBAC principal, permission, and authorizer boundary before request-path enforcement.
@@ -183,4 +184,29 @@
 - [x] Add production Codex App Server worker-backed steering orchestration.
 - [x] Add Codex App Server retry orchestration across worker leases.
 - [x] Add long-running Codex App Server steering summary metrics.
-- [ ] Add external scheduler integration and richer per-turn Codex App Server trace dashboards.
+- [ ] Stage 3: add external scheduler integration and richer per-turn Codex App Server trace dashboards.
+
+## External Production Adoption Backlog
+
+- [ ] Run tenant routing evidence against a real multi-tenant deployment with RLS enabled, forced, and tenant context configured.
+- [ ] Run policy rollout orchestration against a real production policy controller target.
+- [ ] Run provider gate, rollout, and rollback evidence against real provider deployment targets.
+- [ ] Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend.
+- [ ] Run worker load validation, isolated worker-pool validation, and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem.
+- [ ] Run approval notification delivery evidence against real webhook, Slack, or email provider targets.
+- [ ] Run MCP connector deployment, rollout, and rollback evidence against a real team connector target.
+- [ ] Run Codex App Server deployment and ops evidence against a real App Server target.
+- [ ] Run eval/release rollout, orchestration, deployment, and rollback evidence against a real production release target.
+- [ ] Run OTel collector deployment, cluster rollout, and remediation evidence against a real collector deployment.
+- [ ] Run finance close, export delivery, and reconciliation evidence against a real accounting-system target.
+
+## Workflow Pack / Domain Pack Adaptation
+
+- [x] Record the Workflow Pack adaptation plan from vertical workflow plugin references.
+- [ ] Define the `WorkflowPack` / `DomainPack` manifest contract and package validation rules.
+- [ ] Add profile onboarding / cold-start workflow contract for company, department, approval matrix, connector map, risk policy, and output style.
+- [ ] Add typed `agent_handoff_events` with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
+- [ ] Add Reader / Analyzer / Writer worker role declarations and tool-scope enforcement for untrusted input workflows.
+- [ ] Add connector manifest policy fields for provenance, tenant scope, write gating, and prompt-injection boundary.
+- [ ] Build the first AI Governance Pack slice: AI use-case triage, AI impact assessment, vendor AI review, and policy monitor.
+- [ ] Add pack-level eval fixtures and release gates so workflow pack behavior cannot regress silently.
