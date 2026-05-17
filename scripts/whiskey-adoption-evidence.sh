@@ -30,6 +30,8 @@ WHISKEY_K3S_CONSTRAINED_PILOT_JSON=""
 WHISKEY_K3S_CONSTRAINED_PILOT_TEXT=""
 WHISKEY_MCP_LARK_DOCS_SCOPE_JSON=""
 WHISKEY_MCP_LARK_DOCS_SCOPE_TEXT=""
+WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_JSON=""
+WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_TEXT=""
 
 sha256_value() {
   local file="$1"
@@ -155,6 +157,23 @@ sync_mcp_lark_docs_scope_evidence() {
     "$WHISKEY_MCP_LARK_DOCS_SCOPE_TEXT" \
     "$LOCAL_SYNC_DIR/whiskey-mcp-lark-docs-scope-latest.json" \
     "$LOCAL_SYNC_DIR/whiskey-mcp-lark-docs-scope-latest.txt" \
+    "$REMOTE_HOST:$remote_dir/"
+}
+
+collect_mcp_lark_docs_login_prompt_artifact() {
+  WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_JSON="$LOCAL_SYNC_DIR/whiskey-mcp-lark-docs-login-prompt-latest.json"
+  WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_TEXT="$LOCAL_SYNC_DIR/whiskey-mcp-lark-docs-login-prompt-latest.txt"
+}
+
+sync_mcp_lark_docs_login_prompt_artifact() {
+  local remote_dir="$1"
+  if [[ ! -f "$WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_JSON" || ! -f "$WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_TEXT" ]]; then
+    return 0
+  fi
+  ssh "$REMOTE_HOST" "mkdir -p '$remote_dir'"
+  rsync -az \
+    "$WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_JSON" \
+    "$WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_TEXT" \
     "$REMOTE_HOST:$remote_dir/"
 }
 
@@ -892,6 +911,7 @@ mkdir -p "$LOCAL_SYNC_DIR"
 collect_remote_computer_k3s_inventory
 collect_remote_computer_k3s_constrained_pilot
 collect_mcp_lark_docs_scope_evidence
+collect_mcp_lark_docs_login_prompt_artifact
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && test -f '$REMOTE_COMPOSE' && test -f '$REMOTE_ENV'"
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' '$REMOTE_ROOT/scripts' '$REMOTE_ROOT/deploy/stage2-evidence' '$REMOTE_ROOT/deploy/stage2-production-evidence' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
@@ -991,6 +1011,7 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
   rm -rf '$REMOTE_ROOT/evidence/workflow-packs' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/workflow-packs' WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml WORKFLOW_PACK_REQUIRE_CONNECTOR_BINDING=1 WORKFLOW_PACK_REQUIRE_LIVE_CONNECTOR_AUTH=1 WORKFLOW_PACK_MCP_QUERY='$WORKFLOW_PACK_MCP_QUERY' scripts/workflow-pack-evidence-gate.sh"
 sync_mcp_lark_docs_scope_evidence "$REMOTE_ROOT/evidence/workflow-packs"
+sync_mcp_lark_docs_login_prompt_artifact "$REMOTE_ROOT/evidence/workflow-packs"
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
   rm -rf '$REMOTE_ROOT/evidence/stage2-production'"
@@ -1024,6 +1045,7 @@ sync_remote_computer_k3s_inventory "$REMOTE_ROOT/evidence/stage2-production/remo
 sync_remote_computer_k3s_constrained_pilot "$REMOTE_ROOT/evidence/stage2-production/remote-computer-k3s"
 capture_whiskey_otel_collector_evidence "$REMOTE_ROOT/evidence/stage2-production/observability-collector"
 sync_mcp_lark_docs_scope_evidence "$REMOTE_ROOT/evidence/stage2-production/workflow-packs"
+sync_mcp_lark_docs_login_prompt_artifact "$REMOTE_ROOT/evidence/stage2-production/workflow-packs"
 
 archive_paths="$(ssh "$REMOTE_HOST" "set -euo pipefail
   mkdir -p '$REMOTE_ROOT/archives'
