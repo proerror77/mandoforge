@@ -51,6 +51,7 @@ If that preflight is accepted, the next repo-native step is:
 
 ```bash
 scripts/whiskey-remote-computer-k3s-prepare.sh
+scripts/whiskey-remote-computer-k3s-constrained-pilot.sh
 ```
 
 That script defaults to `dry_run` and only reports the host changes needed for a constrained pilot. It does not mutate Whiskey unless `--apply` is passed explicitly.
@@ -86,3 +87,5 @@ The latest consolidated host inventory on 2026-05-17T22:56:43Z returned `preflig
 That means a single-node k3s pilot is feasible only as an explicit constrained experiment with capped Remote Computer warm-pool replicas, no public ingress, and preflight remediation for `br_netfilter` plus bridge iptables before installation.
 
 Until that decision is made, Whiskey remains a single-host production-like pilot: useful for API, Codex App Server deployment/ops, scheduler, and inventory evidence, but not enough for complete Remote Computer cluster/state adoption.
+
+The wrapper `scripts/whiskey-remote-computer-k3s-constrained-pilot.sh` now stitches together host inventory, prerequisite preparation, install, verify, and manifest-render review into one repo-native command. It defaults to `dry_run`, writes a timestamped plan under `.mandoforge/remote-adoption/whiskey/`, and prints the next `kubectl apply -k deploy` plus `RUN_STAGE2_PRODUCTION_VALIDATIONS=1 scripts/whiskey-adoption-evidence.sh` steps for the post-approval constrained pilot.
