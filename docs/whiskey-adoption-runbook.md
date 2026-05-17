@@ -4,6 +4,8 @@ This runbook turns `wishky-2-1` into a repeatable production-like adoption targe
 
 It does not claim full production validation. Whiskey is a single-host pilot unless a real Kubernetes cluster, Codex App Server target, external controllers, and production integrations are configured.
 
+For the latest lane status and residual backlog, see [Whiskey Adoption Status](whiskey-adoption-status.md).
+
 ## Host Contract
 
 - SSH host: `wishky-2-1`.
