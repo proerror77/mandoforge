@@ -321,6 +321,14 @@ This also defaults to `dry_run`. On Whiskey today it reports the exact install p
 
 Use `--apply` only after the preflight and preparation outputs are reviewed and the constrained pilot is explicitly approved.
 
+After installation, verify the single-node pilot with:
+
+```bash
+scripts/whiskey-remote-computer-k3s-verify.sh
+```
+
+Before approval, the current Whiskey host returns `status=not_installed` with no reserved port collisions and no kubeconfig or Ready nodes, which is the expected baseline.
+
 The latest preflight on 2026-05-17 returned `status=constrained_pilot_only`. It confirmed that Whiskey is still a 2 vCPU / 3.4 GiB RAM host with only about 1.6 GiB immediately available memory, 1.4 GiB of swap already in use, no current k3s-reserved port collisions, and missing `br_netfilter` plus `bridge-nf-call-iptables`. That means cluster work should stay isolated from existing services and only proceed as an explicit constrained experiment.
 
 Current Whiskey capacity snapshot from the adoption check:

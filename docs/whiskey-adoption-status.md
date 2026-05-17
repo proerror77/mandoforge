@@ -63,6 +63,14 @@ scripts/whiskey-remote-computer-k3s-install.sh
 
 That script also defaults to `dry_run`. It prints the exact k3s installer command and systemd actions it would run on Whiskey, but does not install anything unless `--apply` is passed explicitly.
 
+After installation, the verification step is:
+
+```bash
+scripts/whiskey-remote-computer-k3s-verify.sh
+```
+
+On the current Whiskey host, that verification reports `status=not_installed`, which is the expected pre-install baseline.
+
 The latest preflight on 2026-05-17 returned `status=constrained_pilot_only` with:
 
 - `cpu_count=2`
