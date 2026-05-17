@@ -69,6 +69,14 @@ Release should require passing eval gates, policy gates, connector readiness, an
 
 Uninstall should archive the pack installation and disable future schedules or entrypoints. It must not delete historical artifacts, eval runs, audit logs, handoff events, or release evidence.
 
+The initial Stage 3 lifecycle implements this as a soft archive:
+
+- `POST /api/workflow-packs/installations/{id}/archive` marks an installed, staged, or released installation as `archived`.
+- Archived installations are excluded from active list and get APIs.
+- The release timestamp, gate status, gate evidence, validation report, and manifest snapshot stay attached to the archived row for audit replay.
+- `workflow_pack.archived` audit evidence records the archive reason, previous status, and archive timestamp.
+- Archive is not a destructive package delete and does not erase historical audit or release evidence.
+
 ## Verification
 
 Run:
@@ -78,3 +86,11 @@ scripts/verify-workflow-pack-manifest.sh
 ```
 
 The gate currently runs Rust validator tests against the AI Governance Pack fixture and checks that the external JSON Schema and package manifest are present.
+
+The Whiskey evidence gate exercises the API lifecycle end to end:
+
+```bash
+WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml scripts/workflow-pack-evidence-gate.sh
+```
+
+It validates the manifest, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, archives the released installation, and verifies archived installs are removed from active reads.

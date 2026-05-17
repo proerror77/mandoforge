@@ -676,6 +676,12 @@ struct WorkflowPackReleaseRequest {
     reason: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkflowPackArchiveRequest {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Approval {
     id: Uuid,
@@ -4251,6 +4257,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-packs/installations/{id}/release",
             post(release_workflow_pack_installation_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/archive",
+            post(archive_workflow_pack_installation_route),
         )
         .route(
             "/api/eval/datasets",
@@ -8008,6 +8018,41 @@ async fn release_workflow_pack_installation_route(
             "eval_gate_status": installation.eval_gate_status,
             "release_gate_status": installation.release_gate_status,
             "gate_evidence": installation.gate_evidence,
+        }),
+    )
+    .await?;
+    Ok(Json(installation))
+}
+
+async fn archive_workflow_pack_installation_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<WorkflowPackArchiveRequest>,
+) -> Result<Json<WorkflowPackInstallation>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    let current = state.get_workflow_pack_installation(id).await?;
+    if !matches!(current.status.as_str(), "installed" | "staged" | "released") {
+        return Err(AppError::bad_request(
+            "only installed, staged, or released workflow packs can be archived",
+        ));
+    }
+    let installation = state.archive_workflow_pack_installation(id).await?;
+    record_workflow_pack_installation_audit(
+        &state,
+        &installation,
+        "workflow_pack.archived",
+        json!({
+            "reason": input.reason,
+            "archived_at": installation.archived_at,
+            "previous_status": current.status,
         }),
     )
     .await?;
@@ -35730,6 +35775,49 @@ not json
         assert_eq!(installations.len(), 1);
         assert_eq!(installations[0].id, installed.id);
 
+        let archived: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/archive", installed.id),
+                json!({"reason": "replace with next pack version"}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(archived.status, "archived");
+        assert!(archived.archived_at.is_some());
+        assert_eq!(archived.released_at, released.released_at);
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            error["error"].as_str(),
+            Some("workflow pack installation not found")
+        );
+
+        let active_installations: Vec<WorkflowPackInstallation> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/workflow-packs/installations")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(active_installations.is_empty());
+
         let audit_logs: Vec<AuditLog> = request_json(
             app,
             Request::builder()
@@ -35743,6 +35831,7 @@ not json
             "workflow_pack.installed",
             "workflow_pack.staged",
             "workflow_pack.released",
+            "workflow_pack.archived",
         ] {
             assert!(
                 audit_logs

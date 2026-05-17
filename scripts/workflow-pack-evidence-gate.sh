@@ -119,16 +119,27 @@ release_file="$(fetch_json POST "/api/workflow-packs/installations/$installation
   '{"eval_gate_status":"passed","release_gate_status":"passed","gate_evidence":{"source":"workflow-pack-evidence-gate","eval_archive":"whiskey-ai-governance-regression","policy_gate":"approval-policy"},"reason":"Whiskey WorkflowPack adoption release proof"}')"
 get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id")"
 list_file="$(fetch_json GET /api/workflow-packs/installations)"
+released_get_file="$EVIDENCE_DIR/api-workflow-packs-installations-$installation_id-before-archive.json"
+released_list_file="$EVIDENCE_DIR/api-workflow-packs-installations-before-archive.json"
+cp "$get_file" "$released_get_file"
+cp "$list_file" "$released_list_file"
+archive_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/archive" \
+  '{"reason":"Whiskey WorkflowPack adoption archive proof"}')"
+archived_get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id" "{}" 4)"
+list_after_archive_file="$(fetch_json GET /api/workflow-packs/installations)"
 
 validation_pack_id="$(jq -r '.response.pack_id // empty' "$validate_file")"
 validated_file_count="$(jq -r '.response.validated_file_count // 0' "$validate_file")"
 install_status="$(jq -r '.response.status // "unknown"' "$install_file")"
 stage_status="$(jq -r '.response.status // "unknown"' "$stage_file")"
 release_status="$(jq -r '.response.status // "unknown"' "$release_file")"
+archive_status="$(jq -r '.response.status // "unknown"' "$archive_file")"
 eval_gate_status="$(jq -r '.response.eval_gate_status // "unknown"' "$release_file")"
 release_gate_status="$(jq -r '.response.release_gate_status // "unknown"' "$release_file")"
-released_get_status="$(jq -r '.response.status // "unknown"' "$get_file")"
-released_list_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id and .status == "released")] | length' "$list_file")"
+released_get_status="$(jq -r '.response.status // "unknown"' "$released_get_file")"
+released_list_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id and .status == "released")] | length' "$released_list_file")"
+archived_get_status="$(jq -r '.http_status // 0' "$archived_get_file")"
+active_after_archive_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id)] | length' "$list_after_archive_file")"
 
 if [[ "$validation_pack_id" != "ai-governance" ]]; then
   echo "workflow pack validation returned unexpected pack_id=$validation_pack_id" >&2
@@ -150,9 +161,17 @@ if [[ "$released_get_status" != "released" || "$released_list_count" != "1" ]]; 
   echo "workflow pack released installation was not retrievable" >&2
   exit 1
 fi
+if [[ "$archive_status" != "archived" ]]; then
+  echo "workflow pack archive did not reach archived state" >&2
+  exit 1
+fi
+if [[ "$archived_get_status" != "404" || "$active_after_archive_count" != "0" ]]; then
+  echo "workflow pack archive did not remove installation from active reads" >&2
+  exit 1
+fi
 
 {
-  echo "workflow_pack_status=released"
+  echo "workflow_pack_status=archived_after_release"
   echo "pack_id=$validation_pack_id"
   echo "manifest_path=$MANIFEST_PATH"
   echo "installation_id=$installation_id"
@@ -160,8 +179,11 @@ fi
   echo "install_status=$install_status"
   echo "stage_status=$stage_status"
   echo "release_status=$release_status"
+  echo "archive_status=$archive_status"
   echo "eval_gate_status=$eval_gate_status"
   echo "release_gate_status=$release_gate_status"
+  echo "archived_get_status=$archived_get_status"
+  echo "active_after_archive_count=$active_after_archive_count"
   echo "evidence_dir=$EVIDENCE_DIR"
 } >"$EVIDENCE_DIR/summary.txt"
 

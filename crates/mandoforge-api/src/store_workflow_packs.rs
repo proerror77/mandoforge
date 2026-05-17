@@ -164,4 +164,40 @@ impl AppState {
             }
         }
     }
+
+    pub(crate) async fn archive_workflow_pack_installation(
+        &self,
+        id: Uuid,
+    ) -> Result<WorkflowPackInstallation, AppError> {
+        let archived_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let installation = store
+                    .workflow_pack_installations
+                    .get_mut(&id)
+                    .filter(|installation| installation.archived_at.is_none())
+                    .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
+                installation.status = "archived".to_string();
+                installation.archived_at = Some(archived_at);
+                installation.updated_at = archived_at;
+                Ok(installation.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE workflow_pack_installations
+                     SET status = 'archived', archived_at = $3, updated_at = $3
+                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL
+                     RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
+                )
+                .bind(self.tenant_id)
+                .bind(id)
+                .bind(archived_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
+                workflow_pack_installation_from_row(row)
+            }
+        }
+    }
 }
