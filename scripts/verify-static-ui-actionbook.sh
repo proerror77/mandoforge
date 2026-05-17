@@ -287,13 +287,19 @@ if ! curl -fsS "http://127.0.0.1:$ACTIONBOOK_CDP_PORT/json/version" >/dev/null 2
     echo "Chrome executable not found at $CHROME_PATH" >&2
     exit 1
   fi
+  chrome_args=(
+    --headless=new
+    "--remote-debugging-port=$ACTIONBOOK_CDP_PORT"
+    "--user-data-dir=$CHROME_USER_DATA_DIR"
+    --disable-gpu
+    --no-first-run
+    --no-default-browser-check
+  )
+  if [[ "$(id -u)" == "0" ]]; then
+    chrome_args+=(--no-sandbox --disable-dev-shm-usage)
+  fi
   "$CHROME_PATH" \
-    --headless=new \
-    "--remote-debugging-port=$ACTIONBOOK_CDP_PORT" \
-    "--user-data-dir=$CHROME_USER_DATA_DIR" \
-    --disable-gpu \
-    --no-first-run \
-    --no-default-browser-check \
+    "${chrome_args[@]}" \
     about:blank \
     >/tmp/mandoforge-actionbook-chrome.log 2>&1 &
   CHROME_PID="$!"

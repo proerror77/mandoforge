@@ -388,6 +388,97 @@ REMOTE
   ssh "$REMOTE_HOST" "bash -lc $(printf '%q' "$remote_script")"
 }
 
+seed_policy_rollout_evidence() {
+  local evidence_dir="$1"
+  local reason="$2"
+  local remote_script
+
+  remote_script="$(cat <<REMOTE
+set -euo pipefail
+cd '$REMOTE_ROOT'
+set -a
+source '$REMOTE_ENV'
+set +a
+
+base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
+evidence_dir='$evidence_dir'
+reason='$reason'
+mkdir -p "\$evidence_dir"
+curl -fsS "\$base_url/healthz" >/dev/null
+
+auth_headers=(
+  -H "x-mandoforge-subject: whiskey-adoption-admin"
+  -H "x-mandoforge-roles: admin"
+)
+
+policy_file="\$(mktemp)"
+revision_file="\$(mktemp)"
+gate_file="\$(mktemp)"
+create_body="\$(mktemp)"
+gate_body="\$(mktemp)"
+
+cleanup() {
+  rm -f "\$policy_file" "\$revision_file" "\$gate_file" "\$create_body" "\$gate_body"
+}
+trap cleanup EXIT
+
+curl -fsS "\${auth_headers[@]}" "\$base_url/api/policy" >"\$policy_file"
+revision_name="whiskey-scheduled-due-policy-\$(date -u +%Y%m%dT%H%M%SZ)"
+jq -n \
+  --arg name "\$revision_name" \
+  --slurpfile policy "\$policy_file" \
+  '{
+    name: \$name,
+    body: (\$policy[0] // {})
+  }' >"\$create_body"
+
+curl -fsS -X POST "\${auth_headers[@]}" \
+  -H "content-type: application/json" \
+  -d @"\$create_body" \
+  "\$base_url/api/policy/revisions" >"\$revision_file"
+revision_id="\$(jq -r '.id // empty' "\$revision_file")"
+if [[ -z "\$revision_id" || "\$revision_id" == "null" ]]; then
+  echo "Whiskey policy rollout seed could not determine revision id" >&2
+  cat "\$revision_file" >&2
+  exit 1
+fi
+
+activate_after="\$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1M +%Y-%m-%dT%H:%M:%SZ)"
+activate_before="\$(date -u -d '1 hour' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1H +%Y-%m-%dT%H:%M:%SZ)"
+jq -n \
+  --arg activate_after "\$activate_after" \
+  --arg activate_before "\$activate_before" \
+  '{
+    activate_after: \$activate_after,
+    activate_before: \$activate_before
+  }' >"\$gate_body"
+
+curl -fsS -X POST "\${auth_headers[@]}" \
+  -H "content-type: application/json" \
+  -d @"\$gate_body" \
+  "\$base_url/api/policy/revisions/\$revision_id/gate" >"\$gate_file"
+
+jq -n \
+  --arg status "seeded" \
+  --arg reason "\$reason" \
+  --arg generated_at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --slurpfile policy "\$policy_file" \
+  --slurpfile revision "\$revision_file" \
+  --slurpfile gate "\$gate_file" \
+  '{
+    status: \$status,
+    reason: \$reason,
+    generated_at: \$generated_at,
+    policy: (\$policy[0] // {}),
+    revision: (\$revision[0] // {}),
+    gate: (\$gate[0] // {})
+  }' >"\$evidence_dir/whiskey-policy-rollout-seed.json"
+REMOTE
+)"
+
+  ssh "$REMOTE_HOST" "bash -lc $(printf '%q' "$remote_script")"
+}
+
 seed_approval_notification_evidence() {
   local evidence_dir="$1"
   local reason="$2"
@@ -695,6 +786,11 @@ seed_observability_remediation_evidence "$REMOTE_ROOT/evidence/observability-col
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/observability-collector' ALLOW_BLOCKED=1 RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 scripts/observability-collector-evidence-gate.sh"
 
+seed_policy_rollout_evidence "$REMOTE_ROOT/evidence/policy-rollout" "Whiskey focused policy rollout orchestration evidence"
+
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+  BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/policy-rollout' ALLOW_BLOCKED=1 RUN_STAGE2_POLICY_DUE_RUN=1 scripts/policy-rollout-evidence-gate.sh"
+
 seed_provider_rollout_evidence "$REMOTE_ROOT/evidence/provider-governance" "Whiskey focused provider rollout adoption evidence"
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
@@ -722,6 +818,7 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
 
 seed_eval_release_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict eval/release adoption evidence"
 seed_observability_remediation_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict observability remediation evidence"
+seed_policy_rollout_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict policy rollout orchestration evidence"
 seed_provider_rollout_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict provider rollout adoption evidence"
 seed_approval_notification_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict approval notification delivery evidence"
 seed_vault_kms_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict Vault/KMS lifecycle evidence"
@@ -742,7 +839,7 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
   [[ -n \"\$pending_rollout_id\" ]] && curl -fsS -X POST -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/teams/\$team_id/mcp-servers/\$server_id/rollouts/\$pending_rollout_id/apply >/dev/null"
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
-  BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/stage2-production' ALLOW_BLOCKED=1 RUN_STAGE2_PRODUCTION_VALIDATIONS=$RUN_STRICT_VALIDATIONS RUN_STAGE2_MCP_DUE_RUN=1 RUN_STAGE2_MCP_ROLLBACK=1 RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1 RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 RUN_STAGE2_PROVIDER_ROLLOUT=1 RUN_STAGE2_APPROVAL_DELIVERY=1 RUN_STAGE2_CODEX_STALE_POLL=1 RUN_STAGE2_SECRET_LIFECYCLE=1 RUN_STAGE2_FINANCE_CONTROLLERS=1 RUN_STAGE2_FINANCE_EXPORT=1 RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 MANDOFORGE_EVAL_RELEASE_ROLLBACK_ENVIRONMENT=whiskey-eval-release MANDOFORGE_SCHEDULER_TOKEN=\"\${MANDOFORGE_SCHEDULER_TOKEN:-}\" scripts/stage2-production-evidence-gate.sh"
+  BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/stage2-production' ALLOW_BLOCKED=1 RUN_STAGE2_PRODUCTION_VALIDATIONS=$RUN_STRICT_VALIDATIONS RUN_STAGE2_MCP_DUE_RUN=1 RUN_STAGE2_MCP_ROLLBACK=1 RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1 RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 RUN_STAGE2_POLICY_DUE_RUN=1 RUN_STAGE2_PROVIDER_ROLLOUT=1 RUN_STAGE2_APPROVAL_DELIVERY=1 RUN_STAGE2_CODEX_STALE_POLL=1 RUN_STAGE2_SECRET_LIFECYCLE=1 RUN_STAGE2_FINANCE_CONTROLLERS=1 RUN_STAGE2_FINANCE_EXPORT=1 RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 RUN_STAGE2_UI_STATIC_ASSETS=1 MANDOFORGE_EVAL_RELEASE_ROLLBACK_ENVIRONMENT=whiskey-eval-release MANDOFORGE_SCHEDULER_TOKEN=\"\${MANDOFORGE_SCHEDULER_TOKEN:-}\" scripts/stage2-production-evidence-gate.sh"
 
 archive_paths="$(ssh "$REMOTE_HOST" "set -euo pipefail
   mkdir -p '$REMOTE_ROOT/archives'

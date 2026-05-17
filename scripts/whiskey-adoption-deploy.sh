@@ -15,6 +15,7 @@ LOCAL_PROVIDER_CONTROLLER="${WHISKEY_PROVIDER_CONTROLLER_FILE:-deploy/whiskey/pr
 LOCAL_APPROVAL_NOTIFICATION_CONTROLLER="${WHISKEY_APPROVAL_NOTIFICATION_CONTROLLER_FILE:-deploy/whiskey/approval-notification-controller.mjs}"
 LOCAL_VAULT_KMS_CONTROLLER="${WHISKEY_VAULT_KMS_CONTROLLER_FILE:-deploy/whiskey/vault-kms-controller.mjs}"
 LOCAL_FINANCE_CONTROLLER="${WHISKEY_FINANCE_CONTROLLER_FILE:-deploy/whiskey/finance-controller.mjs}"
+LOCAL_WEB_DIR="${WHISKEY_WEB_DIR:-web}"
 REMOTE_COMPOSE="$REMOTE_ROOT/docker-compose.yml"
 REMOTE_CODEX_CONTROLLER="$REMOTE_ROOT/codex-app-server-controller.mjs"
 REMOTE_TENANT_CONTROLLER="$REMOTE_ROOT/tenant-routing-controller.mjs"
@@ -127,6 +128,10 @@ if [[ ! -f "$LOCAL_FINANCE_CONTROLLER" ]]; then
   echo "missing Whiskey finance controller file: $LOCAL_FINANCE_CONTROLLER" >&2
   exit 1
 fi
+if [[ ! -d "$LOCAL_WEB_DIR" ]]; then
+  echo "missing Whiskey web asset directory: $LOCAL_WEB_DIR" >&2
+  exit 1
+fi
 
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 rsync -az "$LOCAL_COMPOSE" "$REMOTE_HOST:$REMOTE_COMPOSE"
@@ -140,6 +145,7 @@ rsync -az "$LOCAL_PROVIDER_CONTROLLER" "$REMOTE_HOST:$REMOTE_PROVIDER_CONTROLLER
 rsync -az "$LOCAL_APPROVAL_NOTIFICATION_CONTROLLER" "$REMOTE_HOST:$REMOTE_APPROVAL_NOTIFICATION_CONTROLLER"
 rsync -az "$LOCAL_VAULT_KMS_CONTROLLER" "$REMOTE_HOST:$REMOTE_VAULT_KMS_CONTROLLER"
 rsync -az "$LOCAL_FINANCE_CONTROLLER" "$REMOTE_HOST:$REMOTE_FINANCE_CONTROLLER"
+rsync -az "$LOCAL_WEB_DIR/" "$REMOTE_HOST:$REMOTE_ROOT/web/"
 
 ssh "$REMOTE_HOST" "if [[ ! -f '$REMOTE_ENV' ]]; then cat > '$REMOTE_ENV' <<'ENV'
 MANDOFORGE_IMAGE_TAG=$IMAGE_TAG
