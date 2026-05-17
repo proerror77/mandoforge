@@ -86,6 +86,7 @@
 
 - [x] Close Stage 2 as a repo-controlled Governed Runtime Pilot with completion audit, controller-drill evidence, CI, and an explicit external production adoption backlog.
 - [x] Add Agent Team operating model for parallel lane ownership, integration gates, and merge discipline.
+- [x] Add Stage 2 production adoption and Stage 3 product roadmap.
 - [x] Add reserved MCP Gateway config and client boundary before enabling `mcp.call`.
 - [x] Add reserved OTel observability config and exporter boundary before enabling telemetry export.
 - [x] Add RBAC principal, permission, and authorizer boundary before request-path enforcement.
@@ -185,7 +186,12 @@
 - [x] Add production Codex App Server worker-backed steering orchestration.
 - [x] Add Codex App Server retry orchestration across worker leases.
 - [x] Add long-running Codex App Server steering summary metrics.
-- [ ] Stage 3: add external scheduler integration and richer per-turn Codex App Server trace dashboards.
+- [ ] Stage 3: add external scheduler integration with idempotent due-plan/run ownership, retry policy, and audit evidence.
+- [ ] Stage 3: add richer per-turn Codex App Server trace dashboards for command, poll, interrupt, worker lease, retry, fallback, and artifact sync paths.
+- [ ] Stage 3: productize assigned Remote Computer Pod execution without bypassing Tool Router, Policy Engine, Approval Engine, event log, or audit paths.
+- [ ] Stage 3: add typed agent handoff events with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
+- [ ] Stage 3: add first-class WorkflowPack / DomainPack install, validation, staging, eval, and release gates.
+- [ ] Stage 3: add Stage 3 lane-local verification scripts and integration-owner gates for scheduler, Codex traces, Remote Computer execution, handoffs, and workflow packs.
 
 ## External Production Adoption Backlog
 
