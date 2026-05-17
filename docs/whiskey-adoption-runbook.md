@@ -27,7 +27,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, and the Whiskey tenant routing controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, and the Whiskey worker load controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
 
 The default image is:
 
@@ -116,6 +116,15 @@ The controller validates by performing a real JSON-RPC `initialize` handshake ag
 ## Worker And Remote Computer Lane
 
 Whiskey can collect single-host worker readiness evidence without Kubernetes. The standard evidence script records worker readiness and load-validation evidence under `/evidence/worker`, then includes it in the full pilot archive.
+
+Current Whiskey wiring starts a local worker load controller on the Docker gateway and configures the API with:
+
+```bash
+MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_REQUIRED=true
+MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL=http://host.docker.internal:18791/worker/load/validate
+```
+
+The controller validates the live Whiskey API worker-readiness report, durable Postgres queue mode, queue-backed worker mode, manifest hardening/autoscaling signals, the running Docker Compose worker service, and absence of failed jobs or stale leases. This is a Whiskey single-host worker validation, not a k3s multi-replica autoscaling proof.
 
 Without a real cluster, Remote Computer evidence is an inventory lane. The standard evidence script records readiness, runner, and state-sync validation evidence under `/evidence/remote-computer`, but production state sync should remain blocked until a distributed state filesystem and lock-aware state-sync manager are configured. Complete Remote Computer production evidence requires a real cluster or a `k3s` pilot on Whiskey.
 
