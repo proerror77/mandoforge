@@ -207,10 +207,10 @@ write_summary() {
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
     echo "finance_attention_items:"
-    jq -r '.attention_items[]? | "- \(.message // .kind // \"attention\")"' "$finance_summary_file"
+    jq -r '.attention_items[]? | "- \(.message // .kind // "attention")"' "$finance_summary_file"
     echo
     echo "operations_attention_items:"
-    jq -r '.attention_items[]? | "- \(.message // .kind // \"attention\")"' "$operations_file"
+    jq -r '.attention_items[]? | "- \(.message // .kind // "attention")"' "$operations_file"
     echo
     echo "production_close_blocking_reasons:"
     jq -r '.production_close.blocking_reasons[]? | "- \(.)"' "$operations_file"
