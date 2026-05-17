@@ -293,6 +293,21 @@ Before installing `k3s`, run the host preflight first:
 scripts/whiskey-remote-computer-k3s-preflight.sh
 ```
 
+If the preflight result is accepted, the next repo-native command is:
+
+```bash
+scripts/whiskey-remote-computer-k3s-prepare.sh
+```
+
+That script defaults to `dry_run` and only prints the exact changes it would make on Whiskey:
+
+- `modprobe br_netfilter`
+- write `/etc/modules-load.d/mandoforge-remote-computer.conf`
+- write `/etc/sysctl.d/99-mandoforge-remote-computer.conf`
+- run `sysctl --system`
+
+Use `--apply` only after explicitly approving a constrained k3s pilot.
+
 The latest preflight on 2026-05-17 returned `status=constrained_pilot_only`. It confirmed that Whiskey is still a 2 vCPU / 3.4 GiB RAM host with only about 1.6 GiB immediately available memory, 1.4 GiB of swap already in use, no current k3s-reserved port collisions, and missing `br_netfilter` plus `bridge-nf-call-iptables`. That means cluster work should stay isolated from existing services and only proceed as an explicit constrained experiment.
 
 Current Whiskey capacity snapshot from the adoption check:

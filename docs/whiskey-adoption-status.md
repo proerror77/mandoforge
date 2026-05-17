@@ -47,6 +47,14 @@ Do not install k3s automatically on Whiskey. Before any cluster experiment, run:
 scripts/whiskey-remote-computer-k3s-preflight.sh
 ```
 
+If that preflight is accepted, the next repo-native step is:
+
+```bash
+scripts/whiskey-remote-computer-k3s-prepare.sh
+```
+
+That script defaults to `dry_run` and only reports the host changes needed for a constrained pilot. It does not mutate Whiskey unless `--apply` is passed explicitly.
+
 The latest preflight on 2026-05-17 returned `status=constrained_pilot_only` with:
 
 - `cpu_count=2`
