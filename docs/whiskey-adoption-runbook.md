@@ -173,6 +173,7 @@ Use the repo-native helper below to check or start that scope upgrade:
 
 ```bash
 scripts/whiskey-mcp-lark-docs-scope.sh
+scripts/whiskey-mcp-lark-docs-scope.sh --capture-login-prompt
 scripts/whiskey-mcp-lark-docs-scope.sh --start-login
 ```
 
