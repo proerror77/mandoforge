@@ -288,7 +288,7 @@ github_token=""
 if command -v gh >/dev/null 2>&1; then
   github_token="$(gh auth token 2>/dev/null || true)"
 fi
-nohup env MCP_PILOT_CONTROLLER_HOST=\$docker_gateway_ip MCP_PILOT_CONTROLLER_PORT=$MCP_CONTROLLER_PORT MCP_PILOT_CONTROLLER_TOKEN='$MCP_CONTROLLER_TOKEN' MCP_PILOT_SERVER_NAME='$MCP_SERVER_NAME' MCP_PILOT_UPSTREAM_MODE=github_repositories MCP_PILOT_GITHUB_API_URL=https://api.github.com/search/repositories MCP_PILOT_GITHUB_TOKEN="$github_token" node '$REMOTE_MCP_CONTROLLER' > '$REMOTE_ROOT/mcp-pilot-controller.log' 2>&1 &
+nohup env MCP_PILOT_CONTROLLER_HOST=\$docker_gateway_ip MCP_PILOT_CONTROLLER_PORT=$MCP_CONTROLLER_PORT MCP_PILOT_CONTROLLER_TOKEN='$MCP_CONTROLLER_TOKEN' MCP_PILOT_SERVER_NAME='$MCP_SERVER_NAME' MCP_PILOT_UPSTREAM_MODE=github_repositories MCP_PILOT_GITHUB_API_URL=https://api.github.com/search/repositories MCP_PILOT_GITHUB_TOKEN=\"\$github_token\" node '$REMOTE_MCP_CONTROLLER' > '$REMOTE_ROOT/mcp-pilot-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/mcp-pilot-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$MCP_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/mcp-pilot-controller.log' >&2; exit 1; }
