@@ -1284,6 +1284,7 @@ struct CodexAppServerTraceSummary {
     failed_turn_count: usize,
     by_status: HashMap<String, usize>,
     by_operation: HashMap<String, usize>,
+    by_failure_domain: HashMap<String, usize>,
     traces: Vec<CodexTurnTrace>,
 }
 
@@ -1390,6 +1391,7 @@ struct CodexTurnTrace {
     operations: Vec<String>,
     next_action: String,
     latest_error: Option<Value>,
+    dashboard: CodexTraceDashboard,
     first_seen_at: DateTime<Utc>,
     last_seen_at: DateTime<Utc>,
 }
@@ -1406,6 +1408,9 @@ struct CodexAppServerTraceDetail {
     non_terminal_count: usize,
     command_ids: Vec<String>,
     errors: Vec<Value>,
+    dashboard: CodexTraceDashboard,
+    evidence: Vec<CodexTraceEvidence>,
+    artifact_lineage: Vec<CodexTraceArtifactLineage>,
     latest_response: Value,
 }
 
@@ -1417,6 +1422,46 @@ struct CodexAppServerStatusPoint {
     terminal: bool,
     created_at: DateTime<Utc>,
     error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CodexTraceDashboard {
+    command_count: usize,
+    poll_count: usize,
+    interrupt_count: usize,
+    worker_lease_count: usize,
+    retry_count: usize,
+    fallback_count: usize,
+    artifact_sync_count: usize,
+    failed_operation_count: usize,
+    stuck: bool,
+    failure_domain: String,
+    operator_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexTraceEvidence {
+    source: String,
+    kind: String,
+    message: String,
+    run_id: Option<Uuid>,
+    event_id: Option<Uuid>,
+    audit_log_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    details: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexTraceArtifactLineage {
+    artifact_id: Uuid,
+    session_id: Option<Uuid>,
+    turn_id: Option<String>,
+    command_id: Option<String>,
+    name: Option<String>,
+    path: Option<String>,
+    artifact_type: Option<String>,
+    created_at: DateTime<Utc>,
 }
 
 fn default_codex_poll_attempts() -> u32 {
@@ -14321,7 +14366,12 @@ async fn get_codex_app_server_trace_detail(
     )
     .await?;
     let runs = state.list_codex_app_server_runs().await?;
-    build_codex_app_server_trace_detail(&runs, &trace_key).map(Json)
+    let audit_logs = state.list_audit_logs(None).await?;
+    let mut events = Vec::new();
+    for session in state.list_sessions().await? {
+        events.extend(state.list_events(session.id).await?);
+    }
+    build_codex_app_server_trace_detail(&runs, &trace_key, &events, &audit_logs).map(Json)
 }
 
 async fn poll_codex_app_server_run(
@@ -14593,6 +14643,7 @@ fn codex_turn_status_is_terminal(status: &str) -> bool {
 fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppServerTraceSummary {
     let mut by_status = HashMap::new();
     let mut by_operation = HashMap::new();
+    let mut by_failure_domain = HashMap::new();
     let mut grouped = BTreeMap::<String, Vec<&CodexAppServerRun>>::new();
     for run in runs {
         increment_count(&mut by_status, run.status.as_str());
@@ -14630,16 +14681,8 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
         let latest_status = latest.status.clone();
         let terminal = codex_turn_status_is_terminal(&latest_status);
         let latest_error = group.iter().rev().find_map(|run| run.error.clone());
-        let next_action = if codex_run_status_failed(&latest_status) || latest_error.is_some() {
-            "inspect_error"
-        } else if latest.turn_id.is_some() && !terminal {
-            "poll_or_interrupt"
-        } else if terminal {
-            "complete"
-        } else {
-            "none"
-        }
-        .to_string();
+        let dashboard = build_codex_trace_dashboard(&group, &[], 0, terminal);
+        increment_count(&mut by_failure_domain, dashboard.failure_domain.as_str());
         traces.push(CodexTurnTrace {
             trace_key,
             turn_id: latest.turn_id.clone().or_else(|| first.turn_id.clone()),
@@ -14654,8 +14697,9 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
             duration_seconds: (latest.created_at - first.created_at).num_seconds(),
             command_ids: command_ids.into_iter().collect(),
             operations: operations.into_iter().collect(),
-            next_action,
+            next_action: dashboard.operator_action.clone(),
             latest_error,
+            dashboard,
             first_seen_at: first.created_at,
             last_seen_at: latest.created_at,
         });
@@ -14680,6 +14724,7 @@ fn build_codex_app_server_trace_summary(runs: &[CodexAppServerRun]) -> CodexAppS
         failed_turn_count,
         by_status,
         by_operation,
+        by_failure_domain,
         traces,
     }
 }
@@ -14835,6 +14880,308 @@ fn build_codex_app_server_control_plane_summary(
         deployment_readiness,
         attention_items,
     }
+}
+
+fn build_codex_trace_dashboard(
+    runs: &[&CodexAppServerRun],
+    evidence: &[CodexTraceEvidence],
+    artifact_lineage_count: usize,
+    terminal: bool,
+) -> CodexTraceDashboard {
+    let mut dashboard = CodexTraceDashboard::default();
+    for run in runs {
+        if run.operation.contains("command") || run.command_id.is_some() {
+            dashboard.command_count += 1;
+        }
+        if run.operation.contains("poll") {
+            dashboard.poll_count += 1;
+        }
+        if run.operation.contains("interrupt") {
+            dashboard.interrupt_count += 1;
+        }
+        if run.error.is_some() || codex_run_status_failed(&run.status) {
+            dashboard.failed_operation_count += 1;
+        }
+    }
+    for item in evidence {
+        match item.kind.as_str() {
+            "poll" => dashboard.poll_count += 1,
+            "interrupt" => dashboard.interrupt_count += 1,
+            "worker_lease" => dashboard.worker_lease_count += 1,
+            "retry" => dashboard.retry_count += 1,
+            "fallback" => dashboard.fallback_count += 1,
+            "artifact_sync" => dashboard.artifact_sync_count += 1,
+            "failed" => dashboard.failed_operation_count += 1,
+            _ => {}
+        }
+    }
+    dashboard.artifact_sync_count = dashboard.artifact_sync_count.max(artifact_lineage_count);
+    dashboard.stuck = runs
+        .last()
+        .is_some_and(|run| run.turn_id.is_some() && !terminal);
+    dashboard.failure_domain =
+        if dashboard.fallback_count > 0 && dashboard.failed_operation_count > 0 {
+            "fallback"
+        } else if dashboard.retry_count > 0 && dashboard.failed_operation_count > 0 {
+            "worker_lease"
+        } else if dashboard.failed_operation_count > 0
+            && runs
+                .last()
+                .is_some_and(|run| run.operation.contains("poll") || run.status == "poll_failed")
+        {
+            "poll"
+        } else if dashboard.failed_operation_count > 0 && dashboard.interrupt_count > 0 {
+            "interrupt"
+        } else if dashboard.failed_operation_count > 0 && dashboard.command_count > 0 {
+            "command"
+        } else if dashboard.failed_operation_count > 0 {
+            "provider"
+        } else if dashboard.stuck {
+            "non_terminal_poll"
+        } else {
+            "none"
+        }
+        .to_string();
+    dashboard.operator_action = match dashboard.failure_domain.as_str() {
+        "none" if terminal && dashboard.artifact_sync_count > 0 => "inspect_artifact_lineage",
+        "none" if terminal => "complete",
+        "none" => "observe",
+        "non_terminal_poll" => "poll_or_interrupt",
+        "fallback" => "inspect_fallback_reason",
+        "worker_lease" => "inspect_worker_retry",
+        "poll" => "inspect_poll_failure",
+        "interrupt" => "inspect_interrupt_reason",
+        "command" => "inspect_command_failure",
+        _ => "inspect_provider_error",
+    }
+    .to_string();
+    dashboard
+}
+
+fn codex_trace_evidence(
+    runs: &[CodexAppServerRun],
+    events: &[SessionEvent],
+    audit_logs: &[AuditLog],
+) -> Vec<CodexTraceEvidence> {
+    let run_ids = runs.iter().map(|run| run.id).collect::<HashSet<_>>();
+    let turn_ids = runs
+        .iter()
+        .filter_map(|run| run.turn_id.clone())
+        .collect::<HashSet<_>>();
+    let command_ids = runs
+        .iter()
+        .filter_map(|run| run.command_id.clone())
+        .collect::<HashSet<_>>();
+    let session_ids = codex_trace_session_ids(runs);
+    let mut evidence = Vec::new();
+    for event in events {
+        let Some(kind) = codex_trace_event_kind(event) else {
+            continue;
+        };
+        if !codex_trace_event_matches(event, &run_ids, &turn_ids, &command_ids, &session_ids) {
+            continue;
+        }
+        evidence.push(CodexTraceEvidence {
+            source: "session_event".to_string(),
+            kind,
+            message: codex_trace_event_message(event),
+            run_id: value_uuid(&event.payload, "run_id"),
+            event_id: Some(event.id),
+            audit_log_id: None,
+            session_id: Some(event.session_id),
+            created_at: event.created_at,
+            details: json!({
+                "event_type": event.event_type,
+                "actor_type": event.actor_type,
+                "actor_id": event.actor_id,
+                "payload": event.payload,
+            }),
+        });
+    }
+    for log in audit_logs {
+        let Some(kind) = codex_trace_audit_kind(log) else {
+            continue;
+        };
+        if !codex_trace_audit_matches(log, &run_ids, &turn_ids, &command_ids, &session_ids) {
+            continue;
+        }
+        evidence.push(CodexTraceEvidence {
+            source: "audit_log".to_string(),
+            kind,
+            message: codex_trace_audit_message(log),
+            run_id: value_uuid(&log.details, "run_id"),
+            event_id: None,
+            audit_log_id: Some(log.id),
+            session_id: log.session_id,
+            created_at: log.created_at,
+            details: json!({
+                "action": log.action,
+                "actor_type": log.actor_type,
+                "actor_id": log.actor_id,
+                "resource_type": log.resource_type,
+                "resource_id": log.resource_id,
+                "details": log.details,
+            }),
+        });
+    }
+    evidence.sort_by_key(|item| item.created_at);
+    evidence
+}
+
+fn codex_trace_artifact_lineage(
+    runs: &[CodexAppServerRun],
+    audit_logs: &[AuditLog],
+) -> Vec<CodexTraceArtifactLineage> {
+    let turn_ids = runs
+        .iter()
+        .filter_map(|run| run.turn_id.clone())
+        .collect::<HashSet<_>>();
+    let command_ids = runs
+        .iter()
+        .filter_map(|run| run.command_id.clone())
+        .collect::<HashSet<_>>();
+    let session_ids = codex_trace_session_ids(runs);
+    let mut lineage = audit_logs
+        .iter()
+        .filter(|log| log.action == "codex_app_server.artifact_synced")
+        .filter(|log| {
+            codex_trace_audit_matches(log, &HashSet::new(), &turn_ids, &command_ids, &session_ids)
+        })
+        .filter_map(|log| {
+            let artifact_id = log
+                .resource_id
+                .or_else(|| value_uuid(&log.details, "artifact_id"))?;
+            Some(CodexTraceArtifactLineage {
+                artifact_id,
+                session_id: log.session_id,
+                turn_id: value_string(&log.details, "turn_id"),
+                command_id: value_string(&log.details, "command_id"),
+                name: value_string(&log.details, "name"),
+                path: value_string(&log.details, "path"),
+                artifact_type: value_string(&log.details, "artifact_type"),
+                created_at: log.created_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    lineage.sort_by_key(|item| item.created_at);
+    lineage
+}
+
+fn codex_trace_session_ids(runs: &[CodexAppServerRun]) -> HashSet<Uuid> {
+    let mut session_ids = HashSet::new();
+    for run in runs {
+        for value in [
+            run.request.get("session_id"),
+            run.response.get("session_id"),
+            run.request.pointer("/metadata/session_id"),
+            run.response.pointer("/metadata/session_id"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(session_id) = value.as_str().and_then(|value| Uuid::parse_str(value).ok()) {
+                session_ids.insert(session_id);
+            }
+        }
+    }
+    session_ids
+}
+
+fn codex_trace_event_kind(event: &SessionEvent) -> Option<String> {
+    let kind = match event.event_type.as_str() {
+        "codex.task.event" => "poll",
+        "codex.task.fallback" => "fallback",
+        "codex.task.failed" => "failed",
+        "codex.task.started" | "codex.task.completed" => "worker_lease",
+        "execution.queued" => "worker_lease",
+        "execution.retry_queued" => "retry",
+        "artifact.created"
+            if event.payload.get("source").and_then(Value::as_str) == Some("codex_app_server") =>
+        {
+            "artifact_sync"
+        }
+        _ => return None,
+    };
+    Some(kind.to_string())
+}
+
+fn codex_trace_audit_kind(log: &AuditLog) -> Option<String> {
+    let kind = match log.action.as_str() {
+        "codex_app_server.run_polled" => "poll",
+        "codex_app_server.artifact_synced" => "artifact_sync",
+        _ => return None,
+    };
+    Some(kind.to_string())
+}
+
+fn codex_trace_event_matches(
+    event: &SessionEvent,
+    run_ids: &HashSet<Uuid>,
+    turn_ids: &HashSet<String>,
+    command_ids: &HashSet<String>,
+    session_ids: &HashSet<Uuid>,
+) -> bool {
+    value_uuid(&event.payload, "run_id").is_some_and(|run_id| run_ids.contains(&run_id))
+        || value_string(&event.payload, "turn_id")
+            .is_some_and(|turn_id| turn_ids.contains(&turn_id))
+        || value_string(&event.payload, "command_id")
+            .is_some_and(|command_id| command_ids.contains(&command_id))
+        || (!session_ids.is_empty() && session_ids.contains(&event.session_id))
+}
+
+fn codex_trace_audit_matches(
+    log: &AuditLog,
+    run_ids: &HashSet<Uuid>,
+    turn_ids: &HashSet<String>,
+    command_ids: &HashSet<String>,
+    session_ids: &HashSet<Uuid>,
+) -> bool {
+    value_uuid(&log.details, "run_id").is_some_and(|run_id| run_ids.contains(&run_id))
+        || value_string(&log.details, "turn_id").is_some_and(|turn_id| turn_ids.contains(&turn_id))
+        || value_string(&log.details, "command_id")
+            .is_some_and(|command_id| command_ids.contains(&command_id))
+        || log
+            .session_id
+            .is_some_and(|session_id| session_ids.contains(&session_id))
+}
+
+fn codex_trace_event_message(event: &SessionEvent) -> String {
+    if let Some(error) = event.payload.get("error").and_then(Value::as_str) {
+        return error.to_string();
+    }
+    if let Some(reason) = event.payload.get("reason").and_then(Value::as_str) {
+        return reason.to_string();
+    }
+    if let Some(status) = event.payload.get("status").and_then(Value::as_str) {
+        return format!("{} status {status}", event.event_type);
+    }
+    event.event_type.clone()
+}
+
+fn codex_trace_audit_message(log: &AuditLog) -> String {
+    if let Some(status) = log
+        .details
+        .get("last_status")
+        .or_else(|| log.details.get("status"))
+        .and_then(Value::as_str)
+    {
+        return format!("{} status {status}", log.action);
+    }
+    if let Some(name) = log.details.get("name").and_then(Value::as_str) {
+        return format!("{} {name}", log.action);
+    }
+    log.action.clone()
+}
+
+fn value_string(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn value_uuid(value: &Value, key: &str) -> Option<Uuid> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
 }
 
 fn build_codex_app_server_production_ops_readiness(
@@ -15262,6 +15609,8 @@ where
 fn build_codex_app_server_trace_detail(
     runs: &[CodexAppServerRun],
     trace_key: &str,
+    events: &[SessionEvent],
+    audit_logs: &[AuditLog],
 ) -> Result<CodexAppServerTraceDetail, AppError> {
     let mut matching = runs
         .iter()
@@ -15278,6 +15627,15 @@ fn build_codex_app_server_trace_detail(
         .into_iter()
         .find(|trace| trace.trace_key == trace_key)
         .ok_or_else(|| AppError::not_found("Codex App Server trace not found"))?;
+    let evidence = codex_trace_evidence(&matching, events, audit_logs);
+    let artifact_lineage = codex_trace_artifact_lineage(&matching, audit_logs);
+    let matching_refs = matching.iter().collect::<Vec<_>>();
+    let dashboard = build_codex_trace_dashboard(
+        &matching_refs,
+        &evidence,
+        artifact_lineage.len(),
+        trace.terminal,
+    );
     let status_timeline = matching
         .iter()
         .map(|run| CodexAppServerStatusPoint {
@@ -15325,6 +15683,9 @@ fn build_codex_app_server_trace_detail(
         non_terminal_count,
         command_ids: command_ids.into_iter().collect(),
         errors,
+        dashboard,
+        evidence,
+        artifact_lineage,
         latest_response,
     })
 }
@@ -33751,6 +34112,8 @@ not json
         assert_eq!(summary.failed_turn_count, 1);
         assert_eq!(summary.active_turn_count, 1);
         assert_eq!(summary.by_operation["turn.poll"], 2);
+        assert_eq!(summary.by_failure_domain["none"], 1);
+        assert_eq!(summary.by_failure_domain["poll"], 1);
         let turn_1 = summary
             .traces
             .iter()
@@ -33763,10 +34126,52 @@ not json
         assert_eq!(turn_1.duration_seconds, 2);
         assert_eq!(turn_1.command_ids, vec!["command-1".to_string()]);
         assert_eq!(turn_1.next_action, "complete");
+        assert_eq!(turn_1.dashboard.failure_domain, "none");
+        assert_eq!(turn_1.dashboard.command_count, 1);
+        assert_eq!(turn_1.dashboard.poll_count, 1);
         assert_eq!(turn_1.latest_error, None);
         assert!(turn_1.operations.contains(&"command.execute".to_string()));
-        let turn_1_detail = build_codex_app_server_trace_detail(&runs, "turn-1")
-            .expect("turn-1 detail should exist");
+        let session_id = Uuid::new_v4();
+        let artifact_id = Uuid::new_v4();
+        let events = vec![SessionEvent {
+            id: Uuid::new_v4(),
+            session_id,
+            seq: 1,
+            parent_event_id: None,
+            actor_type: "worker".to_string(),
+            actor_id: None,
+            event_type: "codex.task.event".to_string(),
+            payload: json!({
+                "runner": "app-server",
+                "run_id": runs[3].id,
+                "turn_id": "turn-2",
+                "attempt": 1,
+                "status": "poll_failed",
+                "terminal": false,
+                "error": "timeout"
+            }),
+            created_at: base_time + chrono::Duration::seconds(4),
+        }];
+        let audit_logs = vec![AuditLog {
+            id: Uuid::new_v4(),
+            session_id: Some(session_id),
+            actor_type: "worker".to_string(),
+            actor_id: Some(artifact_id),
+            action: "codex_app_server.artifact_synced".to_string(),
+            resource_type: "artifact".to_string(),
+            resource_id: Some(artifact_id),
+            details: json!({
+                "name": "codex-report.md",
+                "path": "artifacts/codex-report.md",
+                "artifact_type": "markdown",
+                "turn_id": "turn-1",
+                "command_id": "command-1"
+            }),
+            created_at: base_time + chrono::Duration::seconds(5),
+        }];
+        let turn_1_detail =
+            build_codex_app_server_trace_detail(&runs, "turn-1", &events, &audit_logs)
+                .expect("turn-1 detail should exist");
         assert_eq!(turn_1_detail.trace.trace_key, "turn-1");
         assert_eq!(turn_1_detail.runs.len(), 3);
         assert_eq!(turn_1_detail.status_timeline.len(), 3);
@@ -33775,6 +34180,19 @@ not json
         assert_eq!(turn_1_detail.terminal_count, 1);
         assert_eq!(turn_1_detail.non_terminal_count, 2);
         assert_eq!(turn_1_detail.command_ids, vec!["command-1".to_string()]);
+        assert_eq!(turn_1_detail.dashboard.artifact_sync_count, 1);
+        assert_eq!(
+            turn_1_detail.dashboard.operator_action,
+            "inspect_artifact_lineage"
+        );
+        assert_eq!(turn_1_detail.artifact_lineage.len(), 1);
+        assert_eq!(turn_1_detail.artifact_lineage[0].artifact_id, artifact_id);
+        assert!(
+            turn_1_detail
+                .evidence
+                .iter()
+                .any(|item| item.kind == "artifact_sync")
+        );
         assert_eq!(turn_1_detail.latest_response["status"], "completed");
         let turn_2 = summary
             .traces
@@ -33783,11 +34201,24 @@ not json
             .expect("turn-2 trace");
         assert_eq!(turn_2.error_count, 1);
         assert_eq!(turn_2.latest_status, "poll_failed");
-        assert_eq!(turn_2.next_action, "inspect_error");
+        assert_eq!(turn_2.next_action, "inspect_poll_failure");
+        assert_eq!(turn_2.dashboard.failure_domain, "poll");
         assert_eq!(turn_2.duration_seconds, 0);
         assert_eq!(
             turn_2.latest_error.as_ref().expect("latest error")["message"],
             "timeout"
+        );
+        let turn_2_detail =
+            build_codex_app_server_trace_detail(&runs, "turn-2", &events, &audit_logs)
+                .expect("turn-2 detail should exist");
+        assert_eq!(turn_2_detail.dashboard.failure_domain, "poll");
+        assert_eq!(turn_2_detail.dashboard.poll_count, 2);
+        assert!(turn_2_detail.dashboard.stuck);
+        assert!(
+            turn_2_detail
+                .evidence
+                .iter()
+                .any(|item| item.kind == "poll" && item.message == "timeout")
         );
 
         let control = build_codex_app_server_control_plane_summary(
@@ -42630,6 +43061,10 @@ not json
         assert_eq!(trace_detail.trace.turn_id.as_deref(), Some("turn-1"));
         assert_eq!(trace_detail.runs.len(), 3);
         assert_eq!(trace_detail.status_timeline.len(), 3);
+        assert_eq!(trace_detail.dashboard.command_count, 1);
+        assert_eq!(trace_detail.dashboard.poll_count, 2);
+        assert_eq!(trace_detail.dashboard.interrupt_count, 1);
+        assert_eq!(trace_detail.dashboard.failure_domain, "interrupt");
 
         let control_summary: CodexAppServerControlPlaneSummary = request_json(
             app.clone(),

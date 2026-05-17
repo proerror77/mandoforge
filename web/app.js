@@ -2262,6 +2262,10 @@ function renderCodexAppServer() {
     "Trace Operation Breakdown",
     traceSummary?.by_operation,
   );
+  const traceFailureBreakdown = renderCountTable(
+    "Trace Failure Domains",
+    traceSummary?.by_failure_domain,
+  );
   const traceRows = (traceSummary?.traces || [])
     .slice(0, 8)
     .map(
@@ -2271,6 +2275,7 @@ function renderCodexAppServer() {
           <td>${escapeHtml(trace.latest_status)}</td>
           <td>${formatInteger(trace.run_count)} runs · ${formatInteger(trace.command_count)} commands · ${formatInteger(trace.poll_count)} polls</td>
           <td>${formatInteger(trace.error_count)}</td>
+          <td>${escapeHtml(trace.dashboard?.failure_domain || "none")}</td>
           <td>${escapeHtml(trace.next_action || "none")}</td>
           <td>${formatDurationSeconds(trace.duration_seconds)}</td>
           <td>${escapeHtml((trace.operations || []).join(", "))}</td>
@@ -2294,6 +2299,7 @@ function renderCodexAppServer() {
       <div class="trace-breakdown-grid">
         ${traceStatusBreakdown}
         ${traceOperationBreakdown}
+        ${traceFailureBreakdown}
       </div>
       ${
         traceRows
@@ -2304,6 +2310,7 @@ function renderCodexAppServer() {
                   <th>Status</th>
                   <th>Activity</th>
                   <th>Errors</th>
+                  <th>Failure Domain</th>
                   <th>Next</th>
                   <th>Duration</th>
                   <th>Operations</th>
@@ -2323,6 +2330,7 @@ function renderCodexAppServer() {
         <strong>${escapeHtml(traceDetail.trace?.turn_id || traceDetail.trace?.trace_key || "Codex trace")}</strong>
         <div class="muted">Status ${escapeHtml(traceDetail.trace?.latest_status || "unknown")} · next ${escapeHtml(traceDetail.trace?.next_action || "none")} · duration ${formatDurationSeconds(traceDetail.trace?.duration_seconds || 0)} · terminal ${traceDetail.trace?.terminal ? "yes" : "no"}</div>
         <div class="muted">Commands ${escapeHtml((traceDetail.command_ids || traceDetail.trace?.command_ids || []).join(", ") || "none")} · terminal runs ${formatInteger(traceDetail.terminal_count || 0)} · non-terminal runs ${formatInteger(traceDetail.non_terminal_count || 0)}</div>
+        <div class="muted">Failure domain ${escapeHtml(traceDetail.dashboard?.failure_domain || "none")} · action ${escapeHtml(traceDetail.dashboard?.operator_action || "none")} · stuck ${traceDetail.dashboard?.stuck ? "yes" : "no"}</div>
         ${
           traceDetail.trace?.latest_error
             ? `<pre>${escapeHtml(JSON.stringify(traceDetail.trace.latest_error, null, 2))}</pre>`
@@ -2340,7 +2348,77 @@ function renderCodexAppServer() {
       <div class="trace-breakdown-grid">
         ${renderCountTable("Trace Detail Operations", traceDetail.by_operation)}
         ${renderCountTable("Trace Detail Status", traceDetail.by_status)}
+        ${renderCountTable("Trace Detail Signals", {
+          command: traceDetail.dashboard?.command_count || 0,
+          poll: traceDetail.dashboard?.poll_count || 0,
+          interrupt: traceDetail.dashboard?.interrupt_count || 0,
+          worker_lease: traceDetail.dashboard?.worker_lease_count || 0,
+          retry: traceDetail.dashboard?.retry_count || 0,
+          fallback: traceDetail.dashboard?.fallback_count || 0,
+          artifact_sync: traceDetail.dashboard?.artifact_sync_count || 0,
+          failed: traceDetail.dashboard?.failed_operation_count || 0,
+        })}
       </div>
+      ${
+        (traceDetail.artifact_lineage || []).length
+          ? `<h5>Artifact Lineage</h5>
+            <table class="usage-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Path</th>
+                  <th>Command</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${(traceDetail.artifact_lineage || [])
+                  .map(
+                    (artifact) => `
+                      <tr>
+                        <td>${escapeHtml(artifact.name || artifact.artifact_id || "artifact")}</td>
+                        <td>${escapeHtml(artifact.artifact_type || "unknown")}</td>
+                        <td>${escapeHtml(artifact.path || "none")}</td>
+                        <td>${escapeHtml(artifact.command_id || artifact.turn_id || "none")}</td>
+                        <td>${escapeHtml(artifact.created_at || "unknown")}</td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>`
+          : `<div class="muted">No Codex artifact lineage recorded for this trace.</div>`
+      }
+      ${
+        (traceDetail.evidence || []).length
+          ? `<h5>Trace Evidence</h5>
+            <table class="usage-table">
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Signal</th>
+                  <th>Message</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${(traceDetail.evidence || [])
+                  .map(
+                    (item) => `
+                      <tr>
+                        <td>${escapeHtml(item.source)}</td>
+                        <td>${escapeHtml(item.kind)}</td>
+                        <td>${escapeHtml(item.message || "none")}</td>
+                        <td>${escapeHtml(item.created_at || "unknown")}</td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>`
+          : `<div class="muted">No session event or audit evidence matched this trace.</div>`
+      }
       ${
         (traceDetail.errors || []).length
           ? `<h5>Trace Errors</h5>
