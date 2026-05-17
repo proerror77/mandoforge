@@ -139,6 +139,9 @@ if [[ "$REQUIRE_CONNECTOR_BINDING" == "1" && ( -z "$CONNECTOR_TEAM_ID" || -z "$C
   echo "workflow pack connector quality requires a discoverable MCP connector binding" >&2
   exit 1
 fi
+if [[ -n "$CONNECTOR_TEAM_ID" ]]; then
+  fetch_json POST "/api/teams/$CONNECTOR_TEAM_ID/mcp-servers/health/run-due" >/dev/null
+fi
 
 if [[ -z "$UPDATE_MANIFEST_PATH" ]]; then
   update_fixture_path="$(dirname "$MANIFEST_PATH")/package-v${UPDATE_VERSION}.yaml"
