@@ -162,6 +162,19 @@ For a self-contained local rehearsal that starts an ephemeral API process first:
 
 The live gate uses the in-memory API store by default, injects mock controller URLs into the temporary API, runs the same mock-controller evidence path with optional controller actions enabled, and writes `.mandoforge/stage2-controller-drill-live-evidence/`. It is useful for CI and local wiring checks when you do not already have a running API.
 
+## Whiskey Production-Like Pilot
+
+`wishky-2-1` can run a loopback-only production-like adoption pilot without exposing the MandoForge API to the public internet:
+
+```bash
+MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
+scripts/whiskey-adoption-evidence.sh
+```
+
+The API listens on `127.0.0.1:18787`, evidence is written under `/opt/mandoforge-adoption/evidence`, archives are written under `/opt/mandoforge-adoption/archives`, and local copies sync to `.mandoforge/remote-adoption/whiskey/`.
+
+See [Whiskey Adoption Runbook](whiskey-adoption-runbook.md). This is an inventory/adoption lane, not a production completion claim unless real controller targets and credentials are configured.
+
 For in-cluster inventory runs, render or apply the opt-in Kubernetes Job:
 
 ```bash

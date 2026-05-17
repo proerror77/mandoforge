@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mandoforge
+      POSTGRES_PASSWORD: ${MANDOFORGE_POSTGRES_PASSWORD:-mandoforge}
+      POSTGRES_DB: mandoforge
+    ports:
+      - "127.0.0.1:${MANDOFORGE_POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mandoforge -d mandoforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    image: ${MANDOFORGE_IMAGE:-ghcr.io/proerror77/mandoforge/mandoforge-api:${MANDOFORGE_IMAGE_TAG:-latest}}
+    environment:
+      MANDOFORGE_ADDR: 0.0.0.0:8787
+      MANDOFORGE_WORKSPACE_ROOT: /var/lib/mandoforge/workspaces
+      MANDOFORGE_MIGRATIONS_DIR: /app/db/migrations
+      DATABASE_URL: postgres://mandoforge:${MANDOFORGE_POSTGRES_PASSWORD:-mandoforge}@postgres:5432/mandoforge
+      MANDOFORGE_EXECUTION_WORKER: ${MANDOFORGE_EXECUTION_WORKER:-queue}
+      MANDOFORGE_SCHEDULER_TOKEN: ${MANDOFORGE_SCHEDULER_TOKEN:-whiskey-stage2-scheduler-token}
+      MANDOFORGE_PROVIDER_BASE_URL: ${MANDOFORGE_PROVIDER_BASE_URL:-}
+      MANDOFORGE_PROVIDER_API_KEY: ${MANDOFORGE_PROVIDER_API_KEY:-}
+      MANDOFORGE_PROVIDER_MODEL: ${MANDOFORGE_PROVIDER_MODEL:-gpt-5.4-mini}
+      MANDOFORGE_SHELL_RUNNER: ${MANDOFORGE_SHELL_RUNNER:-host}
+      MANDOFORGE_CODEX_APP_SERVER_URL: ${MANDOFORGE_CODEX_APP_SERVER_URL:-}
+      MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_REQUIRED: ${MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_REQUIRED:-false}
+      MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL: ${MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL:-}
+      MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_TOKEN: ${MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_TOKEN:-}
+      MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_REQUIRED: ${MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_REQUIRED:-false}
+      MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL: ${MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL:-}
+      MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN: ${MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN:-}
+    ports:
+      - "127.0.0.1:${MANDOFORGE_API_HOST_PORT:-18787}:8787"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - workspace-data:/var/lib/mandoforge/workspaces
+      - ./evidence:/evidence
+
+  worker:
+    image: ${MANDOFORGE_IMAGE:-ghcr.io/proerror77/mandoforge/mandoforge-api:${MANDOFORGE_IMAGE_TAG:-latest}}
+    command: ["mandoforge-worker"]
+    environment:
+      BASE_URL: http://api:8787
+      WORKER_ID: ${MANDOFORGE_WORKER_ID:-whiskey-pilot-worker-1}
+      POLL_INTERVAL_SECONDS: ${MANDOFORGE_WORKER_POLL_INTERVAL_SECONDS:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  workspace-data:
