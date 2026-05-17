@@ -307,7 +307,15 @@ if [[ -z "\$secret_id" ]]; then
       -d @"\$secret_body" \
       "\$base_url/api/vault/secrets" >"\$secret_file"
   else
-    jq -n --arg id "\$secret_id" '{id: \$id, reused: true}' >"\$secret_file"
+    jq -n \
+      --arg path "providers/whiskey-deepseek" \
+      --arg key "api_key" \
+      --arg value "\$DEEPSEEK_API_KEY" \
+      '{path: \$path, key: \$key, value: \$value}' >"\$secret_body"
+    curl -fsS -X POST "\${auth_headers[@]}" \
+      -H "content-type: application/json" \
+      -d @"\$secret_body" \
+      "\$base_url/api/vault/secrets/\$secret_id/rotate" >"\$secret_file"
   fi
   jq -n \
     --arg reason "\$reason" \

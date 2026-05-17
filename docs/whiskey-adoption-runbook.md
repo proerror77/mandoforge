@@ -249,7 +249,9 @@ RUN_STAGE2_FINANCE_EXPORT=1
 
 The strict Stage 2 gate also enables those flags so the archive contains `finance-close-evidence.json`, `finance-reconciliation-evidence.json`, `usage-export-csv-evidence.json`, and `finance-export-delivery-evidence.json`.
 
-This is a Whiskey pilot accounting target proof. It validates the API's export delivery, finance-close controller boundary, reconciliation-controller boundary, audit trail, and archive coverage against the live Whiskey API. It is not a claim that a real ERP, billing ledger, SOC2 finance process, or external accounting provider has been adopted.
+On Whiskey, the finance controller can run in `lark_drive` mode and upload the generated `mandoforge-usage-export.csv` artifact to a real Feishu Drive file through `lark-cli drive +upload`. The controller health endpoint records the latest uploaded `file_token`, `file_url`, and file name so evidence capture can prove that the webhook reached an external file target instead of only a local mock endpoint.
+
+This is now a Whiskey real finance export proof. It validates the API's export delivery, finance-close controller boundary, reconciliation-controller boundary, audit trail, and archive coverage against the live Whiskey API, with the export artifact landing in Feishu Drive. It is still not a claim that a real ERP, billing ledger, or accounting system of record has been adopted.
 
 ## Observability Collector Lane
 

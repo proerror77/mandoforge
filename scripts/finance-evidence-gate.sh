@@ -8,6 +8,7 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/finance-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_FINANCE_CONTROLLERS="${RUN_STAGE2_FINANCE_CONTROLLERS:-0}"
 RUN_FINANCE_EXPORT="${RUN_STAGE2_FINANCE_EXPORT:-0}"
+DELIVERY_OBSERVER_URL="${FINANCE_EXPORT_DELIVERY_OBSERVER_URL:-}"
 
 auth_headers=(
   -H "x-mandoforge-subject: $SUBJECT"
@@ -97,6 +98,23 @@ fetch_file() {
   rm -f "$response_body"
 }
 
+capture_delivery_observer() {
+  local observer_url="$1"
+  local target="$EVIDENCE_DIR/finance-export-delivery-observer.json"
+  local response_body
+  local http_status
+  response_body="$(mktemp)"
+
+  http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "$observer_url")"
+  if [[ "$http_status" != 2* ]]; then
+    rm -f "$response_body"
+    return 0
+  fi
+
+  tee "$target" <"$response_body" >/dev/null
+  rm -f "$response_body"
+}
+
 write_summary() {
   local finance_summary_file="$EVIDENCE_DIR/api-usage-finance-summary.json"
   local operations_file="$EVIDENCE_DIR/api-usage-finance-operations-summary.json"
@@ -104,6 +122,7 @@ write_summary() {
   local reconciliation_evidence_file="$EVIDENCE_DIR/finance-reconciliation-evidence.json"
   local export_metadata_file="$EVIDENCE_DIR/usage-export-csv-evidence.json"
   local export_delivery_file="$EVIDENCE_DIR/finance-export-delivery-evidence.json"
+  local export_delivery_observer_file="$EVIDENCE_DIR/finance-export-delivery-observer.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local current_cost_cents
   local budget_pressure_status
@@ -130,6 +149,11 @@ write_summary() {
   local close_run_status
   local reconciliation_evidence_status
   local reconciliation_run_status
+  local export_delivery_observer_status
+  local export_delivery_mode
+  local export_delivery_file_token
+  local export_delivery_file_url
+  local export_delivery_file_name
   local blocked_count
 
   current_cost_cents="$(jq -r '.current_cost_cents // 0' "$finance_summary_file")"
@@ -161,9 +185,21 @@ write_summary() {
   fi
   reconciliation_evidence_status="not_requested"
   reconciliation_run_status="not_run"
+  export_delivery_observer_status="not_observed"
+  export_delivery_mode="unknown"
+  export_delivery_file_token="none"
+  export_delivery_file_url="none"
+  export_delivery_file_name="none"
   if [[ -s "$reconciliation_evidence_file" ]]; then
     reconciliation_evidence_status="$(jq -r '.status // "unknown"' "$reconciliation_evidence_file")"
     reconciliation_run_status="$(jq -r '.response.status // "unknown"' "$reconciliation_evidence_file")"
+  fi
+  if [[ -s "$export_delivery_observer_file" ]]; then
+    export_delivery_observer_status="$(jq -r '.status // "ok"' "$export_delivery_observer_file")"
+    export_delivery_mode="$(jq -r '.export_state.delivery_mode // "unknown"' "$export_delivery_observer_file")"
+    export_delivery_file_token="$(jq -r '.export_state.latest_file_token // "none"' "$export_delivery_observer_file")"
+    export_delivery_file_url="$(jq -r '.export_state.latest_file_url // "none"' "$export_delivery_observer_file")"
+    export_delivery_file_name="$(jq -r '.export_state.latest_file_name // "none"' "$export_delivery_observer_file")"
   fi
   blocked_count="$(jq -r 'if .production_close.production_blocked == true then 1 else 0 end' "$operations_file")"
 
@@ -204,6 +240,11 @@ write_summary() {
       echo "finance_export_delivery_status=$(jq -r '.response.status // "unknown"' "$export_delivery_file")"
       echo "finance_export_delivery_target_configured=$(jq -r '.response.target_configured // false' "$export_delivery_file")"
     fi
+    echo "finance_export_delivery_observer_status=$export_delivery_observer_status"
+    echo "finance_export_delivery_mode=$export_delivery_mode"
+    echo "finance_export_delivery_file_token=$export_delivery_file_token"
+    echo "finance_export_delivery_file_url=$export_delivery_file_url"
+    echo "finance_export_delivery_file_name=$export_delivery_file_name"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
     echo "finance_attention_items:"
@@ -286,6 +327,11 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/usage/finance-summary >/dev/null
 fetch_json GET /api/usage/finance-operations/summary >/dev/null
 
+if [[ -z "$DELIVERY_OBSERVER_URL" && -n "${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL:-}" ]]; then
+  DELIVERY_OBSERVER_URL="${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL%/finance/export}/healthz"
+  DELIVERY_OBSERVER_URL="${DELIVERY_OBSERVER_URL/host.docker.internal/172.17.0.1}"
+fi
+
 if [[ "$RUN_FINANCE_CONTROLLERS" == "1" ]]; then
   capture_finance_close_evidence
   capture_finance_reconciliation_evidence
@@ -298,6 +344,10 @@ if [[ "$RUN_FINANCE_EXPORT" == "1" ]]; then
   capture_finance_export_delivery_evidence
 else
   echo "skipping finance export capture; set RUN_STAGE2_FINANCE_EXPORT=1 to include CSV and delivery evidence" >&2
+fi
+
+if [[ -n "$DELIVERY_OBSERVER_URL" ]]; then
+  capture_delivery_observer "$DELIVERY_OBSERVER_URL"
 fi
 
 fetch_json GET /api/usage/finance-operations/summary >/dev/null
