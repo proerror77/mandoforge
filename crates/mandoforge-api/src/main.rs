@@ -682,6 +682,14 @@ struct WorkflowPackArchiveRequest {
     reason: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkflowPackRollbackRequest {
+    #[serde(default = "empty_json_object")]
+    gate_evidence: Value,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Approval {
     id: Uuid,
@@ -4257,6 +4265,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-packs/installations/{id}/release",
             post(release_workflow_pack_installation_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/rollback",
+            post(rollback_workflow_pack_installation_route),
         )
         .route(
             "/api/workflow-packs/installations/{id}/archive",
@@ -8024,6 +8036,66 @@ async fn release_workflow_pack_installation_route(
     Ok(Json(installation))
 }
 
+async fn rollback_workflow_pack_installation_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<WorkflowPackRollbackRequest>,
+) -> Result<Json<WorkflowPackInstallation>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    let current = state.get_workflow_pack_installation(id).await?;
+    if current.status != "released" {
+        return Err(AppError::bad_request(
+            "only released workflow packs can be rolled back",
+        ));
+    }
+    if !input.gate_evidence.is_object() {
+        return Err(AppError::bad_request(
+            "workflow pack rollback gate_evidence must be a JSON object",
+        ));
+    }
+    let rolled_back_at = Utc::now();
+    let reason = input.reason.clone();
+    let gate_evidence = json!({
+        "release": current.gate_evidence,
+        "rollback": {
+            "reason": reason,
+            "evidence": input.gate_evidence,
+            "rolled_back_at": rolled_back_at,
+        },
+    });
+    let installation = state
+        .update_workflow_pack_installation_state(
+            id,
+            "rolled_back",
+            &current.eval_gate_status,
+            &current.release_gate_status,
+            gate_evidence,
+            current.staged_at,
+            current.released_at,
+        )
+        .await?;
+    record_workflow_pack_installation_audit(
+        &state,
+        &installation,
+        "workflow_pack.rolled_back",
+        json!({
+            "reason": input.reason,
+            "rolled_back_at": rolled_back_at,
+            "gate_evidence": installation.gate_evidence,
+        }),
+    )
+    .await?;
+    Ok(Json(installation))
+}
+
 async fn archive_workflow_pack_installation_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -8039,9 +8111,12 @@ async fn archive_workflow_pack_installation_route(
     )
     .await?;
     let current = state.get_workflow_pack_installation(id).await?;
-    if !matches!(current.status.as_str(), "installed" | "staged" | "released") {
+    if !matches!(
+        current.status.as_str(),
+        "installed" | "staged" | "released" | "rolled_back"
+    ) {
         return Err(AppError::bad_request(
-            "only installed, staged, or released workflow packs can be archived",
+            "only installed, staged, released, or rolled back workflow packs can be archived",
         ));
     }
     let installation = state.archive_workflow_pack_installation(id).await?;
@@ -35775,6 +35850,37 @@ not json
         assert_eq!(installations.len(), 1);
         assert_eq!(installations[0].id, installed.id);
 
+        let rolled_back: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-packs/installations/{}/rollback",
+                    installed.id
+                ),
+                json!({
+                    "reason": "release gate regression",
+                    "gate_evidence": {
+                        "rollback_run_id": "rollback-ai-governance-1"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(rolled_back.status, "rolled_back");
+        assert_eq!(rolled_back.eval_gate_status, "passed");
+        assert_eq!(rolled_back.release_gate_status, "passed");
+        assert_eq!(rolled_back.released_at, released.released_at);
+        assert_eq!(
+            rolled_back.gate_evidence["release"]["evidence"]["eval_run_id"],
+            json!("eval-ai-governance-1")
+        );
+        assert_eq!(
+            rolled_back.gate_evidence["rollback"]["evidence"]["rollback_run_id"],
+            json!("rollback-ai-governance-1")
+        );
+
         let archived: WorkflowPackInstallation = request_json(
             app.clone(),
             json_request_with_headers(
@@ -35831,6 +35937,7 @@ not json
             "workflow_pack.installed",
             "workflow_pack.staged",
             "workflow_pack.released",
+            "workflow_pack.rolled_back",
             "workflow_pack.archived",
         ] {
             assert!(

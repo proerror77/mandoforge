@@ -123,6 +123,14 @@ released_get_file="$EVIDENCE_DIR/api-workflow-packs-installations-$installation_
 released_list_file="$EVIDENCE_DIR/api-workflow-packs-installations-before-archive.json"
 cp "$get_file" "$released_get_file"
 cp "$list_file" "$released_list_file"
+rollback_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/rollback" \
+  '{"reason":"Whiskey WorkflowPack adoption rollback proof","gate_evidence":{"source":"workflow-pack-evidence-gate","rollback_archive":"whiskey-ai-governance-rollback"}}')"
+rolled_back_get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id")"
+rolled_back_list_file="$(fetch_json GET /api/workflow-packs/installations)"
+rolled_back_get_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$installation_id-after-rollback.json"
+rolled_back_list_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-after-rollback.json"
+cp "$rolled_back_get_file" "$rolled_back_get_snapshot_file"
+cp "$rolled_back_list_file" "$rolled_back_list_snapshot_file"
 archive_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/archive" \
   '{"reason":"Whiskey WorkflowPack adoption archive proof"}')"
 archived_get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id" "{}" 4)"
@@ -133,11 +141,14 @@ validated_file_count="$(jq -r '.response.validated_file_count // 0' "$validate_f
 install_status="$(jq -r '.response.status // "unknown"' "$install_file")"
 stage_status="$(jq -r '.response.status // "unknown"' "$stage_file")"
 release_status="$(jq -r '.response.status // "unknown"' "$release_file")"
+rollback_status="$(jq -r '.response.status // "unknown"' "$rollback_file")"
 archive_status="$(jq -r '.response.status // "unknown"' "$archive_file")"
 eval_gate_status="$(jq -r '.response.eval_gate_status // "unknown"' "$release_file")"
 release_gate_status="$(jq -r '.response.release_gate_status // "unknown"' "$release_file")"
 released_get_status="$(jq -r '.response.status // "unknown"' "$released_get_file")"
 released_list_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id and .status == "released")] | length' "$released_list_file")"
+rolled_back_get_status="$(jq -r '.response.status // "unknown"' "$rolled_back_get_snapshot_file")"
+rolled_back_list_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id and .status == "rolled_back")] | length' "$rolled_back_list_snapshot_file")"
 archived_get_status="$(jq -r '.http_status // 0' "$archived_get_file")"
 active_after_archive_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id)] | length' "$list_after_archive_file")"
 
@@ -161,6 +172,14 @@ if [[ "$released_get_status" != "released" || "$released_list_count" != "1" ]]; 
   echo "workflow pack released installation was not retrievable" >&2
   exit 1
 fi
+if [[ "$rollback_status" != "rolled_back" ]]; then
+  echo "workflow pack rollback did not reach rolled_back state" >&2
+  exit 1
+fi
+if [[ "$rolled_back_get_status" != "rolled_back" || "$rolled_back_list_count" != "1" ]]; then
+  echo "workflow pack rolled back installation was not retrievable" >&2
+  exit 1
+fi
 if [[ "$archive_status" != "archived" ]]; then
   echo "workflow pack archive did not reach archived state" >&2
   exit 1
@@ -171,7 +190,7 @@ if [[ "$archived_get_status" != "404" || "$active_after_archive_count" != "0" ]]
 fi
 
 {
-  echo "workflow_pack_status=archived_after_release"
+  echo "workflow_pack_status=archived_after_rollback"
   echo "pack_id=$validation_pack_id"
   echo "manifest_path=$MANIFEST_PATH"
   echo "installation_id=$installation_id"
@@ -179,9 +198,12 @@ fi
   echo "install_status=$install_status"
   echo "stage_status=$stage_status"
   echo "release_status=$release_status"
+  echo "rollback_status=$rollback_status"
   echo "archive_status=$archive_status"
   echo "eval_gate_status=$eval_gate_status"
   echo "release_gate_status=$release_gate_status"
+  echo "rolled_back_get_status=$rolled_back_get_status"
+  echo "rolled_back_list_count=$rolled_back_list_count"
   echo "archived_get_status=$archived_get_status"
   echo "active_after_archive_count=$active_after_archive_count"
   echo "evidence_dir=$EVIDENCE_DIR"

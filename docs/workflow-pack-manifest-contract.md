@@ -65,13 +65,21 @@ Stage should materialize draft agent versions, connector definitions, policy rev
 
 Release should require passing eval gates, policy gates, connector readiness, and approval where the pack declares high-risk handoffs or writes. Released pack behavior must be auditable and roll-backable.
 
+The initial rollback contract is explicit and non-destructive:
+
+- `POST /api/workflow-packs/installations/{id}/rollback` only accepts released installations.
+- Rollback changes the installation status to `rolled_back` while preserving the original release timestamp, eval gate status, release gate status, manifest snapshot, and validation report.
+- Rollback gate evidence is stored alongside the original release evidence under `gate_evidence.release` and `gate_evidence.rollback`.
+- `workflow_pack.rolled_back` audit evidence records the rollback reason, timestamp, and gate evidence.
+- A rolled-back installation can still be archived later; archive remains the step that removes it from active get/list APIs.
+
 ### Uninstall
 
 Uninstall should archive the pack installation and disable future schedules or entrypoints. It must not delete historical artifacts, eval runs, audit logs, handoff events, or release evidence.
 
-The initial Stage 3 lifecycle implements this as a soft archive:
+The initial Stage 3 lifecycle implements uninstall as a soft archive:
 
-- `POST /api/workflow-packs/installations/{id}/archive` marks an installed, staged, or released installation as `archived`.
+- `POST /api/workflow-packs/installations/{id}/archive` marks an installed, staged, released, or rolled-back installation as `archived`.
 - Archived installations are excluded from active list and get APIs.
 - The release timestamp, gate status, gate evidence, validation report, and manifest snapshot stay attached to the archived row for audit replay.
 - `workflow_pack.archived` audit evidence records the archive reason, previous status, and archive timestamp.
@@ -93,4 +101,4 @@ The Whiskey evidence gate exercises the API lifecycle end to end:
 WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml scripts/workflow-pack-evidence-gate.sh
 ```
 
-It validates the manifest, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, archives the released installation, and verifies archived installs are removed from active reads.
+It validates the manifest, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, archives the rolled-back installation, and verifies archived installs are removed from active reads.
