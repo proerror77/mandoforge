@@ -130,6 +130,29 @@ if [[ -z "$installation_id" ]]; then
   exit 1
 fi
 
+blocked_onboarding_payload="$(jq -nc \
+  --arg company_content "$(cat "$(dirname "$MANIFEST_PATH")/profiles/company.md")" \
+  '{
+    profiles: [
+      {
+        id: "company",
+        content: $company_content
+      }
+    ],
+    connectors: [
+      {
+        id: "knowledge-base",
+        available_permissions: ["document.search"],
+        provenance_attested: false,
+        tenant_id: "",
+        workspace_id: "workspace-demo",
+        treats_results_as_data: false
+      }
+    ],
+    reason: "Whiskey WorkflowPack onboarding blocked proof"
+  }')"
+blocked_onboarding_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/onboarding/assess" "$blocked_onboarding_payload")"
+
 fetch_json POST "/api/workflow-packs/installations/$installation_id/release" \
   '{"eval_gate_status":"passed","release_gate_status":"passed","gate_evidence":{"expected_failure":"release_before_stage"}}' \
   4 >/dev/null
@@ -165,6 +188,46 @@ old_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$
 list_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-after-update.json"
 cp "$old_after_update_file" "$old_after_update_snapshot_file"
 cp "$list_after_update_file" "$list_after_update_snapshot_file"
+ready_onboarding_payload="$(jq -nc '{
+  profiles: [
+    {
+      id: "company",
+      content: "# Company Profile\nAcme Financial runs regulated AI adoption reviews with named approval owners and evidence retention."
+    },
+    {
+      id: "department",
+      content: "# Department Profile\nSecurity and risk review AI vendors weekly, with named owners and quarterly governance checkpoints."
+    },
+    {
+      id: "approval-matrix",
+      content: "approvals:\n  high:\n    required_role: approver\n    escalation_role: admin\n  medium:\n    required_role: operator\n  low:\n    required_role: operator\n  external_ai:\n    required_role: approver\n"
+    },
+    {
+      id: "connector-map",
+      content: "connectors:\n  knowledge-base:\n    scope: tenant\n    required_permissions:\n      - document.search\n      - document.read\n    source_system: confluence\n"
+    },
+    {
+      id: "risk-policy",
+      content: "risk_policy:\n  high:\n    approval_required: true\n    external_write_allowed: false\n  medium:\n    approval_required: true\n    external_write_allowed: false\n  low:\n    approval_required: false\n    external_write_allowed: false\n"
+    },
+    {
+      id: "output-style",
+      content: "# Output Style\nUse executive summary first, then evidence table, then draft recommendation."
+    }
+  ],
+  connectors: [
+    {
+      id: "knowledge-base",
+      available_permissions: ["document.search", "document.read"],
+      provenance_attested: true,
+      tenant_id: "tenant-demo",
+      workspace_id: "workspace-demo",
+      treats_results_as_data: true
+    }
+  ],
+  reason: "Whiskey WorkflowPack onboarding readiness proof"
+}')"
+onboarding_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/onboarding/assess" "$ready_onboarding_payload")"
 archive_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/archive" \
   '{"reason":"Whiskey WorkflowPack adoption archive proof"}')"
 archived_get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id" "{}" 4)"
@@ -181,6 +244,17 @@ update_version="$(jq -r '.response.version // "unknown"' "$update_file")"
 update_source_id="$(jq -r '.response.gate_evidence.version_update.source_installation_id // "unknown"' "$update_file")"
 old_after_update_status="$(jq -r '.response.status // "unknown"' "$old_after_update_snapshot_file")"
 old_after_update_released_at="$(jq -r '.response.released_at // "missing"' "$old_after_update_snapshot_file")"
+blocked_onboarding_status="$(jq -r '.response.status // "unknown"' "$blocked_onboarding_file")"
+onboarding_status="$(jq -r '.response.status // "unknown"' "$onboarding_file")"
+onboarding_workflow="$(jq -r '.response.onboarding_workflow // "unknown"' "$onboarding_file")"
+onboarding_eval="$(jq -r '.response.onboarding_eval // "unknown"' "$onboarding_file")"
+required_profile_count="$(jq -r '.response.required_profile_count // 0' "$onboarding_file")"
+profile_schema_count="$(jq -r '.response.profile_schema_count // 0' "$onboarding_file")"
+provided_profile_count="$(jq -r '.response.provided_profile_count // 0' "$onboarding_file")"
+placeholder_profile_count="$(jq -r '.response.placeholder_profile_count // 0' "$onboarding_file")"
+connector_requirement_count="$(jq -r '.response.connector_requirement_count // 0' "$onboarding_file")"
+ready_connector_count="$(jq -r '.response.ready_connector_count // 0' "$onboarding_file")"
+onboarding_blocker_count="$(jq -r '[.response.blockers[]?] | length' "$onboarding_file")"
 archive_status="$(jq -r '.response.status // "unknown"' "$archive_file")"
 eval_gate_status="$(jq -r '.response.eval_gate_status // "unknown"' "$release_file")"
 release_gate_status="$(jq -r '.response.release_gate_status // "unknown"' "$release_file")"
@@ -226,6 +300,22 @@ if [[ -z "$updated_installation_id" || "$update_status" != "installed" || "$upda
   echo "workflow pack update did not create an installed new version" >&2
   exit 1
 fi
+if [[ "$blocked_onboarding_status" != "blocked" ]]; then
+  echo "workflow pack blocked onboarding assessment did not fail closed" >&2
+  exit 1
+fi
+if [[ "$onboarding_status" != "ready" || "$onboarding_workflow" != "profile-onboarding" || "$onboarding_eval" != "profile-onboarding-regression" ]]; then
+  echo "workflow pack onboarding readiness assessment did not reach ready state" >&2
+  exit 1
+fi
+if [[ "$required_profile_count" != "6" || "$profile_schema_count" != "6" || "$provided_profile_count" != "6" || "$placeholder_profile_count" != "0" ]]; then
+  echo "workflow pack onboarding profile coverage did not match the contract" >&2
+  exit 1
+fi
+if [[ "$connector_requirement_count" != "1" || "$ready_connector_count" != "1" || "$onboarding_blocker_count" != "0" ]]; then
+  echo "workflow pack onboarding connector readiness did not match the contract" >&2
+  exit 1
+fi
 if [[ "$update_source_id" != "$installation_id" ]]; then
   echo "workflow pack update did not record the source installation id" >&2
   exit 1
@@ -262,6 +352,17 @@ fi
   echo "update_status=$update_status"
   echo "update_version=$update_version"
   echo "update_source_id=$update_source_id"
+  echo "blocked_onboarding_status=$blocked_onboarding_status"
+  echo "onboarding_status=$onboarding_status"
+  echo "onboarding_workflow=$onboarding_workflow"
+  echo "onboarding_eval=$onboarding_eval"
+  echo "required_profile_count=$required_profile_count"
+  echo "profile_schema_count=$profile_schema_count"
+  echo "provided_profile_count=$provided_profile_count"
+  echo "placeholder_profile_count=$placeholder_profile_count"
+  echo "connector_requirement_count=$connector_requirement_count"
+  echo "ready_connector_count=$ready_connector_count"
+  echo "onboarding_blocker_count=$onboarding_blocker_count"
   echo "old_after_update_status=$old_after_update_status"
   echo "updated_list_count=$updated_list_count"
   echo "old_after_update_list_count=$old_after_update_list_count"

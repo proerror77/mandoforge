@@ -688,6 +688,69 @@ struct InstallWorkflowPack {
     manifest_path: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WorkflowPackOnboardingProfileInput {
+    id: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WorkflowPackOnboardingConnectorInput {
+    id: String,
+    #[serde(default)]
+    available_permissions: Vec<String>,
+    #[serde(default)]
+    provenance_attested: bool,
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    treats_results_as_data: bool,
+    #[serde(default)]
+    writes_enabled: bool,
+    #[serde(default)]
+    write_approval_required: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowPackOnboardingAssessmentRequest {
+    #[serde(default)]
+    profiles: Vec<WorkflowPackOnboardingProfileInput>,
+    #[serde(default)]
+    connectors: Vec<WorkflowPackOnboardingConnectorInput>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackConnectorAssessment {
+    id: String,
+    status: String,
+    blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackOnboardingAssessment {
+    installation_id: Uuid,
+    pack_id: String,
+    version: String,
+    status: String,
+    onboarding_workflow: String,
+    onboarding_eval: String,
+    required_profile_count: usize,
+    profile_schema_count: usize,
+    provided_profile_count: usize,
+    placeholder_profile_count: usize,
+    connector_requirement_count: usize,
+    ready_connector_count: usize,
+    missing_profiles: Vec<String>,
+    placeholder_profiles: Vec<String>,
+    connector_blockers: Vec<WorkflowPackConnectorAssessment>,
+    blockers: Vec<String>,
+    checked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 struct WorkflowPackUpdateRequest {
     manifest_path: String,
@@ -4330,6 +4393,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-packs/installations/{id}/stage",
             post(stage_workflow_pack_installation_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/onboarding/assess",
+            post(assess_workflow_pack_onboarding_route),
         )
         .route(
             "/api/workflow-packs/installations/{id}/update",
@@ -8061,6 +8128,50 @@ async fn stage_workflow_pack_installation_route(
     Ok(Json(installation))
 }
 
+async fn assess_workflow_pack_onboarding_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<WorkflowPackOnboardingAssessmentRequest>,
+) -> Result<Json<WorkflowPackOnboardingAssessment>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    let installation = state.get_workflow_pack_installation(id).await?;
+    let assessment = assess_workflow_pack_onboarding(&installation, input.clone())?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "workflow_pack.onboarding_assessed",
+            "workflow_pack_installation",
+            Some(installation.id),
+            json!({
+                "pack_id": installation.pack_id,
+                "version": installation.version,
+                "status": assessment.status,
+                "reason": input.reason,
+                "required_profile_count": assessment.required_profile_count,
+                "provided_profile_count": assessment.provided_profile_count,
+                "placeholder_profile_count": assessment.placeholder_profile_count,
+                "connector_requirement_count": assessment.connector_requirement_count,
+                "ready_connector_count": assessment.ready_connector_count,
+                "missing_profiles": assessment.missing_profiles,
+                "placeholder_profiles": assessment.placeholder_profiles,
+                "connector_blockers": assessment.connector_blockers,
+                "blockers": assessment.blockers,
+            }),
+        ))
+        .await?;
+    Ok(Json(assessment))
+}
+
 async fn update_workflow_pack_installation_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -8319,6 +8430,197 @@ fn load_and_validate_workflow_pack(
         .validate_package_dir(package_dir)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     Ok((manifest_path, manifest, report))
+}
+
+fn assess_workflow_pack_onboarding(
+    installation: &WorkflowPackInstallation,
+    input: WorkflowPackOnboardingAssessmentRequest,
+) -> Result<WorkflowPackOnboardingAssessment, AppError> {
+    let manifest = serde_json::from_value::<workflow_pack::WorkflowPackManifest>(
+        installation.manifest.clone(),
+    )?;
+    let onboarding = manifest.onboarding.as_ref().ok_or_else(|| {
+        AppError::bad_request("workflow pack manifest missing onboarding contract")
+    })?;
+    let manifest_path = PathBuf::from(&installation.manifest_path);
+    let package_dir = manifest_path.parent().ok_or_else(|| {
+        AppError::bad_request("workflow pack manifest path has no parent package directory")
+    })?;
+
+    let mut input_profiles = HashMap::new();
+    for profile in input.profiles {
+        let profile_id = profile.id.trim().to_string();
+        if profile_id.is_empty() {
+            return Err(AppError::bad_request("onboarding profile id is required"));
+        }
+        if input_profiles.insert(profile_id.clone(), profile).is_some() {
+            return Err(AppError::bad_request(format!(
+                "duplicate onboarding profile {}",
+                profile_id
+            )));
+        }
+    }
+
+    let mut input_connectors = HashMap::new();
+    for connector in input.connectors {
+        let connector_id = connector.id.trim().to_string();
+        if connector_id.is_empty() {
+            return Err(AppError::bad_request("onboarding connector id is required"));
+        }
+        if input_connectors
+            .insert(connector_id.clone(), connector)
+            .is_some()
+        {
+            return Err(AppError::bad_request(format!(
+                "duplicate onboarding connector {}",
+                connector_id
+            )));
+        }
+    }
+
+    let profile_refs: HashMap<_, _> = manifest
+        .profiles
+        .iter()
+        .map(|profile| (profile.id.as_str(), profile))
+        .collect();
+    let mut missing_profiles = Vec::new();
+    let mut placeholder_profiles = Vec::new();
+    for profile_id in &onboarding.required_profiles {
+        match input_profiles.get(profile_id) {
+            Some(profile) if !profile.content.trim().is_empty() => {
+                let declared = profile_refs.get(profile_id.as_str()).ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "workflow pack onboarding profile {} is not declared in manifest",
+                        profile_id
+                    ))
+                })?;
+                let default_profile_content =
+                    std::fs::read_to_string(package_dir.join(&declared.path)).with_context(
+                        || format!("read workflow pack profile template {}", declared.path),
+                    )?;
+                if profile.content.trim() == default_profile_content.trim() {
+                    placeholder_profiles.push(profile_id.clone());
+                }
+            }
+            _ => missing_profiles.push(profile_id.clone()),
+        }
+    }
+
+    let mut connector_blockers = Vec::new();
+    let mut ready_connector_count = 0usize;
+    for connector in &manifest.connectors {
+        let mut blockers = Vec::new();
+        match input_connectors.get(connector.id.as_str()) {
+            Some(candidate) => {
+                let permissions: HashSet<_> = candidate
+                    .available_permissions
+                    .iter()
+                    .map(|permission| permission.trim().to_string())
+                    .collect();
+                for permission in &connector.required_permissions {
+                    if !permissions.contains(permission) {
+                        blockers.push(format!("missing permission {}", permission));
+                    }
+                }
+                if connector.provenance.required && !candidate.provenance_attested {
+                    blockers.push("connector provenance is not attested".to_string());
+                }
+                if candidate
+                    .tenant_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                {
+                    blockers.push("tenant scope tenant_id is missing".to_string());
+                }
+                if candidate
+                    .workspace_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                {
+                    blockers.push("tenant scope workspace_id is missing".to_string());
+                }
+                if connector.prompt_injection_boundary.treat_results_as_data
+                    && !candidate.treats_results_as_data
+                {
+                    blockers.push("connector results are not treated as data".to_string());
+                }
+                if connector.writes.enabled && !candidate.writes_enabled {
+                    blockers.push("connector write capability is not enabled".to_string());
+                }
+                if connector.writes.enabled
+                    && connector.writes.approval_required
+                    && !candidate.write_approval_required
+                {
+                    blockers.push("connector write approval gate is missing".to_string());
+                }
+            }
+            None => blockers.push("connector assessment is missing".to_string()),
+        }
+
+        blockers.sort();
+        if blockers.is_empty() {
+            ready_connector_count += 1;
+        }
+        connector_blockers.push(WorkflowPackConnectorAssessment {
+            id: connector.id.clone(),
+            status: if blockers.is_empty() {
+                "ready".to_string()
+            } else {
+                "blocked".to_string()
+            },
+            blockers,
+        });
+    }
+    connector_blockers.sort_by(|left, right| left.id.cmp(&right.id));
+
+    missing_profiles.sort();
+    placeholder_profiles.sort();
+
+    let mut blockers = Vec::new();
+    blockers.extend(
+        missing_profiles
+            .iter()
+            .map(|profile| format!("missing required profile {}", profile)),
+    );
+    blockers.extend(
+        placeholder_profiles
+            .iter()
+            .map(|profile| format!("profile {} still matches package default", profile)),
+    );
+    for connector in &connector_blockers {
+        for blocker in &connector.blockers {
+            blockers.push(format!("connector {}: {}", connector.id, blocker));
+        }
+    }
+
+    let checked_at = Utc::now();
+    Ok(WorkflowPackOnboardingAssessment {
+        installation_id: installation.id,
+        pack_id: installation.pack_id.clone(),
+        version: installation.version.clone(),
+        status: if blockers.is_empty() {
+            "ready".to_string()
+        } else {
+            "blocked".to_string()
+        },
+        onboarding_workflow: onboarding.workflow.clone(),
+        onboarding_eval: onboarding.eval.clone(),
+        required_profile_count: onboarding.required_profiles.len(),
+        profile_schema_count: onboarding.profile_schemas.len(),
+        provided_profile_count: input_profiles.len(),
+        placeholder_profile_count: placeholder_profiles.len(),
+        connector_requirement_count: manifest.connectors.len(),
+        ready_connector_count,
+        missing_profiles,
+        placeholder_profiles,
+        connector_blockers,
+        blockers,
+        checked_at,
+    })
 }
 
 fn resolve_workflow_pack_manifest_path(input: &str) -> Result<PathBuf, AppError> {
@@ -36219,6 +36521,164 @@ not json
         }));
     }
 
+    #[tokio::test]
+    async fn workflow_pack_onboarding_assessment_reports_blocked_and_ready_states() {
+        let app = test_app().await;
+        let installed: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-packs/install",
+                json!({"manifest_path": ai_governance_manifest_path_string()}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        let blocked: WorkflowPackOnboardingAssessment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-packs/installations/{}/onboarding/assess",
+                    installed.id
+                ),
+                json!({
+                    "profiles": [
+                        {
+                            "id": "company",
+                            "content": ai_governance_profile_template("profiles/company.md")
+                        }
+                    ],
+                    "connectors": [
+                        {
+                            "id": "knowledge-base",
+                            "available_permissions": ["document.search"],
+                            "provenance_attested": false,
+                            "tenant_id": "",
+                            "workspace_id": "workspace-demo",
+                            "treats_results_as_data": false
+                        }
+                    ],
+                    "reason": "baseline onboarding quality check"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(blocked.status, "blocked");
+        assert_eq!(blocked.required_profile_count, 6);
+        assert_eq!(blocked.provided_profile_count, 1);
+        assert_eq!(blocked.placeholder_profile_count, 1);
+        assert!(blocked.missing_profiles.contains(&"department".to_string()));
+        assert!(
+            blocked
+                .missing_profiles
+                .contains(&"approval-matrix".to_string())
+        );
+        assert!(
+            blocked
+                .placeholder_profiles
+                .contains(&"company".to_string())
+        );
+        assert_eq!(blocked.connector_requirement_count, 1);
+        assert_eq!(blocked.ready_connector_count, 0);
+        assert_eq!(blocked.connector_blockers[0].id, "knowledge-base");
+        assert_eq!(blocked.connector_blockers[0].status, "blocked");
+        assert!(
+            blocked.connector_blockers[0]
+                .blockers
+                .contains(&"missing permission document.read".to_string())
+        );
+        assert!(
+            blocked
+                .blockers
+                .iter()
+                .any(|blocker| { blocker == "profile company still matches package default" })
+        );
+
+        let ready: WorkflowPackOnboardingAssessment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-packs/installations/{}/onboarding/assess",
+                    installed.id
+                ),
+                json!({
+                    "profiles": [
+                        {
+                            "id": "company",
+                            "content": "# Company Profile\nAcme Financial operates regulated AI review with named owners and evidence retention."
+                        },
+                        {
+                            "id": "department",
+                            "content": "# Department Profile\nSecurity review covers vendor intake, risk acceptance, and quarterly governance reviews."
+                        },
+                        {
+                            "id": "approval-matrix",
+                            "content": "approvals:\n  high:\n    required_role: approver\n    escalation_role: admin\n  medium:\n    required_role: operator\n  low:\n    required_role: operator\n  external_ai:\n    required_role: approver\n"
+                        },
+                        {
+                            "id": "connector-map",
+                            "content": "connectors:\n  knowledge-base:\n    scope: tenant\n    required_permissions:\n      - document.search\n      - document.read\n    source_system: confluence\n"
+                        },
+                        {
+                            "id": "risk-policy",
+                            "content": "risk_policy:\n  high:\n    approval_required: true\n    external_write_allowed: false\n  medium:\n    approval_required: true\n    external_write_allowed: false\n  low:\n    approval_required: false\n    external_write_allowed: false\n"
+                        },
+                        {
+                            "id": "output-style",
+                            "content": "# Output Style\nUse executive summaries first, then evidence tables, then draft recommendations."
+                        }
+                    ],
+                    "connectors": [
+                        {
+                            "id": "knowledge-base",
+                            "available_permissions": ["document.search", "document.read"],
+                            "provenance_attested": true,
+                            "tenant_id": "tenant-demo",
+                            "workspace_id": "workspace-demo",
+                            "treats_results_as_data": true
+                        }
+                    ],
+                    "reason": "customer onboarding ready for release review"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(ready.status, "ready");
+        assert_eq!(ready.onboarding_workflow, "profile-onboarding");
+        assert_eq!(ready.onboarding_eval, "profile-onboarding-regression");
+        assert_eq!(ready.required_profile_count, 6);
+        assert_eq!(ready.profile_schema_count, 6);
+        assert_eq!(ready.provided_profile_count, 6);
+        assert_eq!(ready.placeholder_profile_count, 0);
+        assert_eq!(ready.connector_requirement_count, 1);
+        assert_eq!(ready.ready_connector_count, 1);
+        assert!(ready.missing_profiles.is_empty());
+        assert!(ready.placeholder_profiles.is_empty());
+        assert_eq!(ready.connector_blockers[0].status, "ready");
+        assert!(ready.connector_blockers[0].blockers.is_empty());
+        assert!(ready.blockers.is_empty());
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "workflow_pack.onboarding_assessed"
+                && log.resource_id == Some(installed.id)
+                && log.details["status"] == json!("ready")
+        }));
+    }
+
     #[test]
     fn parses_openai_compatible_tool_calls() {
         let response = json!({
@@ -45584,10 +46044,22 @@ not json
         .to_string()
     }
 
+    fn ai_governance_pack_dir() -> PathBuf {
+        std::fs::canonicalize(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("packs/ai-governance"),
+        )
+        .expect("AI governance pack exists")
+    }
+
+    fn ai_governance_profile_template(path: &str) -> String {
+        std::fs::read_to_string(ai_governance_pack_dir().join(path))
+            .expect("AI governance profile template exists")
+    }
+
     fn ai_governance_update_manifest_path_string(version: &str) -> String {
-        let source_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("packs/ai-governance");
+        let source_dir = ai_governance_pack_dir();
         let target_dir = test_workspace_root()
             .join("workflow-pack-updates")
             .join(Uuid::new_v4().to_string());

@@ -71,6 +71,16 @@ The initial Stage 3 update API implements the immutable-version contract:
 
 Stage should materialize draft agent versions, connector definitions, policy revisions, eval suites, and profile requirements in a non-production state. Staging must preserve tenant scope and must not bypass provider, tool, approval, MCP, or audit governance.
 
+### Onboarding Assessment
+
+Customer onboarding must be explicit before a pack is treated as tenant-ready. The initial Stage 3 onboarding assessment API is contract-driven and non-destructive:
+
+- `POST /api/workflow-packs/installations/{id}/onboarding/assess` accepts active pack installations and evaluates customer-supplied onboarding profiles plus connector declarations against the installed manifest snapshot.
+- The assessment verifies required profiles are present, non-empty, and not identical to the packaged default templates.
+- The assessment verifies each declared connector has the required permissions, provenance attestation, tenant/workspace scope, and prompt-injection boundary expected by the pack contract.
+- The response is `ready` or `blocked`; it reports missing profiles, placeholder profiles, connector blockers, required profile/schema counts, and the onboarding workflow/eval ids.
+- `workflow_pack.onboarding_assessed` audit evidence records the assessment result and blockers, but the assessment does not mutate install, stage, release, rollback, or archive state.
+
 ### Release
 
 Release should require passing eval gates, policy gates, connector readiness, and approval where the pack declares high-risk handoffs or writes. Released pack behavior must be auditable and roll-backable.
@@ -111,4 +121,4 @@ The Whiskey evidence gate exercises the API lifecycle end to end:
 WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml scripts/workflow-pack-evidence-gate.sh
 ```
 
-It validates the manifest, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, creates a new installed version from an updated manifest, verifies the rolled-back source remains unchanged and active before archive, archives the rolled-back source installation, and verifies archive removes only the source while the new installed version stays active.
+It validates the manifest, proves onboarding fails closed with placeholder/missing customer inputs, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, creates a new installed version from an updated manifest, proves onboarding reaches `ready` with customer-grounded profiles and connector declarations, verifies the rolled-back source remains unchanged and active before archive, archives the rolled-back source installation, and verifies archive removes only the source while the new installed version stays active.
