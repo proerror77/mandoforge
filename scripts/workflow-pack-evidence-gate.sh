@@ -121,17 +121,17 @@ discover_connector_binding() {
       local servers_file
       servers_file="$(fetch_json GET "/api/teams/$team_id/mcp-servers")"
       local server_id
-      server_id="$(jq -r --arg name "$CONNECTOR_SERVER_NAME" 'map(select(.name == $name and .status == "active")) | .[0].id // empty' "$servers_file")"
+      server_id="$(jq -r --arg name "$CONNECTOR_SERVER_NAME" '.response | map(select(.name == $name and .status == "active")) | .[0].id // empty' "$servers_file")"
       if [[ -z "$server_id" ]]; then
-        server_id="$(jq -r 'map(select(.status == "active")) | .[0].id // empty' "$servers_file")"
+        server_id="$(jq -r '.response | map(select(.status == "active")) | .[0].id // empty' "$servers_file")"
       fi
       if [[ -n "$server_id" ]]; then
         CONNECTOR_TEAM_ID="$team_id"
         CONNECTOR_SERVER_ID="$server_id"
         return 0
       fi
-    done < <(jq -r 'map(select((.archived_at // null) == null)) | .[].id' "$teams_file")
-  done < <(jq -r 'map(select((.archived_at // null) == null)) | .[].id' "$organizations_file")
+    done < <(jq -r '.response | map(select((.archived_at // null) == null)) | .[].id' "$teams_file")
+  done < <(jq -r '.response | map(select((.archived_at // null) == null)) | .[].id' "$organizations_file")
 }
 
 discover_connector_binding
@@ -317,7 +317,7 @@ blocked_connector_quality_payload="$(jq -nc '{
       ]
     }
   ]
-})' --arg team_id "$CONNECTOR_TEAM_ID" --arg server_id "$CONNECTOR_SERVER_ID" --arg tool_name "$CONNECTOR_TOOL_NAME")"
+} end)' --arg team_id "$CONNECTOR_TEAM_ID" --arg server_id "$CONNECTOR_SERVER_ID" --arg tool_name "$CONNECTOR_TOOL_NAME")"
 blocked_connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$blocked_connector_quality_payload")"
 blocked_connector_quality_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$updated_installation_id-connectors-quality-assess-blocked.json"
 cp "$blocked_connector_quality_file" "$blocked_connector_quality_snapshot_file"
@@ -369,7 +369,7 @@ ready_connector_quality_payload="$(jq -nc '{
       ]
     }
   ]
-})' --arg team_id "$CONNECTOR_TEAM_ID" --arg server_id "$CONNECTOR_SERVER_ID" --arg tool_name "$CONNECTOR_TOOL_NAME")"
+} end)' --arg team_id "$CONNECTOR_TEAM_ID" --arg server_id "$CONNECTOR_SERVER_ID" --arg tool_name "$CONNECTOR_TOOL_NAME")"
 connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$ready_connector_quality_payload")"
 archive_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/archive" \
   '{"reason":"Whiskey WorkflowPack adoption archive proof"}')"
