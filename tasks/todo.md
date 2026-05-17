@@ -216,5 +216,5 @@
 - [x] Add typed `agent_handoff_events` with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
 - [x] Add Reader / Analyzer / Writer worker role declarations and tool-scope enforcement for untrusted input workflows.
 - [x] Add connector manifest policy fields for provenance, tenant scope, write gating, and prompt-injection boundary.
-- [ ] Build the first AI Governance Pack slice: AI use-case triage, AI impact assessment, vendor AI review, and policy monitor.
+- [x] Build the first AI Governance Pack slice: AI use-case triage, AI impact assessment, vendor AI review, and policy monitor.
 - [x] Add pack-level eval fixtures and release gates so workflow pack behavior cannot regress silently.

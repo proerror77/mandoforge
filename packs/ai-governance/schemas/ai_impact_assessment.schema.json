@@ -2,24 +2,32 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "required": [
-    "title",
-    "business_owner",
-    "data_categories",
+    "use_case_id",
     "impact_level",
+    "affected_users",
+    "data_risk",
+    "controls",
     "approval_required",
     "draft_only",
     "provenance"
   ],
   "properties": {
-    "title": { "type": "string", "minLength": 1 },
-    "business_owner": { "type": "string", "minLength": 1 },
-    "data_categories": {
+    "use_case_id": { "type": "string", "minLength": 1 },
+    "impact_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "prohibited"]
+    },
+    "affected_users": {
       "type": "array",
       "items": { "type": "string", "minLength": 1 }
     },
-    "impact_level": {
+    "data_risk": {
       "type": "string",
-      "enum": ["low", "medium", "high"]
+      "enum": ["none", "internal", "confidential", "personal", "sensitive"]
+    },
+    "controls": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
     },
     "approval_required": { "type": "boolean" },
     "draft_only": { "const": true },

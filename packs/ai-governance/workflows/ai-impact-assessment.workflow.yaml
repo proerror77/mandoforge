@@ -1,0 +1,15 @@
+id: ai-impact-assessment
+entry_agent: reader
+steps:
+  - agent: reader
+    output_schema: ai-impact-assessment
+  - agent: analyzer
+    handoff_intent: classify-ai-impact
+  - agent: writer
+    handoff_intent: draft-ai-impact-assessment
+approval:
+  required_before_external_write: true
+  required_before_final_policy_publication: true
+output:
+  draft_only: true
+  provenance_required: true

@@ -8,6 +8,7 @@ capabilities:
   - ai-use-case-triage
   - ai-impact-assessment
   - vendor-ai-review
+  - policy-monitor
 profiles:
   - id: default
     path: profiles/default.md
@@ -37,9 +38,27 @@ skills:
   - id: ai-use-case-triage
     path: skills/ai-use-case-triage/skill.md
     required: true
+  - id: ai-impact-assessment
+    path: skills/ai-impact-assessment/skill.md
+    required: true
+  - id: vendor-ai-review
+    path: skills/vendor-ai-review/skill.md
+    required: true
+  - id: policy-monitor
+    path: skills/policy-monitor/skill.md
+    required: true
 workflows:
   - id: ai-use-case-triage
     path: workflows/ai-use-case-triage.workflow.yaml
+    entry_agent: reader
+  - id: ai-impact-assessment
+    path: workflows/ai-impact-assessment.workflow.yaml
+    entry_agent: reader
+  - id: vendor-ai-review
+    path: workflows/vendor-ai-review.workflow.yaml
+    entry_agent: reader
+  - id: policy-monitor
+    path: workflows/policy-monitor.workflow.yaml
     entry_agent: reader
   - id: profile-onboarding
     path: workflows/profile-onboarding.workflow.yaml
@@ -56,6 +75,9 @@ agents:
       - target_agent: analyzer
         intents:
           - classify-ai-use-case
+          - classify-ai-impact
+          - classify-vendor-ai-risk
+          - classify-policy-monitor-signal
         risk_level: medium
         approval_required: false
         schema: schemas/handoff.schema.json
@@ -70,6 +92,9 @@ agents:
       - target_agent: writer
         intents:
           - draft-ai-governance-assessment
+          - draft-ai-impact-assessment
+          - draft-vendor-ai-review
+          - draft-policy-monitor-finding
         risk_level: high
         approval_required: true
         schema: schemas/handoff.schema.json
@@ -101,6 +126,15 @@ connectors:
 schemas:
   - id: ai-use-case
     path: schemas/ai_use_case.schema.json
+    required: true
+  - id: ai-impact-assessment
+    path: schemas/ai_impact_assessment.schema.json
+    required: true
+  - id: vendor-ai-review
+    path: schemas/vendor_ai_review.schema.json
+    required: true
+  - id: policy-monitor-finding
+    path: schemas/policy_monitor_finding.schema.json
     required: true
   - id: handoff
     path: schemas/handoff.schema.json

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "vendor_name",
+    "product_name",
+    "data_processing",
+    "model_governance",
+    "contractual_gaps",
+    "recommendation",
+    "approval_required",
+    "draft_only",
+    "provenance"
+  ],
+  "properties": {
+    "vendor_name": { "type": "string", "minLength": 1 },
+    "product_name": { "type": "string", "minLength": 1 },
+    "data_processing": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "model_governance": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "contractual_gaps": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "recommendation": {
+      "type": "string",
+      "enum": ["approve_with_controls", "needs_review", "reject"]
+    },
+    "approval_required": { "type": "boolean" },
+    "draft_only": { "const": true },
+    "provenance": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    }
+  },
+  "additionalProperties": true
+}
