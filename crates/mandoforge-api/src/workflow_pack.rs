@@ -74,7 +74,7 @@ pub struct AgentRef {
     pub handoffs: Vec<HandoffRule>,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRole {
     Reader,
@@ -85,7 +85,7 @@ pub enum AgentRole {
     Monitor,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ToolScope {
     #[serde(default)]
     pub read: Vec<String>,
@@ -191,6 +191,18 @@ pub struct OnboardingContract {
     pub eval: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AgentFileContract {
+    id: String,
+    role: AgentRole,
+    instructions: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolScopePolicy {
+    roles: BTreeMap<String, ToolScope>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowPackValidationReport {
     pub pack_id: String,
@@ -228,8 +240,10 @@ impl WorkflowPackManifest {
             validate_ref("policies", item, package_dir, &mut ids_by_section)?;
             file_count += 1;
         }
+        let tool_scope_policy = self.load_tool_scope_policy(package_dir)?;
 
-        let agent_ids = self.validate_agents(package_dir, &mut ids_by_section)?;
+        let agent_ids =
+            self.validate_agents(package_dir, &tool_scope_policy, &mut ids_by_section)?;
         file_count += self.agents.len();
 
         for workflow in &self.workflows {
@@ -330,32 +344,26 @@ impl WorkflowPackManifest {
     fn validate_agents(
         &self,
         package_dir: &Path,
+        tool_scope_policy: &ToolScopePolicy,
         ids_by_section: &mut BTreeMap<&'static str, BTreeSet<String>>,
     ) -> Result<BTreeSet<String>> {
         let mut agent_ids = BTreeSet::new();
+        let mut declared_roles = BTreeSet::new();
         for agent in &self.agents {
             validate_id("agents", &agent.id)?;
             insert_unique_id(ids_by_section, "agents", &agent.id)?;
             validate_relative_existing_path(package_dir, &agent.path)?;
+            self.validate_agent_file_contract(agent, package_dir)?;
+            self.validate_agent_tool_scope(agent, tool_scope_policy)?;
             agent_ids.insert(agent.id.clone());
-
-            match agent.role {
-                AgentRole::Reader => {
-                    if !agent.tool_scope.write.is_empty()
-                        || !agent.tool_scope.external_write.is_empty()
-                    {
-                        bail!("reader agent {} cannot declare write tool scopes", agent.id);
-                    }
-                }
-                AgentRole::Writer => {
-                    if !agent.tool_scope.external_write.is_empty() {
-                        bail!(
-                            "writer agent {} cannot declare external_write tool scopes",
-                            agent.id
-                        );
-                    }
-                }
-                _ => {}
+            declared_roles.insert(agent.role);
+        }
+        for role in [AgentRole::Reader, AgentRole::Analyzer, AgentRole::Writer] {
+            if !declared_roles.contains(&role) {
+                bail!(
+                    "workflow pack must declare a {} agent for untrusted input workflows",
+                    role.as_slug()
+                );
             }
         }
 
@@ -390,6 +398,66 @@ impl WorkflowPackManifest {
         }
 
         Ok(agent_ids)
+    }
+
+    fn load_tool_scope_policy(&self, package_dir: &Path) -> Result<ToolScopePolicy> {
+        let policy = self
+            .policies
+            .iter()
+            .find(|policy| policy.id == "tool-scope")
+            .ok_or_else(|| anyhow::anyhow!("manifest must declare tool-scope policy"))?;
+        validate_relative_existing_path(package_dir, &policy.path)?;
+        let input = fs::read_to_string(package_dir.join(&policy.path))?;
+        let policy: ToolScopePolicy = serde_yml::from_str(&input)?;
+        if policy.roles.is_empty() {
+            bail!("tool-scope policy must declare roles");
+        }
+        Ok(policy)
+    }
+
+    fn validate_agent_file_contract(&self, agent: &AgentRef, package_dir: &Path) -> Result<()> {
+        let input = fs::read_to_string(package_dir.join(&agent.path))?;
+        let contract: AgentFileContract = serde_yml::from_str(&input)?;
+        if contract.id != agent.id {
+            bail!(
+                "agent file {} id {} must match manifest agent {}",
+                agent.path,
+                contract.id,
+                agent.id
+            );
+        }
+        if contract.role != agent.role {
+            bail!(
+                "agent file {} role {} must match manifest role {}",
+                agent.path,
+                contract.role.as_slug(),
+                agent.role.as_slug()
+            );
+        }
+        if contract.instructions.trim().is_empty() {
+            bail!("agent file {} must declare instructions", agent.path);
+        }
+        Ok(())
+    }
+
+    fn validate_agent_tool_scope(
+        &self,
+        agent: &AgentRef,
+        tool_scope_policy: &ToolScopePolicy,
+    ) -> Result<()> {
+        let role_key = agent.role.as_slug();
+        let policy_scope = tool_scope_policy
+            .roles
+            .get(role_key)
+            .ok_or_else(|| anyhow::anyhow!("tool-scope policy must declare {} role", role_key))?;
+        if policy_scope != &agent.tool_scope {
+            bail!(
+                "agent {} tool_scope must match tool-scope policy role {}",
+                agent.id,
+                role_key
+            );
+        }
+        enforce_worker_role_tool_scope(agent)
     }
 
     fn validate_connector(
@@ -495,6 +563,132 @@ impl WorkflowPackManifest {
             )?;
         }
         Ok(onboarding.profile_schemas.len())
+    }
+}
+
+impl AgentRole {
+    fn as_slug(&self) -> &'static str {
+        match self {
+            AgentRole::Reader => "reader",
+            AgentRole::Analyzer => "analyzer",
+            AgentRole::Writer => "writer",
+            AgentRole::Orchestrator => "orchestrator",
+            AgentRole::Executor => "executor",
+            AgentRole::Monitor => "monitor",
+        }
+    }
+}
+
+fn enforce_worker_role_tool_scope(agent: &AgentRef) -> Result<()> {
+    match agent.role {
+        AgentRole::Reader => {
+            ensure_scope_subset(
+                &agent.id,
+                "reader read",
+                &agent.tool_scope.read,
+                &["connector.read", "file.read"],
+            )?;
+            if !agent.tool_scope.write.is_empty() || !agent.tool_scope.external_write.is_empty() {
+                bail!("reader agent {} cannot declare write tool scopes", agent.id);
+            }
+        }
+        AgentRole::Analyzer => {
+            ensure_scope_subset(
+                &agent.id,
+                "analyzer read",
+                &agent.tool_scope.read,
+                &["profile.read", "schema.read"],
+            )?;
+            ensure_scope_contains(
+                &agent.id,
+                "analyzer read",
+                &agent.tool_scope.read,
+                "profile.read",
+            )?;
+            ensure_scope_contains(
+                &agent.id,
+                "analyzer read",
+                &agent.tool_scope.read,
+                "schema.read",
+            )?;
+            if !agent.tool_scope.write.is_empty() || !agent.tool_scope.external_write.is_empty() {
+                bail!(
+                    "analyzer agent {} cannot declare write tool scopes",
+                    agent.id
+                );
+            }
+        }
+        AgentRole::Writer => {
+            ensure_scope_subset(
+                &agent.id,
+                "writer read",
+                &agent.tool_scope.read,
+                &["profile.read"],
+            )?;
+            ensure_scope_subset(
+                &agent.id,
+                "writer write",
+                &agent.tool_scope.write,
+                &["artifact.write"],
+            )?;
+            if !agent
+                .tool_scope
+                .write
+                .iter()
+                .any(|scope| scope == "artifact.write")
+            {
+                bail!(
+                    "writer agent {} must be limited to artifact.write",
+                    agent.id
+                );
+            }
+            if !agent.tool_scope.external_write.is_empty() {
+                bail!(
+                    "writer agent {} cannot declare external_write tool scopes",
+                    agent.id
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ensure_scope_subset(
+    agent_id: &str,
+    scope_name: &str,
+    scopes: &[String],
+    allowed: &[&str],
+) -> Result<()> {
+    for scope in scopes {
+        if !allowed.iter().any(|allowed_scope| scope == allowed_scope) {
+            bail!(
+                "agent {} {} scope {} is outside allowed set {:?}",
+                agent_id,
+                scope_name,
+                scope,
+                allowed
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ensure_scope_contains(
+    agent_id: &str,
+    scope_name: &str,
+    scopes: &[String],
+    required: &str,
+) -> Result<()> {
+    if scopes.iter().any(|scope| scope == required) {
+        Ok(())
+    } else {
+        bail!(
+            "agent {} {} scope must include {}",
+            agent_id,
+            scope_name,
+            required
+        )
     }
 }
 
@@ -630,15 +824,28 @@ agents:
   - id: reader
     path: agents/reader.agent.yaml
     role: reader
+    tool_scope:
+      read: [connector.read, file.read]
     handoffs:
       - target_agent: writer
         intents: [publish]
         risk_level: high
         approval_required: false
         schema: schemas/handoff.schema.json
+  - id: analyzer
+    path: agents/analyzer.agent.yaml
+    role: analyzer
+    tool_scope:
+      read: [profile.read, schema.read]
   - id: writer
     path: agents/writer.agent.yaml
     role: writer
+    tool_scope:
+      read: [profile.read]
+      write: [artifact.write]
+policies:
+  - id: tool-scope
+    path: policies/tool_scope.yaml
 workflows:
   - id: triage
     path: workflows/triage.workflow.yaml
@@ -674,5 +881,97 @@ release_gates:
             .expect_err("high-risk handoff without approval must fail");
 
         assert!(error.to_string().contains("must require approval"));
+    }
+
+    #[test]
+    fn rejects_tool_scope_policy_mismatch_for_worker_roles() {
+        let input = std::fs::read_to_string(fixture_manifest_path()).expect("fixture manifest");
+        let input = input.replace(
+            "write:\n        - artifact.write",
+            "write:\n        - artifact.write\n        - external.message",
+        );
+        let manifest = WorkflowPackManifest::from_yaml_str(&input).expect("manifest parses");
+        let error = manifest
+            .validate_package_dir(&fixture_manifest_path().parent().unwrap().to_path_buf())
+            .expect_err("manifest scope drift from policy must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("tool_scope must match tool-scope policy role writer")
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_worker_role_tool_scopes() {
+        let reader = AgentRef {
+            id: "reader".to_string(),
+            path: "agents/reader.agent.yaml".to_string(),
+            role: AgentRole::Reader,
+            tool_scope: ToolScope {
+                write: vec!["artifact.write".to_string()],
+                ..ToolScope::default()
+            },
+            handoffs: vec![],
+        };
+        let reader_error =
+            enforce_worker_role_tool_scope(&reader).expect_err("reader writes must fail");
+        assert!(
+            reader_error
+                .to_string()
+                .contains("reader agent reader cannot declare write tool scopes")
+        );
+
+        let analyzer = AgentRef {
+            id: "analyzer".to_string(),
+            path: "agents/analyzer.agent.yaml".to_string(),
+            role: AgentRole::Analyzer,
+            tool_scope: ToolScope {
+                read: vec!["connector.read".to_string()],
+                ..ToolScope::default()
+            },
+            handoffs: vec![],
+        };
+        let analyzer_error =
+            enforce_worker_role_tool_scope(&analyzer).expect_err("analyzer raw reads must fail");
+        assert!(analyzer_error.to_string().contains("outside allowed set"));
+
+        let writer = AgentRef {
+            id: "writer".to_string(),
+            path: "agents/writer.agent.yaml".to_string(),
+            role: AgentRole::Writer,
+            tool_scope: ToolScope {
+                read: vec!["profile.read".to_string()],
+                write: vec!["artifact.write".to_string()],
+                external_write: vec!["email.send".to_string()],
+            },
+            handoffs: vec![],
+        };
+        let writer_error =
+            enforce_worker_role_tool_scope(&writer).expect_err("writer external writes must fail");
+        assert!(
+            writer_error
+                .to_string()
+                .contains("writer agent writer cannot declare external_write tool scopes")
+        );
+    }
+
+    #[test]
+    fn rejects_connector_policy_boundary_drift() {
+        let input = std::fs::read_to_string(fixture_manifest_path()).expect("fixture manifest");
+        let input = input.replace(
+            "treat_results_as_data: true",
+            "treat_results_as_data: false",
+        );
+        let manifest = WorkflowPackManifest::from_yaml_str(&input).expect("manifest parses");
+        let error = manifest
+            .validate_package_dir(&fixture_manifest_path().parent().unwrap().to_path_buf())
+            .expect_err("connector prompt-injection boundary drift must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must treat connector results as data")
+        );
     }
 }
