@@ -678,6 +678,18 @@ struct WorkflowPackInstallation {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackProfileAsset {
+    id: Uuid,
+    installation_id: Uuid,
+    profile_id: String,
+    content: String,
+    version: i32,
+    status: String,
+    created_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ValidateWorkflowPack {
     manifest_path: String,
@@ -723,6 +735,13 @@ struct WorkflowPackOnboardingAssessmentRequest {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowPackProfileAssetSaveRequest {
+    profiles: Vec<WorkflowPackOnboardingProfileInput>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowPackConnectorAssessment {
     id: String,
@@ -740,6 +759,8 @@ struct WorkflowPackOnboardingAssessment {
     onboarding_eval: String,
     required_profile_count: usize,
     profile_schema_count: usize,
+    inline_profile_count: usize,
+    persisted_profile_count: usize,
     provided_profile_count: usize,
     placeholder_profile_count: usize,
     connector_requirement_count: usize,
@@ -4397,6 +4418,11 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-packs/installations/{id}/onboarding/assess",
             post(assess_workflow_pack_onboarding_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/onboarding/profiles",
+            get(list_workflow_pack_profile_assets_route)
+                .post(save_workflow_pack_profile_assets_route),
         )
         .route(
             "/api/workflow-packs/installations/{id}/update",
@@ -8143,7 +8169,9 @@ async fn assess_workflow_pack_onboarding_route(
     )
     .await?;
     let installation = state.get_workflow_pack_installation(id).await?;
-    let assessment = assess_workflow_pack_onboarding(&installation, input.clone())?;
+    let persisted_profiles = state.list_workflow_pack_profile_assets(id).await?;
+    let assessment =
+        assess_workflow_pack_onboarding(&installation, &persisted_profiles, input.clone())?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -8158,6 +8186,8 @@ async fn assess_workflow_pack_onboarding_route(
                 "status": assessment.status,
                 "reason": input.reason,
                 "required_profile_count": assessment.required_profile_count,
+                "inline_profile_count": assessment.inline_profile_count,
+                "persisted_profile_count": assessment.persisted_profile_count,
                 "provided_profile_count": assessment.provided_profile_count,
                 "placeholder_profile_count": assessment.placeholder_profile_count,
                 "connector_requirement_count": assessment.connector_requirement_count,
@@ -8170,6 +8200,71 @@ async fn assess_workflow_pack_onboarding_route(
         ))
         .await?;
     Ok(Json(assessment))
+}
+
+async fn list_workflow_pack_profile_assets_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkflowPackProfileAsset>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    state.get_workflow_pack_installation(id).await?;
+    Ok(Json(state.list_workflow_pack_profile_assets(id).await?))
+}
+
+async fn save_workflow_pack_profile_assets_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<WorkflowPackProfileAssetSaveRequest>,
+) -> Result<Json<Vec<WorkflowPackProfileAsset>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    let installation = state.get_workflow_pack_installation(id).await?;
+    let validated_profiles =
+        validate_workflow_pack_profile_assets_input(&installation, input.profiles.clone())?;
+    let mut saved = Vec::with_capacity(validated_profiles.len());
+    for profile in &validated_profiles {
+        saved.push(
+            state
+                .save_workflow_pack_profile_asset(id, &profile.id, &profile.content)
+                .await?,
+        );
+    }
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "workflow_pack.onboarding_profiles_saved",
+            "workflow_pack_installation",
+            Some(installation.id),
+            json!({
+                "pack_id": installation.pack_id,
+                "version": installation.version,
+                "reason": input.reason,
+                "profile_ids": saved.iter().map(|profile| profile.profile_id.clone()).collect::<Vec<_>>(),
+                "versions": saved.iter().map(|profile| json!({
+                    "profile_id": profile.profile_id,
+                    "version": profile.version,
+                })).collect::<Vec<_>>(),
+            }),
+        ))
+        .await?;
+    Ok(Json(saved))
 }
 
 async fn update_workflow_pack_installation_route(
@@ -8434,17 +8529,12 @@ fn load_and_validate_workflow_pack(
 
 fn assess_workflow_pack_onboarding(
     installation: &WorkflowPackInstallation,
+    persisted_profiles: &[WorkflowPackProfileAsset],
     input: WorkflowPackOnboardingAssessmentRequest,
 ) -> Result<WorkflowPackOnboardingAssessment, AppError> {
-    let manifest = serde_json::from_value::<workflow_pack::WorkflowPackManifest>(
-        installation.manifest.clone(),
-    )?;
+    let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
     let onboarding = manifest.onboarding.as_ref().ok_or_else(|| {
         AppError::bad_request("workflow pack manifest missing onboarding contract")
-    })?;
-    let manifest_path = PathBuf::from(&installation.manifest_path);
-    let package_dir = manifest_path.parent().ok_or_else(|| {
-        AppError::bad_request("workflow pack manifest path has no parent package directory")
     })?;
 
     let mut input_profiles = HashMap::new();
@@ -8459,6 +8549,23 @@ fn assess_workflow_pack_onboarding(
                 profile_id
             )));
         }
+    }
+
+    let mut merged_profiles: HashMap<String, WorkflowPackOnboardingProfileInput> =
+        persisted_profiles
+            .iter()
+            .map(|profile| {
+                (
+                    profile.profile_id.clone(),
+                    WorkflowPackOnboardingProfileInput {
+                        id: profile.profile_id.clone(),
+                        content: profile.content.clone(),
+                    },
+                )
+            })
+            .collect();
+    for (profile_id, profile) in &input_profiles {
+        merged_profiles.insert(profile_id.clone(), profile.clone());
     }
 
     let mut input_connectors = HashMap::new();
@@ -8486,7 +8593,7 @@ fn assess_workflow_pack_onboarding(
     let mut missing_profiles = Vec::new();
     let mut placeholder_profiles = Vec::new();
     for profile_id in &onboarding.required_profiles {
-        match input_profiles.get(profile_id) {
+        match merged_profiles.get(profile_id) {
             Some(profile) if !profile.content.trim().is_empty() => {
                 let declared = profile_refs.get(profile_id.as_str()).ok_or_else(|| {
                     AppError::bad_request(format!(
@@ -8611,7 +8718,9 @@ fn assess_workflow_pack_onboarding(
         onboarding_eval: onboarding.eval.clone(),
         required_profile_count: onboarding.required_profiles.len(),
         profile_schema_count: onboarding.profile_schemas.len(),
-        provided_profile_count: input_profiles.len(),
+        inline_profile_count: input_profiles.len(),
+        persisted_profile_count: persisted_profiles.len(),
+        provided_profile_count: merged_profiles.len(),
         placeholder_profile_count: placeholder_profiles.len(),
         connector_requirement_count: manifest.connectors.len(),
         ready_connector_count,
@@ -8621,6 +8730,89 @@ fn assess_workflow_pack_onboarding(
         blockers,
         checked_at,
     })
+}
+
+fn workflow_pack_manifest_and_dir_from_installation(
+    installation: &WorkflowPackInstallation,
+) -> Result<(workflow_pack::WorkflowPackManifest, PathBuf), AppError> {
+    let manifest = serde_json::from_value::<workflow_pack::WorkflowPackManifest>(
+        installation.manifest.clone(),
+    )?;
+    let manifest_path = PathBuf::from(&installation.manifest_path);
+    let package_dir = manifest_path.parent().ok_or_else(|| {
+        AppError::bad_request("workflow pack manifest path has no parent package directory")
+    })?;
+    Ok((manifest, package_dir.to_path_buf()))
+}
+
+fn validate_workflow_pack_profile_assets_input(
+    installation: &WorkflowPackInstallation,
+    profiles: Vec<WorkflowPackOnboardingProfileInput>,
+) -> Result<Vec<WorkflowPackOnboardingProfileInput>, AppError> {
+    if profiles.is_empty() {
+        return Err(AppError::bad_request(
+            "at least one workflow pack onboarding profile is required",
+        ));
+    }
+    let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
+    let onboarding = manifest.onboarding.as_ref().ok_or_else(|| {
+        AppError::bad_request("workflow pack manifest missing onboarding contract")
+    })?;
+    let profile_refs: HashMap<_, _> = manifest
+        .profiles
+        .iter()
+        .map(|profile| (profile.id.as_str(), profile))
+        .collect();
+    let allowed_profiles: HashSet<_> = onboarding.required_profiles.iter().cloned().collect();
+
+    let mut seen = HashSet::new();
+    let mut validated = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        let profile_id = profile.id.trim().to_string();
+        if profile_id.is_empty() {
+            return Err(AppError::bad_request(
+                "workflow pack profile id is required",
+            ));
+        }
+        if !seen.insert(profile_id.clone()) {
+            return Err(AppError::bad_request(format!(
+                "duplicate workflow pack profile asset {}",
+                profile_id
+            )));
+        }
+        if !allowed_profiles.contains(&profile_id) {
+            return Err(AppError::bad_request(format!(
+                "workflow pack profile {} is not part of the onboarding contract",
+                profile_id
+            )));
+        }
+        let content = profile.content.trim().to_string();
+        if content.is_empty() {
+            return Err(AppError::bad_request(format!(
+                "workflow pack profile {} content is required",
+                profile_id
+            )));
+        }
+        let declared = profile_refs.get(profile_id.as_str()).ok_or_else(|| {
+            AppError::bad_request(format!(
+                "workflow pack onboarding profile {} is not declared in manifest",
+                profile_id
+            ))
+        })?;
+        let default_profile_content = std::fs::read_to_string(package_dir.join(&declared.path))
+            .with_context(|| format!("read workflow pack profile template {}", declared.path))?;
+        if content == default_profile_content.trim() {
+            return Err(AppError::bad_request(format!(
+                "workflow pack profile {} still matches the packaged default template",
+                profile_id
+            )));
+        }
+        validated.push(WorkflowPackOnboardingProfileInput {
+            id: profile_id,
+            content,
+        });
+    }
+    Ok(validated)
 }
 
 fn resolve_workflow_pack_manifest_path(input: &str) -> Result<PathBuf, AppError> {
@@ -10435,6 +10627,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "remote_computer_sidecar_heartbeats",
         "agent_handoff_events",
         "workflow_pack_installations",
+        "workflow_pack_profile_assets",
         "mcp_servers",
         "eval_datasets",
         "eval_cases",
@@ -36568,6 +36761,8 @@ not json
         .await;
         assert_eq!(blocked.status, "blocked");
         assert_eq!(blocked.required_profile_count, 6);
+        assert_eq!(blocked.inline_profile_count, 1);
+        assert_eq!(blocked.persisted_profile_count, 0);
         assert_eq!(blocked.provided_profile_count, 1);
         assert_eq!(blocked.placeholder_profile_count, 1);
         assert!(blocked.missing_profiles.contains(&"department".to_string()));
@@ -36597,12 +36792,12 @@ not json
                 .any(|blocker| { blocker == "profile company still matches package default" })
         );
 
-        let ready: WorkflowPackOnboardingAssessment = request_json(
+        let saved_profiles: Vec<WorkflowPackProfileAsset> = request_json(
             app.clone(),
             json_request_with_headers(
                 "POST",
                 &format!(
-                    "/api/workflow-packs/installations/{}/onboarding/assess",
+                    "/api/workflow-packs/installations/{}/onboarding/profiles",
                     installed.id
                 ),
                 json!({
@@ -36632,6 +36827,48 @@ not json
                             "content": "# Output Style\nUse executive summaries first, then evidence tables, then draft recommendations."
                         }
                     ],
+                    "reason": "persist customer onboarding assets"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(saved_profiles.len(), 6);
+        assert!(saved_profiles.iter().all(|profile| profile.version == 1));
+
+        let listed_profiles: Vec<WorkflowPackProfileAsset> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}/onboarding/profiles",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(listed_profiles.len(), 6);
+        assert!(
+            listed_profiles
+                .iter()
+                .any(|profile| profile.profile_id == "company")
+        );
+        assert!(
+            listed_profiles
+                .iter()
+                .all(|profile| profile.status == "active")
+        );
+
+        let ready: WorkflowPackOnboardingAssessment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-packs/installations/{}/onboarding/assess",
+                    installed.id
+                ),
+                json!({
                     "connectors": [
                         {
                             "id": "knowledge-base",
@@ -36653,6 +36890,8 @@ not json
         assert_eq!(ready.onboarding_eval, "profile-onboarding-regression");
         assert_eq!(ready.required_profile_count, 6);
         assert_eq!(ready.profile_schema_count, 6);
+        assert_eq!(ready.inline_profile_count, 0);
+        assert_eq!(ready.persisted_profile_count, 6);
         assert_eq!(ready.provided_profile_count, 6);
         assert_eq!(ready.placeholder_profile_count, 0);
         assert_eq!(ready.connector_requirement_count, 1);
@@ -36676,6 +36915,10 @@ not json
             log.action == "workflow_pack.onboarding_assessed"
                 && log.resource_id == Some(installed.id)
                 && log.details["status"] == json!("ready")
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "workflow_pack.onboarding_profiles_saved"
+                && log.resource_id == Some(installed.id)
         }));
     }
 
@@ -36816,6 +37059,7 @@ not json
         assert!(names.contains(&"0026_remote_computer_sidecar_heartbeats.sql"));
         assert!(names.contains(&"0027_agent_handoff_events.sql"));
         assert!(names.contains(&"0028_workflow_pack_installations.sql"));
+        assert!(names.contains(&"0029_workflow_pack_profile_assets.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -36825,12 +37069,13 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
             include_str!("../../../db/migrations/0027_agent_handoff_events.sql"),
-            include_str!("../../../db/migrations/0028_workflow_pack_installations.sql")
+            include_str!("../../../db/migrations/0028_workflow_pack_installations.sql"),
+            include_str!("../../../db/migrations/0029_workflow_pack_profile_assets.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));

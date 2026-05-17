@@ -75,11 +75,14 @@ Stage should materialize draft agent versions, connector definitions, policy rev
 
 Customer onboarding must be explicit before a pack is treated as tenant-ready. The initial Stage 3 onboarding assessment API is contract-driven and non-destructive:
 
+- `POST /api/workflow-packs/installations/{id}/onboarding/profiles` persists customer onboarding profiles as versioned assets for the installation. Saving a new profile revision archives the previous active revision for that profile.
+- `GET /api/workflow-packs/installations/{id}/onboarding/profiles` lists the active persisted profile assets that will be reused by later onboarding checks.
 - `POST /api/workflow-packs/installations/{id}/onboarding/assess` accepts active pack installations and evaluates customer-supplied onboarding profiles plus connector declarations against the installed manifest snapshot.
+- Persisted onboarding profiles are used by default; inline profiles in the assessment request can override them for ad hoc checks.
 - The assessment verifies required profiles are present, non-empty, and not identical to the packaged default templates.
 - The assessment verifies each declared connector has the required permissions, provenance attestation, tenant/workspace scope, and prompt-injection boundary expected by the pack contract.
-- The response is `ready` or `blocked`; it reports missing profiles, placeholder profiles, connector blockers, required profile/schema counts, and the onboarding workflow/eval ids.
-- `workflow_pack.onboarding_assessed` audit evidence records the assessment result and blockers, but the assessment does not mutate install, stage, release, rollback, or archive state.
+- The response is `ready` or `blocked`; it reports missing profiles, placeholder profiles, connector blockers, required profile/schema counts, and the onboarding workflow/eval ids, plus inline versus persisted profile counts.
+- `workflow_pack.onboarding_profiles_saved` audit evidence records persisted profile revisions, and `workflow_pack.onboarding_assessed` records the readiness result and blockers. Neither endpoint mutates install, stage, release, rollback, or archive state.
 
 ### Release
 
@@ -121,4 +124,4 @@ The Whiskey evidence gate exercises the API lifecycle end to end:
 WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml scripts/workflow-pack-evidence-gate.sh
 ```
 
-It validates the manifest, proves onboarding fails closed with placeholder/missing customer inputs, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, creates a new installed version from an updated manifest, proves onboarding reaches `ready` with customer-grounded profiles and connector declarations, verifies the rolled-back source remains unchanged and active before archive, archives the rolled-back source installation, and verifies archive removes only the source while the new installed version stays active.
+It validates the manifest, proves onboarding fails closed with placeholder/missing customer inputs, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, creates a new installed version from an updated manifest, persists customer onboarding profiles as reusable assets, proves onboarding reaches `ready` from persisted profile assets plus connector declarations, verifies the rolled-back source remains unchanged and active before archive, archives the rolled-back source installation, and verifies archive removes only the source while the new installed version stays active.

@@ -8,6 +8,7 @@ use crate::{
     CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
     PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent,
     Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
+    WorkflowPackProfileAsset,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -166,6 +167,21 @@ pub(crate) fn workflow_pack_installation_from_row(
         archived_at: row.try_get("archived_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn workflow_pack_profile_asset_from_row(
+    row: PgRow,
+) -> Result<WorkflowPackProfileAsset, AppError> {
+    Ok(WorkflowPackProfileAsset {
+        id: row.try_get("id")?,
+        installation_id: row.try_get("installation_id")?,
+        profile_id: row.try_get("profile_id")?,
+        content: row.try_get("content")?,
+        version: row.try_get("version")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        archived_at: row.try_get("archived_at")?,
     })
 }
 

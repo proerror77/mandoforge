@@ -188,7 +188,7 @@ old_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$
 list_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-after-update.json"
 cp "$old_after_update_file" "$old_after_update_snapshot_file"
 cp "$list_after_update_file" "$list_after_update_snapshot_file"
-ready_onboarding_payload="$(jq -nc '{
+persisted_profiles_payload="$(jq -nc '{
   profiles: [
     {
       id: "company",
@@ -215,6 +215,11 @@ ready_onboarding_payload="$(jq -nc '{
       content: "# Output Style\nUse executive summary first, then evidence table, then draft recommendation."
     }
   ],
+  reason: "Whiskey WorkflowPack onboarding asset persistence proof"
+}')"
+persisted_profiles_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/onboarding/profiles" "$persisted_profiles_payload")"
+persisted_profiles_list_file="$(fetch_json GET "/api/workflow-packs/installations/$updated_installation_id/onboarding/profiles")"
+ready_onboarding_payload="$(jq -nc '{
   connectors: [
     {
       id: "knowledge-base",
@@ -250,11 +255,15 @@ onboarding_workflow="$(jq -r '.response.onboarding_workflow // "unknown"' "$onbo
 onboarding_eval="$(jq -r '.response.onboarding_eval // "unknown"' "$onboarding_file")"
 required_profile_count="$(jq -r '.response.required_profile_count // 0' "$onboarding_file")"
 profile_schema_count="$(jq -r '.response.profile_schema_count // 0' "$onboarding_file")"
+inline_profile_count="$(jq -r '.response.inline_profile_count // 0' "$onboarding_file")"
+persisted_profile_count="$(jq -r '.response.persisted_profile_count // 0' "$onboarding_file")"
 provided_profile_count="$(jq -r '.response.provided_profile_count // 0' "$onboarding_file")"
 placeholder_profile_count="$(jq -r '.response.placeholder_profile_count // 0' "$onboarding_file")"
 connector_requirement_count="$(jq -r '.response.connector_requirement_count // 0' "$onboarding_file")"
 ready_connector_count="$(jq -r '.response.ready_connector_count // 0' "$onboarding_file")"
 onboarding_blocker_count="$(jq -r '[.response.blockers[]?] | length' "$onboarding_file")"
+persisted_profile_asset_count="$(jq -r '[.response[]?] | length' "$persisted_profiles_file")"
+persisted_profile_list_count="$(jq -r '[.response[]?] | length' "$persisted_profiles_list_file")"
 archive_status="$(jq -r '.response.status // "unknown"' "$archive_file")"
 eval_gate_status="$(jq -r '.response.eval_gate_status // "unknown"' "$release_file")"
 release_gate_status="$(jq -r '.response.release_gate_status // "unknown"' "$release_file")"
@@ -308,7 +317,11 @@ if [[ "$onboarding_status" != "ready" || "$onboarding_workflow" != "profile-onbo
   echo "workflow pack onboarding readiness assessment did not reach ready state" >&2
   exit 1
 fi
-if [[ "$required_profile_count" != "6" || "$profile_schema_count" != "6" || "$provided_profile_count" != "6" || "$placeholder_profile_count" != "0" ]]; then
+if [[ "$persisted_profile_asset_count" != "6" || "$persisted_profile_list_count" != "6" ]]; then
+  echo "workflow pack persisted onboarding profile assets did not save cleanly" >&2
+  exit 1
+fi
+if [[ "$required_profile_count" != "6" || "$profile_schema_count" != "6" || "$inline_profile_count" != "0" || "$persisted_profile_count" != "6" || "$provided_profile_count" != "6" || "$placeholder_profile_count" != "0" ]]; then
   echo "workflow pack onboarding profile coverage did not match the contract" >&2
   exit 1
 fi
@@ -358,11 +371,15 @@ fi
   echo "onboarding_eval=$onboarding_eval"
   echo "required_profile_count=$required_profile_count"
   echo "profile_schema_count=$profile_schema_count"
+  echo "inline_profile_count=$inline_profile_count"
+  echo "persisted_profile_count=$persisted_profile_count"
   echo "provided_profile_count=$provided_profile_count"
   echo "placeholder_profile_count=$placeholder_profile_count"
   echo "connector_requirement_count=$connector_requirement_count"
   echo "ready_connector_count=$ready_connector_count"
   echo "onboarding_blocker_count=$onboarding_blocker_count"
+  echo "persisted_profile_asset_count=$persisted_profile_asset_count"
+  echo "persisted_profile_list_count=$persisted_profile_list_count"
   echo "old_after_update_status=$old_after_update_status"
   echo "updated_list_count=$updated_list_count"
   echo "old_after_update_list_count=$old_after_update_list_count"
