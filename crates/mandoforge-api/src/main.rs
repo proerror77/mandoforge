@@ -20538,7 +20538,9 @@ where
             "close_controller_not_configured"
         }
     });
-    if close_controller_configured && !after.production_close.production_blocked {
+    if close_controller_configured
+        && finance_close_controller_prerequisites_ready(&after.production_close)
+    {
         match execute_usage_finance_close_controller(
             &lookup,
             subject,
@@ -20632,6 +20634,26 @@ where
         ))
         .await?;
     Ok(run)
+}
+
+fn finance_close_controller_prerequisites_ready(
+    production_close: &UsageFinanceProductionCloseReadiness,
+) -> bool {
+    if !production_close.production_blocked {
+        return true;
+    }
+    let allowed_bootstrap_reasons = [
+        "finance close controller has no recent closed evidence",
+        "finance close controller evidence is stale",
+        "finance reconciliation controller has no recent reconciled evidence",
+        "finance reconciliation controller evidence is stale",
+    ];
+    !production_close.blocking_reasons.is_empty()
+        && production_close.blocking_reasons.iter().all(|reason| {
+            allowed_bootstrap_reasons
+                .iter()
+                .any(|allowed| reason == allowed)
+        })
 }
 
 fn usage_finance_close_controller_configured<F>(lookup: &F) -> bool
@@ -33445,6 +33467,99 @@ not json
                 .iter()
                 .any(|reason| { reason == "finance reconciliation controller evidence is stale" })
         );
+    }
+
+    #[test]
+    fn finance_close_controller_can_bootstrap_its_required_evidence() {
+        let generated_at = Utc::now();
+        let dashboard = UsageFinanceDashboardSummary {
+            generated_at,
+            current_cost_cents: 0.0,
+            current_total_tokens: 0,
+            current_tool_calls: 0,
+            comparison_basis: "current".to_string(),
+            budget_pressure_status: "normal".to_string(),
+            budget_pressure_count: 0,
+            critical_budget_count: 0,
+            warning_budget_count: 0,
+            alert_count: 0,
+            critical_alert_count: 0,
+            warning_alert_count: 0,
+            alert_route_count: 1,
+            active_alert_route_count: 1,
+            rollup_count: 1,
+            latest_rollup_at: Some(generated_at),
+            latest_rollup_age_hours: Some(0),
+            finance_export_target_configured: true,
+            finance_export_schedule_enabled: true,
+            forecast_7d_cost_cents: Some(0.0),
+            forecast_30d_cost_cents: Some(0.0),
+            top_provider_by_cost: None,
+            recommendations: vec![],
+            attention_items: vec![],
+        };
+        let export = UsageFinanceOperationAudit {
+            action: "usage.finance_export_delivered".to_string(),
+            status: "delivered".to_string(),
+            subject: Some("admin-1".to_string()),
+            created_at: generated_at,
+        };
+        let delivery = UsageFinanceOperationAudit {
+            action: "usage.cost_alerts_delivered".to_string(),
+            status: "delivered".to_string(),
+            subject: Some("admin-1".to_string()),
+            created_at: generated_at,
+        };
+
+        let bootstrap_ready = build_usage_finance_production_close_readiness(
+            &dashboard,
+            &[],
+            &[],
+            "fresh",
+            "no_alerts",
+            Some(&export),
+            Some(&delivery),
+            generated_at,
+            true,
+            true,
+            true,
+            true,
+        );
+        assert_eq!(bootstrap_ready.status, "blocked");
+        assert!(
+            bootstrap_ready.blocking_reasons.iter().any(|reason| {
+                reason == "finance close controller has no recent closed evidence"
+            })
+        );
+        assert!(bootstrap_ready.blocking_reasons.iter().any(|reason| {
+            reason == "finance reconciliation controller has no recent reconciled evidence"
+        }));
+        assert!(finance_close_controller_prerequisites_ready(
+            &bootstrap_ready
+        ));
+
+        let export_blocked = build_usage_finance_production_close_readiness(
+            &dashboard,
+            &[],
+            &[],
+            "fresh",
+            "no_alerts",
+            None,
+            Some(&delivery),
+            generated_at,
+            true,
+            true,
+            true,
+            true,
+        );
+        assert!(
+            export_blocked.blocking_reasons.iter().any(|reason| {
+                reason == "finance export has no recent delivered audit evidence"
+            })
+        );
+        assert!(!finance_close_controller_prerequisites_ready(
+            &export_blocked
+        ));
     }
 
     #[tokio::test]

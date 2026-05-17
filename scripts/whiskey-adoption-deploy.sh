@@ -14,6 +14,7 @@ LOCAL_OBSERVABILITY_CONTROLLER="${WHISKEY_OBSERVABILITY_CONTROLLER_FILE:-deploy/
 LOCAL_PROVIDER_CONTROLLER="${WHISKEY_PROVIDER_CONTROLLER_FILE:-deploy/whiskey/provider-rollout-controller.mjs}"
 LOCAL_APPROVAL_NOTIFICATION_CONTROLLER="${WHISKEY_APPROVAL_NOTIFICATION_CONTROLLER_FILE:-deploy/whiskey/approval-notification-controller.mjs}"
 LOCAL_VAULT_KMS_CONTROLLER="${WHISKEY_VAULT_KMS_CONTROLLER_FILE:-deploy/whiskey/vault-kms-controller.mjs}"
+LOCAL_FINANCE_CONTROLLER="${WHISKEY_FINANCE_CONTROLLER_FILE:-deploy/whiskey/finance-controller.mjs}"
 REMOTE_COMPOSE="$REMOTE_ROOT/docker-compose.yml"
 REMOTE_CODEX_CONTROLLER="$REMOTE_ROOT/codex-app-server-controller.mjs"
 REMOTE_TENANT_CONTROLLER="$REMOTE_ROOT/tenant-routing-controller.mjs"
@@ -24,6 +25,7 @@ REMOTE_OBSERVABILITY_CONTROLLER="$REMOTE_ROOT/observability-controller.mjs"
 REMOTE_PROVIDER_CONTROLLER="$REMOTE_ROOT/provider-rollout-controller.mjs"
 REMOTE_APPROVAL_NOTIFICATION_CONTROLLER="$REMOTE_ROOT/approval-notification-controller.mjs"
 REMOTE_VAULT_KMS_CONTROLLER="$REMOTE_ROOT/vault-kms-controller.mjs"
+REMOTE_FINANCE_CONTROLLER="$REMOTE_ROOT/finance-controller.mjs"
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
 IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-latest}"
 PULL_IMAGE="${WHISKEY_PULL_IMAGE:-1}"
@@ -54,6 +56,9 @@ VAULT_KMS_VAULT_TOKEN="${WHISKEY_VAULT_TOKEN:-whiskey-vault-token}"
 VAULT_KMS_PROVIDER="${WHISKEY_KMS_PROVIDER:-mock-kms}"
 VAULT_KMS_KEY_ID="${WHISKEY_KMS_KEY_ID:-whiskey-kms-key-1}"
 VAULT_KMS_ROTATION_POLICY="${WHISKEY_KMS_ROTATION_POLICY:-whiskey-manual-confirmed}"
+FINANCE_CONTROLLER_PORT="${WHISKEY_FINANCE_CONTROLLER_PORT:-18798}"
+FINANCE_CLOSE_CONTROLLER_TOKEN="${WHISKEY_FINANCE_CLOSE_CONTROLLER_TOKEN:-whiskey-finance-close-controller-token}"
+FINANCE_RECONCILIATION_CONTROLLER_TOKEN="${WHISKEY_FINANCE_RECONCILIATION_CONTROLLER_TOKEN:-whiskey-finance-reconciliation-controller-token}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -105,6 +110,10 @@ if [[ ! -f "$LOCAL_VAULT_KMS_CONTROLLER" ]]; then
   echo "missing Whiskey Vault/KMS controller file: $LOCAL_VAULT_KMS_CONTROLLER" >&2
   exit 1
 fi
+if [[ ! -f "$LOCAL_FINANCE_CONTROLLER" ]]; then
+  echo "missing Whiskey finance controller file: $LOCAL_FINANCE_CONTROLLER" >&2
+  exit 1
+fi
 
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 rsync -az "$LOCAL_COMPOSE" "$REMOTE_HOST:$REMOTE_COMPOSE"
@@ -117,6 +126,7 @@ rsync -az "$LOCAL_OBSERVABILITY_CONTROLLER" "$REMOTE_HOST:$REMOTE_OBSERVABILITY_
 rsync -az "$LOCAL_PROVIDER_CONTROLLER" "$REMOTE_HOST:$REMOTE_PROVIDER_CONTROLLER"
 rsync -az "$LOCAL_APPROVAL_NOTIFICATION_CONTROLLER" "$REMOTE_HOST:$REMOTE_APPROVAL_NOTIFICATION_CONTROLLER"
 rsync -az "$LOCAL_VAULT_KMS_CONTROLLER" "$REMOTE_HOST:$REMOTE_VAULT_KMS_CONTROLLER"
+rsync -az "$LOCAL_FINANCE_CONTROLLER" "$REMOTE_HOST:$REMOTE_FINANCE_CONTROLLER"
 
 ssh "$REMOTE_HOST" "if [[ ! -f '$REMOTE_ENV' ]]; then cat > '$REMOTE_ENV' <<'ENV'
 MANDOFORGE_IMAGE_TAG=$IMAGE_TAG
@@ -217,7 +227,15 @@ ensure_env MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_URL http://hos
 ensure_env MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_TOKEN $APPROVAL_NOTIFICATION_CONTROLLER_TOKEN
 ensure_env MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_REQUIRED true
 ensure_env MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_URL http://host.docker.internal:$APPROVAL_NOTIFICATION_CONTROLLER_PORT/approval-notification/ops/validate
-ensure_env MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_TOKEN $APPROVAL_NOTIFICATION_CONTROLLER_TOKEN"
+ensure_env MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_TOKEN $APPROVAL_NOTIFICATION_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_USAGE_EXPORT_SCHEDULE true
+ensure_env MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL http://host.docker.internal:$FINANCE_CONTROLLER_PORT/finance/export
+ensure_env MANDOFORGE_FINANCE_CLOSE_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL http://host.docker.internal:$FINANCE_CONTROLLER_PORT/finance/close
+ensure_env MANDOFORGE_FINANCE_CLOSE_CONTROLLER_TOKEN $FINANCE_CLOSE_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL http://host.docker.internal:$FINANCE_CONTROLLER_PORT/finance/reconcile
+ensure_env MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_TOKEN $FINANCE_RECONCILIATION_CONTROLLER_TOKEN"
 
 ssh "$REMOTE_HOST" "set -euo pipefail
 docker_gateway_ip=\$(ip -4 addr show docker0 2>/dev/null | awk '/inet /{print \$2}' | cut -d/ -f1 | head -1)
@@ -318,7 +336,17 @@ command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey Vault/KM
 nohup env VAULT_KMS_CONTROLLER_HOST=\$docker_gateway_ip VAULT_KMS_CONTROLLER_PORT=$VAULT_KMS_CONTROLLER_PORT VAULT_KMS_CONTROLLER_TOKEN='$VAULT_KMS_CONTROLLER_TOKEN' VAULT_KMS_CONTROLLER_VAULT_TOKEN='$VAULT_KMS_VAULT_TOKEN' VAULT_KMS_CONTROLLER_PROVIDER='$VAULT_KMS_PROVIDER' VAULT_KMS_CONTROLLER_KEY_ID='$VAULT_KMS_KEY_ID' VAULT_KMS_CONTROLLER_ROTATION_POLICY='$VAULT_KMS_ROTATION_POLICY' node '$REMOTE_VAULT_KMS_CONTROLLER' > '$REMOTE_ROOT/vault-kms-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/vault-kms-controller.pid'
 sleep 2
-ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$VAULT_KMS_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/vault-kms-controller.log' >&2; exit 1; }"
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$VAULT_KMS_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/vault-kms-controller.log' >&2; exit 1; }
+if [[ -f '$REMOTE_ROOT/finance-controller.pid' ]]; then
+  kill \$(cat '$REMOTE_ROOT/finance-controller.pid') >/dev/null 2>&1 || true
+  rm -f '$REMOTE_ROOT/finance-controller.pid'
+  sleep 1
+fi
+command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey finance controller' >&2; exit 1; }
+nohup env FINANCE_CONTROLLER_HOST=\$docker_gateway_ip FINANCE_CONTROLLER_PORT=$FINANCE_CONTROLLER_PORT FINANCE_CLOSE_CONTROLLER_TOKEN='$FINANCE_CLOSE_CONTROLLER_TOKEN' FINANCE_RECONCILIATION_CONTROLLER_TOKEN='$FINANCE_RECONCILIATION_CONTROLLER_TOKEN' node '$REMOTE_FINANCE_CONTROLLER' > '$REMOTE_ROOT/finance-controller.log' 2>&1 &
+echo \$! > '$REMOTE_ROOT/finance-controller.pid'
+sleep 2
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$FINANCE_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/finance-controller.log' >&2; exit 1; }"
 
 remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"
 if [[ "$PULL_IMAGE" == "1" ]]; then

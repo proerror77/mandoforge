@@ -27,7 +27,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, the Whiskey approval notification controller, and the Whiskey Vault/KMS controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, the Whiskey approval notification controller, the Whiskey Vault/KMS controller, and the Whiskey finance controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
 
 The default image is:
 
@@ -60,8 +60,9 @@ The script:
 - seeds a Whiskey mock provider, runs `scripts/provider-governance-evidence-gate.sh`, and captures provider deployment, policy-gate, rollout, and rollback evidence;
 - seeds a routable approval plus webhook policy, runs `scripts/approval-notification-evidence-gate.sh`, and captures deployment, ops, and delivery evidence;
 - seeds a Vault secret catalog record, runs `scripts/vault-evidence-gate.sh`, and captures Vault health, KMS rotation, and KMS recovery controller evidence;
+- runs `scripts/finance-evidence-gate.sh` with finance close, reconciliation, CSV export, and webhook delivery evidence enabled;
 - runs the synced `scripts/workflow-pack-evidence-gate.sh` on the Whiskey host against the loopback API;
-- seeds another Whiskey eval/release request, another observability remediation path, another Whiskey mock provider, another routable approval, and another Vault secret catalog record before running the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
+- seeds another Whiskey eval/release request, another observability remediation path, another Whiskey mock provider, another routable approval, and another Vault secret catalog record before running the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1` and strict finance controller/export capture enabled;
 - archives Stage 2 evidence and full pilot evidence under `/opt/mandoforge-adoption/archives`;
 - syncs archive copies to `.mandoforge/remote-adoption/whiskey/`;
 - verifies the Stage 2 archive locally with `ALLOW_BLOCKED=1`.
@@ -220,6 +221,30 @@ MANDOFORGE_KMS_RECOVERY_CONTROLLER_URL=http://host.docker.internal:18797/kms/rec
 The controller exposes a minimal Vault-compatible health and KV v2 surface plus KMS rotation and recovery validation endpoints. The evidence script seeds a catalog-only secret reference, runs the focused Vault gate with `RUN_STAGE2_SECRET_LIFECYCLE=1`, then includes the same lifecycle flag in the strict Stage 2 gate.
 
 This is a Whiskey pilot KMS lifecycle proof. It validates the API's Vault provider health path, external KMS rotation boundary, recovery-controller boundary, audit trail, and archive coverage against the live Whiskey API. It is not a claim that a real HSM, enterprise Vault cluster, envelope-encryption policy, or secret rollback procedure has been adopted.
+
+## Finance Accounting Lane
+
+Current Whiskey wiring starts a local finance pilot controller on the Docker gateway and configures the API with:
+
+```bash
+MANDOFORGE_USAGE_EXPORT_SCHEDULE=true
+MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL=http://host.docker.internal:18798/finance/export
+MANDOFORGE_FINANCE_CLOSE_CONTROLLER_REQUIRED=true
+MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL=http://host.docker.internal:18798/finance/close
+MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_REQUIRED=true
+MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL=http://host.docker.internal:18798/finance/reconcile
+```
+
+The controller accepts the API's finance export webhook payload, validates the close payload after rollup/export/alert prerequisites are ready, and validates reconciliation after close evidence exists. The evidence script runs the focused finance gate with:
+
+```bash
+RUN_STAGE2_FINANCE_CONTROLLERS=1
+RUN_STAGE2_FINANCE_EXPORT=1
+```
+
+The strict Stage 2 gate also enables those flags so the archive contains `finance-close-evidence.json`, `finance-reconciliation-evidence.json`, `usage-export-csv-evidence.json`, and `finance-export-delivery-evidence.json`.
+
+This is a Whiskey pilot accounting target proof. It validates the API's export delivery, finance-close controller boundary, reconciliation-controller boundary, audit trail, and archive coverage against the live Whiskey API. It is not a claim that a real ERP, billing ledger, SOC2 finance process, or external accounting provider has been adopted.
 
 ## Observability Collector Lane
 
