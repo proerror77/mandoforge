@@ -15,6 +15,7 @@ CONNECTOR_SERVER_NAME="${WORKFLOW_PACK_CONNECTOR_SERVER_NAME:-whiskey-docs}"
 REQUIRE_CONNECTOR_BINDING="${WORKFLOW_PACK_REQUIRE_CONNECTOR_BINDING:-0}"
 WORKFLOW_PACK_MCP_CALL_URL="${WORKFLOW_PACK_MCP_CALL_URL:-}"
 WORKFLOW_PACK_MCP_QUERY="${WORKFLOW_PACK_MCP_QUERY:-OpenAI}"
+WORKFLOW_PACK_REQUIRE_LIVE_CONNECTOR_AUTH="${WORKFLOW_PACK_REQUIRE_LIVE_CONNECTOR_AUTH:-0}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -477,10 +478,12 @@ connector_quality_bound_server_id="$(jq -r '.response.connector_results[0].bound
 connector_quality_bound_server_name="$(jq -r '.response.connector_results[0].bound_server_name // "none"' "$connector_quality_file")"
 connector_quality_bound_server_health_status="$(jq -r '.response.connector_results[0].bound_server_health_status // "none"' "$connector_quality_file")"
 connector_quality_live_source="none"
+connector_quality_live_auth_mode="none"
 connector_quality_live_title="none"
 connector_quality_live_url="none"
 if [[ -n "$gateway_call_file" && -s "$gateway_call_file" ]]; then
   connector_quality_live_source="$(jq -r '.result.source // "none"' "$gateway_call_file")"
+  connector_quality_live_auth_mode="$(jq -r '.result.auth_mode // "none"' "$gateway_call_file")"
   connector_quality_live_title="$(jq -r '.result.items[0].title // "none"' "$gateway_call_file")"
   connector_quality_live_url="$(jq -r '.result.items[0].url // "none"' "$gateway_call_file")"
 fi
@@ -543,6 +546,10 @@ if [[ "$onboarding_status" != "ready" || "$onboarding_workflow" != "profile-onbo
 fi
 if [[ "$blocked_connector_quality_status" != "blocked" ]]; then
   echo "workflow pack blocked connector quality assessment did not fail closed" >&2
+  exit 1
+fi
+if [[ "$WORKFLOW_PACK_REQUIRE_LIVE_CONNECTOR_AUTH" == "1" && "$connector_quality_live_auth_mode" != "authenticated" ]]; then
+  echo "workflow pack live connector source is not authenticated" >&2
   exit 1
 fi
 if [[ "$REQUIRE_CONNECTOR_BINDING" == "1" && ( "$connector_quality_bound_team_id" == "none" || "$connector_quality_bound_server_id" == "none" ) ]]; then
@@ -630,6 +637,7 @@ fi
   echo "connector_quality_bound_server_name=$connector_quality_bound_server_name"
   echo "connector_quality_bound_server_health_status=$connector_quality_bound_server_health_status"
   echo "connector_quality_live_source=$connector_quality_live_source"
+  echo "connector_quality_live_auth_mode=$connector_quality_live_auth_mode"
   echo "connector_quality_live_title=$connector_quality_live_title"
   echo "connector_quality_live_url=$connector_quality_live_url"
   echo "installed_default_profile_asset_count=$installed_default_profile_asset_count"

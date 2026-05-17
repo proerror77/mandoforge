@@ -12,6 +12,7 @@ const wikimediaLimit = Number(process.env.MCP_PILOT_WIKIMEDIA_LIMIT || "5");
 const githubSearchApiUrl =
   process.env.MCP_PILOT_GITHUB_API_URL || "https://api.github.com/search/repositories";
 const githubSearchLimit = Number(process.env.MCP_PILOT_GITHUB_LIMIT || "5");
+const githubToken = process.env.MCP_PILOT_GITHUB_TOKEN || "";
 
 function writeJson(response, statusCode, body) {
   response.writeHead(statusCode, { "content-type": "application/json" });
@@ -74,12 +75,14 @@ async function searchGitHubRepositories(query) {
   const url = new URL(githubSearchApiUrl);
   url.searchParams.set("q", query);
   url.searchParams.set("per_page", String(Math.max(1, githubSearchLimit)));
-  const response = await fetch(url, {
-    headers: {
-      "user-agent": "mandoforge-whiskey-mcp-pilot/1.0",
-      accept: "application/vnd.github+json",
-    },
-  });
+  const headers = {
+    "user-agent": "mandoforge-whiskey-mcp-pilot/1.0",
+    accept: "application/vnd.github+json",
+  };
+  if (githubToken) {
+    headers.authorization = `Bearer ${githubToken}`;
+  }
+  const response = await fetch(url, { headers });
   if (!response.ok) {
     throw new Error(`github repository search failed with status ${response.status}`);
   }
@@ -167,8 +170,16 @@ async function handleGatewayCall(request, response) {
         upstreamMode === "wikimedia"
           ? "wikimedia-opensearch"
           : upstreamMode === "github_repositories"
-            ? "github-repository-search"
+            ? githubToken
+              ? "github-repository-search-authenticated"
+              : "github-repository-search"
             : "whiskey-mcp-pilot",
+      auth_mode:
+        upstreamMode === "github_repositories"
+          ? githubToken
+            ? "authenticated"
+            : "anonymous"
+          : "not_applicable",
       query,
       item_count: items.length,
       items,
