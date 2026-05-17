@@ -284,7 +284,7 @@ if [[ -f '$REMOTE_ROOT/mcp-pilot-controller.pid' ]]; then
   sleep 1
 fi
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey MCP pilot controller' >&2; exit 1; }
-nohup env MCP_PILOT_CONTROLLER_HOST=\$docker_gateway_ip MCP_PILOT_CONTROLLER_PORT=$MCP_CONTROLLER_PORT MCP_PILOT_CONTROLLER_TOKEN='$MCP_CONTROLLER_TOKEN' MCP_PILOT_SERVER_NAME='$MCP_SERVER_NAME' MCP_PILOT_UPSTREAM_MODE=wikimedia MCP_PILOT_WIKIMEDIA_API_URL=https://en.wikipedia.org/w/api.php node '$REMOTE_MCP_CONTROLLER' > '$REMOTE_ROOT/mcp-pilot-controller.log' 2>&1 &
+nohup env MCP_PILOT_CONTROLLER_HOST=\$docker_gateway_ip MCP_PILOT_CONTROLLER_PORT=$MCP_CONTROLLER_PORT MCP_PILOT_CONTROLLER_TOKEN='$MCP_CONTROLLER_TOKEN' MCP_PILOT_SERVER_NAME='$MCP_SERVER_NAME' MCP_PILOT_UPSTREAM_MODE=github_repositories MCP_PILOT_GITHUB_API_URL=https://api.github.com/search/repositories node '$REMOTE_MCP_CONTROLLER' > '$REMOTE_ROOT/mcp-pilot-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/mcp-pilot-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$MCP_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/mcp-pilot-controller.log' >&2; exit 1; }

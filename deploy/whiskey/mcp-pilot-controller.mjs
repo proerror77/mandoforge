@@ -9,6 +9,9 @@ const upstreamMode = process.env.MCP_PILOT_UPSTREAM_MODE || "mock";
 const wikimediaApiUrl =
   process.env.MCP_PILOT_WIKIMEDIA_API_URL || "https://en.wikipedia.org/w/api.php";
 const wikimediaLimit = Number(process.env.MCP_PILOT_WIKIMEDIA_LIMIT || "5");
+const githubSearchApiUrl =
+  process.env.MCP_PILOT_GITHUB_API_URL || "https://api.github.com/search/repositories";
+const githubSearchLimit = Number(process.env.MCP_PILOT_GITHUB_LIMIT || "5");
 
 function writeJson(response, statusCode, body) {
   response.writeHead(statusCode, { "content-type": "application/json" });
@@ -64,6 +67,31 @@ async function searchWikimedia(query) {
     source_id: urls[index] || title,
     reference: title,
     retrieval_actor: "wikimedia-opensearch",
+  }));
+}
+
+async function searchGitHubRepositories(query) {
+  const url = new URL(githubSearchApiUrl);
+  url.searchParams.set("q", query);
+  url.searchParams.set("per_page", String(Math.max(1, githubSearchLimit)));
+  const response = await fetch(url, {
+    headers: {
+      "user-agent": "mandoforge-whiskey-mcp-pilot/1.0",
+      accept: "application/vnd.github+json",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`github repository search failed with status ${response.status}`);
+  }
+  const body = await response.json();
+  const items = Array.isArray(body?.items) ? body.items : [];
+  return items.map((item) => ({
+    title: item.full_name || item.name || "unknown",
+    url: item.html_url || item.url || null,
+    snippet: item.description || "",
+    source_id: item.full_name || item.html_url || item.url || item.name || "unknown",
+    reference: item.full_name || item.name || "unknown",
+    retrieval_actor: "github-repository-search",
   }));
 }
 
@@ -129,11 +157,18 @@ async function handleGatewayCall(request, response) {
   const items =
     upstreamMode === "wikimedia"
       ? await searchWikimedia(String(query))
-      : pilotItems(String(query));
+      : upstreamMode === "github_repositories"
+        ? await searchGitHubRepositories(String(query))
+        : pilotItems(String(query));
   writeJson(response, 200, {
     result: {
       status: "ok",
-      source: upstreamMode === "wikimedia" ? "wikimedia-opensearch" : "whiskey-mcp-pilot",
+      source:
+        upstreamMode === "wikimedia"
+          ? "wikimedia-opensearch"
+          : upstreamMode === "github_repositories"
+            ? "github-repository-search"
+            : "whiskey-mcp-pilot",
       query,
       item_count: items.length,
       items,
