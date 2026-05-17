@@ -232,6 +232,7 @@ These manifests are a self-hosted pilot starting point, not a production hardeni
 - [Stage 1 Completion Audit](docs/stage1-completion-audit.md)
 - [Stage 2 Gap Audit](docs/stage2-gap-audit.md)
 - [Stage 2 Completion Audit](docs/stage2-completion-audit.md)
+- [Stage 2 Production Adoption Runbook](docs/stage2-production-adoption-runbook.md)
 - [Stage 2 / Stage 3 Roadmap](docs/stage2-stage3-roadmap.md)
 - [Workflow Pack Adaptation Plan](docs/workflow-pack-adaptation-plan.md)
 - [Agent Remote Computer Plan](docs/agent-remote-computer-plan.md)

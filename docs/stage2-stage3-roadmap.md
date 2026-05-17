@@ -27,8 +27,8 @@ Owner: integration owner.
 
 Deliverables:
 
-- Production adoption runbook.
-- Controller environment matrix.
+- Production adoption runbook: [Stage 2 Production Adoption Runbook](stage2-production-adoption-runbook.md).
+- Controller environment matrix in the adoption runbook.
 - Secret rendering checklist.
 - Evidence PVC and archive procedure.
 - Required artifact map for each production target.

@@ -4,6 +4,8 @@ Stage 2 is intentionally fail-closed: green unit tests, static UI smoke checks, 
 
 Use `scripts/stage2-production-evidence-gate.sh` as the operator gate for that proof. It collects machine-readable readiness evidence into `.mandoforge/stage2-production-evidence/` and exits non-zero while `GET /api/stage2/readiness` reports open completion gaps.
 
+For the end-to-end production adoption sequence, controller matrix, and residual backlog format, see [Stage 2 Production Adoption Runbook](stage2-production-adoption-runbook.md).
+
 ## Read-only Inventory
 
 ```bash
