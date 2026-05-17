@@ -155,6 +155,8 @@ MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL=http://host.docker.internal:18792
 
 The evidence script seeds a `whiskey-docs` connector on the Whiskey pilot team, keeps the `search` tool allowlisted, creates a due rollout when one is not already pending, enables strict MCP due-run plus rollback evidence, and routes `/v1/call` through authenticated Feishu private-chat message retrieval using the Whiskey host's existing `lark-cli` session. The default MCP pilot target is the current user's private chat message list, filtered locally by the query string. This validates the real MandoForge MCP gateway HTTP boundary and rollout controller hooks while exercising a credentialed non-pilot enterprise read target.
 
+The same controller now also supports `WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search`. In that mode it uses `lark-cli docs +search` against the current user's Docs/Wiki search scope instead of private-chat messages. That is the next repo-native path for turning `whiskey-docs` into a broader internal knowledge-space target, but it requires the Whiskey `lark-cli` login to have `search:docs:read`.
+
 ## Eval/Release Lane
 
 Current Whiskey wiring starts a local agent release rollout/deployment/orchestration/rollback controller on the Docker gateway and configures the API with:

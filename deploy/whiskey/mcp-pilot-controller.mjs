@@ -29,6 +29,7 @@ const larkIdentity = process.env.MCP_PILOT_LARK_AS || "user";
 const larkUserOpenId = process.env.MCP_PILOT_LARK_USER_OPEN_ID || "";
 const larkChatId = process.env.MCP_PILOT_LARK_CHAT_ID || "";
 const larkMessageLimit = Number(process.env.MCP_PILOT_LARK_MESSAGE_LIMIT || "10");
+const larkDocsPageSize = Number(process.env.MCP_PILOT_LARK_DOCS_PAGE_SIZE || "10");
 const larkSnippetLength = Number(process.env.MCP_PILOT_LARK_SNIPPET_LENGTH || "240");
 const larkTimeoutMs = Number(process.env.MCP_PILOT_LARK_TIMEOUT_MS || "10000");
 
@@ -232,6 +233,10 @@ function normalizeLarkMessageText(text) {
   return normalizeSnippet(String(text || "").replace(/\r/g, ""));
 }
 
+function stripHighlightTags(text) {
+  return String(text || "").replace(/<\/?h[b]?>/g, "");
+}
+
 async function searchLarkChatMessages(query) {
   if (!larkUserOpenId && !larkChatId) {
     throw new Error("lark chat messages mode requires a user open id or chat id");
@@ -282,6 +287,73 @@ async function searchLarkChatMessages(query) {
   }));
 }
 
+async function searchLarkDocs(query) {
+  const args = [
+    "docs",
+    "+search",
+    "--as",
+    larkIdentity,
+    "--query",
+    String(query || ""),
+    "--page-size",
+    String(Math.max(1, Math.min(20, larkDocsPageSize))),
+    "--format",
+    "json",
+  ];
+
+  const { stdout } = await execFileAsync(larkCliBin, args, {
+    timeout: larkTimeoutMs,
+    maxBuffer: 1024 * 1024,
+  });
+  const response = JSON.parse(stdout || "{}");
+  if (response.ok !== true) {
+    throw new Error(response.error?.message || "lark docs search request failed");
+  }
+
+  const items = Array.isArray(response.data?.results)
+    ? response.data.results
+    : Array.isArray(response.data?.items)
+      ? response.data.items
+      : [];
+  if (items.length === 0) {
+    throw new Error(`lark docs search returned no matches for query "${query}"`);
+  }
+
+  return items.map((item, index) => {
+    const resultMeta = item.result_meta || {};
+    const title =
+      stripHighlightTags(item.title || item.title_highlighted || item.node_title || item.name) ||
+      `Lark document ${index + 1}`;
+    const summary = stripHighlightTags(
+      item.summary || item.summary_highlighted || item.description || item.preview || "",
+    );
+    const docType =
+      resultMeta.doc_types ||
+      item.obj_type ||
+      item.type ||
+      item.node_type ||
+      "unknown";
+    const url =
+      resultMeta.url || item.url || item.open_url || item.document_url || item.doc_url || null;
+    const sourceId =
+      resultMeta.token ||
+      item.token ||
+      item.obj_token ||
+      item.node_token ||
+      url ||
+      `${docType}:${title}`;
+
+    return {
+      title,
+      url,
+      snippet: normalizeSnippet(summary || title).slice(0, larkSnippetLength),
+      source_id: sourceId,
+      reference: `${docType}:${sourceId}`,
+      retrieval_actor: "lark-docs-search",
+    };
+  });
+}
+
 function pilotItems(query) {
   return [
     {
@@ -323,10 +395,23 @@ function sourceAuthMode() {
   if (upstreamMode === "github_repositories" || upstreamMode === "github_repo_contents") {
     return githubToken ? "authenticated" : "anonymous";
   }
-  if (upstreamMode === "lark_chat_messages") {
+  if (upstreamMode === "lark_chat_messages" || upstreamMode === "lark_docs_search") {
     return "authenticated";
   }
   return "not_applicable";
+}
+
+function resolveGatewayQuery(payload) {
+  if (Object.prototype.hasOwnProperty.call(payload.args || {}, "query")) {
+    return payload.args.query;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload.arguments || {}, "query")) {
+    return payload.arguments.query;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload.input || {}, "query")) {
+    return payload.input.query;
+  }
+  return "OpenAI";
 }
 
 async function handleGatewayCall(request, response) {
@@ -349,8 +434,7 @@ async function handleGatewayCall(request, response) {
     });
     return;
   }
-  const query =
-    payload.args?.query || payload.arguments?.query || payload.input?.query || "OpenAI";
+  const query = resolveGatewayQuery(payload);
   const items =
     upstreamMode === "wikimedia"
       ? await searchWikimedia(String(query))
@@ -360,6 +444,8 @@ async function handleGatewayCall(request, response) {
           ? await searchGitHubRepositoryContents(String(query))
           : upstreamMode === "lark_chat_messages"
             ? await searchLarkChatMessages(String(query))
+            : upstreamMode === "lark_docs_search"
+              ? await searchLarkDocs(String(query))
         : pilotItems(String(query));
   writeJson(response, 200, {
     result: {
@@ -377,6 +463,8 @@ async function handleGatewayCall(request, response) {
                 : "github-repo-contents"
             : upstreamMode === "lark_chat_messages"
                 ? "lark-chat-messages-authenticated"
+            : upstreamMode === "lark_docs_search"
+                ? "lark-docs-search-authenticated"
             : "whiskey-mcp-pilot",
       auth_mode: sourceAuthMode(),
       query,
@@ -388,6 +476,8 @@ async function handleGatewayCall(request, response) {
         upstreamMode === "lark_chat_messages"
           ? larkChatId || larkUserOpenId || null
           : null,
+      docs_search_scope_required:
+        upstreamMode === "lark_docs_search" ? "search:docs:read" : null,
       item_count: items.length,
       items,
     },
