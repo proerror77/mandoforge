@@ -200,7 +200,9 @@ MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_URL=http://host.docker.internal:
 
 The evidence script seeds an active webhook notification policy, rejects stale pending approvals that have no delegated approver or group target, creates a fresh pending approval delegated to `whiskey-approver`, and runs the focused approval notification gate with `RUN_STAGE2_APPROVAL_DELIVERY=1`. The strict Stage 2 gate also records deployment, ops, and delivery evidence.
 
-This is a Whiskey pilot notification proof. It validates routing, channel policy, webhook delivery, deployment-controller evidence, and ops-controller evidence against the live Whiskey API. It is not a claim that an external Slack, email, PagerDuty, or enterprise notification provider has been adopted.
+On Whiskey, the approval webhook controller can run in `lark_im` mode and auto-discover the current `lark-cli` user `open_id` unless `WHISKEY_APPROVAL_NOTIFICATION_LARK_OPEN_ID` is set explicitly. In that mode, `/approval/webhook` forwards each accepted approval notification to a real Feishu/Lark private chat through `lark-cli im +messages-send`, and `/healthz` records the latest forwarded `message_id` and `chat_id` for evidence capture.
+
+This is now a Whiskey real notification proof. It validates routing, channel policy, delivery through the live Whiskey API, deployment-controller evidence, ops-controller evidence, and a real Feishu/Lark delivery target. It is still not a claim that Slack, email, PagerDuty, or broader approval-group fan-out has been adopted.
 
 ## Vault/KMS Lane
 

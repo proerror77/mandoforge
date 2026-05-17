@@ -1,14 +1,29 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import http from "node:http";
+
+const execFileAsync = promisify(execFile);
 
 const listenHost = process.env.APPROVAL_NOTIFICATION_CONTROLLER_HOST || "127.0.0.1";
 const listenPort = Number(process.env.APPROVAL_NOTIFICATION_CONTROLLER_PORT || "18796");
 const controllerToken = process.env.APPROVAL_NOTIFICATION_CONTROLLER_TOKEN || "";
+const deliveryMode = process.env.APPROVAL_NOTIFICATION_DELIVERY_MODE || "accept_only";
+const larkCliBin = process.env.APPROVAL_NOTIFICATION_LARK_CLI_BIN || "lark-cli";
+const larkAs = process.env.APPROVAL_NOTIFICATION_LARK_AS || "user";
+const larkOpenId = process.env.APPROVAL_NOTIFICATION_LARK_OPEN_ID || "";
+const larkTimeoutMs = Number(process.env.APPROVAL_NOTIFICATION_LARK_TIMEOUT_MS || "10000");
 
 const deliveryState = {
   delivered_count: 0,
   latest_delivery_at: null,
   latest_target_count: 0,
+  delivery_mode: deliveryMode,
+  latest_forwarding_status: "not_attempted",
+  latest_forwarding_channel: deliveryMode === "lark_im" ? "lark_im" : "none",
+  latest_forwarded_message_id: null,
+  latest_forwarded_chat_id: null,
+  latest_error: null,
 };
 
 function writeJson(response, statusCode, body) {
@@ -41,6 +56,64 @@ function step(name, status, details = {}) {
   return { name, ...details, status };
 }
 
+function approvalNotificationText(payload) {
+  const approvalId = payload.approval?.id || "unknown";
+  const status = payload.approval?.status || "pending";
+  const reason = payload.approval?.reason || "Whiskey approval notification";
+  const targetSubjects = Array.isArray(payload.target_subjects)
+    ? payload.target_subjects.join(", ")
+    : "unknown";
+  return [
+    "Whiskey approval notification",
+    `approval_id: ${approvalId}`,
+    `status: ${status}`,
+    `targets: ${targetSubjects}`,
+    `reason: ${reason}`,
+  ].join("\n");
+}
+
+async function forwardApprovalToLark(payload) {
+  if (deliveryMode !== "lark_im") {
+    return {
+      delivered: true,
+      channel: "accept_only",
+      message_id: null,
+      chat_id: null,
+    };
+  }
+  if (!larkOpenId) {
+    throw new Error("APPROVAL_NOTIFICATION_LARK_OPEN_ID is required for lark_im delivery");
+  }
+
+  const { stdout } = await execFileAsync(
+    larkCliBin,
+    [
+      "im",
+      "+messages-send",
+      "--as",
+      larkAs,
+      "--user-id",
+      larkOpenId,
+      "--text",
+      approvalNotificationText(payload),
+    ],
+    {
+      timeout: larkTimeoutMs,
+      maxBuffer: 1024 * 1024,
+    },
+  );
+  const response = JSON.parse(stdout || "{}");
+  if (response.ok !== true) {
+    throw new Error(response.error?.message || "Lark IM delivery was not accepted");
+  }
+  return {
+    delivered: true,
+    channel: "lark_im",
+    message_id: response.data?.message_id || null,
+    chat_id: response.data?.chat_id || null,
+  };
+}
+
 function validatePayloadType(payload, expectedType) {
   if (payload.type === expectedType) {
     return null;
@@ -60,16 +133,49 @@ function validatePayloadType(payload, expectedType) {
 async function handleWebhookDelivery(request, response) {
   const payload = await readJson(request);
   const targetCount = Number(payload.target_count || 0);
-  const delivered = payload.type === "mandoforge.approval_requested" && targetCount > 0;
+  const deliveryEligible = payload.type === "mandoforge.approval_requested" && targetCount > 0;
+  let forwarded = null;
+  try {
+    if (deliveryEligible) {
+      forwarded = await forwardApprovalToLark(payload);
+    }
+  } catch (error) {
+    deliveryState.latest_forwarding_status = "failed";
+    deliveryState.latest_forwarded_message_id = null;
+    deliveryState.latest_forwarded_chat_id = null;
+    deliveryState.latest_error = error.message || "approval notification forwarding failed";
+    writeJson(response, 502, {
+      status: "failed",
+      delivered: false,
+      target_count: targetCount,
+      delivery_mode: deliveryMode,
+      forwarding_channel: deliveryMode === "lark_im" ? "lark_im" : "none",
+      message: deliveryState.latest_error,
+    });
+    return;
+  }
+  const delivered = deliveryEligible && forwarded?.delivered === true;
   if (delivered) {
     deliveryState.delivered_count += 1;
     deliveryState.latest_delivery_at = new Date().toISOString();
     deliveryState.latest_target_count = targetCount;
+    deliveryState.latest_forwarding_status = "delivered";
+    deliveryState.latest_forwarding_channel = forwarded.channel || "unknown";
+    deliveryState.latest_forwarded_message_id = forwarded.message_id || null;
+    deliveryState.latest_forwarded_chat_id = forwarded.chat_id || null;
+    deliveryState.latest_error = null;
+  } else if (deliveryEligible) {
+    deliveryState.latest_forwarding_status = "blocked";
+    deliveryState.latest_error = "delivery did not complete";
   }
   writeJson(response, delivered ? 200 : 422, {
     status: delivered ? "accepted" : "blocked",
     delivered,
     target_count: targetCount,
+    delivery_mode: deliveryMode,
+    forwarding_channel: forwarded?.channel || "none",
+    message_id: forwarded?.message_id || null,
+    chat_id: forwarded?.chat_id || null,
   });
 }
 
@@ -140,6 +246,9 @@ async function handleOpsValidation(request, response) {
       step("delivery_history_observed", "passed", {
         latest_run_status: delivery.latest_run_status || "none",
         delivered_count: deliveryState.delivered_count,
+        latest_forwarding_status: deliveryState.latest_forwarding_status,
+        latest_forwarding_channel: deliveryState.latest_forwarding_channel,
+        latest_forwarded_message_id: deliveryState.latest_forwarded_message_id,
       }),
       step("controller_reachable", controllerReachable ? "passed" : "failed"),
     ],

@@ -55,6 +55,9 @@ PROVIDER_CONTROLLER_TOKEN="${WHISKEY_PROVIDER_CONTROLLER_TOKEN:-whiskey-provider
 PROVIDER_ROLLOUT_ENVIRONMENT="${WHISKEY_PROVIDER_ROLLOUT_ENVIRONMENT:-production}"
 APPROVAL_NOTIFICATION_CONTROLLER_PORT="${WHISKEY_APPROVAL_NOTIFICATION_CONTROLLER_PORT:-18796}"
 APPROVAL_NOTIFICATION_CONTROLLER_TOKEN="${WHISKEY_APPROVAL_NOTIFICATION_CONTROLLER_TOKEN:-whiskey-approval-notification-controller-token}"
+APPROVAL_NOTIFICATION_DELIVERY_MODE="${WHISKEY_APPROVAL_NOTIFICATION_DELIVERY_MODE:-lark_im}"
+APPROVAL_NOTIFICATION_LARK_AS="${WHISKEY_APPROVAL_NOTIFICATION_LARK_AS:-user}"
+APPROVAL_NOTIFICATION_LARK_OPEN_ID="${WHISKEY_APPROVAL_NOTIFICATION_LARK_OPEN_ID:-}"
 VAULT_KMS_CONTROLLER_PORT="${WHISKEY_VAULT_KMS_CONTROLLER_PORT:-18797}"
 VAULT_KMS_CONTROLLER_TOKEN="${WHISKEY_VAULT_KMS_CONTROLLER_TOKEN:-whiskey-vault-kms-controller-token}"
 VAULT_KMS_VAULT_TOKEN="${WHISKEY_VAULT_TOKEN:-whiskey-vault-token}"
@@ -333,7 +336,19 @@ if [[ -f '$REMOTE_ROOT/approval-notification-controller.pid' ]]; then
   sleep 1
 fi
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey approval notification controller' >&2; exit 1; }
-nohup env APPROVAL_NOTIFICATION_CONTROLLER_HOST=\$docker_gateway_ip APPROVAL_NOTIFICATION_CONTROLLER_PORT=$APPROVAL_NOTIFICATION_CONTROLLER_PORT APPROVAL_NOTIFICATION_CONTROLLER_TOKEN='$APPROVAL_NOTIFICATION_CONTROLLER_TOKEN' node '$REMOTE_APPROVAL_NOTIFICATION_CONTROLLER' > '$REMOTE_ROOT/approval-notification-controller.log' 2>&1 &
+lark_open_id="$APPROVAL_NOTIFICATION_LARK_OPEN_ID"
+if [[ '$APPROVAL_NOTIFICATION_DELIVERY_MODE' == 'lark_im' ]]; then
+  command -v lark-cli >/dev/null 2>&1 || { echo 'lark-cli is required for Whiskey Lark approval notification delivery' >&2; exit 1; }
+  command -v jq >/dev/null 2>&1 || { echo 'jq is required for Whiskey Lark approval notification delivery autodiscovery' >&2; exit 1; }
+  if [[ -z "\$lark_open_id" ]]; then
+    lark_open_id=\"\$(lark-cli auth status 2>/dev/null | jq -r '.userOpenId // empty' || true)\"
+  fi
+  if [[ -z "\$lark_open_id" ]]; then
+    lark_open_id=\"\$(lark-cli contact +get-user --format json 2>/dev/null | jq -r '.data.user.open_id // empty' || true)\"
+  fi
+  [[ -n "\$lark_open_id" ]] || { echo 'could not resolve Whiskey Lark open_id for approval notification delivery' >&2; exit 1; }
+fi
+nohup env APPROVAL_NOTIFICATION_CONTROLLER_HOST=\$docker_gateway_ip APPROVAL_NOTIFICATION_CONTROLLER_PORT=$APPROVAL_NOTIFICATION_CONTROLLER_PORT APPROVAL_NOTIFICATION_CONTROLLER_TOKEN='$APPROVAL_NOTIFICATION_CONTROLLER_TOKEN' APPROVAL_NOTIFICATION_DELIVERY_MODE='$APPROVAL_NOTIFICATION_DELIVERY_MODE' APPROVAL_NOTIFICATION_LARK_AS='$APPROVAL_NOTIFICATION_LARK_AS' APPROVAL_NOTIFICATION_LARK_OPEN_ID="\$lark_open_id" node '$REMOTE_APPROVAL_NOTIFICATION_CONTROLLER' > '$REMOTE_ROOT/approval-notification-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/approval-notification-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$APPROVAL_NOTIFICATION_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/approval-notification-controller.log' >&2; exit 1; }
