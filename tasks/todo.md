@@ -192,7 +192,7 @@
 - [ ] Stage 3: productize assigned Remote Computer Pod execution without bypassing Tool Router, Policy Engine, Approval Engine, event log, or audit paths.
 - [x] Stage 3: add typed agent handoff events with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
 - [x] Stage 3: add first-class WorkflowPack / DomainPack install, validation, staging, eval, and release gates.
-- [ ] Stage 3: add Stage 3 lane-local verification scripts and integration-owner gates for scheduler, Codex traces, Remote Computer execution, handoffs, and workflow packs.
+- [x] Stage 3: add Stage 3 lane-local verification scripts and integration-owner gates for scheduler, Codex traces, Remote Computer execution, handoffs, and workflow packs.
 
 ## External Production Adoption Backlog
 
