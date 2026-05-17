@@ -106,3 +106,13 @@ Whiskey can collect single-host worker readiness evidence without Kubernetes. Th
 Without a real cluster, Remote Computer evidence is an inventory lane. The standard evidence script records readiness, runner, and state-sync validation evidence under `/evidence/remote-computer`, but production state sync should remain blocked until a distributed state filesystem and lock-aware state-sync manager are configured. Complete Remote Computer production evidence requires a real cluster or a `k3s` pilot on Whiskey.
 
 Before installing `k3s`, decide whether Whiskey should carry that operational burden. The host has limited memory, so cluster work should be isolated from existing services and measured before claiming Remote Computer production readiness.
+
+Current Whiskey capacity snapshot from the adoption check:
+
+- 2 vCPU.
+- 3.4 GiB RAM, with roughly 1.9 GiB available during the pilot.
+- 4.0 GiB swap, with existing swap use observed.
+- No `k3s` or `kubectl` installed.
+- Existing public services already use ports `5432`, `8080`, `3000`, and `9377`; MandoForge remains loopback-only on `18787` and `15432`.
+
+Recommendation: keep Whiskey in single-host pilot mode unless explicitly deciding to spend this host's remaining headroom on a constrained single-node `k3s` pilot. If `k3s` is installed later, cap Remote Computer warm-pool replicas and keep Codex/Remote Computer services on loopback or cluster-internal networking until an authenticated ingress policy exists.
