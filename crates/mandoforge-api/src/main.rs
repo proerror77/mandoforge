@@ -29784,20 +29784,26 @@ async fn build_remote_computer_execution_transport_readiness(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "reserved".to_string());
     let requested_execution_enabled = env_bool("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
-    let execution_enabled = false;
-    let status = if mode == "kubernetes" && requested_execution_enabled {
-        "client_boundary_ready_not_integrated"
-    } else if mode == "kubernetes" {
-        "blocked"
+    let (execution_enabled, status) =
+        remote_computer_execution_transport_state(&mode, requested_execution_enabled);
+    let required_implementation = if execution_enabled {
+        Vec::new()
     } else {
-        "reserved"
-    }
-    .to_string();
+        vec![
+            "automatic artifact discovery sidecar ID injection and production supervision"
+                .to_string(),
+        ]
+    };
+    let message = if execution_enabled {
+        "Remote Computer assigned-Pod execution is enabled for approved file.write, shell.exec, and codex.exec jobs through the worker, policy, approval, event, and audit paths"
+    } else {
+        "Remote Computer runner can plan assigned Pod execution fail-closed; enable Kubernetes transport gates only after runner, state sync, and sidecar evidence are ready"
+    };
     Ok(RemoteComputerExecutionTransportReadiness {
         mode,
         requested_execution_enabled,
         execution_enabled,
-        status,
+        status: status.to_string(),
         assignment_count,
         active_assignment_count,
         supported_operations: vec![
@@ -29812,13 +29818,23 @@ async fn build_remote_computer_execution_transport_readiness(
             "audit_handoff".to_string(),
             "fail_closed".to_string(),
         ],
-        required_implementation: vec![
-            "automatic artifact discovery sidecar ID injection and production supervision".to_string(),
-        ],
-        message:
-            "Remote Computer runner can route assigned file.write, shell.exec, and codex.exec jobs through gated Kubernetes Pod exec, propagate cancellation through Pod deletion, accept push-based artifact sync, and discover artifacts from a shared Remote Computer workspace"
-                .to_string(),
+        required_implementation,
+        message: message.to_string(),
     })
+}
+
+fn remote_computer_execution_transport_state(
+    mode: &str,
+    requested_execution_enabled: bool,
+) -> (bool, &'static str) {
+    let normalized_mode = mode.trim().to_ascii_lowercase();
+    if requested_execution_enabled && matches!(normalized_mode.as_str(), "kubernetes" | "k8s") {
+        (true, "enabled")
+    } else if matches!(normalized_mode.as_str(), "kubernetes" | "k8s") {
+        (false, "blocked")
+    } else {
+        (false, "reserved")
+    }
 }
 
 fn sidecar_stale_after_seconds() -> i64 {
@@ -52382,6 +52398,22 @@ not json
         )
         .await;
         assert!(matches!(completed_session.status, SessionStatus::Completed));
+    }
+
+    #[test]
+    fn remote_computer_execution_transport_state_is_gate_driven() {
+        assert_eq!(
+            remote_computer_execution_transport_state("reserved", true),
+            (false, "reserved")
+        );
+        assert_eq!(
+            remote_computer_execution_transport_state("kubernetes", false),
+            (false, "blocked")
+        );
+        assert_eq!(
+            remote_computer_execution_transport_state("k8s", true),
+            (true, "enabled")
+        );
     }
 
     #[test]

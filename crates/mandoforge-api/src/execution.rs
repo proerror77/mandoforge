@@ -150,6 +150,12 @@ pub(crate) async fn run_execution_job(
             None => auto_assign_remote_computer_for_job(state, &job, worker_id).await?,
         };
     if let Some(assignment) = remote_computer_assignment.as_ref() {
+        let execution_enabled = remote_computer_pod_execution_requested();
+        let handoff_mode = if execution_enabled {
+            "assigned-pod-execution"
+        } else {
+            "control-plane-only"
+        };
         let details = json!({
             "assignment_id": assignment.id,
             "execution_job_id": job.id,
@@ -159,8 +165,8 @@ pub(crate) async fn run_execution_job(
             "remote_computer_id": assignment.remote_computer_id,
             "lease_id": assignment.lease_id,
             "worker_id": worker_id,
-            "execution_enabled": false,
-            "handoff_mode": "control-plane-only"
+            "execution_enabled": execution_enabled,
+            "handoff_mode": handoff_mode
         });
         state
             .append_event(
@@ -349,15 +355,22 @@ async fn append_remote_computer_execution_transport_plan(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "reserved".to_string());
     let requested_execution_enabled = env_flag("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+    let execution_enabled = remote_computer_pod_execution_requested();
+    let handoff_mode = if execution_enabled {
+        "assigned-pod-execution"
+    } else {
+        "control-plane-only"
+    };
     let pod_exec_api_path = remote_computer.pod_name.as_ref().map(|pod_name| {
         format!(
             "/api/v1/namespaces/{}/pods/{}/exec",
             remote_computer.namespace, pod_name
         )
     });
-    let transport_status = if transport_mode == "kubernetes" && requested_execution_enabled {
-        "client_boundary_ready"
-    } else if transport_mode == "kubernetes" {
+    let normalized_transport_mode = transport_mode.trim().to_ascii_lowercase();
+    let transport_status = if execution_enabled {
+        "execution_enabled"
+    } else if matches!(normalized_transport_mode.as_str(), "kubernetes" | "k8s") {
         "blocked"
     } else {
         "reserved"
@@ -377,8 +390,8 @@ async fn append_remote_computer_execution_transport_plan(
         "pod_name": remote_computer.pod_name,
         "pod_exec_api_path": pod_exec_api_path,
         "requested_execution_enabled": requested_execution_enabled,
-        "execution_enabled": false,
-        "handoff_mode": "control-plane-only"
+        "execution_enabled": execution_enabled,
+        "handoff_mode": handoff_mode
     });
     state
         .append_event(
