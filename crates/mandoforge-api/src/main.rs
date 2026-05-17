@@ -4575,9 +4575,10 @@ fn codex_app_server_client_from_env() -> Result<Arc<dyn CodexAppServerClient>> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    if endpoint.as_deref().is_some_and(|value| {
-        value.starts_with("ws://") || value.starts_with("wss://")
-    }) {
+    if endpoint
+        .as_deref()
+        .is_some_and(|value| value.starts_with("ws://") || value.starts_with("wss://"))
+    {
         Ok(Arc::new(WsCodexAppServerClient))
     } else if endpoint.is_some() {
         Ok(Arc::new(

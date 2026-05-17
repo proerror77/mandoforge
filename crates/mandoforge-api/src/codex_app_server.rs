@@ -275,7 +275,9 @@ impl CodexAppServerClient for WsCodexAppServerClient {
         )
         .await?
         .map_err(|error| {
-            AppError::bad_request(format!("Codex App Server websocket connect failed: {error}"))
+            AppError::bad_request(format!(
+                "Codex App Server websocket connect failed: {error}"
+            ))
         })?;
         tokio::time::timeout(
             Duration::from_secs(config.timeout_seconds),
@@ -287,19 +289,19 @@ impl CodexAppServerClient for WsCodexAppServerClient {
         })?;
 
         loop {
-            let message = tokio::time::timeout(
-                Duration::from_secs(config.timeout_seconds),
-                socket.next(),
-            )
-            .await?
-            .ok_or_else(|| {
-                AppError::bad_request("Codex App Server websocket closed before initialize response")
-            })?
-            .map_err(|error| {
-                AppError::bad_request(format!(
-                    "Codex App Server initialize receive failed: {error}"
-                ))
-            })?;
+            let message =
+                tokio::time::timeout(Duration::from_secs(config.timeout_seconds), socket.next())
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::bad_request(
+                            "Codex App Server websocket closed before initialize response",
+                        )
+                    })?
+                    .map_err(|error| {
+                        AppError::bad_request(format!(
+                            "Codex App Server initialize receive failed: {error}"
+                        ))
+                    })?;
             let payload = match message {
                 Message::Text(text) => text,
                 Message::Binary(bytes) => String::from_utf8(bytes).map_err(|error| {
