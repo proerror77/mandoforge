@@ -126,6 +126,8 @@ pub struct ConnectorRef {
     pub provenance: ConnectorProvenance,
     pub tenant_scope: TenantScope,
     pub prompt_injection_boundary: PromptInjectionBoundary,
+    #[serde(default)]
+    pub data_quality: Option<ConnectorDataQualityContract>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -157,6 +159,18 @@ pub struct TenantScope {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PromptInjectionBoundary {
     pub treat_results_as_data: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ConnectorDataQualityContract {
+    pub min_sample_count: usize,
+    pub max_age_hours: i64,
+    #[serde(default)]
+    pub citation_required: bool,
+    #[serde(default)]
+    pub required_metadata_fields: Vec<String>,
+    #[serde(default)]
+    pub required_content_fields: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -492,6 +506,44 @@ impl WorkflowPackManifest {
                 "connector {} must treat connector results as data, not instructions",
                 connector.id
             );
+        }
+        if let Some(contract) = connector.data_quality.as_ref() {
+            if contract.min_sample_count == 0 {
+                bail!(
+                    "connector {} data_quality min_sample_count must be at least 1",
+                    connector.id
+                );
+            }
+            if contract.max_age_hours <= 0 {
+                bail!(
+                    "connector {} data_quality max_age_hours must be greater than 0",
+                    connector.id
+                );
+            }
+            if contract.required_metadata_fields.is_empty() {
+                bail!(
+                    "connector {} data_quality must declare required_metadata_fields",
+                    connector.id
+                );
+            }
+            if contract.required_content_fields.is_empty() {
+                bail!(
+                    "connector {} data_quality must declare required_content_fields",
+                    connector.id
+                );
+            }
+            for field in contract
+                .required_metadata_fields
+                .iter()
+                .chain(contract.required_content_fields.iter())
+            {
+                if field.trim().is_empty() {
+                    bail!(
+                        "connector {} data_quality field names must be non-empty",
+                        connector.id
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -972,6 +1024,27 @@ release_gates:
             error
                 .to_string()
                 .contains("must treat connector results as data")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_connector_data_quality_contract() {
+        let input = std::fs::read_to_string(fixture_manifest_path()).expect("fixture manifest");
+        let mut manifest = WorkflowPackManifest::from_yaml_str(&input).expect("manifest parses");
+        manifest.connectors[0]
+            .data_quality
+            .as_mut()
+            .expect("fixture declares connector data quality")
+            .required_content_fields
+            .clear();
+        let error = manifest
+            .validate_package_dir(&fixture_manifest_path().parent().unwrap().to_path_buf())
+            .expect_err("connector data_quality contract should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("data_quality must declare required_content_fields")
         );
     }
 }

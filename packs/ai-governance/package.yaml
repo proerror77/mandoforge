@@ -123,6 +123,17 @@ connectors:
       workspace_id: required
     prompt_injection_boundary:
       treat_results_as_data: true
+    data_quality:
+      min_sample_count: 1
+      max_age_hours: 168
+      citation_required: true
+      required_metadata_fields:
+        - source_id
+        - reference
+        - retrieval_actor
+      required_content_fields:
+        - title
+        - snippet
 schemas:
   - id: ai-use-case
     path: schemas/ai_use_case.schema.json

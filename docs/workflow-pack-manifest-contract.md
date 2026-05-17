@@ -38,6 +38,7 @@ The validator enforces the initial Stage 3 safety floor:
 - Connectors must require provenance.
 - Connectors must declare tenant and workspace scope as required.
 - Connector outputs must be treated as data, not instructions.
+- Connector data-quality contracts, when declared, must require at least one sample, a positive freshness window, and non-empty required metadata/content field lists.
 - Reader agents cannot declare write or external-write tool scopes.
 - Writer agents cannot declare external-write tool scopes.
 - Handoffs must target declared agents.
@@ -90,6 +91,16 @@ Customer onboarding must be explicit before a pack is treated as tenant-ready. T
 - The response is `ready` or `blocked`; it reports missing profiles, placeholder profiles, connector blockers, required profile/schema counts, and the onboarding workflow/eval ids, plus inline versus persisted profile counts.
 - `workflow_pack.onboarding_profiles_saved` audit evidence records persisted profile revisions, and `workflow_pack.onboarding_assessed` records the readiness result and blockers. Neither endpoint mutates install, stage, release, rollback, or archive state.
 
+### Connector Quality
+
+Connector adoption must prove that retrieved data is fresh, attributable, and structurally usable before pack outputs rely on it.
+
+- Connectors can declare an optional `data_quality` contract with `min_sample_count`, `max_age_hours`, `citation_required`, `required_metadata_fields`, and `required_content_fields`.
+- `POST /api/workflow-packs/installations/{id}/connectors/quality/assess` evaluates connector sample payloads against that contract.
+- The assessment checks sample freshness, citation presence, required metadata fields, required content fields, and minimum passing sample count.
+- The response is `ready` or `blocked`; it reports per-connector sample counts, passing sample counts, and blocker lists.
+- `workflow_pack.connector_quality_assessed` audit evidence records the connector-quality result and blockers, but does not mutate install, stage, release, rollback, or archive state.
+
 ### Release
 
 Release should require passing eval gates, policy gates, connector readiness, and approval where the pack declares high-risk handoffs or writes. Released pack behavior must be auditable and roll-backable.
@@ -130,4 +141,4 @@ The Whiskey evidence gate exercises the API lifecycle end to end:
 WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml scripts/workflow-pack-evidence-gate.sh
 ```
 
-It validates the manifest, proves install bootstraps default onboarding profile assets, proves onboarding fails closed with placeholder/missing customer inputs, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, creates a new installed version from an updated manifest, proves the updated installation also boots default profile assets, persists customer onboarding profiles as reusable assets, proves onboarding reaches `ready` from persisted profile assets plus connector declarations, verifies the rolled-back source remains unchanged and active before archive, archives the rolled-back source installation, and verifies archive removes only the source while the new installed version stays active.
+It validates the manifest, proves install bootstraps default onboarding profile assets, proves onboarding fails closed with placeholder/missing customer inputs, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, creates a new installed version from an updated manifest, proves the updated installation also boots default profile assets, persists customer onboarding profiles as reusable assets, proves onboarding reaches `ready` from persisted profile assets plus connector declarations, proves connector quality fails closed with stale/incomplete samples and reaches `ready` with fresh attributable samples, verifies the rolled-back source remains unchanged and active before archive, archives the rolled-back source installation, and verifies archive removes only the source while the new installed version stays active.

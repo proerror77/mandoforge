@@ -742,10 +742,46 @@ struct WorkflowPackProfileAssetSaveRequest {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowPackConnectorQualitySample {
+    object_id: String,
+    retrieved_at: DateTime<Utc>,
+    #[serde(default)]
+    citation_url: Option<String>,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+    #[serde(default = "empty_json_object")]
+    content: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowPackConnectorQualityInput {
+    id: String,
+    #[serde(default)]
+    samples: Vec<WorkflowPackConnectorQualitySample>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowPackConnectorQualityAssessmentRequest {
+    #[serde(default)]
+    connectors: Vec<WorkflowPackConnectorQualityInput>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowPackConnectorAssessment {
     id: String,
     status: String,
+    blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackConnectorQualityResult {
+    id: String,
+    status: String,
+    sample_count: usize,
+    passing_sample_count: usize,
     blockers: Vec<String>,
 }
 
@@ -768,6 +804,19 @@ struct WorkflowPackOnboardingAssessment {
     missing_profiles: Vec<String>,
     placeholder_profiles: Vec<String>,
     connector_blockers: Vec<WorkflowPackConnectorAssessment>,
+    blockers: Vec<String>,
+    checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackConnectorQualityAssessment {
+    installation_id: Uuid,
+    pack_id: String,
+    version: String,
+    status: String,
+    connector_requirement_count: usize,
+    ready_connector_count: usize,
+    connector_results: Vec<WorkflowPackConnectorQualityResult>,
     blockers: Vec<String>,
     checked_at: DateTime<Utc>,
 }
@@ -4423,6 +4472,10 @@ fn build_router(state: AppState) -> Router {
             "/api/workflow-packs/installations/{id}/onboarding/profiles",
             get(list_workflow_pack_profile_assets_route)
                 .post(save_workflow_pack_profile_assets_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/connectors/quality/assess",
+            post(assess_workflow_pack_connector_quality_route),
         )
         .route(
             "/api/workflow-packs/installations/{id}/update",
@@ -8278,6 +8331,45 @@ async fn save_workflow_pack_profile_assets_route(
     Ok(Json(saved))
 }
 
+async fn assess_workflow_pack_connector_quality_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<WorkflowPackConnectorQualityAssessmentRequest>,
+) -> Result<Json<WorkflowPackConnectorQualityAssessment>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    let installation = state.get_workflow_pack_installation(id).await?;
+    let assessment = assess_workflow_pack_connector_quality(&installation, input.clone())?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "workflow_pack.connector_quality_assessed",
+            "workflow_pack_installation",
+            Some(installation.id),
+            json!({
+                "pack_id": installation.pack_id,
+                "version": installation.version,
+                "status": assessment.status,
+                "reason": input.reason,
+                "connector_requirement_count": assessment.connector_requirement_count,
+                "ready_connector_count": assessment.ready_connector_count,
+                "connector_results": assessment.connector_results,
+                "blockers": assessment.blockers,
+            }),
+        ))
+        .await?;
+    Ok(Json(assessment))
+}
+
 async fn update_workflow_pack_installation_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -8869,6 +8961,187 @@ fn validate_workflow_pack_profile_assets_input(
         });
     }
     Ok(validated)
+}
+
+fn assess_workflow_pack_connector_quality(
+    installation: &WorkflowPackInstallation,
+    input: WorkflowPackConnectorQualityAssessmentRequest,
+) -> Result<WorkflowPackConnectorQualityAssessment, AppError> {
+    let (manifest, _package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
+    let checked_at = Utc::now();
+    let mut input_connectors = HashMap::new();
+    for connector in input.connectors {
+        let connector_id = connector.id.trim().to_string();
+        if connector_id.is_empty() {
+            return Err(AppError::bad_request(
+                "workflow pack connector id is required",
+            ));
+        }
+        if input_connectors
+            .insert(connector_id.clone(), connector)
+            .is_some()
+        {
+            return Err(AppError::bad_request(format!(
+                "duplicate workflow pack connector quality input {}",
+                connector_id
+            )));
+        }
+    }
+
+    let mut connector_results = Vec::new();
+    let mut ready_connector_count = 0usize;
+    let mut blockers = Vec::new();
+    for connector in &manifest.connectors {
+        let Some(contract) = connector.data_quality.as_ref() else {
+            let blocker = "connector data_quality contract is missing".to_string();
+            connector_results.push(WorkflowPackConnectorQualityResult {
+                id: connector.id.clone(),
+                status: "blocked".to_string(),
+                sample_count: 0,
+                passing_sample_count: 0,
+                blockers: vec![blocker.clone()],
+            });
+            blockers.push(format!("connector {}: {}", connector.id, blocker));
+            continue;
+        };
+        let Some(input_connector) = input_connectors.get(connector.id.as_str()) else {
+            let blocker = "connector quality assessment is missing".to_string();
+            connector_results.push(WorkflowPackConnectorQualityResult {
+                id: connector.id.clone(),
+                status: "blocked".to_string(),
+                sample_count: 0,
+                passing_sample_count: 0,
+                blockers: vec![blocker.clone()],
+            });
+            blockers.push(format!("connector {}: {}", connector.id, blocker));
+            continue;
+        };
+
+        let mut passing_sample_count = 0usize;
+        let mut connector_blockers = Vec::new();
+        for (index, sample) in input_connector.samples.iter().enumerate() {
+            let sample_label = if sample.object_id.trim().is_empty() {
+                format!("sample {}", index + 1)
+            } else {
+                format!("sample {}", sample.object_id.trim())
+            };
+            let mut sample_ok = true;
+            if sample.object_id.trim().is_empty() {
+                connector_blockers.push(format!("{sample_label} missing object_id"));
+                sample_ok = false;
+            }
+            if checked_at
+                .signed_duration_since(sample.retrieved_at)
+                .num_hours()
+                > contract.max_age_hours
+            {
+                connector_blockers.push(format!(
+                    "{sample_label} is older than {} hours",
+                    contract.max_age_hours
+                ));
+                sample_ok = false;
+            }
+            if contract.citation_required
+                && sample
+                    .citation_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+            {
+                connector_blockers.push(format!("{sample_label} missing citation_url"));
+                sample_ok = false;
+            }
+
+            let metadata = sample.metadata.as_object().ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "connector {} sample metadata must be a JSON object",
+                    connector.id
+                ))
+            })?;
+            for field in &contract.required_metadata_fields {
+                if !json_field_present(metadata.get(field)) {
+                    connector_blockers
+                        .push(format!("{sample_label} missing metadata field {}", field));
+                    sample_ok = false;
+                }
+            }
+
+            let content = sample.content.as_object().ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "connector {} sample content must be a JSON object",
+                    connector.id
+                ))
+            })?;
+            for field in &contract.required_content_fields {
+                if !json_field_present(content.get(field)) {
+                    connector_blockers
+                        .push(format!("{sample_label} missing content field {}", field));
+                    sample_ok = false;
+                }
+            }
+
+            if sample_ok {
+                passing_sample_count += 1;
+            }
+        }
+        if passing_sample_count < contract.min_sample_count {
+            connector_blockers.push(format!(
+                "requires at least {} passing sample(s)",
+                contract.min_sample_count
+            ));
+        }
+        connector_blockers.sort();
+        connector_blockers.dedup();
+        let status = if connector_blockers.is_empty() {
+            ready_connector_count += 1;
+            "ready".to_string()
+        } else {
+            blockers.extend(
+                connector_blockers
+                    .iter()
+                    .cloned()
+                    .map(|blocker| format!("connector {}: {}", connector.id, blocker)),
+            );
+            "blocked".to_string()
+        };
+        connector_results.push(WorkflowPackConnectorQualityResult {
+            id: connector.id.clone(),
+            status,
+            sample_count: input_connector.samples.len(),
+            passing_sample_count,
+            blockers: connector_blockers,
+        });
+    }
+    connector_results.sort_by(|left, right| left.id.cmp(&right.id));
+    blockers.sort();
+    blockers.dedup();
+
+    Ok(WorkflowPackConnectorQualityAssessment {
+        installation_id: installation.id,
+        pack_id: installation.pack_id.clone(),
+        version: installation.version.clone(),
+        status: if blockers.is_empty() {
+            "ready".to_string()
+        } else {
+            "blocked".to_string()
+        },
+        connector_requirement_count: manifest.connectors.len(),
+        ready_connector_count,
+        connector_results,
+        blockers,
+        checked_at,
+    })
+}
+
+fn json_field_present(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(map)) => !map.is_empty(),
+        Some(Value::Null) | None => false,
+        Some(_) => true,
+    }
 }
 
 fn resolve_workflow_pack_manifest_path(input: &str) -> Result<PathBuf, AppError> {
@@ -37049,6 +37322,137 @@ not json
         assert!(audit_logs.iter().any(|log| {
             log.action == "workflow_pack.onboarding_profiles_saved"
                 && log.resource_id == Some(installed.id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_pack_connector_quality_assessment_reports_blocked_and_ready_states() {
+        let app = test_app().await;
+        let installed: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-packs/install",
+                json!({"manifest_path": ai_governance_manifest_path_string()}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        let blocked: WorkflowPackConnectorQualityAssessment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-packs/installations/{}/connectors/quality/assess",
+                    installed.id
+                ),
+                json!({
+                    "connectors": [
+                        {
+                            "id": "knowledge-base",
+                            "samples": [
+                                {
+                                    "object_id": "kb-1",
+                                    "retrieved_at": (Utc::now() - chrono::Duration::hours(200)).to_rfc3339(),
+                                    "metadata": {
+                                        "source_id": "page-1"
+                                    },
+                                    "content": {
+                                        "title": "Vendor policy page"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "reason": "connector quality blocked check"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(blocked.status, "blocked");
+        assert_eq!(blocked.connector_requirement_count, 1);
+        assert_eq!(blocked.ready_connector_count, 0);
+        assert_eq!(blocked.connector_results[0].id, "knowledge-base");
+        assert_eq!(blocked.connector_results[0].sample_count, 1);
+        assert_eq!(blocked.connector_results[0].passing_sample_count, 0);
+        assert!(
+            blocked.connector_results[0]
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("missing citation_url"))
+        );
+        assert!(
+            blocked.connector_results[0]
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("missing metadata field reference"))
+        );
+        assert!(
+            blocked.connector_results[0]
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("missing content field snippet"))
+        );
+
+        let ready: WorkflowPackConnectorQualityAssessment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-packs/installations/{}/connectors/quality/assess",
+                    installed.id
+                ),
+                json!({
+                    "connectors": [
+                        {
+                            "id": "knowledge-base",
+                            "samples": [
+                                {
+                                    "object_id": "kb-2",
+                                    "retrieved_at": Utc::now().to_rfc3339(),
+                                    "citation_url": "https://kb.example/policy/vendor-ai",
+                                    "metadata": {
+                                        "source_id": "page-2",
+                                        "reference": "KB-2026-05",
+                                        "retrieval_actor": "connector-pilot"
+                                    },
+                                    "content": {
+                                        "title": "Vendor AI policy",
+                                        "snippet": "Grounded source with retained provenance."
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "reason": "connector quality ready check"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(ready.status, "ready");
+        assert_eq!(ready.connector_requirement_count, 1);
+        assert_eq!(ready.ready_connector_count, 1);
+        assert_eq!(ready.connector_results[0].status, "ready");
+        assert_eq!(ready.connector_results[0].passing_sample_count, 1);
+        assert!(ready.connector_results[0].blockers.is_empty());
+        assert!(ready.blockers.is_empty());
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "workflow_pack.connector_quality_assessed"
+                && log.resource_id == Some(installed.id)
+                && log.details["status"] == json!("ready")
         }));
     }
 

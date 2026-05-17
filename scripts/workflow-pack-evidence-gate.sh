@@ -235,6 +235,54 @@ ready_onboarding_payload="$(jq -nc '{
   reason: "Whiskey WorkflowPack onboarding readiness proof"
 }')"
 onboarding_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/onboarding/assess" "$ready_onboarding_payload")"
+blocked_connector_quality_payload="$(jq -nc '{
+  connectors: [
+    {
+      id: "knowledge-base",
+      samples: [
+        {
+          object_id: "kb-stale-1",
+          retrieved_at: "2026-05-01T00:00:00Z",
+          metadata: {
+            source_id: "page-stale-1"
+          },
+          content: {
+            title: "Stale KB result"
+          }
+        }
+      ]
+    }
+  ],
+  reason: "Whiskey WorkflowPack connector quality blocked proof"
+}')"
+blocked_connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$blocked_connector_quality_payload")"
+blocked_connector_quality_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$updated_installation_id-connectors-quality-assess-blocked.json"
+cp "$blocked_connector_quality_file" "$blocked_connector_quality_snapshot_file"
+ready_connector_quality_payload="$(jq -nc '{
+  connectors: [
+    {
+      id: "knowledge-base",
+      samples: [
+        {
+          object_id: "kb-fresh-1",
+          retrieved_at: "2026-05-17T00:00:00Z",
+          citation_url: "https://kb.example/policy/vendor-ai",
+          metadata: {
+            source_id: "page-fresh-1",
+            reference: "KB-2026-05",
+            retrieval_actor: "connector-pilot"
+          },
+          content: {
+            title: "Vendor AI policy",
+            snippet: "Grounded source with retained provenance."
+          }
+        }
+      ]
+    }
+  ],
+  reason: "Whiskey WorkflowPack connector quality ready proof"
+}')"
+connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$ready_connector_quality_payload")"
 archive_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/archive" \
   '{"reason":"Whiskey WorkflowPack adoption archive proof"}')"
 archived_get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id" "{}" 4)"
@@ -270,6 +318,13 @@ installed_default_profile_asset_count="$(jq -r '[.response[]?] | length' "$insta
 updated_default_profile_asset_count="$(jq -r '[.response[]?] | length' "$updated_default_profiles_file")"
 persisted_profile_saved_min_version="$(jq -r '[.response[]?.version] | min // 0' "$persisted_profiles_file")"
 persisted_profile_saved_max_version="$(jq -r '[.response[]?.version] | max // 0' "$persisted_profiles_file")"
+blocked_connector_quality_status="$(jq -r '.response.status // "unknown"' "$blocked_connector_quality_snapshot_file")"
+connector_quality_status="$(jq -r '.response.status // "unknown"' "$connector_quality_file")"
+connector_quality_requirement_count="$(jq -r '.response.connector_requirement_count // 0' "$connector_quality_file")"
+connector_quality_ready_connector_count="$(jq -r '.response.ready_connector_count // 0' "$connector_quality_file")"
+connector_quality_sample_count="$(jq -r '[.response.connector_results[]?.sample_count] | add // 0' "$connector_quality_file")"
+connector_quality_passing_sample_count="$(jq -r '[.response.connector_results[]?.passing_sample_count] | add // 0' "$connector_quality_file")"
+connector_quality_blocker_count="$(jq -r '[.response.blockers[]?] | length' "$connector_quality_file")"
 archive_status="$(jq -r '.response.status // "unknown"' "$archive_file")"
 eval_gate_status="$(jq -r '.response.eval_gate_status // "unknown"' "$release_file")"
 release_gate_status="$(jq -r '.response.release_gate_status // "unknown"' "$release_file")"
@@ -325,6 +380,14 @@ if [[ "$installed_default_profile_asset_count" != "6" || "$updated_default_profi
 fi
 if [[ "$onboarding_status" != "ready" || "$onboarding_workflow" != "profile-onboarding" || "$onboarding_eval" != "profile-onboarding-regression" ]]; then
   echo "workflow pack onboarding readiness assessment did not reach ready state" >&2
+  exit 1
+fi
+if [[ "$blocked_connector_quality_status" != "blocked" ]]; then
+  echo "workflow pack blocked connector quality assessment did not fail closed" >&2
+  exit 1
+fi
+if [[ "$connector_quality_status" != "ready" || "$connector_quality_requirement_count" != "1" || "$connector_quality_ready_connector_count" != "1" || "$connector_quality_sample_count" != "1" || "$connector_quality_passing_sample_count" != "1" || "$connector_quality_blocker_count" != "0" ]]; then
+  echo "workflow pack connector quality assessment did not reach ready state" >&2
   exit 1
 fi
 if [[ "$persisted_profile_asset_count" != "6" || "$persisted_profile_list_count" != "6" ]]; then
@@ -392,6 +455,13 @@ fi
   echo "connector_requirement_count=$connector_requirement_count"
   echo "ready_connector_count=$ready_connector_count"
   echo "onboarding_blocker_count=$onboarding_blocker_count"
+  echo "blocked_connector_quality_status=$blocked_connector_quality_status"
+  echo "connector_quality_status=$connector_quality_status"
+  echo "connector_quality_requirement_count=$connector_quality_requirement_count"
+  echo "connector_quality_ready_connector_count=$connector_quality_ready_connector_count"
+  echo "connector_quality_sample_count=$connector_quality_sample_count"
+  echo "connector_quality_passing_sample_count=$connector_quality_passing_sample_count"
+  echo "connector_quality_blocker_count=$connector_quality_blocker_count"
   echo "installed_default_profile_asset_count=$installed_default_profile_asset_count"
   echo "updated_default_profile_asset_count=$updated_default_profile_asset_count"
   echo "persisted_profile_asset_count=$persisted_profile_asset_count"
