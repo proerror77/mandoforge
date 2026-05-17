@@ -1,8 +1,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::AppError;
 
@@ -214,6 +216,9 @@ pub(crate) struct HttpCodexAppServerClient {
 }
 
 #[allow(dead_code)]
+pub(crate) struct WsCodexAppServerClient;
+
+#[allow(dead_code)]
 impl HttpCodexAppServerClient {
     pub(crate) fn new() -> Result<Self, AppError> {
         Ok(Self {
@@ -243,6 +248,140 @@ impl HttpCodexAppServerClient {
 
     fn commands_url(config: &CodexAppServerConfig, turn_id: &str) -> String {
         format!("{}/turns/{turn_id}/commands", config.normalized_endpoint())
+    }
+}
+
+#[async_trait]
+impl CodexAppServerClient for WsCodexAppServerClient {
+    async fn health_check(&self, config: &CodexAppServerConfig) -> Result<(), AppError> {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "mandoforge",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {
+                    "experimentalApi": true,
+                    "optOutNotificationMethods": []
+                }
+            }
+        });
+        let (mut socket, _) = tokio::time::timeout(
+            Duration::from_secs(config.timeout_seconds),
+            connect_async(config.normalized_endpoint()),
+        )
+        .await?
+        .map_err(|error| {
+            AppError::bad_request(format!("Codex App Server websocket connect failed: {error}"))
+        })?;
+        tokio::time::timeout(
+            Duration::from_secs(config.timeout_seconds),
+            socket.send(Message::Text(request.to_string())),
+        )
+        .await?
+        .map_err(|error| {
+            AppError::bad_request(format!("Codex App Server initialize send failed: {error}"))
+        })?;
+
+        loop {
+            let message = tokio::time::timeout(
+                Duration::from_secs(config.timeout_seconds),
+                socket.next(),
+            )
+            .await?
+            .ok_or_else(|| {
+                AppError::bad_request("Codex App Server websocket closed before initialize response")
+            })?
+            .map_err(|error| {
+                AppError::bad_request(format!(
+                    "Codex App Server initialize receive failed: {error}"
+                ))
+            })?;
+            let payload = match message {
+                Message::Text(text) => text,
+                Message::Binary(bytes) => String::from_utf8(bytes).map_err(|error| {
+                    AppError::bad_request(format!(
+                        "Codex App Server initialize response was not UTF-8: {error}"
+                    ))
+                })?,
+                Message::Close(_) => {
+                    return Err(AppError::bad_request(
+                        "Codex App Server websocket closed before initialize response",
+                    ));
+                }
+                _ => continue,
+            };
+            let response: Value = serde_json::from_str(&payload)?;
+            if response.get("id").and_then(Value::as_i64) != Some(1) {
+                continue;
+            }
+            if let Some(error) = response.get("error") {
+                return Err(AppError::bad_request(format!(
+                    "Codex App Server initialize failed: {error}"
+                )));
+            }
+            if response.get("result").is_some() {
+                return Ok(());
+            }
+            return Err(AppError::bad_request(
+                "Codex App Server initialize response did not include result",
+            ));
+        }
+    }
+
+    async fn create_thread(
+        &self,
+        _config: &CodexAppServerConfig,
+        _request: CodexThreadRequest,
+    ) -> Result<CodexThreadResponse, AppError> {
+        Err(AppError::bad_request(
+            "Codex App Server websocket steering is not implemented; use HTTP adapter for thread creation",
+        ))
+    }
+
+    async fn create_turn(
+        &self,
+        _config: &CodexAppServerConfig,
+        _thread_id: &str,
+        _request: CodexTurnRequest,
+    ) -> Result<CodexTurnResponse, AppError> {
+        Err(AppError::bad_request(
+            "Codex App Server websocket steering is not implemented; use HTTP adapter for turn creation",
+        ))
+    }
+
+    async fn get_turn_status(
+        &self,
+        _config: &CodexAppServerConfig,
+        _turn_id: &str,
+    ) -> Result<CodexTurnResponse, AppError> {
+        Err(AppError::bad_request(
+            "Codex App Server websocket steering is not implemented; use HTTP adapter for turn polling",
+        ))
+    }
+
+    async fn interrupt_turn(
+        &self,
+        _config: &CodexAppServerConfig,
+        _turn_id: &str,
+    ) -> Result<CodexInterruptResponse, AppError> {
+        Err(AppError::bad_request(
+            "Codex App Server websocket steering is not implemented; use HTTP adapter for interrupts",
+        ))
+    }
+
+    async fn execute_command(
+        &self,
+        _config: &CodexAppServerConfig,
+        _turn_id: &str,
+        _request: CodexCommandRequest,
+    ) -> Result<CodexCommandResponse, AppError> {
+        Err(AppError::bad_request(
+            "Codex App Server websocket steering is not implemented; use HTTP adapter for command execution",
+        ))
     }
 }
 
@@ -391,12 +530,15 @@ where
 #[cfg(test)]
 mod tests {
     use axum::{Json, Router, routing::get, routing::post};
+    use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
 
     use super::{
         CodexAppServerClient, CodexAppServerConfig, CodexCommandRequest, CodexCommandResponse,
         CodexInterruptResponse, CodexThreadRequest, CodexThreadResponse, CodexTurnRequest,
         CodexTurnResponse, HttpCodexAppServerClient, ReservedCodexAppServerClient,
+        WsCodexAppServerClient,
     };
 
     async fn mock_health() -> Json<serde_json::Value> {
@@ -566,5 +708,54 @@ mod tests {
             .expect("interrupt");
         assert_eq!(interrupt.status.as_deref(), Some("interrupted"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn ws_codex_app_server_client_initializes_for_health() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket");
+            let message = socket
+                .next()
+                .await
+                .expect("message")
+                .expect("websocket message");
+            let request: serde_json::Value =
+                serde_json::from_str(message.to_text().expect("text")).expect("json");
+            assert_eq!(request["method"], "initialize");
+            assert_eq!(request["params"]["clientInfo"]["name"], "mandoforge");
+            socket
+                .send(Message::Text(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "codexHome": "/tmp/codex",
+                            "platformFamily": "unix",
+                            "platformOs": "linux",
+                            "userAgent": "codex-test"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("send response");
+        });
+        let config = CodexAppServerConfig::from_lookup(|key| match key {
+            "MANDOFORGE_CODEX_APP_SERVER_URL" => Some(format!("ws://{addr}")),
+            "MANDOFORGE_CODEX_APP_SERVER_TIMEOUT_SECONDS" => Some("2".to_string()),
+            _ => None,
+        })
+        .expect("config");
+        let client = WsCodexAppServerClient;
+
+        client.health_check(&config).await.expect("health");
+        server.await.expect("server task");
     }
 }

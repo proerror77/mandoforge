@@ -76,6 +76,7 @@ use codex_app_server::{
     CodexAppServerClient, CodexAppServerConfig, CodexCommandRequest, CodexCommandResponse,
     CodexInterruptResponse, CodexThreadRequest, CodexThreadResponse, CodexTurnRequest,
     CodexTurnResponse, HttpCodexAppServerClient, ReservedCodexAppServerClient,
+    WsCodexAppServerClient,
 };
 use eval_judge::{EvalJudgeClient, EvalJudgeConfig, HttpEvalJudgeClient};
 #[cfg(test)]
@@ -4570,10 +4571,15 @@ fn codex_app_server_config_from_env() -> Result<Option<CodexAppServerConfig>> {
 }
 
 fn codex_app_server_client_from_env() -> Result<Arc<dyn CodexAppServerClient>> {
-    if std::env::var("MANDOFORGE_CODEX_APP_SERVER_URL")
+    let endpoint = std::env::var("MANDOFORGE_CODEX_APP_SERVER_URL")
         .ok()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if endpoint.as_deref().is_some_and(|value| {
+        value.starts_with("ws://") || value.starts_with("wss://")
+    }) {
+        Ok(Arc::new(WsCodexAppServerClient))
+    } else if endpoint.is_some() {
         Ok(Arc::new(
             HttpCodexAppServerClient::new().map_err(|error| anyhow::anyhow!(error.message))?,
         ))

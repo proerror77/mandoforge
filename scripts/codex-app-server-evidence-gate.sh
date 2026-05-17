@@ -180,7 +180,6 @@ fetch_json GET /api/codex-app-server/control-plane/summary >/dev/null
 fetch_json GET /api/codex-app-server/runs >/dev/null
 fetch_json GET /api/codex-app-server/traces >/dev/null
 fetch_json POST /api/codex-app-server/deployment/validate >/dev/null
-fetch_json POST /api/codex-app-server/ops/validate >/dev/null
 
 if [[ "$RUN_CODEX_STALE_POLL" == "1" ]]; then
   capture_stale_poll_evidence
@@ -188,5 +187,6 @@ else
   echo "skipping Codex App Server stale poll; set RUN_STAGE2_CODEX_STALE_POLL=1 to include stale-run supervision evidence" >&2
 fi
 
+fetch_json POST /api/codex-app-server/ops/validate >/dev/null
 fetch_json GET /api/codex-app-server/control-plane/summary >/dev/null
 write_summary

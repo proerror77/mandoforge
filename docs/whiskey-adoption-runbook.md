@@ -25,7 +25,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml) to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml) and the Whiskey Codex controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controller when needed, pulls the configured image, and starts the API, Postgres, and worker.
 
 The default image is:
 
@@ -89,7 +89,15 @@ Completion evidence must show `codex_app_server_health_status` healthy, deployme
 
 If the evidence script reports `Codex App Server is disabled until MANDOFORGE_CODEX_APP_SERVER_URL is configured`, the lane is still blocked and should stay in the external production adoption backlog.
 
-Current Whiskey observation: the host runs `codex app-server --listen unix://` plus `codex app-server proxy`. The Codex CLI reports supported transports as `stdio://`, `unix://`, `unix://PATH`, `ws://IP:PORT`, and `off`; MandoForge's current Codex App Server adapter expects an HTTP endpoint. Until an HTTP bridge, a ws/unix adapter, or a separate HTTP-compatible controller exists, do not mark this lane passed.
+Current Whiskey wiring uses a loopback Codex WebSocket target plus a local HTTP deployment/ops controller:
+
+```bash
+MANDOFORGE_CODEX_APP_SERVER_URL=ws://host.docker.internal:18788
+MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL=http://host.docker.internal:18789/deployment/validate
+MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL=http://host.docker.internal:18789/ops/validate
+```
+
+The controller validates by performing a real JSON-RPC `initialize` handshake against the Codex WebSocket App Server. The WebSocket adapter currently covers deployment and ops health evidence; full steering over native WebSocket remains a follow-up because thread/turn/command REST operations still require the HTTP adapter path.
 
 ## Worker And Remote Computer Lane
 

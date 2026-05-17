@@ -60,7 +60,7 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
 
     rm -rf /evidence/scheduler /evidence/codex-app-server /evidence/worker /evidence/remote-computer /evidence/stage2-production
     BASE_URL=http://127.0.0.1:8787 EVIDENCE_DIR=/evidence/scheduler ALLOW_BLOCKED=1 MANDOFORGE_SCHEDULER_TOKEN=\"\${MANDOFORGE_SCHEDULER_TOKEN:-}\" /app/scripts/scheduler-evidence-gate.sh
-    BASE_URL=http://127.0.0.1:8787 EVIDENCE_DIR=/evidence/codex-app-server ALLOW_BLOCKED=1 /app/scripts/codex-app-server-evidence-gate.sh
+    BASE_URL=http://127.0.0.1:8787 EVIDENCE_DIR=/evidence/codex-app-server ALLOW_BLOCKED=1 RUN_STAGE2_CODEX_STALE_POLL=1 /app/scripts/codex-app-server-evidence-gate.sh
     BASE_URL=http://127.0.0.1:8787 EVIDENCE_DIR=/evidence/worker ALLOW_BLOCKED=1 /app/scripts/worker-evidence-gate.sh
     BASE_URL=http://127.0.0.1:8787 EVIDENCE_DIR=/evidence/remote-computer ALLOW_BLOCKED=1 /app/scripts/remote-computer-evidence-gate.sh
     BASE_URL=http://127.0.0.1:8787 EVIDENCE_DIR=/evidence/stage2-production ALLOW_BLOCKED=1 RUN_STAGE2_PRODUCTION_VALIDATIONS=$RUN_STRICT_VALIDATIONS MANDOFORGE_SCHEDULER_TOKEN=\"\${MANDOFORGE_SCHEDULER_TOKEN:-}\" /app/scripts/stage2-production-evidence-gate.sh

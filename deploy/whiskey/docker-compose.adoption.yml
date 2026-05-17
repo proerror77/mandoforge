@@ -37,6 +37,8 @@ services:
       MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN: ${MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN:-}
     ports:
       - "127.0.0.1:${MANDOFORGE_API_HOST_PORT:-18787}:8787"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
