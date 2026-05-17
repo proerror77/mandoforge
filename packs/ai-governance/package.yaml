@@ -12,6 +12,27 @@ profiles:
   - id: default
     path: profiles/default.md
     required: true
+  - id: onboarding
+    path: profiles/onboarding.md
+    required: true
+  - id: company
+    path: profiles/company.md
+    required: true
+  - id: department
+    path: profiles/department.md
+    required: true
+  - id: approval-matrix
+    path: profiles/approval_matrix.yaml
+    required: true
+  - id: connector-map
+    path: profiles/connector_map.yaml
+    required: true
+  - id: risk-policy
+    path: profiles/risk_policy.yaml
+    required: true
+  - id: output-style
+    path: profiles/output_style.md
+    required: true
 skills:
   - id: ai-use-case-triage
     path: skills/ai-use-case-triage/skill.md
@@ -19,6 +40,9 @@ skills:
 workflows:
   - id: ai-use-case-triage
     path: workflows/ai-use-case-triage.workflow.yaml
+    entry_agent: reader
+  - id: profile-onboarding
+    path: workflows/profile-onboarding.workflow.yaml
     entry_agent: reader
 agents:
   - id: reader
@@ -81,6 +105,24 @@ schemas:
   - id: handoff
     path: schemas/handoff.schema.json
     required: true
+  - id: company-profile
+    path: schemas/company_profile.schema.json
+    required: true
+  - id: department-profile
+    path: schemas/department_profile.schema.json
+    required: true
+  - id: approval-matrix
+    path: schemas/approval_matrix.schema.json
+    required: true
+  - id: connector-map
+    path: schemas/connector_map.schema.json
+    required: true
+  - id: risk-policy
+    path: schemas/risk_policy.schema.json
+    required: true
+  - id: output-style
+    path: schemas/output_style.schema.json
+    required: true
 policies:
   - id: approval
     path: policies/approval.yaml
@@ -94,6 +136,11 @@ evals:
     gate:
       required: true
       min_score: 1.0
+  - id: profile-onboarding-regression
+    path: evals/profile_onboarding_cases.jsonl
+    gate:
+      required: true
+      min_score: 1.0
 release_gates:
   - id: pack-regression
     gate_type: eval
@@ -101,3 +148,32 @@ release_gates:
   - id: approval-policy
     gate_type: policy
     required: true
+onboarding:
+  workflow: profile-onboarding
+  required_profiles:
+    - company
+    - department
+    - approval-matrix
+    - connector-map
+    - risk-policy
+    - output-style
+  profile_schemas:
+    - id: company-profile
+      path: schemas/company_profile.schema.json
+      required: true
+    - id: department-profile
+      path: schemas/department_profile.schema.json
+      required: true
+    - id: approval-matrix
+      path: schemas/approval_matrix.schema.json
+      required: true
+    - id: connector-map
+      path: schemas/connector_map.schema.json
+      required: true
+    - id: risk-policy
+      path: schemas/risk_policy.schema.json
+      required: true
+    - id: output-style
+      path: schemas/output_style.schema.json
+      required: true
+  eval: profile-onboarding-regression

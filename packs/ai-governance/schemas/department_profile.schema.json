@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["department_name", "owners", "review_cadence"],
+  "properties": {
+    "department_name": { "type": "string", "minLength": 1 },
+    "owners": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "review_cadence": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": true
+}

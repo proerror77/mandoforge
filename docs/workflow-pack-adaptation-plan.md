@@ -279,9 +279,9 @@ Do not start by building a complete legal suite. Start with packs that match the
 
 ### Slice 2: Profile Onboarding
 
-- Add cold-start onboarding workflow contract.
-- Persist tenant/domain profiles as versioned artifacts.
-- Add approval matrix and connector map schemas.
+- Add cold-start onboarding workflow contract through the manifest `onboarding` section.
+- Persist tenant/domain profiles as versioned artifacts in the pack profile contract.
+- Add approval matrix, connector map, risk policy, output style, company, and department schemas.
 - Add eval cases for "generic output before profile" versus "profile-grounded output after onboarding".
 
 ### Slice 3: Handoff Events

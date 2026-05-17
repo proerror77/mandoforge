@@ -20,6 +20,7 @@ Every pack manifest must declare:
 - `id`, `name`, `version`, and `description`.
 - Capabilities.
 - Profiles, skills, workflows, agents, connectors, schemas, policies, evals, and release gates.
+- Onboarding workflow, required tenant profiles, profile schemas, and an onboarding eval.
 
 All referenced files must be relative to the package directory, must exist, and must not use absolute paths or `..` escapes.
 
@@ -28,6 +29,11 @@ All referenced files must be relative to the package directory, must exist, and 
 The validator enforces the initial Stage 3 safety floor:
 
 - At least one workflow, agent, connector, required eval gate, and required release gate must exist.
+- At least one profile, skill, schema, and policy must exist.
+- The onboarding workflow must reference a declared workflow.
+- Onboarding required profiles must reference declared profile ids.
+- Onboarding profile schemas must be relative, existing files.
+- The onboarding eval must reference a declared eval.
 - Connector writes must be approval-gated when enabled.
 - Connectors must require provenance.
 - Connectors must declare tenant and workspace scope as required.

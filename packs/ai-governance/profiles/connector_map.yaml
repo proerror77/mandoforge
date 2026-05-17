@@ -1,0 +1,6 @@
+connectors:
+  knowledge-base:
+    scope: tenant
+    required_permissions:
+      - document.search
+      - document.read

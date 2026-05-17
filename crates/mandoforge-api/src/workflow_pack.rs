@@ -37,6 +37,8 @@ pub struct WorkflowPackManifest {
     pub evals: Vec<EvalRef>,
     #[serde(default)]
     pub release_gates: Vec<ReleaseGateRef>,
+    #[serde(default)]
+    pub onboarding: Option<OnboardingContract>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -179,6 +181,16 @@ pub struct ReleaseGateRef {
     pub required: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct OnboardingContract {
+    pub workflow: String,
+    #[serde(default)]
+    pub required_profiles: Vec<String>,
+    #[serde(default)]
+    pub profile_schemas: Vec<PackFileRef>,
+    pub eval: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowPackValidationReport {
     pub pack_id: String,
@@ -241,6 +253,8 @@ impl WorkflowPackManifest {
 
         let required_eval_gate_count = self.validate_evals(package_dir, &mut ids_by_section)?;
         file_count += self.evals.len();
+
+        file_count += self.validate_onboarding(package_dir, &mut ids_by_section)?;
 
         if self.workflows.is_empty() {
             bail!("manifest must declare at least one workflow");
@@ -433,6 +447,55 @@ impl WorkflowPackManifest {
         }
         Ok(required_count)
     }
+
+    fn validate_onboarding(
+        &self,
+        package_dir: &Path,
+        ids_by_section: &mut BTreeMap<&'static str, BTreeSet<String>>,
+    ) -> Result<usize> {
+        let onboarding = self
+            .onboarding
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("manifest must declare onboarding contract"))?;
+        validate_id("onboarding workflow", &onboarding.workflow)?;
+        if !contains_id(ids_by_section, "workflows", &onboarding.workflow) {
+            bail!(
+                "onboarding workflow {} must reference a declared workflow",
+                onboarding.workflow
+            );
+        }
+        validate_id("onboarding eval", &onboarding.eval)?;
+        if !contains_id(ids_by_section, "evals", &onboarding.eval) {
+            bail!(
+                "onboarding eval {} must reference a declared eval",
+                onboarding.eval
+            );
+        }
+        if onboarding.required_profiles.is_empty() {
+            bail!("onboarding contract must declare required_profiles");
+        }
+        for profile_id in &onboarding.required_profiles {
+            validate_id("onboarding required profile", profile_id)?;
+            if !contains_id(ids_by_section, "profiles", profile_id) {
+                bail!(
+                    "onboarding required profile {} must reference a declared profile",
+                    profile_id
+                );
+            }
+        }
+        if onboarding.profile_schemas.is_empty() {
+            bail!("onboarding contract must declare profile_schemas");
+        }
+        for schema in &onboarding.profile_schemas {
+            validate_ref(
+                "onboarding_profile_schemas",
+                schema,
+                package_dir,
+                ids_by_section,
+            )?;
+        }
+        Ok(onboarding.profile_schemas.len())
+    }
 }
 
 fn validate_ref(
@@ -456,6 +519,16 @@ fn insert_unique_id<'a>(
         bail!("duplicate {} id {}", section, id);
     }
     Ok(())
+}
+
+fn contains_id(
+    ids_by_section: &BTreeMap<&'static str, BTreeSet<String>>,
+    section: &'static str,
+    id: &str,
+) -> bool {
+    ids_by_section
+        .get(section)
+        .is_some_and(|ids| ids.contains(id))
 }
 
 fn validate_id(section: &str, id: &str) -> Result<()> {
@@ -538,7 +611,7 @@ mod tests {
         assert_eq!(report.schema_version, SUPPORTED_SCHEMA_VERSION);
         assert_eq!(report.agent_count, 3);
         assert_eq!(report.connector_count, 1);
-        assert_eq!(report.required_eval_gate_count, 1);
+        assert_eq!(report.required_eval_gate_count, 2);
         assert!(report.validated_file_count >= 10);
     }
 

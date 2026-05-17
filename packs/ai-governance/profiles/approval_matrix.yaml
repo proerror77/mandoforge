@@ -1,0 +1,8 @@
+approvals:
+  high:
+    required_role: approver
+    escalation_role: admin
+  medium:
+    required_role: operator
+  low:
+    required_role: operator

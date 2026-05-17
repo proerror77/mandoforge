@@ -1,0 +1,18 @@
+id: profile-onboarding
+entry_agent: reader
+outputs:
+  - company
+  - department
+  - approval-matrix
+  - connector-map
+  - risk-policy
+  - output-style
+steps:
+  - agent: reader
+    task: collect tenant context and source references
+  - agent: analyzer
+    task: normalize context into profile schemas
+  - agent: writer
+    task: draft tenant profiles as versioned artifacts
+approval:
+  required_before_release: true

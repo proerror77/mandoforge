@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["connectors"],
+  "properties": {
+    "connectors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["scope", "required_permissions"],
+        "properties": {
+          "scope": { "type": "string", "enum": ["tenant", "workspace"] },
+          "required_permissions": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

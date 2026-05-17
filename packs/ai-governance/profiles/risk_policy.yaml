@@ -1,0 +1,10 @@
+risk_policy:
+  high:
+    approval_required: true
+    external_write_allowed: false
+  medium:
+    approval_required: false
+    external_write_allowed: false
+  low:
+    approval_required: false
+    external_write_allowed: false

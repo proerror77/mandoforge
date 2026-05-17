@@ -1,0 +1,1 @@
+{"id":"profile-grounding-required","input":{"company_name":"ExampleCo","department_name":"Product","policy_maturity":"early"},"expected_fragments":["company","approval_matrix","connector_map","risk_policy","output_style"]}

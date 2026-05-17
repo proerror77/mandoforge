@@ -18,7 +18,8 @@
     "schemas",
     "policies",
     "evals",
-    "release_gates"
+    "release_gates",
+    "onboarding"
   ],
   "additionalProperties": false,
   "properties": {
@@ -93,6 +94,9 @@
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/release_gate_ref" }
+    },
+    "onboarding": {
+      "$ref": "#/$defs/onboarding_contract"
     }
   },
   "$defs": {
@@ -270,6 +274,26 @@
         "id": { "$ref": "#/$defs/slug" },
         "gate_type": { "$ref": "#/$defs/slug" },
         "required": { "type": "boolean" }
+      }
+    },
+    "onboarding_contract": {
+      "type": "object",
+      "required": ["workflow", "required_profiles", "profile_schemas", "eval"],
+      "additionalProperties": false,
+      "properties": {
+        "workflow": { "$ref": "#/$defs/slug" },
+        "required_profiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/slug" },
+          "uniqueItems": true
+        },
+        "profile_schemas": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/file_ref" }
+        },
+        "eval": { "$ref": "#/$defs/slug" }
       }
     }
   }
