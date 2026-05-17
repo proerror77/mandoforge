@@ -849,7 +849,6 @@ run_controller_validations() {
   capture_observability_collector_deployment_validation
   capture_observability_collector_cluster_validation
   fetch_json POST /api/scheduler/deployment/validate >/dev/null
-  fetch_json POST /api/scheduler/run-due >/dev/null
 
   if [[ -n "$TEAM_ID" ]]; then
     capture_mcp_deployment_validation
@@ -861,6 +860,8 @@ run_controller_validations() {
   else
     echo "skipping MCP connector validation; set MANDOFORGE_STAGE2_TEAM_ID to include team-scoped MCP rollout evidence" >&2
   fi
+
+  fetch_json POST /api/scheduler/run-due >/dev/null
 
   if [[ "${RUN_STAGE2_MCP_ROLLBACK:-0}" == "1" ]]; then
     capture_mcp_rollback_validation

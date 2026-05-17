@@ -27,7 +27,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, and the Whiskey worker load controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, and the Whiskey MCP pilot controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
 
 The default image is:
 
@@ -49,12 +49,13 @@ The script:
 
 - verifies `GET /healthz`;
 - ensures `Whiskey Adoption Org` and `Whiskey Pilot Team` exist;
+- syncs repo-local Stage 2 evidence scripts and controller manifests to `/opt/mandoforge-adoption/`;
 - runs `scripts/scheduler-evidence-gate.sh`;
 - runs `scripts/codex-app-server-evidence-gate.sh`;
 - runs `scripts/tenant-isolation-evidence-gate.sh`;
 - runs `scripts/worker-evidence-gate.sh`;
 - runs `scripts/remote-computer-evidence-gate.sh`;
-- runs `scripts/stage2-production-evidence-gate.sh` with `ALLOW_BLOCKED=1`;
+- runs the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
 - archives Stage 2 evidence and full pilot evidence under `/opt/mandoforge-adoption/archives`;
 - syncs archive copies to `.mandoforge/remote-adoption/whiskey/`;
 - verifies the Stage 2 archive locally with `ALLOW_BLOCKED=1`.
@@ -127,6 +128,23 @@ MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL=http://host.docker.internal:187
 The controller validates the live Whiskey API worker-readiness report, durable Postgres queue mode, queue-backed worker mode, manifest hardening/autoscaling signals, the running Docker Compose worker service, and absence of failed jobs or stale leases. This is a Whiskey single-host worker validation, not a k3s multi-replica autoscaling proof.
 
 Without a real cluster, Remote Computer evidence is an inventory lane. The standard evidence script records readiness, runner, and state-sync validation evidence under `/evidence/remote-computer`, but production state sync should remain blocked until a distributed state filesystem and lock-aware state-sync manager are configured. Complete Remote Computer production evidence requires a real cluster or a `k3s` pilot on Whiskey.
+
+## MCP Connector Lane
+
+Current Whiskey wiring starts a local MCP pilot gateway/controller on the Docker gateway and configures the API with:
+
+```bash
+MANDOFORGE_MCP_GATEWAY_URL=http://host.docker.internal:18792
+MANDOFORGE_MCP_ALLOWED_SERVERS=whiskey-docs
+MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_REQUIRED=true
+MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_URL=http://host.docker.internal:18792/mcp/deployment/validate
+MANDOFORGE_MCP_ROLLOUT_CONTROLLER_REQUIRED=true
+MANDOFORGE_MCP_ROLLOUT_CONTROLLER_URL=http://host.docker.internal:18792/mcp/rollout/approve
+MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_REQUIRED=true
+MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL=http://host.docker.internal:18792/mcp/rollback/validate
+```
+
+The evidence script seeds a `whiskey-docs` connector on the Whiskey pilot team, keeps the `search` tool allowlisted, creates a due rollout when one is not already pending, and enables strict MCP due-run plus rollback evidence. This validates the real MandoForge MCP gateway HTTP boundary and rollout controller hooks without requiring an external SaaS connector.
 
 Before installing `k3s`, decide whether Whiskey should carry that operational burden. The host has limited memory, so cluster work should be isolated from existing services and measured before claiming Remote Computer production readiness.
 
