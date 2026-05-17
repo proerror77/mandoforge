@@ -62,7 +62,7 @@ The script:
 - seeds a Vault secret catalog record, runs `scripts/vault-evidence-gate.sh`, and captures Vault health, KMS rotation, and KMS recovery controller evidence;
 - runs `scripts/finance-evidence-gate.sh` with finance close, reconciliation, CSV export, and webhook delivery evidence enabled;
 - runs the synced `scripts/workflow-pack-evidence-gate.sh` on the Whiskey host against the loopback API;
-- seeds another Whiskey eval/release request, another observability remediation path, another Whiskey mock provider, another routable approval, and another Vault secret catalog record before running the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1` and strict finance controller/export capture enabled;
+- seeds another Whiskey eval/release request, another observability remediation path, another Whiskey provider rollout path, another routable approval, another Vault secret catalog record, a due policy revision, and the static UI smoke prerequisites before running the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`, strict finance controller/export capture enabled, `RUN_STAGE2_POLICY_DUE_RUN=1`, `RUN_STAGE2_UI_STATIC_ASSETS=1`, and `RUN_STAGE2_UI_ACTIONBOOK=1`;
 - archives Stage 2 evidence and full pilot evidence under `/opt/mandoforge-adoption/archives`;
 - syncs archive copies to `.mandoforge/remote-adoption/whiskey/`;
 - verifies the Stage 2 archive locally with `ALLOW_BLOCKED=1`.
