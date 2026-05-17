@@ -56,9 +56,11 @@ fetch_json() {
 }
 
 write_summary() {
+  local providers_json="$EVIDENCE_DIR/api-providers.json"
   local summary_json="$EVIDENCE_DIR/api-providers-summary.json"
   local gate_json="$EVIDENCE_DIR/api-providers-policy-gate.json"
   local runs_json="$EVIDENCE_DIR/api-providers-policy-gate-runs.json"
+  local provider_health_json="$EVIDENCE_DIR/api-providers-health.json"
   local rollout_evidence_file="$EVIDENCE_DIR/provider-production-rollout-evidence.json"
   local rollback_evidence_file="$EVIDENCE_DIR/provider-production-rollback-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
@@ -69,6 +71,12 @@ write_summary() {
   local deployment_controller_age_hours
   local gate_status
   local gate_enforcement_status
+  local provider_name
+  local provider_type
+  local provider_health_status
+  local provider_health_external_probe
+  local provider_health_api_key_env_present
+  local provider_health_api_key_ref_resolved
   local rollout_evidence_status
   local rollout_run_status
   local rollback_evidence_status
@@ -82,6 +90,12 @@ write_summary() {
   deployment_controller_age_hours="$(jq -r '.deployment_readiness.latest_controller_age_hours // "none"' "$summary_json")"
   gate_status="$(jq -r '.status // "unknown"' "$gate_json")"
   gate_enforcement_status="$(jq -r '.production_enforcement.status // "unknown"' "$runs_json")"
+  provider_name="$(jq -r 'map(select(.status == "active")) | .[0].name // .[0].name // "none"' "$providers_json")"
+  provider_type="$(jq -r 'map(select(.status == "active")) | .[0].provider_type // .[0].provider_type // "none"' "$providers_json")"
+  provider_health_status="$(jq -r '.status // "unknown"' "$provider_health_json")"
+  provider_health_external_probe="$(jq -r '.checks.external_probe // "unknown"' "$provider_health_json")"
+  provider_health_api_key_env_present="$(jq -r '.checks.api_key_env_present // "unknown"' "$provider_health_json")"
+  provider_health_api_key_ref_resolved="$(jq -r '.checks.api_key_ref_resolved // "unknown"' "$provider_health_json")"
   rollout_evidence_status="not_requested"
   rollout_run_status="not_run"
   if [[ -s "$rollout_evidence_file" ]]; then
@@ -104,6 +118,12 @@ write_summary() {
     echo "active_provider_count=$active_count"
     echo "provider_policy_gate_status=$gate_status"
     echo "provider_policy_gate_enforcement_status=$gate_enforcement_status"
+    echo "provider_name=$provider_name"
+    echo "provider_type=$provider_type"
+    echo "provider_health_status=$provider_health_status"
+    echo "provider_health_external_probe=$provider_health_external_probe"
+    echo "provider_health_api_key_env_present=$provider_health_api_key_env_present"
+    echo "provider_health_api_key_ref_resolved=$provider_health_api_key_ref_resolved"
     echo "deployment_readiness_status=$deployment_status"
     echo "deployment_controller_evidence_fresh=$deployment_controller_fresh"
     echo "deployment_controller_age_hours=$deployment_controller_age_hours"
@@ -174,11 +194,19 @@ require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
+providers_file="$(fetch_json GET /api/providers)"
 fetch_json GET /api/providers/summary >/dev/null
 fetch_json GET /api/providers/policy-gate >/dev/null
 fetch_json GET /api/providers/policy-gate/runs >/dev/null
 fetch_json POST /api/providers/policy-gate/run >/dev/null
 fetch_json POST /api/providers/deployment/validate >/dev/null
+provider_id="$(jq -r 'map(select(.status == "active")) | .[0].id // .[0].id // empty' "$providers_file")"
+if [[ -n "$provider_id" ]]; then
+  provider_health_file="$(fetch_json GET "/api/providers/$provider_id/health")"
+  cp "$provider_health_file" "$EVIDENCE_DIR/api-providers-health.json"
+else
+  jq -n '{status: "missing", checks: {external_probe: "not_run", api_key_env_present: "unknown", api_key_ref_resolved: "unknown"}}' >"$EVIDENCE_DIR/api-providers-health.json"
+fi
 
 if [[ "$RUN_PROVIDER_ROLLOUT" == "1" ]]; then
   capture_provider_rollout_evidence

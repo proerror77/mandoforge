@@ -182,9 +182,11 @@ MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL=http://host.docker.internal:18795/pro
 MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL=http://host.docker.internal:18795/provider/rollout/rollback
 ```
 
-The evidence script seeds an active `mock` provider named `whiskey-mock-provider` with a daily request budget, then runs the focused provider governance gate with `RUN_STAGE2_PROVIDER_ROLLOUT=1`. The strict Stage 2 gate also runs provider deployment validation, policy gate, rollout, and rollback evidence.
+When `DEEPSEEK_API_KEY` is available on Whiskey, the deploy script now syncs it into `whiskey.env`, the API container receives it, and the evidence script upgrades the seeded provider to `whiskey-deepseek-provider` with `base_url=https://api.deepseek.com`, `default_model=deepseek-v4-flash`, and `config.api_key_ref=vault:providers/whiskey-deepseek#api_key`. The referenced secret is created or reused through the Whiskey Vault boundary so provider health can resolve a Vault-backed key rather than an env-key warning path. When the DeepSeek key is unavailable, the seed falls back to `whiskey-mock-provider`.
 
-This is a Whiskey pilot provider target proof. It validates the provider governance policy gate, deployment-controller hook, production rollout hook, and rollback hook against the live Whiskey API. It does not claim that an external OpenAI-compatible provider fleet, credential-rotation process, or production traffic switch has been adopted.
+The evidence script then runs the focused provider governance gate with `RUN_STAGE2_PROVIDER_ROLLOUT=1`, and the strict Stage 2 gate also records provider deployment validation, policy gate, rollout, and rollback evidence.
+
+This is now a Whiskey real provider proof. It validates the provider governance policy gate, a healthy external `/v1/models` probe against DeepSeek, deployment-controller evidence, production rollout hook, and rollback hook against the live Whiskey API. It still does not claim that a broader multi-provider fleet, credential-rotation policy, or production traffic switch has been adopted.
 
 ## Approval Notification Lane
 

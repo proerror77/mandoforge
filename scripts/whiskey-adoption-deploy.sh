@@ -53,6 +53,7 @@ OBSERVABILITY_SERVICE_NAME="${WHISKEY_OBSERVABILITY_SERVICE_NAME:-mandoforge-api
 PROVIDER_CONTROLLER_PORT="${WHISKEY_PROVIDER_CONTROLLER_PORT:-18795}"
 PROVIDER_CONTROLLER_TOKEN="${WHISKEY_PROVIDER_CONTROLLER_TOKEN:-whiskey-provider-controller-token}"
 PROVIDER_ROLLOUT_ENVIRONMENT="${WHISKEY_PROVIDER_ROLLOUT_ENVIRONMENT:-production}"
+PROVIDER_REAL_MODE="${WHISKEY_PROVIDER_REAL_MODE:-deepseek_if_available}"
 APPROVAL_NOTIFICATION_CONTROLLER_PORT="${WHISKEY_APPROVAL_NOTIFICATION_CONTROLLER_PORT:-18796}"
 APPROVAL_NOTIFICATION_CONTROLLER_TOKEN="${WHISKEY_APPROVAL_NOTIFICATION_CONTROLLER_TOKEN:-whiskey-approval-notification-controller-token}"
 APPROVAL_NOTIFICATION_DELIVERY_MODE="${WHISKEY_APPROVAL_NOTIFICATION_DELIVERY_MODE:-lark_im}"
@@ -230,6 +231,16 @@ ensure_env MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL http://host.docker.interna
 ensure_env MANDOFORGE_PROVIDER_ROLLOUT_TOKEN $PROVIDER_CONTROLLER_TOKEN
 ensure_env MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL http://host.docker.internal:$PROVIDER_CONTROLLER_PORT/provider/rollout/rollback
 ensure_env MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_TOKEN $PROVIDER_CONTROLLER_TOKEN
+if [[ '$PROVIDER_REAL_MODE' == 'deepseek_if_available' ]]; then
+  if [[ -f /root/.hermes/.env ]]; then
+    set -a
+    source /root/.hermes/.env
+    set +a
+  fi
+  if [[ -n "\${DEEPSEEK_API_KEY:-}" ]]; then
+    ensure_env DEEPSEEK_API_KEY "\$DEEPSEEK_API_KEY"
+  fi
+fi
 ensure_env MANDOFORGE_APPROVAL_WEBHOOK_URL http://host.docker.internal:$APPROVAL_NOTIFICATION_CONTROLLER_PORT/approval/webhook
 ensure_env MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_REQUIRED true
 ensure_env MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_URL http://host.docker.internal:$APPROVAL_NOTIFICATION_CONTROLLER_PORT/approval-notification/deployment/validate
@@ -377,7 +388,7 @@ remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"
 if [[ "$PULL_IMAGE" == "1" ]]; then
   remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' pull"
 fi
-remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' ps"
+remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d postgres && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d --force-recreate api worker && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' ps"
 
 ssh "$REMOTE_HOST" "bash -lc $(printf '%q' "$remote_cmd")"
 

@@ -276,47 +276,108 @@ providers_before="\$(mktemp)"
 provider_file="\$(mktemp)"
 providers_after="\$(mktemp)"
 provider_body="\$(mktemp)"
+provider_request_method="POST"
+existing_provider_id=""
+secrets_before="\$(mktemp)"
+secret_file="\$(mktemp)"
+secret_body="\$(mktemp)"
 
 cleanup() {
-  rm -f "\$providers_before" "\$provider_file" "\$providers_after" "\$provider_body"
+  rm -f "\$providers_before" "\$provider_file" "\$providers_after" "\$provider_body" "\$secrets_before" "\$secret_file" "\$secret_body"
 }
 trap cleanup EXIT
 
 curl -fsS "\${auth_headers[@]}" "\$base_url/api/providers" >"\$providers_before"
-
-jq -n \
-  --arg reason "\$reason" \
-  '{
-    provider_type: "mock",
-    name: "whiskey-mock-provider",
-    default_model: "gpt-5.4-mini",
-    config: {
-      source: "whiskey-provider-rollout-evidence",
-      reason: \$reason,
-      budget: {
-        daily_request_limit: 1000
+if [[ -n "\${DEEPSEEK_API_KEY:-}" ]]; then
+  curl -fsS "\${auth_headers[@]}" "\$base_url/api/vault/secrets" >"\$secrets_before"
+  secret_id="\$(jq -r 'map(select(.name == "whiskey-deepseek-provider-secret" and .path == "providers/whiskey-deepseek" and .key == "api_key")) | .[0].id // empty' "\$secrets_before")"
+  if [[ -z "\$secret_id" ]]; then
+    jq -n \
+      --arg value "\$DEEPSEEK_API_KEY" \
+      '{
+        name: "whiskey-deepseek-provider-secret",
+        path: "providers/whiskey-deepseek",
+        key: "api_key",
+        scope_type: "tenant",
+        scope_id: null,
+        value: \$value
+      }' >"\$secret_body"
+    curl -fsS -X POST "\${auth_headers[@]}" \
+      -H "content-type: application/json" \
+      -d @"\$secret_body" \
+      "\$base_url/api/vault/secrets" >"\$secret_file"
+  else
+    jq -n --arg id "\$secret_id" '{id: \$id, reused: true}' >"\$secret_file"
+  fi
+  jq -n \
+    --arg reason "\$reason" \
+    '{
+      provider_type: "openai_compatible",
+      name: "whiskey-deepseek-provider",
+      base_url: "https://api.deepseek.com",
+      default_model: "deepseek-v4-flash",
+      config: {
+        api_key_ref: "vault:providers/whiskey-deepseek#api_key",
+        source: "whiskey-provider-rollout-evidence",
+        reason: \$reason,
+        budget: {
+          daily_request_limit: 1000
+        }
       }
-    }
-  }' >"\$provider_body"
+    }' >"\$provider_body"
+  existing_provider_id="\$(jq -r 'map(select(.name == "whiskey-deepseek-provider" or .name == "whiskey-mock-provider")) | .[0].id // empty' "\$providers_before")"
+else
+  jq -n \
+    --arg reason "\$reason" \
+    '{
+      provider_type: "mock",
+      name: "whiskey-mock-provider",
+      default_model: "gpt-5.4-mini",
+      config: {
+        source: "whiskey-provider-rollout-evidence",
+        reason: \$reason,
+        budget: {
+          daily_request_limit: 1000
+        }
+      }
+    }' >"\$provider_body"
+  existing_provider_id="\$(jq -r 'map(select(.name == "whiskey-mock-provider")) | .[0].id // empty' "\$providers_before")"
+fi
 
-curl -fsS -X POST "\${auth_headers[@]}" \
-  -H "content-type: application/json" \
-  -d @"\$provider_body" \
-  "\$base_url/api/providers" >"\$provider_file"
+if [[ -n "\$existing_provider_id" ]]; then
+  provider_request_method="PATCH"
+  curl -fsS -X PATCH "\${auth_headers[@]}" \
+    -H "content-type: application/json" \
+    -d @"\$provider_body" \
+    "\$base_url/api/providers/\$existing_provider_id" >"\$provider_file"
+else
+  curl -fsS -X POST "\${auth_headers[@]}" \
+    -H "content-type: application/json" \
+    -d @"\$provider_body" \
+    "\$base_url/api/providers" >"\$provider_file"
+fi
 
 curl -fsS "\${auth_headers[@]}" "\$base_url/api/providers" >"\$providers_after"
 
 jq -n \
   --arg status "seeded" \
+  --arg method "\$provider_request_method" \
+  --arg existing_provider_id "\$existing_provider_id" \
   --arg generated_at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg reason "\$reason" \
   --slurpfile providers_before "\$providers_before" \
   --slurpfile provider "\$provider_file" \
   --slurpfile providers_after "\$providers_after" \
+  --slurpfile secrets_before "\$secrets_before" \
+  --slurpfile secret "\$secret_file" \
   '{
     status: \$status,
+    method: \$method,
+    existing_provider_id: (if \$existing_provider_id == "" then null else \$existing_provider_id end),
     generated_at: \$generated_at,
     reason: \$reason,
+    secrets_before: (\$secrets_before[0] // []),
+    secret: (\$secret[0] // null),
     providers_before: (\$providers_before[0] // []),
     provider: (\$provider[0] // {}),
     providers_after: (\$providers_after[0] // [])
