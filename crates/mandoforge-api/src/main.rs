@@ -8081,32 +8081,43 @@ async fn install_workflow_pack_route(
 ) -> Result<Json<WorkflowPackInstallation>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "workflow_pack", None).await?;
     let (manifest_path, manifest, report) = load_and_validate_workflow_pack(&input.manifest_path)?;
+    let default_profile_assets =
+        workflow_pack_default_profile_assets(&manifest, manifest_path.as_path())?;
     let now = Utc::now();
-    let installation = state
-        .create_workflow_pack_installation(WorkflowPackInstallation {
-            id: Uuid::new_v4(),
-            pack_id: manifest.id.clone(),
-            kind: workflow_pack_kind_label(&manifest.kind).to_string(),
-            version: manifest.version.clone(),
-            manifest_path: manifest_path.display().to_string(),
-            manifest: serde_json::to_value(&manifest)?,
-            validation_report: serde_json::to_value(&report)?,
-            status: "installed".to_string(),
-            eval_gate_status: "pending".to_string(),
-            release_gate_status: "pending".to_string(),
-            gate_evidence: json!({}),
-            staged_at: None,
-            released_at: None,
-            archived_at: None,
-            created_at: now,
-            updated_at: now,
-        })
+    let (installation, bootstrapped_profile_assets) = state
+        .create_workflow_pack_installation_with_profile_assets(
+            WorkflowPackInstallation {
+                id: Uuid::new_v4(),
+                pack_id: manifest.id.clone(),
+                kind: workflow_pack_kind_label(&manifest.kind).to_string(),
+                version: manifest.version.clone(),
+                manifest_path: manifest_path.display().to_string(),
+                manifest: serde_json::to_value(&manifest)?,
+                validation_report: serde_json::to_value(&report)?,
+                status: "installed".to_string(),
+                eval_gate_status: "pending".to_string(),
+                release_gate_status: "pending".to_string(),
+                gate_evidence: json!({}),
+                staged_at: None,
+                released_at: None,
+                archived_at: None,
+                created_at: now,
+                updated_at: now,
+            },
+            &default_profile_assets,
+        )
         .await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
         "workflow_pack.installed",
         json!({"validation_report": installation.validation_report}),
+    )
+    .await?;
+    record_workflow_pack_profile_asset_bootstrap_audit(
+        &state,
+        &installation,
+        &bootstrapped_profile_assets,
     )
     .await?;
     Ok(Json(installation))
@@ -8299,35 +8310,40 @@ async fn update_workflow_pack_installation_route(
             "workflow pack update manifest must declare a new version",
         ));
     }
+    let default_profile_assets =
+        workflow_pack_default_profile_assets(&manifest, manifest_path.as_path())?;
 
     let now = Utc::now();
-    let installation = state
-        .create_workflow_pack_installation(WorkflowPackInstallation {
-            id: Uuid::new_v4(),
-            pack_id: manifest.id.clone(),
-            kind: kind.to_string(),
-            version: manifest.version.clone(),
-            manifest_path: manifest_path.display().to_string(),
-            manifest: serde_json::to_value(&manifest)?,
-            validation_report: serde_json::to_value(&report)?,
-            status: "installed".to_string(),
-            eval_gate_status: "pending".to_string(),
-            release_gate_status: "pending".to_string(),
-            gate_evidence: json!({
-                "version_update": {
-                    "source_installation_id": current.id,
-                    "source_status": current.status,
-                    "source_version": current.version,
-                    "reason": input.reason,
-                    "created_at": now,
-                },
-            }),
-            staged_at: None,
-            released_at: None,
-            archived_at: None,
-            created_at: now,
-            updated_at: now,
-        })
+    let (installation, bootstrapped_profile_assets) = state
+        .create_workflow_pack_installation_with_profile_assets(
+            WorkflowPackInstallation {
+                id: Uuid::new_v4(),
+                pack_id: manifest.id.clone(),
+                kind: kind.to_string(),
+                version: manifest.version.clone(),
+                manifest_path: manifest_path.display().to_string(),
+                manifest: serde_json::to_value(&manifest)?,
+                validation_report: serde_json::to_value(&report)?,
+                status: "installed".to_string(),
+                eval_gate_status: "pending".to_string(),
+                release_gate_status: "pending".to_string(),
+                gate_evidence: json!({
+                    "version_update": {
+                        "source_installation_id": current.id,
+                        "source_status": current.status,
+                        "source_version": current.version,
+                        "reason": input.reason,
+                        "created_at": now,
+                    },
+                }),
+                staged_at: None,
+                released_at: None,
+                archived_at: None,
+                created_at: now,
+                updated_at: now,
+            },
+            &default_profile_assets,
+        )
         .await?;
     record_workflow_pack_installation_audit(
         &state,
@@ -8340,6 +8356,12 @@ async fn update_workflow_pack_installation_route(
             "new_version": installation.version,
             "validation_report": installation.validation_report,
         }),
+    )
+    .await?;
+    record_workflow_pack_profile_asset_bootstrap_audit(
+        &state,
+        &installation,
+        &bootstrapped_profile_assets,
     )
     .await?;
     Ok(Json(installation))
@@ -8745,6 +8767,40 @@ fn workflow_pack_manifest_and_dir_from_installation(
     Ok((manifest, package_dir.to_path_buf()))
 }
 
+fn workflow_pack_default_profile_assets(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    manifest_path: &std::path::Path,
+) -> Result<Vec<(String, String)>, AppError> {
+    let onboarding = manifest.onboarding.as_ref().ok_or_else(|| {
+        AppError::bad_request("workflow pack manifest missing onboarding contract")
+    })?;
+    let package_dir = manifest_path.parent().ok_or_else(|| {
+        AppError::bad_request("workflow pack manifest path has no parent package directory")
+    })?;
+    let profile_refs: HashMap<_, _> = manifest
+        .profiles
+        .iter()
+        .map(|profile| (profile.id.as_str(), profile))
+        .collect();
+    onboarding
+        .required_profiles
+        .iter()
+        .map(|profile_id| {
+            let declared = profile_refs.get(profile_id.as_str()).ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "workflow pack onboarding profile {} is not declared in manifest",
+                    profile_id
+                ))
+            })?;
+            let content =
+                std::fs::read_to_string(package_dir.join(&declared.path)).with_context(|| {
+                    format!("read workflow pack profile template {}", declared.path)
+                })?;
+            Ok((profile_id.clone(), content))
+        })
+        .collect()
+}
+
 fn validate_workflow_pack_profile_assets_input(
     installation: &WorkflowPackInstallation,
     profiles: Vec<WorkflowPackOnboardingProfileInput>,
@@ -8870,6 +8926,43 @@ async fn record_workflow_pack_installation_audit(
             }),
         ))
         .await
+}
+
+async fn record_workflow_pack_profile_asset_bootstrap_audit(
+    state: &AppState,
+    installation: &WorkflowPackInstallation,
+    profile_assets: &[WorkflowPackProfileAsset],
+) -> Result<(), AppError> {
+    if profile_assets.is_empty() {
+        return Ok(());
+    }
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "workflow_pack.onboarding_defaults_bootstrapped",
+            "workflow_pack_installation",
+            Some(installation.id),
+            json!({
+                "pack_id": installation.pack_id,
+                "version": installation.version,
+                "profile_count": profile_assets.len(),
+                "profile_ids": profile_assets
+                    .iter()
+                    .map(|profile| profile.profile_id.clone())
+                    .collect::<Vec<_>>(),
+                "versions": profile_assets
+                    .iter()
+                    .map(|profile| json!({
+                        "profile_id": profile.profile_id,
+                        "version": profile.version,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn build_harness_context(
@@ -36468,6 +36561,24 @@ not json
         assert_eq!(installed.eval_gate_status, "pending");
         assert_eq!(installed.release_gate_status, "pending");
         assert!(installed.validation_report["required_eval_gate_count"] == json!(2));
+        let installed_profiles: Vec<WorkflowPackProfileAsset> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}/onboarding/profiles",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(installed_profiles.len(), 6);
+        assert!(
+            installed_profiles
+                .iter()
+                .all(|profile| profile.version == 1)
+        );
 
         let (status, error) = request_value(
             app.clone(),
@@ -36623,6 +36734,20 @@ not json
             updated.gate_evidence["version_update"]["source_version"],
             json!("0.1.0")
         );
+        let updated_profiles: Vec<WorkflowPackProfileAsset> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}/onboarding/profiles",
+                    updated.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(updated_profiles.len(), 6);
+        assert!(updated_profiles.iter().all(|profile| profile.version == 1));
 
         let old_after_update: WorkflowPackInstallation = request_json(
             app.clone(),
@@ -36762,19 +36887,19 @@ not json
         assert_eq!(blocked.status, "blocked");
         assert_eq!(blocked.required_profile_count, 6);
         assert_eq!(blocked.inline_profile_count, 1);
-        assert_eq!(blocked.persisted_profile_count, 0);
-        assert_eq!(blocked.provided_profile_count, 1);
-        assert_eq!(blocked.placeholder_profile_count, 1);
-        assert!(blocked.missing_profiles.contains(&"department".to_string()));
-        assert!(
-            blocked
-                .missing_profiles
-                .contains(&"approval-matrix".to_string())
-        );
+        assert_eq!(blocked.persisted_profile_count, 6);
+        assert_eq!(blocked.provided_profile_count, 6);
+        assert_eq!(blocked.placeholder_profile_count, 6);
+        assert!(blocked.missing_profiles.is_empty());
         assert!(
             blocked
                 .placeholder_profiles
                 .contains(&"company".to_string())
+        );
+        assert!(
+            blocked
+                .placeholder_profiles
+                .contains(&"department".to_string())
         );
         assert_eq!(blocked.connector_requirement_count, 1);
         assert_eq!(blocked.ready_connector_count, 0);
@@ -36834,7 +36959,7 @@ not json
         )
         .await;
         assert_eq!(saved_profiles.len(), 6);
-        assert!(saved_profiles.iter().all(|profile| profile.version == 1));
+        assert!(saved_profiles.iter().all(|profile| profile.version == 2));
 
         let listed_profiles: Vec<WorkflowPackProfileAsset> = request_json(
             app.clone(),
@@ -36854,6 +36979,7 @@ not json
                 .iter()
                 .any(|profile| profile.profile_id == "company")
         );
+        assert!(listed_profiles.iter().all(|profile| profile.version == 2));
         assert!(
             listed_profiles
                 .iter()
@@ -36915,6 +37041,10 @@ not json
             log.action == "workflow_pack.onboarding_assessed"
                 && log.resource_id == Some(installed.id)
                 && log.details["status"] == json!("ready")
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "workflow_pack.onboarding_defaults_bootstrapped"
+                && log.resource_id == Some(installed.id)
         }));
         assert!(audit_logs.iter().any(|log| {
             log.action == "workflow_pack.onboarding_profiles_saved"

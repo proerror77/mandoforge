@@ -53,6 +53,12 @@ This contract does not install or activate packs yet. It blocks unsafe package s
 
 Install should parse and validate the manifest, copy the package into a tenant-scoped immutable package store, and create a draft pack version. It must not create active agents, connectors, policies, schedules, or external writes by default.
 
+The initial Stage 3 install flow also bootstraps customer-editable onboarding defaults:
+
+- Install creates active version `1` onboarding profile assets for every required onboarding profile using the packaged template files.
+- Those bootstrapped assets are intentionally placeholder defaults; onboarding assessment must still fail closed until customer-specific content replaces them.
+- `workflow_pack.onboarding_defaults_bootstrapped` audit evidence records which onboarding profiles were seeded during install.
+
 ### Update
 
 Update should create a new pack version. Existing released versions remain immutable. A new version must pass manifest validation, pack evals, policy gates, and release approval before tenant behavior changes.
@@ -124,4 +130,4 @@ The Whiskey evidence gate exercises the API lifecycle end to end:
 WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml scripts/workflow-pack-evidence-gate.sh
 ```
 
-It validates the manifest, proves onboarding fails closed with placeholder/missing customer inputs, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, creates a new installed version from an updated manifest, persists customer onboarding profiles as reusable assets, proves onboarding reaches `ready` from persisted profile assets plus connector declarations, verifies the rolled-back source remains unchanged and active before archive, archives the rolled-back source installation, and verifies archive removes only the source while the new installed version stays active.
+It validates the manifest, proves install bootstraps default onboarding profile assets, proves onboarding fails closed with placeholder/missing customer inputs, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, creates a new installed version from an updated manifest, proves the updated installation also boots default profile assets, persists customer onboarding profiles as reusable assets, proves onboarding reaches `ready` from persisted profile assets plus connector declarations, verifies the rolled-back source remains unchanged and active before archive, archives the rolled-back source installation, and verifies archive removes only the source while the new installed version stays active.

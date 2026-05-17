@@ -10,6 +10,91 @@ use crate::store_rows::{
 use crate::{AppError, AppState, WorkflowPackInstallation, WorkflowPackProfileAsset};
 
 impl AppState {
+    pub(crate) async fn create_workflow_pack_installation_with_profile_assets(
+        &self,
+        installation: WorkflowPackInstallation,
+        profile_assets: &[(String, String)],
+    ) -> Result<(WorkflowPackInstallation, Vec<WorkflowPackProfileAsset>), AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                store
+                    .workflow_pack_installations
+                    .insert(installation.id, installation.clone());
+                let bootstrapped_assets = profile_assets
+                    .iter()
+                    .map(|(profile_id, content)| WorkflowPackProfileAsset {
+                        id: Uuid::new_v4(),
+                        installation_id: installation.id,
+                        profile_id: profile_id.clone(),
+                        content: content.clone(),
+                        version: 1,
+                        status: "active".to_string(),
+                        created_at: installation.created_at,
+                        archived_at: None,
+                    })
+                    .collect::<Vec<_>>();
+                for asset in &bootstrapped_assets {
+                    store
+                        .workflow_pack_profile_assets
+                        .insert(asset.id, asset.clone());
+                }
+                Ok((installation, bootstrapped_assets))
+            }
+            StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let installation_row = sqlx::query(
+                    "INSERT INTO workflow_pack_installations
+                        (id, tenant_id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                     RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
+                )
+                .bind(installation.id)
+                .bind(self.current_tenant_id())
+                .bind(&installation.pack_id)
+                .bind(&installation.kind)
+                .bind(&installation.version)
+                .bind(&installation.manifest_path)
+                .bind(&installation.manifest)
+                .bind(&installation.validation_report)
+                .bind(&installation.status)
+                .bind(&installation.eval_gate_status)
+                .bind(&installation.release_gate_status)
+                .bind(&installation.gate_evidence)
+                .bind(installation.staged_at)
+                .bind(installation.released_at)
+                .bind(installation.archived_at)
+                .bind(installation.created_at)
+                .bind(installation.updated_at)
+                .fetch_one(&mut *tx)
+                .await?;
+                let installation = workflow_pack_installation_from_row(installation_row)?;
+
+                let mut bootstrapped_assets = Vec::with_capacity(profile_assets.len());
+                for (profile_id, content) in profile_assets {
+                    let row = sqlx::query(
+                        "INSERT INTO workflow_pack_profile_assets
+                            (id, tenant_id, installation_id, profile_id, content, version, status, created_at, archived_at)
+                         VALUES ($1, $2, $3, $4, $5, 1, 'active', $6, NULL)
+                         RETURNING id, installation_id, profile_id, content, version, status, created_at, archived_at",
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(self.current_tenant_id())
+                    .bind(installation.id)
+                    .bind(profile_id)
+                    .bind(content)
+                    .bind(installation.created_at)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    bootstrapped_assets.push(workflow_pack_profile_asset_from_row(row)?);
+                }
+
+                tx.commit().await?;
+                Ok((installation, bootstrapped_assets))
+            }
+        }
+    }
+
     pub(crate) async fn list_workflow_pack_installations(
         &self,
     ) -> Result<Vec<WorkflowPackInstallation>, AppError> {
@@ -67,50 +152,6 @@ impl AppState {
                 .fetch_optional(pool)
                 .await?
                 .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
-                workflow_pack_installation_from_row(row)
-            }
-        }
-    }
-
-    pub(crate) async fn create_workflow_pack_installation(
-        &self,
-        installation: WorkflowPackInstallation,
-    ) -> Result<WorkflowPackInstallation, AppError> {
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                inner
-                    .write()
-                    .await
-                    .workflow_pack_installations
-                    .insert(installation.id, installation.clone());
-                Ok(installation)
-            }
-            StoreBackend::Postgres(pool) => {
-                let row = sqlx::query(
-                    "INSERT INTO workflow_pack_installations
-                        (id, tenant_id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-                     RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
-                )
-                .bind(installation.id)
-                .bind(self.current_tenant_id())
-                .bind(&installation.pack_id)
-                .bind(&installation.kind)
-                .bind(&installation.version)
-                .bind(&installation.manifest_path)
-                .bind(&installation.manifest)
-                .bind(&installation.validation_report)
-                .bind(&installation.status)
-                .bind(&installation.eval_gate_status)
-                .bind(&installation.release_gate_status)
-                .bind(&installation.gate_evidence)
-                .bind(installation.staged_at)
-                .bind(installation.released_at)
-                .bind(installation.archived_at)
-                .bind(installation.created_at)
-                .bind(installation.updated_at)
-                .fetch_one(pool)
-                .await?;
                 workflow_pack_installation_from_row(row)
             }
         }

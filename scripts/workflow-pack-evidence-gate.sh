@@ -129,6 +129,7 @@ if [[ -z "$installation_id" ]]; then
   echo "workflow pack install evidence did not return an installation id" >&2
   exit 1
 fi
+installed_profiles_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id/onboarding/profiles")"
 
 blocked_onboarding_payload="$(jq -nc \
   --arg company_content "$(cat "$(dirname "$MANIFEST_PATH")/profiles/company.md")" \
@@ -184,6 +185,7 @@ update_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_
 updated_installation_id="$(jq -r '.response.id // empty' "$update_file")"
 old_after_update_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id")"
 list_after_update_file="$(fetch_json GET /api/workflow-packs/installations)"
+updated_default_profiles_file="$(fetch_json GET "/api/workflow-packs/installations/$updated_installation_id/onboarding/profiles")"
 old_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$installation_id-after-update.json"
 list_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-after-update.json"
 cp "$old_after_update_file" "$old_after_update_snapshot_file"
@@ -264,6 +266,10 @@ ready_connector_count="$(jq -r '.response.ready_connector_count // 0' "$onboardi
 onboarding_blocker_count="$(jq -r '[.response.blockers[]?] | length' "$onboarding_file")"
 persisted_profile_asset_count="$(jq -r '[.response[]?] | length' "$persisted_profiles_file")"
 persisted_profile_list_count="$(jq -r '[.response[]?] | length' "$persisted_profiles_list_file")"
+installed_default_profile_asset_count="$(jq -r '[.response[]?] | length' "$installed_profiles_file")"
+updated_default_profile_asset_count="$(jq -r '[.response[]?] | length' "$updated_default_profiles_file")"
+persisted_profile_saved_min_version="$(jq -r '[.response[]?.version] | min // 0' "$persisted_profiles_file")"
+persisted_profile_saved_max_version="$(jq -r '[.response[]?.version] | max // 0' "$persisted_profiles_file")"
 archive_status="$(jq -r '.response.status // "unknown"' "$archive_file")"
 eval_gate_status="$(jq -r '.response.eval_gate_status // "unknown"' "$release_file")"
 release_gate_status="$(jq -r '.response.release_gate_status // "unknown"' "$release_file")"
@@ -313,12 +319,20 @@ if [[ "$blocked_onboarding_status" != "blocked" ]]; then
   echo "workflow pack blocked onboarding assessment did not fail closed" >&2
   exit 1
 fi
+if [[ "$installed_default_profile_asset_count" != "6" || "$updated_default_profile_asset_count" != "6" ]]; then
+  echo "workflow pack install/update did not bootstrap default onboarding profile assets" >&2
+  exit 1
+fi
 if [[ "$onboarding_status" != "ready" || "$onboarding_workflow" != "profile-onboarding" || "$onboarding_eval" != "profile-onboarding-regression" ]]; then
   echo "workflow pack onboarding readiness assessment did not reach ready state" >&2
   exit 1
 fi
 if [[ "$persisted_profile_asset_count" != "6" || "$persisted_profile_list_count" != "6" ]]; then
   echo "workflow pack persisted onboarding profile assets did not save cleanly" >&2
+  exit 1
+fi
+if [[ "$persisted_profile_saved_min_version" != "2" || "$persisted_profile_saved_max_version" != "2" ]]; then
+  echo "workflow pack persisted onboarding profile versions did not advance past bootstrapped defaults" >&2
   exit 1
 fi
 if [[ "$required_profile_count" != "6" || "$profile_schema_count" != "6" || "$inline_profile_count" != "0" || "$persisted_profile_count" != "6" || "$provided_profile_count" != "6" || "$placeholder_profile_count" != "0" ]]; then
@@ -378,8 +392,12 @@ fi
   echo "connector_requirement_count=$connector_requirement_count"
   echo "ready_connector_count=$ready_connector_count"
   echo "onboarding_blocker_count=$onboarding_blocker_count"
+  echo "installed_default_profile_asset_count=$installed_default_profile_asset_count"
+  echo "updated_default_profile_asset_count=$updated_default_profile_asset_count"
   echo "persisted_profile_asset_count=$persisted_profile_asset_count"
   echo "persisted_profile_list_count=$persisted_profile_list_count"
+  echo "persisted_profile_saved_min_version=$persisted_profile_saved_min_version"
+  echo "persisted_profile_saved_max_version=$persisted_profile_saved_max_version"
   echo "old_after_update_status=$old_after_update_status"
   echo "updated_list_count=$updated_list_count"
   echo "old_after_update_list_count=$old_after_update_list_count"
