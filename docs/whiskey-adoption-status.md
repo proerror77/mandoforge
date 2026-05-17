@@ -7,14 +7,14 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 ## Current Deployment
 
 - Host: `wishky-2-1`.
-- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:8a053e0`.
+- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:96d7f86`.
 - API: `127.0.0.1:18787`.
 - Postgres: `127.0.0.1:15432`.
 - Compose project: `mandoforge-adoption`.
 - Tenant routing mode: `tenant_routed`.
-- Latest remote archive: `/opt/mandoforge-adoption/archives/mandoforge-whiskey-pilot-20260517T111701Z.tar.gz`.
-- Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260517T111701Z.tar.gz`.
-- Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260517T111701Z.tar.gz`.
+- Latest remote archive: `/opt/mandoforge-adoption/archives/mandoforge-whiskey-pilot-20260517T120625Z.tar.gz`.
+- Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260517T120625Z.tar.gz`.
+- Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260517T120625Z.tar.gz`.
 - Latest strict archive summary: `stage2_status=ready`, `completion_blocked=false`, `open_gap_count=0`, `validation_missing_endpoint_count=0`, `validation_stale_endpoint_count=0`.
 
 ## Lane Matrix
@@ -37,7 +37,7 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 
 | Lane | Whiskey status | Evidence | Next action |
 | --- | --- | --- | --- |
-| WorkflowPack / AI Governance Pack | Passed for Whiskey pilot lifecycle with rollback and archive proof | Full pilot archive `mandoforge-whiskey-pilot-20260517T111701Z.tar.gz` includes `workflow-packs/summary.txt` with `workflow_pack_status=archived_after_rollback`, `pack_id=ai-governance`, `validated_file_count=42`, `install_status=installed`, `stage_status=staged`, `release_status=released`, `rollback_status=rolled_back`, `archive_status=archived`, `eval_gate_status=passed`, `release_gate_status=passed`, `rolled_back_get_status=rolled_back`, `rolled_back_list_count=1`, `archived_get_status=404`, and `active_after_archive_count=0`. The release, rollback, and archive evidence records explicit gate evidence from `workflow-pack-evidence-gate`. | Continue with customer-specific onboarding quality, connector data quality, and WorkflowPack version-update semantics. |
+| WorkflowPack / AI Governance Pack | Passed for Whiskey pilot lifecycle with immutable version-update proof | Full pilot archive `mandoforge-whiskey-pilot-20260517T120625Z.tar.gz` includes `workflow-packs/summary.txt` with `workflow_pack_status=version_created_after_rollback_and_archive`, `pack_id=ai-governance`, `validated_file_count=42`, `install_status=installed`, `stage_status=staged`, `release_status=released`, `rollback_status=rolled_back`, `update_status=installed`, `update_version=0.1.1`, `update_manifest_path=packs/ai-governance/package-v0.1.1.yaml`, `archive_status=archived`, `eval_gate_status=passed`, `release_gate_status=passed`, `rolled_back_get_status=rolled_back`, `rolled_back_list_count=1`, `archived_get_status=404`, `active_after_archive_count=0`, and `updated_active_after_archive_count=1`. The gate proves a new version can be installed from an immutable manifest fixture while the rolled-back source remains auditable until archive. | Continue with customer-specific onboarding quality, connector data quality, and customer pack install defaults. |
 
 ## k3s Decision
 
