@@ -27,7 +27,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml) and the Whiskey Codex controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controller when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, and the Whiskey tenant routing controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
 
 The default image is:
 
@@ -51,6 +51,7 @@ The script:
 - ensures `Whiskey Adoption Org` and `Whiskey Pilot Team` exist;
 - runs `scripts/scheduler-evidence-gate.sh`;
 - runs `scripts/codex-app-server-evidence-gate.sh`;
+- runs `scripts/tenant-isolation-evidence-gate.sh`;
 - runs `scripts/worker-evidence-gate.sh`;
 - runs `scripts/remote-computer-evidence-gate.sh`;
 - runs `scripts/stage2-production-evidence-gate.sh` with `ALLOW_BLOCKED=1`;
@@ -65,6 +66,17 @@ RUN_STAGE2_PRODUCTION_VALIDATIONS=1 scripts/whiskey-adoption-evidence.sh
 ```
 
 If strict validation fails on a missing controller URL, that is the expected fail-closed behavior. Do not replace it with a mock controller for production adoption evidence.
+
+## Tenant Routing Lane
+
+Current Whiskey wiring starts a local tenant routing controller on the Docker gateway and configures the API with:
+
+```bash
+MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED=true
+MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL=http://host.docker.internal:18790/tenant/routing/validate
+```
+
+The controller is not a production multi-tenant router. It validates the live Whiskey API readiness report against the payload sent by `/api/tenant-isolation/routing/validate`, verifies fail-closed tenant headers and membership-scope signals, and preserves reported production blockers for single-runtime tenant routing and incomplete RLS. This gives repeatable controller evidence for Whiskey without marking the tenant routing lane production-ready.
 
 ## Codex App Server Lane
 

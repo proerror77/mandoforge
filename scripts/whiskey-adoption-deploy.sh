@@ -6,14 +6,18 @@ REMOTE_ROOT="${WHISKEY_REMOTE_ROOT:-/opt/mandoforge-adoption}"
 COMPOSE_PROJECT="${WHISKEY_COMPOSE_PROJECT:-mandoforge-adoption}"
 LOCAL_COMPOSE="${WHISKEY_COMPOSE_FILE:-deploy/whiskey/docker-compose.adoption.yml}"
 LOCAL_CODEX_CONTROLLER="${WHISKEY_CODEX_CONTROLLER_FILE:-deploy/whiskey/codex-app-server-controller.mjs}"
+LOCAL_TENANT_CONTROLLER="${WHISKEY_TENANT_CONTROLLER_FILE:-deploy/whiskey/tenant-routing-controller.mjs}"
 REMOTE_COMPOSE="$REMOTE_ROOT/docker-compose.yml"
 REMOTE_CODEX_CONTROLLER="$REMOTE_ROOT/codex-app-server-controller.mjs"
+REMOTE_TENANT_CONTROLLER="$REMOTE_ROOT/tenant-routing-controller.mjs"
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
 IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-latest}"
 PULL_IMAGE="${WHISKEY_PULL_IMAGE:-1}"
 CODEX_WS_PORT="${WHISKEY_CODEX_APP_SERVER_WS_PORT:-18788}"
 CODEX_CONTROLLER_PORT="${WHISKEY_CODEX_APP_SERVER_CONTROLLER_PORT:-18789}"
 CODEX_CONTROLLER_TOKEN="${WHISKEY_CODEX_APP_SERVER_CONTROLLER_TOKEN:-whiskey-codex-controller-token}"
+TENANT_CONTROLLER_PORT="${WHISKEY_TENANT_ROUTING_CONTROLLER_PORT:-18790}"
+TENANT_CONTROLLER_TOKEN="${WHISKEY_TENANT_ROUTING_CONTROLLER_TOKEN:-whiskey-tenant-routing-controller-token}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -33,10 +37,15 @@ if [[ ! -f "$LOCAL_CODEX_CONTROLLER" ]]; then
   echo "missing Whiskey Codex controller file: $LOCAL_CODEX_CONTROLLER" >&2
   exit 1
 fi
+if [[ ! -f "$LOCAL_TENANT_CONTROLLER" ]]; then
+  echo "missing Whiskey tenant routing controller file: $LOCAL_TENANT_CONTROLLER" >&2
+  exit 1
+fi
 
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 rsync -az "$LOCAL_COMPOSE" "$REMOTE_HOST:$REMOTE_COMPOSE"
 rsync -az "$LOCAL_CODEX_CONTROLLER" "$REMOTE_HOST:$REMOTE_CODEX_CONTROLLER"
+rsync -az "$LOCAL_TENANT_CONTROLLER" "$REMOTE_HOST:$REMOTE_TENANT_CONTROLLER"
 
 ssh "$REMOTE_HOST" "if [[ ! -f '$REMOTE_ENV' ]]; then cat > '$REMOTE_ENV' <<'ENV'
 MANDOFORGE_IMAGE_TAG=$IMAGE_TAG
@@ -68,7 +77,10 @@ ensure_env MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL http://host.doc
 ensure_env MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_TOKEN $CODEX_CONTROLLER_TOKEN
 ensure_env MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_REQUIRED true
 ensure_env MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL http://host.docker.internal:$CODEX_CONTROLLER_PORT/ops/validate
-ensure_env MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN $CODEX_CONTROLLER_TOKEN"
+ensure_env MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN $CODEX_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL http://host.docker.internal:$TENANT_CONTROLLER_PORT/tenant/routing/validate
+ensure_env MANDOFORGE_TENANT_ROUTING_CONTROLLER_TOKEN $TENANT_CONTROLLER_TOKEN"
 
 ssh "$REMOTE_HOST" "set -euo pipefail
 docker_gateway_ip=\$(ip -4 addr show docker0 2>/dev/null | awk '/inet /{print \$2}' | cut -d/ -f1 | head -1)
@@ -89,7 +101,17 @@ if ! ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_CONTROLL
   echo \$! > '$REMOTE_ROOT/codex-app-server-controller.pid'
   sleep 2
 fi
-ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/codex-app-server-controller.log' >&2; exit 1; }"
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/codex-app-server-controller.log' >&2; exit 1; }
+if [[ -f '$REMOTE_ROOT/tenant-routing-controller.pid' ]]; then
+  kill \$(cat '$REMOTE_ROOT/tenant-routing-controller.pid') >/dev/null 2>&1 || true
+  rm -f '$REMOTE_ROOT/tenant-routing-controller.pid'
+  sleep 1
+fi
+command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey tenant routing controller' >&2; exit 1; }
+nohup env TENANT_ROUTING_CONTROLLER_API_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} TENANT_ROUTING_CONTROLLER_HOST=\$docker_gateway_ip TENANT_ROUTING_CONTROLLER_PORT=$TENANT_CONTROLLER_PORT TENANT_ROUTING_CONTROLLER_TOKEN='$TENANT_CONTROLLER_TOKEN' node '$REMOTE_TENANT_CONTROLLER' > '$REMOTE_ROOT/tenant-routing-controller.log' 2>&1 &
+echo \$! > '$REMOTE_ROOT/tenant-routing-controller.pid'
+sleep 2
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$TENANT_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/tenant-routing-controller.log' >&2; exit 1; }"
 
 remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"
 if [[ "$PULL_IMAGE" == "1" ]]; then
