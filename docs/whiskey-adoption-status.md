@@ -55,6 +55,14 @@ scripts/whiskey-remote-computer-k3s-prepare.sh
 
 That script defaults to `dry_run` and only reports the host changes needed for a constrained pilot. It does not mutate Whiskey unless `--apply` is passed explicitly.
 
+After the host prerequisites are in place, the next repo-native step is:
+
+```bash
+scripts/whiskey-remote-computer-k3s-install.sh
+```
+
+That script also defaults to `dry_run`. It prints the exact k3s installer command and systemd actions it would run on Whiskey, but does not install anything unless `--apply` is passed explicitly.
+
 The latest preflight on 2026-05-17 returned `status=constrained_pilot_only` with:
 
 - `cpu_count=2`

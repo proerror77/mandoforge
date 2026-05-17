@@ -308,6 +308,19 @@ That script defaults to `dry_run` and only prints the exact changes it would mak
 
 Use `--apply` only after explicitly approving a constrained k3s pilot.
 
+After that preparation step, the install runway is:
+
+```bash
+scripts/whiskey-remote-computer-k3s-install.sh
+```
+
+This also defaults to `dry_run`. On Whiskey today it reports the exact install plan:
+
+- `curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=stable INSTALL_K3S_EXEC="server --disable=traefik --write-kubeconfig-mode=644 --kube-apiserver-arg=service-node-port-range=30080-30443" sh -`
+- `systemctl enable --now k3s`
+
+Use `--apply` only after the preflight and preparation outputs are reviewed and the constrained pilot is explicitly approved.
+
 The latest preflight on 2026-05-17 returned `status=constrained_pilot_only`. It confirmed that Whiskey is still a 2 vCPU / 3.4 GiB RAM host with only about 1.6 GiB immediately available memory, 1.4 GiB of swap already in use, no current k3s-reserved port collisions, and missing `br_netfilter` plus `bridge-nf-call-iptables`. That means cluster work should stay isolated from existing services and only proceed as an explicit constrained experiment.
 
 Current Whiskey capacity snapshot from the adoption check:
