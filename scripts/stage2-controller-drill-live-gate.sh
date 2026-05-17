@@ -9,6 +9,7 @@ STAGE2_MOCK_CONTROLLER_PORT="${STAGE2_MOCK_CONTROLLER_PORT:-18082}"
 STAGE2_MOCK_CONTROLLER_HOST="${STAGE2_MOCK_CONTROLLER_HOST:-127.0.0.1}"
 MOCK_BASE_URL="http://$STAGE2_MOCK_CONTROLLER_HOST:$STAGE2_MOCK_CONTROLLER_PORT"
 API_PID=""
+GATE_API_STARTUP_ATTEMPTS="${GATE_API_STARTUP_ATTEMPTS:-240}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -87,7 +88,7 @@ start_gate_api() {
     cargo run -p mandoforge-api >"$log_file" 2>&1 &
   API_PID="$!"
 
-  for _ in $(seq 1 80); do
+  for _ in $(seq 1 "$GATE_API_STARTUP_ATTEMPTS"); do
     if curl -fsS "$BASE_URL/healthz" >/dev/null 2>&1; then
       return 0
     fi
