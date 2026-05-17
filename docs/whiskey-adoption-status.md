@@ -7,14 +7,14 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 ## Current Deployment
 
 - Host: `wishky-2-1`.
-- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:09aa783`.
+- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:8b15084`.
 - API: `127.0.0.1:18787`.
 - Postgres: `127.0.0.1:15432`.
 - Compose project: `mandoforge-adoption`.
 - Tenant routing mode: `tenant_routed`.
-- Latest remote archive: `/opt/mandoforge-adoption/archives/mandoforge-whiskey-pilot-20260517T132402Z.tar.gz`.
-- Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260517T132402Z.tar.gz`.
-- Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260517T132402Z.tar.gz`.
+- Latest remote archive: `/opt/mandoforge-adoption/archives/mandoforge-whiskey-pilot-20260517T135242Z.tar.gz`.
+- Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260517T135242Z.tar.gz`.
+- Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260517T135242Z.tar.gz`.
 - Latest strict archive summary: `stage2_status=ready`, `completion_blocked=false`, `open_gap_count=0`, `validation_missing_endpoint_count=0`, `validation_stale_endpoint_count=0`.
 
 ## Lane Matrix
@@ -37,7 +37,7 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 
 | Lane | Whiskey status | Evidence | Next action |
 | --- | --- | --- | --- |
-| WorkflowPack / AI Governance Pack | Passed for Whiskey pilot lifecycle with immutable version-update, persisted profile assets, and onboarding assessment proof | Full pilot archive `mandoforge-whiskey-pilot-20260517T132402Z.tar.gz` includes `workflow-packs/summary.txt` with `workflow_pack_status=version_created_after_rollback_and_archive`, `pack_id=ai-governance`, `validated_file_count=42`, `install_status=installed`, `stage_status=staged`, `release_status=released`, `rollback_status=rolled_back`, `update_status=installed`, `update_version=0.1.1`, `update_manifest_path=packs/ai-governance/package-v0.1.1.yaml`, `blocked_onboarding_status=blocked`, `onboarding_status=ready`, `onboarding_workflow=profile-onboarding`, `onboarding_eval=profile-onboarding-regression`, `required_profile_count=6`, `profile_schema_count=6`, `inline_profile_count=0`, `persisted_profile_count=6`, `provided_profile_count=6`, `placeholder_profile_count=0`, `connector_requirement_count=1`, `ready_connector_count=1`, `onboarding_blocker_count=0`, `persisted_profile_asset_count=6`, `persisted_profile_list_count=6`, `archive_status=archived`, `eval_gate_status=passed`, `release_gate_status=passed`, `rolled_back_get_status=rolled_back`, `rolled_back_list_count=1`, `archived_get_status=404`, `active_after_archive_count=0`, and `updated_active_after_archive_count=1`. The gate now proves fail-closed onboarding assessment against placeholder/missing customer inputs, persists six customer profile assets, and reaches `ready` by reusing those persisted assets with connector declarations. | Continue with customer pack install defaults and real connector data quality against external targets. |
+| WorkflowPack / AI Governance Pack | Passed for Whiskey pilot lifecycle with install defaults, immutable version-update, persisted profile assets, and onboarding assessment proof | Full pilot archive `mandoforge-whiskey-pilot-20260517T135242Z.tar.gz` includes `workflow-packs/summary.txt` with `workflow_pack_status=version_created_after_rollback_and_archive`, `pack_id=ai-governance`, `validated_file_count=42`, `install_status=installed`, `stage_status=staged`, `release_status=released`, `rollback_status=rolled_back`, `update_status=installed`, `update_version=0.1.1`, `update_manifest_path=packs/ai-governance/package-v0.1.1.yaml`, `blocked_onboarding_status=blocked`, `onboarding_status=ready`, `onboarding_workflow=profile-onboarding`, `onboarding_eval=profile-onboarding-regression`, `required_profile_count=6`, `profile_schema_count=6`, `inline_profile_count=0`, `persisted_profile_count=6`, `provided_profile_count=6`, `placeholder_profile_count=0`, `connector_requirement_count=1`, `ready_connector_count=1`, `onboarding_blocker_count=0`, `installed_default_profile_asset_count=6`, `updated_default_profile_asset_count=6`, `persisted_profile_asset_count=6`, `persisted_profile_list_count=6`, `persisted_profile_saved_min_version=2`, `persisted_profile_saved_max_version=2`, `archive_status=archived`, `eval_gate_status=passed`, `release_gate_status=passed`, `rolled_back_get_status=rolled_back`, `rolled_back_list_count=1`, `archived_get_status=404`, `active_after_archive_count=0`, and `updated_active_after_archive_count=1`. The gate now proves install and update both bootstrap six default onboarding profile assets, saving customer-specific profiles advances those assets to version `2`, and readiness can be reached by reusing the persisted assets with connector declarations. | Continue with real connector data quality against external targets. |
 
 ## k3s Decision
 
