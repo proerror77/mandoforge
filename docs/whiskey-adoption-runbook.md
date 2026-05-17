@@ -54,7 +54,7 @@ The script:
 - runs `scripts/codex-app-server-evidence-gate.sh`;
 - runs `scripts/tenant-isolation-evidence-gate.sh`;
 - runs `scripts/worker-evidence-gate.sh`;
-- runs `scripts/remote-computer-evidence-gate.sh`;
+- runs `scripts/remote-computer-evidence-gate.sh` with sidecar recovery capture enabled so the archive records the audited no-op or replacement plan while preserving the state-sync production blocker;
 - seeds a Whiskey eval/release request, runs `scripts/eval-release-evidence-gate.sh`, and captures rollout, orchestration, deployment, and rollback evidence;
 - seeds a diagnostics approval path for observability remediation, runs `scripts/observability-collector-evidence-gate.sh`, and captures deployment, rollout, and remediation evidence;
 - seeds a Whiskey mock provider, runs `scripts/provider-governance-evidence-gate.sh`, and captures provider deployment, policy-gate, rollout, and rollback evidence;
@@ -134,7 +134,7 @@ MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL=http://host.docker.internal:187
 
 The controller validates the live Whiskey API worker-readiness report, durable Postgres queue mode, queue-backed worker mode, manifest hardening/autoscaling signals, the running Docker Compose worker service, and absence of failed jobs or stale leases. This is a Whiskey single-host worker validation, not a k3s multi-replica autoscaling proof.
 
-Without a real cluster, Remote Computer evidence is an inventory lane. The standard evidence script records readiness, runner, and state-sync validation evidence under `/evidence/remote-computer`, but production state sync should remain blocked until a distributed state filesystem and lock-aware state-sync manager are configured. Complete Remote Computer production evidence requires a real cluster or a `k3s` pilot on Whiskey.
+Without a real cluster, Remote Computer evidence is an inventory lane. The standard evidence script records readiness, runner, state-sync validation, and sidecar recovery evidence under `/evidence/remote-computer`. On the single-host Whiskey pilot, sidecar recovery normally records a `noop` audited plan when no unhealthy sidecar heartbeat exists; it must not be treated as pod replacement proof. Production state sync should remain blocked until a distributed state filesystem and lock-aware state-sync manager are configured. Complete Remote Computer production evidence requires a real cluster or a `k3s` pilot on Whiskey.
 
 ## MCP Connector Lane
 
