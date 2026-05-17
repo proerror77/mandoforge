@@ -25,7 +25,7 @@ if [[ ! -f "$LOCAL_COMPOSE" ]]; then
   exit 1
 fi
 
-ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives'"
+ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 rsync -az "$LOCAL_COMPOSE" "$REMOTE_HOST:$REMOTE_COMPOSE"
 
 ssh "$REMOTE_HOST" "if [[ ! -f '$REMOTE_ENV' ]]; then cat > '$REMOTE_ENV' <<'ENV'
@@ -34,6 +34,12 @@ MANDOFORGE_API_HOST_PORT=18787
 MANDOFORGE_POSTGRES_HOST_PORT=15432
 MANDOFORGE_SCHEDULER_TOKEN=whiskey-stage2-scheduler-token
 ENV
+else
+  if grep -q '^MANDOFORGE_IMAGE_TAG=' '$REMOTE_ENV'; then
+    sed -i 's/^MANDOFORGE_IMAGE_TAG=.*/MANDOFORGE_IMAGE_TAG=$IMAGE_TAG/' '$REMOTE_ENV'
+  else
+    printf '\nMANDOFORGE_IMAGE_TAG=%s\n' '$IMAGE_TAG' >> '$REMOTE_ENV'
+  fi
 fi"
 
 remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"

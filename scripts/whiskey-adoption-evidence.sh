@@ -34,6 +34,7 @@ sha256_value() {
 mkdir -p "$LOCAL_SYNC_DIR"
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && test -f '$REMOTE_COMPOSE' && test -f '$REMOTE_ENV'"
+ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
   docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' exec -T api bash -lc '

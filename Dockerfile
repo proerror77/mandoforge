@@ -14,6 +14,7 @@ COPY --from=builder /app/target/release/mandoforge-worker /usr/local/bin/mandofo
 COPY README.md README.zh-CN.md ./
 COPY config ./config
 COPY db ./db
+COPY docs ./docs
 COPY schemas ./schemas
 COPY packs ./packs
 COPY web ./web
