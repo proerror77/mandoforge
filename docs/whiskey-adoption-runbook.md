@@ -169,6 +169,13 @@ In that mode, `whiskey-docs` reads authenticated file contents from the private 
 
 The same controller also supports `WHISKEY_MCP_UPSTREAM_MODE=lark_chat_messages` and `WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search`. `lark_docs_search` uses `lark-cli docs +search` against the current user's Docs/Wiki search scope; it is the next repo-native path for turning `whiskey-docs` into a broader Lark knowledge-space target, but it requires the Whiskey `lark-cli` login to have `search:docs:read`.
 
+Use the repo-native helper below to check or start that scope upgrade:
+
+```bash
+scripts/whiskey-mcp-lark-docs-scope.sh
+scripts/whiskey-mcp-lark-docs-scope.sh --start-login
+```
+
 ## Eval/Release Lane
 
 Current Whiskey wiring starts a local agent release rollout/deployment/orchestration/rollback controller on the Docker gateway and configures the API with:
