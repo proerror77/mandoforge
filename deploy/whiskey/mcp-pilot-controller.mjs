@@ -5,6 +5,10 @@ const listenHost = process.env.MCP_PILOT_CONTROLLER_HOST || "127.0.0.1";
 const listenPort = Number(process.env.MCP_PILOT_CONTROLLER_PORT || "18792");
 const controllerToken = process.env.MCP_PILOT_CONTROLLER_TOKEN || "";
 const allowedServer = process.env.MCP_PILOT_SERVER_NAME || "whiskey-docs";
+const upstreamMode = process.env.MCP_PILOT_UPSTREAM_MODE || "mock";
+const wikimediaApiUrl =
+  process.env.MCP_PILOT_WIKIMEDIA_API_URL || "https://en.wikipedia.org/w/api.php";
+const wikimediaLimit = Number(process.env.MCP_PILOT_WIKIMEDIA_LIMIT || "5");
 
 function writeJson(response, statusCode, body) {
   response.writeHead(statusCode, { "content-type": "application/json" });
@@ -34,6 +38,46 @@ async function readJson(request) {
 
 function step(name, status, details = {}) {
   return { name, ...details, status };
+}
+
+async function searchWikimedia(query) {
+  const url = new URL(wikimediaApiUrl);
+  url.searchParams.set("action", "opensearch");
+  url.searchParams.set("search", query);
+  url.searchParams.set("limit", String(Math.max(1, wikimediaLimit)));
+  url.searchParams.set("namespace", "0");
+  url.searchParams.set("format", "json");
+  const response = await fetch(url, {
+    headers: { "user-agent": "mandoforge-whiskey-mcp-pilot/1.0" },
+  });
+  if (!response.ok) {
+    throw new Error(`wikimedia search failed with status ${response.status}`);
+  }
+  const body = await response.json();
+  const titles = Array.isArray(body?.[1]) ? body[1] : [];
+  const descriptions = Array.isArray(body?.[2]) ? body[2] : [];
+  const urls = Array.isArray(body?.[3]) ? body[3] : [];
+  return titles.map((title, index) => ({
+    title,
+    url: urls[index] || null,
+    snippet: descriptions[index] || "",
+    source_id: urls[index] || title,
+    reference: title,
+    retrieval_actor: "wikimedia-opensearch",
+  }));
+}
+
+function pilotItems(query) {
+  return [
+    {
+      title: "Whiskey MCP pilot",
+      url: "https://example.invalid/mandoforge/whiskey-mcp-pilot",
+      snippet: `Pilot response for ${query}`,
+      source_id: "whiskey-mcp-pilot",
+      reference: "Whiskey MCP pilot",
+      retrieval_actor: "whiskey-mcp-pilot",
+    },
+  ];
 }
 
 function validateConnectors(payload) {
@@ -80,16 +124,19 @@ async function handleGatewayCall(request, response) {
     });
     return;
   }
+  const query =
+    payload.args?.query || payload.arguments?.query || payload.input?.query || "OpenAI";
+  const items =
+    upstreamMode === "wikimedia"
+      ? await searchWikimedia(String(query))
+      : pilotItems(String(query));
   writeJson(response, 200, {
     result: {
       status: "ok",
-      source: "whiskey-mcp-pilot",
-      items: [
-        {
-          title: "Whiskey MCP pilot",
-          url: "https://example.invalid/mandoforge/whiskey-mcp-pilot",
-        },
-      ],
+      source: upstreamMode === "wikimedia" ? "wikimedia-opensearch" : "whiskey-mcp-pilot",
+      query,
+      item_count: items.length,
+      items,
     },
   });
 }

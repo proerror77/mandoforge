@@ -13,6 +13,8 @@ CONNECTOR_SERVER_ID="${WORKFLOW_PACK_CONNECTOR_SERVER_ID:-}"
 CONNECTOR_TOOL_NAME="${WORKFLOW_PACK_CONNECTOR_TOOL_NAME:-search}"
 CONNECTOR_SERVER_NAME="${WORKFLOW_PACK_CONNECTOR_SERVER_NAME:-whiskey-docs}"
 REQUIRE_CONNECTOR_BINDING="${WORKFLOW_PACK_REQUIRE_CONNECTOR_BINDING:-0}"
+WORKFLOW_PACK_MCP_CALL_URL="${WORKFLOW_PACK_MCP_CALL_URL:-}"
+WORKFLOW_PACK_MCP_QUERY="${WORKFLOW_PACK_MCP_QUERY:-OpenAI}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -96,6 +98,26 @@ fetch_json() {
   printf '%s\n' "$target"
 }
 
+fetch_gateway_call() {
+  local target="$EVIDENCE_DIR/mcp-gateway-call.json"
+  local response_body
+  local http_status
+  response_body="$(mktemp)"
+  http_status="$(curl -sS -o "$response_body" -w "%{http_code}" -X POST \
+    -H "content-type: application/json" \
+    -d "{\"server\":\"$CONNECTOR_SERVER_NAME\",\"tool\":\"$CONNECTOR_TOOL_NAME\",\"args\":{\"query\":\"$WORKFLOW_PACK_MCP_QUERY\"}}" \
+    "$WORKFLOW_PACK_MCP_CALL_URL")"
+  if [[ "$http_status" != 2* ]]; then
+    echo "workflow pack gateway call failed: returned HTTP $http_status" >&2
+    sed -n '1,80p' "$response_body" >&2
+    rm -f "$response_body"
+    exit 1
+  fi
+  tee "$target" <"$response_body" >/dev/null
+  rm -f "$response_body"
+  echo "$target"
+}
+
 require_cmd curl
 require_cmd jq
 require_cmd awk
@@ -138,6 +160,12 @@ discover_connector_binding
 if [[ "$REQUIRE_CONNECTOR_BINDING" == "1" && ( -z "$CONNECTOR_TEAM_ID" || -z "$CONNECTOR_SERVER_ID" ) ]]; then
   echo "workflow pack connector quality requires a discoverable MCP connector binding" >&2
   exit 1
+fi
+if [[ -z "$WORKFLOW_PACK_MCP_CALL_URL" ]]; then
+  gateway_base="${MANDOFORGE_MCP_GATEWAY_URL:-}"
+  if [[ -n "$gateway_base" ]]; then
+    WORKFLOW_PACK_MCP_CALL_URL="${gateway_base/host.docker.internal/172.17.0.1}/v1/call"
+  fi
 fi
 if [[ -n "$CONNECTOR_TEAM_ID" ]]; then
   fetch_json POST "/api/teams/$CONNECTOR_TEAM_ID/mcp-servers/health/run-due" >/dev/null
@@ -324,6 +352,25 @@ blocked_connector_quality_payload="$(jq -nc '{
 blocked_connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$blocked_connector_quality_payload")"
 blocked_connector_quality_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$updated_installation_id-connectors-quality-assess-blocked.json"
 cp "$blocked_connector_quality_file" "$blocked_connector_quality_snapshot_file"
+gateway_call_file=""
+gateway_live_title="Vendor AI policy"
+gateway_live_url="https://kb.example/policy/vendor-ai"
+gateway_live_snippet="Grounded source with retained provenance."
+gateway_live_source_id="page-fresh-1"
+gateway_live_reference="KB-2026-05"
+gateway_live_retrieval_actor="connector-pilot"
+if [[ -n "$WORKFLOW_PACK_MCP_CALL_URL" ]]; then
+  gateway_call_file="$(fetch_gateway_call)"
+  gateway_live_title="$(jq -r '.result.items[0].title // "Vendor AI policy"' "$gateway_call_file")"
+  gateway_live_url="$(jq -r '.result.items[0].url // "https://kb.example/policy/vendor-ai"' "$gateway_call_file")"
+  gateway_live_snippet="$(jq -r '.result.items[0].snippet // "Grounded source with retained provenance."' "$gateway_call_file")"
+  gateway_live_source_id="$(jq -r '.result.items[0].source_id // .result.items[0].url // .result.items[0].title // "page-fresh-1"' "$gateway_call_file")"
+  gateway_live_reference="$(jq -r '.result.items[0].reference // .result.items[0].title // "KB-2026-05"' "$gateway_call_file")"
+  gateway_live_retrieval_actor="$(jq -r '.result.items[0].retrieval_actor // .result.source // "connector-pilot"' "$gateway_call_file")"
+elif [[ "$REQUIRE_CONNECTOR_BINDING" == "1" ]]; then
+  echo "workflow pack connector quality requires a reachable MCP gateway call URL" >&2
+  exit 1
+fi
 ready_connector_quality_payload="$(jq -nc '{
   connectors: [
     {
@@ -332,15 +379,15 @@ ready_connector_quality_payload="$(jq -nc '{
         {
           object_id: "kb-fresh-1",
           retrieved_at: "2026-05-17T00:00:00Z",
-          citation_url: "https://kb.example/policy/vendor-ai",
+          citation_url: $citation_url,
           metadata: {
-            source_id: "page-fresh-1",
-            reference: "KB-2026-05",
-            retrieval_actor: "connector-pilot"
+            source_id: $source_id,
+            reference: $reference,
+            retrieval_actor: $retrieval_actor
           },
           content: {
-            title: "Vendor AI policy",
-            snippet: "Grounded source with retained provenance."
+            title: $title,
+            snippet: $snippet
           }
         }
       ]
@@ -372,7 +419,16 @@ ready_connector_quality_payload="$(jq -nc '{
       ]
     }
   ]
-} end)' --arg team_id "$CONNECTOR_TEAM_ID" --arg server_id "$CONNECTOR_SERVER_ID" --arg tool_name "$CONNECTOR_TOOL_NAME")"
+} end)' \
+  --arg team_id "$CONNECTOR_TEAM_ID" \
+  --arg server_id "$CONNECTOR_SERVER_ID" \
+  --arg tool_name "$CONNECTOR_TOOL_NAME" \
+  --arg citation_url "$gateway_live_url" \
+  --arg source_id "$gateway_live_source_id" \
+  --arg reference "$gateway_live_reference" \
+  --arg retrieval_actor "$gateway_live_retrieval_actor" \
+  --arg title "$gateway_live_title" \
+  --arg snippet "$gateway_live_snippet")"
 connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$ready_connector_quality_payload")"
 archive_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/archive" \
   '{"reason":"Whiskey WorkflowPack adoption archive proof"}')"
