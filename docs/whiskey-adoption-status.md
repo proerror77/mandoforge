@@ -41,6 +41,23 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 
 ## k3s Decision
 
-Do not install k3s automatically on Whiskey. The host has 2 vCPU and 3.4 GiB RAM, with roughly 1.9 GiB available during the current pilot and existing swap use. A single-node k3s pilot is feasible only as an explicit constrained experiment with capped Remote Computer warm-pool replicas and no public ingress.
+Do not install k3s automatically on Whiskey. Before any cluster experiment, run:
+
+```bash
+scripts/whiskey-remote-computer-k3s-preflight.sh
+```
+
+The latest preflight on 2026-05-17 returned `status=constrained_pilot_only` with:
+
+- `cpu_count=2`
+- `mem_available_mib=1584`
+- `swap_used_mib=1397`
+- `root_avail_gib=83.3`
+- `cgroup_fs=cgroup2fs`
+- `reserved_ports=none`
+- `br_netfilter_loaded=false`
+- `bridge_nf_call_iptables=missing`
+
+That means a single-node k3s pilot is feasible only as an explicit constrained experiment with capped Remote Computer warm-pool replicas, no public ingress, and preflight remediation for `br_netfilter` plus bridge iptables before installation.
 
 Until that decision is made, Whiskey remains a single-host production-like pilot: useful for API, Codex App Server deployment/ops, scheduler, and inventory evidence, but not enough for complete Remote Computer cluster/state adoption.

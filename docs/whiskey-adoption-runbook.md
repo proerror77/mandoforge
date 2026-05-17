@@ -287,14 +287,21 @@ scripts/workflow-pack-evidence-gate.sh
 
 The gate validates the manifest contract, proves onboarding fails closed with placeholder or missing customer input, installs the pack, confirms install bootstraps default onboarding profile assets, stages the installation, confirms release fails unless eval and release gates pass, releases the pack with explicit gate evidence, creates an immutable `0.1.1` update version, confirms the updated installation also boots default profile assets, persists customer onboarding profiles as versioned assets, proves onboarding reaches `ready` when those persisted assets plus connector declarations satisfy the pack contract, then proves connector quality fails closed with stale or incomplete samples and reaches `ready` with fresh attributable samples bound to the real Whiskey `whiskey-docs` MCP server and sourced from authenticated Feishu private-chat message reads. The current pilot result is a real message from the Whiskey user's Feishu private chat with a stable `message_id` and deep link. This is a Whiskey pilot proof for the WorkflowPack install/stage/release lifecycle plus contract-level onboarding readiness, install defaults, profile-asset persistence, connector-quality gating, real MCP server binding, and a credentialed non-pilot enterprise read source; it does not yet prove broader internal docs/wiki spaces or external SaaS connectors such as Slack, Jira, or Confluence.
 
-Before installing `k3s`, decide whether Whiskey should carry that operational burden. The host has limited memory, so cluster work should be isolated from existing services and measured before claiming Remote Computer production readiness.
+Before installing `k3s`, run the host preflight first:
+
+```bash
+scripts/whiskey-remote-computer-k3s-preflight.sh
+```
+
+The latest preflight on 2026-05-17 returned `status=constrained_pilot_only`. It confirmed that Whiskey is still a 2 vCPU / 3.4 GiB RAM host with only about 1.6 GiB immediately available memory, 1.4 GiB of swap already in use, no current k3s-reserved port collisions, and missing `br_netfilter` plus `bridge-nf-call-iptables`. That means cluster work should stay isolated from existing services and only proceed as an explicit constrained experiment.
 
 Current Whiskey capacity snapshot from the adoption check:
 
 - 2 vCPU.
-- 3.4 GiB RAM, with roughly 1.9 GiB available during the pilot.
+- 3.4 GiB RAM, with roughly 1.6 GiB available during the latest preflight.
 - 4.0 GiB swap, with existing swap use observed.
 - No `k3s` or `kubectl` installed.
 - Existing public services already use ports `5432`, `8080`, `3000`, and `9377`; MandoForge remains loopback-only on `18787` and `15432`.
+- `br_netfilter` is not loaded and `net.bridge.bridge-nf-call-iptables` is missing.
 
-Recommendation: keep Whiskey in single-host pilot mode unless explicitly deciding to spend this host's remaining headroom on a constrained single-node `k3s` pilot. If `k3s` is installed later, cap Remote Computer warm-pool replicas and keep Codex/Remote Computer services on loopback or cluster-internal networking until an authenticated ingress policy exists.
+Recommendation: keep Whiskey in single-host pilot mode unless explicitly deciding to spend this host's remaining headroom on a constrained single-node `k3s` pilot. If `k3s` is installed later, first load `br_netfilter`, enable bridge iptables, cap Remote Computer warm-pool replicas, and keep Codex/Remote Computer services on loopback or cluster-internal networking until an authenticated ingress policy exists.
