@@ -959,6 +959,13 @@ struct ApprovalEscalationDueRun {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SchedulerDueRun {
+    run_id: Uuid,
+    idempotency_key: Option<String>,
+    owner: String,
+    run_window_start: DateTime<Utc>,
+    run_window_end: DateTime<Utc>,
+    retry_policy: SchedulerRetryPolicy,
+    replayed: bool,
     status: String,
     checked_at: DateTime<Utc>,
     team_count: usize,
@@ -974,6 +981,26 @@ struct SchedulerDueRun {
     usage_finance_export: UsageFinanceExportDelivery,
     remote_computer_reclaim: RemoteComputerReclaimRun,
     remote_computer_sidecar_supervision: RemoteComputerSidecarSupervisionRun,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchedulerRetryPolicy {
+    max_attempts: u32,
+    backoff_seconds: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchedulerRunDueRequest {
+    #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    run_window_start: Option<DateTime<Utc>>,
+    #[serde(default)]
+    run_window_end: Option<DateTime<Utc>>,
+    #[serde(default)]
+    retry_policy: Option<SchedulerRetryPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1028,6 +1055,9 @@ struct SchedulerOrchestrationSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SchedulerRunHistoryItem {
     audit_log_id: Uuid,
+    run_id: Option<Uuid>,
+    idempotency_key: Option<String>,
+    owner: Option<String>,
     status: String,
     team_count: usize,
     action_count: usize,
@@ -21109,10 +21139,13 @@ fn usage_finance_export_webhook_url() -> Option<String> {
 async fn run_scheduler_due_tasks(
     State(state): State<AppState>,
     headers: HeaderMap,
+    input: Option<Json<SchedulerRunDueRequest>>,
 ) -> Result<Json<SchedulerDueRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
     validate_scheduler_shared_token(&headers)?;
-    Ok(Json(execute_scheduler_due_tasks(&state).await?))
+    Ok(Json(
+        execute_scheduler_due_tasks(&state, input.map(|Json(input)| input)).await?,
+    ))
 }
 
 async fn validate_scheduler_deployment(
@@ -21611,6 +21644,21 @@ fn secret_manifest_defines_key(relative_path: &str, key: &str) -> bool {
 }
 
 fn scheduler_run_history_item(log: AuditLog) -> Option<SchedulerRunHistoryItem> {
+    let run_id = log
+        .details
+        .get("run_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let idempotency_key = log
+        .details
+        .get("idempotency_key")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let owner = log
+        .details
+        .get("owner")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let status = log
         .details
         .get("status")
@@ -21636,6 +21684,9 @@ fn scheduler_run_history_item(log: AuditLog) -> Option<SchedulerRunHistoryItem> 
         .unwrap_or_default();
     Some(SchedulerRunHistoryItem {
         audit_log_id: log.id,
+        run_id,
+        idempotency_key,
+        owner,
         status,
         team_count,
         action_count: actions.len(),
@@ -21984,8 +22035,17 @@ fn scheduler_due_plan_item(
     }
 }
 
-async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun, AppError> {
+async fn execute_scheduler_due_tasks(
+    state: &AppState,
+    input: Option<SchedulerRunDueRequest>,
+) -> Result<SchedulerDueRun, AppError> {
     let checked_at = Utc::now();
+    let request = normalize_scheduler_run_due_request(input, checked_at)?;
+    if let Some(existing_run) =
+        scheduler_replay_due_run(state, request.idempotency_key.as_deref()).await?
+    {
+        return Ok(existing_run);
+    }
     let providers = state.list_providers().await?;
     let audit_logs = state.list_audit_logs(None).await?;
     let provider_policy_gate = if provider_policy_gate_is_due(&providers, &audit_logs, checked_at) {
@@ -22097,6 +22157,18 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
     }
     .to_string();
     let run = SchedulerDueRun {
+        run_id: Uuid::new_v4(),
+        idempotency_key: request.idempotency_key.clone(),
+        owner: request.owner.clone().expect("normalized owner"),
+        run_window_start: request
+            .run_window_start
+            .expect("normalized run window start"),
+        run_window_end: request.run_window_end.expect("normalized run window end"),
+        retry_policy: request
+            .retry_policy
+            .clone()
+            .expect("normalized retry policy"),
+        replayed: false,
         status,
         checked_at,
         team_count,
@@ -22113,6 +22185,7 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
         remote_computer_reclaim,
         remote_computer_sidecar_supervision,
     };
+    let run_value = serde_json::to_value(&run)?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -22123,6 +22196,12 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
             None,
             json!({
                 "status": run.status,
+                "run_id": run.run_id,
+                "idempotency_key": run.idempotency_key,
+                "owner": run.owner,
+                "run_window_start": run.run_window_start,
+                "run_window_end": run.run_window_end,
+                "retry_policy": run.retry_policy,
                 "team_count": run.team_count,
                 "actions": run.actions,
                 "provider_policy_gate_status": run.provider_policy_gate.as_ref().map(|gate| gate.status.clone()),
@@ -22131,10 +22210,99 @@ async fn execute_scheduler_due_tasks(state: &AppState) -> Result<SchedulerDueRun
                 "remote_computer_sidecar_missing_heartbeat_count": run.remote_computer_sidecar_supervision.missing_heartbeat_count,
                 "remote_computer_sidecar_stale_heartbeat_count": run.remote_computer_sidecar_supervision.stale_heartbeat_count,
                 "checked_at": run.checked_at,
+                "run": run_value,
             }),
         ))
         .await?;
     Ok(run)
+}
+
+fn normalize_scheduler_run_due_request(
+    input: Option<SchedulerRunDueRequest>,
+    checked_at: DateTime<Utc>,
+) -> Result<SchedulerRunDueRequest, AppError> {
+    let input = input.unwrap_or(SchedulerRunDueRequest {
+        idempotency_key: None,
+        owner: None,
+        run_window_start: None,
+        run_window_end: None,
+        retry_policy: None,
+    });
+    let idempotency_key = input
+        .idempotency_key
+        .map(|value| validate_scheduler_slug("idempotency_key", &value))
+        .transpose()?;
+    let owner = input
+        .owner
+        .map(|value| validate_scheduler_slug("owner", &value))
+        .transpose()?
+        .unwrap_or_else(|| "manual".to_string());
+    let run_window_start = input.run_window_start.unwrap_or(checked_at);
+    let run_window_end = input
+        .run_window_end
+        .unwrap_or_else(|| checked_at + ChronoDuration::minutes(5));
+    if run_window_end <= run_window_start {
+        return Err(AppError::bad_request(
+            "scheduler run_window_end must be after run_window_start",
+        ));
+    }
+    let retry_policy = input.retry_policy.unwrap_or(SchedulerRetryPolicy {
+        max_attempts: 1,
+        backoff_seconds: 0,
+    });
+    if retry_policy.max_attempts == 0 || retry_policy.max_attempts > 10 {
+        return Err(AppError::bad_request(
+            "scheduler retry_policy.max_attempts must be between 1 and 10",
+        ));
+    }
+    if retry_policy.backoff_seconds > 3600 {
+        return Err(AppError::bad_request(
+            "scheduler retry_policy.backoff_seconds must be 3600 or less",
+        ));
+    }
+    Ok(SchedulerRunDueRequest {
+        idempotency_key,
+        owner: Some(owner),
+        run_window_start: Some(run_window_start),
+        run_window_end: Some(run_window_end),
+        retry_policy: Some(retry_policy),
+    })
+}
+
+async fn scheduler_replay_due_run(
+    state: &AppState,
+    idempotency_key: Option<&str>,
+) -> Result<Option<SchedulerDueRun>, AppError> {
+    let Some(idempotency_key) = idempotency_key else {
+        return Ok(None);
+    };
+    let audit_logs = state.list_audit_logs(None).await?;
+    let Some(log) = audit_logs
+        .into_iter()
+        .filter(|log| log.action == "scheduler.run_due")
+        .find(|log| log.details["idempotency_key"].as_str() == Some(idempotency_key))
+    else {
+        return Ok(None);
+    };
+    let mut run: SchedulerDueRun = serde_json::from_value(log.details["run"].clone())
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    run.replayed = true;
+    Ok(Some(run))
+}
+
+fn validate_scheduler_slug(field: &str, value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 128
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+    {
+        return Err(AppError::bad_request(format!(
+            "scheduler {field} must be non-empty token text"
+        )));
+    }
+    Ok(trimmed.to_string())
 }
 
 async fn execute_remote_computer_sidecar_supervision(
@@ -47316,6 +47484,12 @@ not json
         )
         .await;
         assert_eq!(run.status, "completed");
+        assert_eq!(run.owner, "manual");
+        assert_eq!(run.idempotency_key, None);
+        assert!(!run.replayed);
+        assert_eq!(run.retry_policy.max_attempts, 1);
+        assert_eq!(run.retry_policy.backoff_seconds, 0);
+        assert!(run.run_window_end > run.run_window_start);
         assert_eq!(run.team_count, 1);
         assert_eq!(run.mcp_health_runs.len(), 1);
         assert_eq!(run.mcp_health_runs[0].team_id, team.id);
@@ -47377,6 +47551,9 @@ not json
         .await;
         assert_eq!(summary.last_run_status.as_deref(), Some("completed"));
         assert_eq!(summary.recent_run_count, 1);
+        assert_eq!(summary.recent_runs[0].run_id, Some(run.run_id));
+        assert_eq!(summary.recent_runs[0].owner.as_deref(), Some("manual"));
+        assert_eq!(summary.recent_runs[0].idempotency_key, None);
         assert_eq!(summary.deployment_readiness.status, "blocked");
         assert!(summary.deployment_readiness.production_blocked);
         assert!(summary.deployment_readiness.scheduler_manifest_present);
@@ -47443,6 +47620,9 @@ not json
             log.action == "scheduler.run_due"
                 && log.details["team_count"] == 1
                 && log.details["status"] == "completed"
+                && log.details["run_id"] == json!(run.run_id)
+                && log.details["owner"] == "manual"
+                && log.details["run"]["run_id"] == json!(run.run_id)
                 && log.details["cost_alert_delivery_status"] == "reserved"
                 && log.details["remote_computer_sidecar_supervision_status"] == "attention"
         }));
@@ -47451,6 +47631,149 @@ not json
                 && log.details["status"] == "attention"
                 && log.details["missing_heartbeat_count"] == 1
         }));
+    }
+
+    #[tokio::test]
+    async fn scheduler_due_run_replays_by_idempotency_key_and_validates_request() {
+        let app = test_app().await;
+        let payload = json!({
+            "idempotency_key": "stage3-scheduler:2026-05-17T00:00Z",
+            "owner": "k8s-cronjob",
+            "run_window_start": "2026-05-17T00:00:00Z",
+            "run_window_end": "2026-05-17T00:05:00Z",
+            "retry_policy": {
+                "max_attempts": 3,
+                "backoff_seconds": 30
+            }
+        });
+
+        let first_run: SchedulerDueRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/run-due")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(payload.to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(first_run.status, "noop");
+        assert_eq!(
+            first_run.idempotency_key.as_deref(),
+            Some("stage3-scheduler:2026-05-17T00:00Z")
+        );
+        assert_eq!(first_run.owner, "k8s-cronjob");
+        assert_eq!(first_run.retry_policy.max_attempts, 3);
+        assert_eq!(first_run.retry_policy.backoff_seconds, 30);
+        assert!(!first_run.replayed);
+
+        let second_run: SchedulerDueRun = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/run-due")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(payload.to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(second_run.run_id, first_run.run_id);
+        assert_eq!(second_run.checked_at, first_run.checked_at);
+        assert!(second_run.replayed);
+
+        let summary: SchedulerOrchestrationSummary = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/scheduler/summary")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(summary.recent_run_count, 1);
+        assert_eq!(summary.recent_runs[0].run_id, Some(first_run.run_id));
+        assert_eq!(
+            summary.recent_runs[0].idempotency_key.as_deref(),
+            Some("stage3-scheduler:2026-05-17T00:00Z")
+        );
+        assert_eq!(summary.recent_runs[0].owner.as_deref(), Some("k8s-cronjob"));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let matching_runs: Vec<_> = audit_logs
+            .iter()
+            .filter(|log| {
+                log.action == "scheduler.run_due"
+                    && log.details["idempotency_key"] == json!("stage3-scheduler:2026-05-17T00:00Z")
+            })
+            .collect();
+        assert_eq!(matching_runs.len(), 1);
+        assert_eq!(matching_runs[0].details["run"]["replayed"], false);
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/run-due")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "idempotency_key": "invalid key with spaces",
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("idempotency_key"))
+        );
+
+        let (status, error) = request_value(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/run-due")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "idempotency_key": "stage3-scheduler:bad-retry",
+                        "run_window_start": "2026-05-17T00:05:00Z",
+                        "run_window_end": "2026-05-17T00:05:00Z",
+                        "retry_policy": {"max_attempts": 0, "backoff_seconds": 0}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("run_window_end"))
+        );
     }
 
     #[tokio::test]

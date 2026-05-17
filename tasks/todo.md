@@ -187,7 +187,7 @@
 - [x] Add production Codex App Server worker-backed steering orchestration.
 - [x] Add Codex App Server retry orchestration across worker leases.
 - [x] Add long-running Codex App Server steering summary metrics.
-- [ ] Stage 3: add external scheduler integration with idempotent due-plan/run ownership, retry policy, and audit evidence.
+- [x] Stage 3: add external scheduler integration with idempotent due-plan/run ownership, retry policy, and audit evidence.
 - [ ] Stage 3: add richer per-turn Codex App Server trace dashboards for command, poll, interrupt, worker lease, retry, fallback, and artifact sync paths.
 - [ ] Stage 3: productize assigned Remote Computer Pod execution without bypassing Tool Router, Policy Engine, Approval Engine, event log, or audit paths.
 - [x] Stage 3: add typed agent handoff events with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
