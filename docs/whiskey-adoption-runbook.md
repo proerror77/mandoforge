@@ -153,9 +153,21 @@ MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_REQUIRED=true
 MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL=http://host.docker.internal:18792/mcp/rollback/validate
 ```
 
-The evidence script seeds a `whiskey-docs` connector on the Whiskey pilot team, keeps the `search` tool allowlisted, creates a due rollout when one is not already pending, enables strict MCP due-run plus rollback evidence, and routes `/v1/call` through authenticated Feishu private-chat message retrieval using the Whiskey host's existing `lark-cli` session. The default MCP pilot target is the current user's private chat message list, filtered locally by the query string. This validates the real MandoForge MCP gateway HTTP boundary and rollout controller hooks while exercising a credentialed non-pilot enterprise read target.
+The evidence script seeds a `whiskey-docs` connector on the Whiskey pilot team, keeps the `search` tool allowlisted, creates a due rollout when one is not already pending, enables strict MCP due-run plus rollback evidence, and routes `/v1/call` through the configured upstream mode.
 
-The same controller now also supports `WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search`. In that mode it uses `lark-cli docs +search` against the current user's Docs/Wiki search scope instead of private-chat messages. That is the next repo-native path for turning `whiskey-docs` into a broader internal knowledge-space target, but it requires the Whiskey `lark-cli` login to have `search:docs:read`.
+The current Whiskey evidence was collected with:
+
+```bash
+WHISKEY_MCP_UPSTREAM_MODE=github_repo_contents
+WHISKEY_MCP_GITHUB_REPO_OWNER=proerror77
+WHISKEY_MCP_GITHUB_REPO_NAME=Goodchance
+WHISKEY_MCP_GITHUB_REPO_REF=main
+WHISKEY_WORKFLOW_PACK_MCP_QUERY=README
+```
+
+In that mode, `whiskey-docs` reads authenticated file contents from the private `proerror77/Goodchance` repository and returns path-level hits such as `clients/ios-app/README.md`. This validates the real MandoForge MCP gateway HTTP boundary and rollout controller hooks while exercising a credentialed internal repository knowledge target rather than a chat transcript.
+
+The same controller also supports `WHISKEY_MCP_UPSTREAM_MODE=lark_chat_messages` and `WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search`. `lark_docs_search` uses `lark-cli docs +search` against the current user's Docs/Wiki search scope; it is the next repo-native path for turning `whiskey-docs` into a broader Lark knowledge-space target, but it requires the Whiskey `lark-cli` login to have `search:docs:read`.
 
 ## Eval/Release Lane
 
@@ -290,7 +302,7 @@ WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml \
 scripts/workflow-pack-evidence-gate.sh
 ```
 
-The gate validates the manifest contract, proves onboarding fails closed with placeholder or missing customer input, installs the pack, confirms install bootstraps default onboarding profile assets, stages the installation, confirms release fails unless eval and release gates pass, releases the pack with explicit gate evidence, creates an immutable `0.1.1` update version, confirms the updated installation also boots default profile assets, persists customer onboarding profiles as versioned assets, proves onboarding reaches `ready` when those persisted assets plus connector declarations satisfy the pack contract, then proves connector quality fails closed with stale or incomplete samples and reaches `ready` with fresh attributable samples bound to the real Whiskey `whiskey-docs` MCP server and sourced from authenticated Feishu private-chat message reads. The current pilot result is a real message from the Whiskey user's Feishu private chat with a stable `message_id` and deep link. This is a Whiskey pilot proof for the WorkflowPack install/stage/release lifecycle plus contract-level onboarding readiness, install defaults, profile-asset persistence, connector-quality gating, real MCP server binding, and a credentialed non-pilot enterprise read source; it does not yet prove broader internal docs/wiki spaces or external SaaS connectors such as Slack, Jira, or Confluence.
+The gate validates the manifest contract, proves onboarding fails closed with placeholder or missing customer input, installs the pack, confirms install bootstraps default onboarding profile assets, stages the installation, confirms release fails unless eval and release gates pass, releases the pack with explicit gate evidence, creates an immutable `0.1.1` update version, confirms the updated installation also boots default profile assets, persists customer onboarding profiles as versioned assets, proves onboarding reaches `ready` when those persisted assets plus connector declarations satisfy the pack contract, then proves connector quality fails closed with stale or incomplete samples and reaches `ready` with fresh attributable samples bound to the real Whiskey `whiskey-docs` MCP server and sourced from authenticated private repository content reads. The current pilot result is a real hit from `proerror77/Goodchance@main`, with `clients/ios-app/README.md` captured as the live connector-quality sample. This is a Whiskey pilot proof for the WorkflowPack install/stage/release lifecycle plus contract-level onboarding readiness, install defaults, profile-asset persistence, connector-quality gating, real MCP server binding, and a credentialed non-pilot enterprise read source; it does not yet prove broader Lark docs/wiki spaces or external SaaS connectors such as Slack, Jira, or Confluence.
 
 Before installing `k3s`, run the host preflight first:
 
