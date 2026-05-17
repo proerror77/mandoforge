@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["title", "business_owner", "data_categories", "impact_level"],
+  "properties": {
+    "title": { "type": "string", "minLength": 1 },
+    "business_owner": { "type": "string", "minLength": 1 },
+    "data_categories": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "impact_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,74 @@
+# WorkflowPack Manifest Contract
+
+This is the Stage 3 contract for installable Workflow Packs and Domain Packs.
+
+The first implementation is intentionally contract-first: it validates package shape, file references, connector trust boundaries, worker roles, handoff rules, eval gates, and release gates before any runtime install API is allowed to mutate tenant behavior.
+
+## Files
+
+- Manifest schema: `schemas/workflow-pack-manifest.schema.json`
+- Rust validator: `crates/mandoforge-api/src/workflow_pack.rs`
+- Example pack: `packs/ai-governance/package.yaml`
+- Verification entrypoint: `scripts/verify-workflow-pack-manifest.sh`
+
+## Manifest Requirements
+
+Every pack manifest must declare:
+
+- `schema_version`: currently `workflowpack.mandoforge.dev/v1`.
+- `kind`: `WorkflowPack` or `DomainPack`.
+- `id`, `name`, `version`, and `description`.
+- Capabilities.
+- Profiles, skills, workflows, agents, connectors, schemas, policies, evals, and release gates.
+
+All referenced files must be relative to the package directory, must exist, and must not use absolute paths or `..` escapes.
+
+## Safety Rules
+
+The validator enforces the initial Stage 3 safety floor:
+
+- At least one workflow, agent, connector, required eval gate, and required release gate must exist.
+- Connector writes must be approval-gated when enabled.
+- Connectors must require provenance.
+- Connectors must declare tenant and workspace scope as required.
+- Connector outputs must be treated as data, not instructions.
+- Reader agents cannot declare write or external-write tool scopes.
+- Writer agents cannot declare external-write tool scopes.
+- Handoffs must target declared agents.
+- Handoffs must declare enum-like intents.
+- High-risk handoffs must require approval.
+- Eval gate scores must be between `0` and `1`.
+
+This contract does not install or activate packs yet. It blocks unsafe package shape before the later install/stage/release APIs exist.
+
+## Lifecycle Semantics
+
+### Install
+
+Install should parse and validate the manifest, copy the package into a tenant-scoped immutable package store, and create a draft pack version. It must not create active agents, connectors, policies, schedules, or external writes by default.
+
+### Update
+
+Update should create a new pack version. Existing released versions remain immutable. A new version must pass manifest validation, pack evals, policy gates, and release approval before tenant behavior changes.
+
+### Stage
+
+Stage should materialize draft agent versions, connector definitions, policy revisions, eval suites, and profile requirements in a non-production state. Staging must preserve tenant scope and must not bypass provider, tool, approval, MCP, or audit governance.
+
+### Release
+
+Release should require passing eval gates, policy gates, connector readiness, and approval where the pack declares high-risk handoffs or writes. Released pack behavior must be auditable and roll-backable.
+
+### Uninstall
+
+Uninstall should archive the pack installation and disable future schedules or entrypoints. It must not delete historical artifacts, eval runs, audit logs, handoff events, or release evidence.
+
+## Verification
+
+Run:
+
+```bash
+scripts/verify-workflow-pack-manifest.sh
+```
+
+The gate currently runs Rust validator tests against the AI Governance Pack fixture and checks that the external JSON Schema and package manifest are present.

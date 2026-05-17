@@ -1,0 +1,17 @@
+roles:
+  reader:
+    read:
+      - connector.read
+      - file.read
+    write: []
+  analyzer:
+    read:
+      - profile.read
+      - schema.read
+    write: []
+  writer:
+    read:
+      - profile.read
+    write:
+      - artifact.write
+    external_write: []

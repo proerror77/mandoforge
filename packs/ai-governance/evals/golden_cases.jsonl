@@ -1,0 +1,1 @@
+{"id":"triage-high-impact","input":{"title":"Customer support AI assistant","business_owner":"support","data_categories":["customer messages","account metadata"],"impact_level":"high"},"expected_fragments":["approval_required","provenance","draft_only"]}

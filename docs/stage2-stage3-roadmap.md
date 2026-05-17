@@ -183,7 +183,7 @@ Primary lanes: Lane A, Lane B, and Lane E.
 
 Scope:
 
-- Define the `WorkflowPack` and `DomainPack` manifest contract.
+- Define the `WorkflowPack` and `DomainPack` manifest contract, starting with `schemas/workflow-pack-manifest.schema.json`.
 - Validate pack layout, connectors, schemas, policies, evals, profiles, and worker roles.
 - Add profile onboarding contracts for company, department, approval matrix, connector map, risk policy, and output style.
 - Ship the first AI Governance Pack slice.

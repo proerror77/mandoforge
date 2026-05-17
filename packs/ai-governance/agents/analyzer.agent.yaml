@@ -1,0 +1,3 @@
+id: analyzer
+role: analyzer
+instructions: Analyze structured facts against the tenant profile and policy matrix.

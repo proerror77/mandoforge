@@ -1,0 +1,11 @@
+id: ai-use-case-triage
+entry_agent: reader
+steps:
+  - agent: reader
+    output_schema: ai-use-case
+  - agent: analyzer
+    handoff_intent: classify-ai-use-case
+  - agent: writer
+    handoff_intent: draft-ai-governance-assessment
+approval:
+  required_before_external_write: true

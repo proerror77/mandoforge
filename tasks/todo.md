@@ -211,7 +211,7 @@
 ## Workflow Pack / Domain Pack Adaptation
 
 - [x] Record the Workflow Pack adaptation plan from vertical workflow plugin references.
-- [ ] Define the `WorkflowPack` / `DomainPack` manifest contract and package validation rules.
+- [x] Define the `WorkflowPack` / `DomainPack` manifest contract and package validation rules.
 - [ ] Add profile onboarding / cold-start workflow contract for company, department, approval matrix, connector map, risk policy, and output style.
 - [ ] Add typed `agent_handoff_events` with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
 - [ ] Add Reader / Analyzer / Writer worker role declarations and tool-scope enforcement for untrusted input workflows.

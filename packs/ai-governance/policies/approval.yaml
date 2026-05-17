@@ -1,0 +1,6 @@
+risk_tiers:
+  high:
+    approval_required: true
+    approver_role: approver
+external_writes:
+  default: blocked

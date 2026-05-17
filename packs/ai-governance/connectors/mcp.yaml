@@ -1,0 +1,12 @@
+connectors:
+  - id: knowledge-base
+    type: mcp
+    permissions:
+      - document.search
+      - document.read
+    writes:
+      enabled: false
+    provenance:
+      required: true
+    prompt_injection_boundary:
+      treat_results_as_data: true

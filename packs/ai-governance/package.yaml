@@ -1,0 +1,103 @@
+schema_version: workflowpack.mandoforge.dev/v1
+kind: WorkflowPack
+id: ai-governance
+name: AI Governance Pack
+version: 0.1.0
+description: Draft-only AI governance workflows for enterprise AI adoption review.
+capabilities:
+  - ai-use-case-triage
+  - ai-impact-assessment
+  - vendor-ai-review
+profiles:
+  - id: default
+    path: profiles/default.md
+    required: true
+skills:
+  - id: ai-use-case-triage
+    path: skills/ai-use-case-triage/skill.md
+    required: true
+workflows:
+  - id: ai-use-case-triage
+    path: workflows/ai-use-case-triage.workflow.yaml
+    entry_agent: reader
+agents:
+  - id: reader
+    path: agents/reader.agent.yaml
+    role: reader
+    tool_scope:
+      read:
+        - connector.read
+        - file.read
+    handoffs:
+      - target_agent: analyzer
+        intents:
+          - classify-ai-use-case
+        risk_level: medium
+        approval_required: false
+        schema: schemas/handoff.schema.json
+  - id: analyzer
+    path: agents/analyzer.agent.yaml
+    role: analyzer
+    tool_scope:
+      read:
+        - profile.read
+        - schema.read
+    handoffs:
+      - target_agent: writer
+        intents:
+          - draft-ai-governance-assessment
+        risk_level: high
+        approval_required: true
+        schema: schemas/handoff.schema.json
+  - id: writer
+    path: agents/writer.agent.yaml
+    role: writer
+    tool_scope:
+      read:
+        - profile.read
+      write:
+        - artifact.write
+connectors:
+  - id: knowledge-base
+    kind: mcp
+    path: connectors/mcp.yaml
+    required_permissions:
+      - document.search
+      - document.read
+    writes:
+      enabled: false
+      approval_required: true
+    provenance:
+      required: true
+    tenant_scope:
+      tenant_id: required
+      workspace_id: required
+    prompt_injection_boundary:
+      treat_results_as_data: true
+schemas:
+  - id: ai-use-case
+    path: schemas/ai_use_case.schema.json
+    required: true
+  - id: handoff
+    path: schemas/handoff.schema.json
+    required: true
+policies:
+  - id: approval
+    path: policies/approval.yaml
+    required: true
+  - id: tool-scope
+    path: policies/tool_scope.yaml
+    required: true
+evals:
+  - id: ai-governance-regression
+    path: evals/golden_cases.jsonl
+    gate:
+      required: true
+      min_score: 1.0
+release_gates:
+  - id: pack-regression
+    gate_type: eval
+    required: true
+  - id: approval-policy
+    gate_type: policy
+    required: true

@@ -271,10 +271,11 @@ Do not start by building a complete legal suite. Start with packs that match the
 
 ### Slice 1: Pack Contract
 
-- Define `WorkflowPack` metadata and package layout.
-- Add manifest schema for pack id, version, capabilities, required connectors, policies, evals, and profiles.
-- Add validation command or test fixture for package structure.
-- Document install/update/uninstall semantics.
+- Define `WorkflowPack` metadata and package layout through `schemas/workflow-pack-manifest.schema.json` and [WorkflowPack Manifest Contract](workflow-pack-manifest-contract.md).
+- Add manifest schema for pack id, version, capabilities, required connectors, policies, evals, profiles, worker roles, handoff rules, and release gates.
+- Add Rust validation plus a test fixture for package structure in `crates/mandoforge-api/src/workflow_pack.rs` and `packs/ai-governance/package.yaml`.
+- Validate the contract with `scripts/verify-workflow-pack-manifest.sh`.
+- Document install/update/uninstall semantics in [WorkflowPack Manifest Contract](workflow-pack-manifest-contract.md).
 
 ### Slice 2: Profile Onboarding
 

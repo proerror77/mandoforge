@@ -1,0 +1,3 @@
+id: reader
+role: reader
+instructions: Read untrusted source material and emit schema-valid structured facts only.

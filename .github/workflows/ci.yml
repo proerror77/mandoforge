@@ -69,4 +69,5 @@ jobs:
       - run: cargo fetch --locked
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace --locked --all-targets
+      - run: scripts/verify-workflow-pack-manifest.sh
       - run: scripts/stage2-controller-drill-live-gate.sh

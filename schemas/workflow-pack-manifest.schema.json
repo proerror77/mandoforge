@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mandoforge.dev/schemas/workflow-pack-manifest.schema.json",
+  "title": "MandoForge WorkflowPack Manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind",
+    "id",
+    "name",
+    "version",
+    "description",
+    "capabilities",
+    "profiles",
+    "workflows",
+    "agents",
+    "connectors",
+    "schemas",
+    "policies",
+    "evals",
+    "release_gates"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "workflowpack.mandoforge.dev/v1"
+    },
+    "kind": {
+      "enum": ["WorkflowPack", "DomainPack"]
+    },
+    "id": {
+      "$ref": "#/$defs/slug"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/slug" },
+      "uniqueItems": true
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/file_ref" }
+    },
+    "skills": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/file_ref" }
+    },
+    "workflows": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/workflow_ref" }
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/agent_ref" }
+    },
+    "connectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/connector_ref" }
+    },
+    "schemas": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/file_ref" }
+    },
+    "policies": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/file_ref" }
+    },
+    "evals": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/eval_ref" }
+    },
+    "release_gates": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/release_gate_ref" }
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "anyOf": [
+          { "pattern": "^/" },
+          { "pattern": "(^|/)\\.\\.(/|$)" }
+        ]
+      }
+    },
+    "file_ref": {
+      "type": "object",
+      "required": ["id", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "path": { "$ref": "#/$defs/relative_path" },
+        "required": { "type": "boolean" }
+      }
+    },
+    "workflow_ref": {
+      "type": "object",
+      "required": ["id", "path", "entry_agent"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "path": { "$ref": "#/$defs/relative_path" },
+        "entry_agent": { "$ref": "#/$defs/slug" }
+      }
+    },
+    "agent_ref": {
+      "type": "object",
+      "required": ["id", "path", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "path": { "$ref": "#/$defs/relative_path" },
+        "role": {
+          "enum": ["reader", "analyzer", "writer", "orchestrator", "executor", "monitor"]
+        },
+        "tool_scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/slug" }
+            },
+            "write": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/slug" }
+            },
+            "external_write": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/slug" }
+            }
+          }
+        },
+        "handoffs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/handoff_rule" }
+        }
+      }
+    },
+    "handoff_rule": {
+      "type": "object",
+      "required": ["target_agent", "intents", "risk_level", "approval_required", "schema"],
+      "additionalProperties": false,
+      "properties": {
+        "target_agent": { "$ref": "#/$defs/slug" },
+        "intents": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/slug" }
+        },
+        "risk_level": {
+          "enum": ["low", "medium", "high"]
+        },
+        "approval_required": { "type": "boolean" },
+        "schema": { "$ref": "#/$defs/relative_path" }
+      }
+    },
+    "connector_ref": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "path",
+        "required_permissions",
+        "writes",
+        "provenance",
+        "tenant_scope",
+        "prompt_injection_boundary"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "kind": { "enum": ["mcp", "native"] },
+        "path": { "$ref": "#/$defs/relative_path" },
+        "required_permissions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/slug" }
+        },
+        "writes": {
+          "type": "object",
+          "required": ["enabled", "approval_required"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "approval_required": { "type": "boolean" }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "required": ["required"],
+          "additionalProperties": false,
+          "properties": {
+            "required": { "type": "boolean" }
+          }
+        },
+        "tenant_scope": {
+          "type": "object",
+          "required": ["tenant_id", "workspace_id"],
+          "additionalProperties": false,
+          "properties": {
+            "tenant_id": { "const": "required" },
+            "workspace_id": { "const": "required" }
+          }
+        },
+        "prompt_injection_boundary": {
+          "type": "object",
+          "required": ["treat_results_as_data"],
+          "additionalProperties": false,
+          "properties": {
+            "treat_results_as_data": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "eval_ref": {
+      "type": "object",
+      "required": ["id", "path", "gate"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "path": { "$ref": "#/$defs/relative_path" },
+        "gate": {
+          "type": "object",
+          "required": ["required", "min_score"],
+          "additionalProperties": false,
+          "properties": {
+            "required": { "type": "boolean" },
+            "min_score": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      }
+    },
+    "release_gate_ref": {
+      "type": "object",
+      "required": ["id", "gate_type", "required"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "gate_type": { "$ref": "#/$defs/slug" },
+        "required": { "type": "boolean" }
+      }
+    }
+  }
+}

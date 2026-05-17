@@ -65,6 +65,7 @@ mod store_secret_records;
 mod store_seed;
 mod store_tool_calls;
 mod store_usage_rollups;
+mod workflow_pack;
 
 use authorization::{
     AuthorizationRequest, Authorizer, Permission, Principal, Role, RoleBasedAuthorizer,
