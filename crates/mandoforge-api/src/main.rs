@@ -759,6 +759,12 @@ struct WorkflowPackConnectorQualityInput {
     id: String,
     #[serde(default)]
     samples: Vec<WorkflowPackConnectorQualitySample>,
+    #[serde(default)]
+    team_id: Option<Uuid>,
+    #[serde(default)]
+    server_id: Option<Uuid>,
+    #[serde(default)]
+    tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -782,6 +788,11 @@ struct WorkflowPackConnectorQualityResult {
     status: String,
     sample_count: usize,
     passing_sample_count: usize,
+    bound_team_id: Option<Uuid>,
+    bound_server_id: Option<Uuid>,
+    bound_server_name: Option<String>,
+    bound_server_health_status: Option<String>,
+    bound_tool_name: Option<String>,
     blockers: Vec<String>,
 }
 
@@ -8346,7 +8357,8 @@ async fn assess_workflow_pack_connector_quality_route(
     )
     .await?;
     let installation = state.get_workflow_pack_installation(id).await?;
-    let assessment = assess_workflow_pack_connector_quality(&installation, input.clone())?;
+    let assessment =
+        assess_workflow_pack_connector_quality(&state, &installation, input.clone()).await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -8963,7 +8975,8 @@ fn validate_workflow_pack_profile_assets_input(
     Ok(validated)
 }
 
-fn assess_workflow_pack_connector_quality(
+async fn assess_workflow_pack_connector_quality(
+    state: &AppState,
     installation: &WorkflowPackInstallation,
     input: WorkflowPackConnectorQualityAssessmentRequest,
 ) -> Result<WorkflowPackConnectorQualityAssessment, AppError> {
@@ -8999,6 +9012,11 @@ fn assess_workflow_pack_connector_quality(
                 status: "blocked".to_string(),
                 sample_count: 0,
                 passing_sample_count: 0,
+                bound_team_id: None,
+                bound_server_id: None,
+                bound_server_name: None,
+                bound_server_health_status: None,
+                bound_tool_name: None,
                 blockers: vec![blocker.clone()],
             });
             blockers.push(format!("connector {}: {}", connector.id, blocker));
@@ -9011,14 +9029,96 @@ fn assess_workflow_pack_connector_quality(
                 status: "blocked".to_string(),
                 sample_count: 0,
                 passing_sample_count: 0,
+                bound_team_id: None,
+                bound_server_id: None,
+                bound_server_name: None,
+                bound_server_health_status: None,
+                bound_tool_name: None,
                 blockers: vec![blocker.clone()],
             });
             blockers.push(format!("connector {}: {}", connector.id, blocker));
             continue;
         };
 
+        let mut bound_server_id = None;
+        let mut bound_server_name = None;
+        let mut bound_server_health_status = None;
+        let bound_tool_name = input_connector
+            .tool_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
         let mut passing_sample_count = 0usize;
         let mut connector_blockers = Vec::new();
+        if let (Some(team_id), Some(server_id)) = (input_connector.team_id, input_connector.server_id)
+        {
+            let server = state
+                .list_mcp_servers(team_id)
+                .await?
+                .into_iter()
+                .find(|candidate| candidate.id == server_id)
+                .ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "workflow pack connector {} bound mcp server {} was not found in team {}",
+                        connector.id, server_id, team_id
+                    ))
+                })?;
+            bound_server_id = Some(server.id);
+            bound_server_name = Some(server.name.clone());
+            let server_health_status = server
+                .config
+                .pointer("/health_check/last_status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            bound_server_health_status = Some(server_health_status.clone());
+            if server.status != "active" {
+                connector_blockers.push(format!(
+                    "bound MCP server {} is not active",
+                    server.name
+                ));
+            }
+            if server
+                .config
+                .pointer("/health_check/last_healthy")
+                .and_then(Value::as_bool)
+                != Some(true)
+            {
+                connector_blockers.push(format!(
+                    "bound MCP server {} is not healthy",
+                    server.name
+                ));
+            }
+            let last_checked_at = server
+                .config
+                .pointer("/health_check/last_checked_at")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc));
+            match last_checked_at {
+                Some(last_checked_at)
+                    if checked_at.signed_duration_since(last_checked_at)
+                        <= chrono::Duration::hours(24) => {}
+                Some(_) => connector_blockers.push(format!(
+                    "bound MCP server {} health evidence is stale",
+                    server.name
+                )),
+                None => connector_blockers.push(format!(
+                    "bound MCP server {} has no health evidence",
+                    server.name
+                )),
+            }
+            if let Some(tool_name) = bound_tool_name.as_deref() {
+                if !server.tool_allowlist.iter().any(|tool| tool == tool_name) {
+                    connector_blockers.push(format!(
+                        "bound MCP server {} does not allow tool {}",
+                        server.name, tool_name
+                    ));
+                }
+            }
+        }
+
         for (index, sample) in input_connector.samples.iter().enumerate() {
             let sample_label = if sample.object_id.trim().is_empty() {
                 format!("sample {}", index + 1)
@@ -9110,6 +9210,11 @@ fn assess_workflow_pack_connector_quality(
             status,
             sample_count: input_connector.samples.len(),
             passing_sample_count,
+            bound_team_id: input_connector.team_id,
+            bound_server_id,
+            bound_server_name,
+            bound_server_health_status,
+            bound_tool_name,
             blockers: connector_blockers,
         });
     }
@@ -37328,6 +37433,54 @@ not json
     #[tokio::test]
     async fn workflow_pack_connector_quality_assessment_reports_blocked_and_ready_states() {
         let app = test_app().await;
+        let organization: Organization = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/organizations",
+                json!({
+                    "name": "Whiskey Connector Org",
+                    "slug": format!("whiskey-connector-org-{}", Uuid::new_v4())
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let team: Team = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/organizations/{}/teams", organization.id),
+                json!({
+                    "name": "Whiskey Connector Team",
+                    "slug": format!("whiskey-connector-team-{}", Uuid::new_v4())
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let mcp_server: McpServerRecord = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/teams/{}/mcp-servers", team.id),
+                json!({
+                    "name": "whiskey-docs",
+                    "transport": "http",
+                    "tool_allowlist": ["search"],
+                    "config": {
+                        "health_check": {
+                            "interval_seconds": 60,
+                            "last_checked_at": Utc::now().to_rfc3339(),
+                            "last_healthy": true,
+                            "last_status": "healthy"
+                        }
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
         let installed: WorkflowPackInstallation = request_json(
             app.clone(),
             json_request_with_headers(
@@ -37351,6 +37504,9 @@ not json
                     "connectors": [
                         {
                             "id": "knowledge-base",
+                            "team_id": team.id,
+                            "server_id": mcp_server.id,
+                            "tool_name": "search",
                             "samples": [
                                 {
                                     "object_id": "kb-1",
@@ -37377,6 +37533,22 @@ not json
         assert_eq!(blocked.connector_results[0].id, "knowledge-base");
         assert_eq!(blocked.connector_results[0].sample_count, 1);
         assert_eq!(blocked.connector_results[0].passing_sample_count, 0);
+        assert_eq!(blocked.connector_results[0].bound_team_id, Some(team.id));
+        assert_eq!(blocked.connector_results[0].bound_server_id, Some(mcp_server.id));
+        assert_eq!(
+            blocked.connector_results[0].bound_server_name.as_deref(),
+            Some("whiskey-docs")
+        );
+        assert_eq!(
+            blocked.connector_results[0]
+                .bound_server_health_status
+                .as_deref(),
+            Some("healthy")
+        );
+        assert_eq!(
+            blocked.connector_results[0].bound_tool_name.as_deref(),
+            Some("search")
+        );
         assert!(
             blocked.connector_results[0]
                 .blockers
@@ -37408,6 +37580,9 @@ not json
                     "connectors": [
                         {
                             "id": "knowledge-base",
+                            "team_id": team.id,
+                            "server_id": mcp_server.id,
+                            "tool_name": "search",
                             "samples": [
                                 {
                                     "object_id": "kb-2",
@@ -37437,6 +37612,8 @@ not json
         assert_eq!(ready.ready_connector_count, 1);
         assert_eq!(ready.connector_results[0].status, "ready");
         assert_eq!(ready.connector_results[0].passing_sample_count, 1);
+        assert_eq!(ready.connector_results[0].bound_team_id, Some(team.id));
+        assert_eq!(ready.connector_results[0].bound_server_id, Some(mcp_server.id));
         assert!(ready.connector_results[0].blockers.is_empty());
         assert!(ready.blockers.is_empty());
 

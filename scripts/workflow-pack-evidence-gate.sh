@@ -8,6 +8,11 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/workflow-pack-evidence}"
 MANIFEST_PATH="${WORKFLOW_PACK_MANIFEST_PATH:-packs/ai-governance/package.yaml}"
 UPDATE_MANIFEST_PATH="${WORKFLOW_PACK_UPDATE_MANIFEST_PATH:-}"
 UPDATE_VERSION="${WORKFLOW_PACK_UPDATE_VERSION:-0.1.1}"
+CONNECTOR_TEAM_ID="${WORKFLOW_PACK_CONNECTOR_TEAM_ID:-}"
+CONNECTOR_SERVER_ID="${WORKFLOW_PACK_CONNECTOR_SERVER_ID:-}"
+CONNECTOR_TOOL_NAME="${WORKFLOW_PACK_CONNECTOR_TOOL_NAME:-search}"
+CONNECTOR_SERVER_NAME="${WORKFLOW_PACK_CONNECTOR_SERVER_NAME:-whiskey-docs}"
+REQUIRE_CONNECTOR_BINDING="${WORKFLOW_PACK_REQUIRE_CONNECTOR_BINDING:-0}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -97,6 +102,43 @@ require_cmd awk
 mkdir -p "$EVIDENCE_DIR"
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
+
+discover_connector_binding() {
+  if [[ -n "$CONNECTOR_TEAM_ID" && -n "$CONNECTOR_SERVER_ID" ]]; then
+    return 0
+  fi
+
+  local organizations_file
+  organizations_file="$(fetch_json GET /api/organizations)"
+  local organization_id
+  while IFS= read -r organization_id; do
+    [[ -z "$organization_id" ]] && continue
+    local teams_file
+    teams_file="$(fetch_json GET "/api/organizations/$organization_id/teams")"
+    local team_id
+    while IFS= read -r team_id; do
+      [[ -z "$team_id" ]] && continue
+      local servers_file
+      servers_file="$(fetch_json GET "/api/teams/$team_id/mcp-servers")"
+      local server_id
+      server_id="$(jq -r --arg name "$CONNECTOR_SERVER_NAME" 'map(select(.name == $name and .status == "active")) | .[0].id // empty' "$servers_file")"
+      if [[ -z "$server_id" ]]; then
+        server_id="$(jq -r 'map(select(.status == "active")) | .[0].id // empty' "$servers_file")"
+      fi
+      if [[ -n "$server_id" ]]; then
+        CONNECTOR_TEAM_ID="$team_id"
+        CONNECTOR_SERVER_ID="$server_id"
+        return 0
+      fi
+    done < <(jq -r 'map(select((.archived_at // null) == null)) | .[].id' "$teams_file")
+  done < <(jq -r 'map(select((.archived_at // null) == null)) | .[].id' "$organizations_file")
+}
+
+discover_connector_binding
+if [[ "$REQUIRE_CONNECTOR_BINDING" == "1" && ( -z "$CONNECTOR_TEAM_ID" || -z "$CONNECTOR_SERVER_ID" ) ]]; then
+  echo "workflow pack connector quality requires a discoverable MCP connector binding" >&2
+  exit 1
+fi
 
 if [[ -z "$UPDATE_MANIFEST_PATH" ]]; then
   update_fixture_path="$(dirname "$MANIFEST_PATH")/package-v${UPDATE_VERSION}.yaml"
@@ -254,7 +296,28 @@ blocked_connector_quality_payload="$(jq -nc '{
     }
   ],
   reason: "Whiskey WorkflowPack connector quality blocked proof"
-}')"
+} + (if $team_id == "" or $server_id == "" then {} else {
+  connectors: [
+    {
+      id: "knowledge-base",
+      team_id: $team_id,
+      server_id: $server_id,
+      tool_name: $tool_name,
+      samples: [
+        {
+          object_id: "kb-stale-1",
+          retrieved_at: "2026-05-01T00:00:00Z",
+          metadata: {
+            source_id: "page-stale-1"
+          },
+          content: {
+            title: "Stale KB result"
+          }
+        }
+      ]
+    }
+  ]
+})' --arg team_id "$CONNECTOR_TEAM_ID" --arg server_id "$CONNECTOR_SERVER_ID" --arg tool_name "$CONNECTOR_TOOL_NAME")"
 blocked_connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$blocked_connector_quality_payload")"
 blocked_connector_quality_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$updated_installation_id-connectors-quality-assess-blocked.json"
 cp "$blocked_connector_quality_file" "$blocked_connector_quality_snapshot_file"
@@ -281,7 +344,32 @@ ready_connector_quality_payload="$(jq -nc '{
     }
   ],
   reason: "Whiskey WorkflowPack connector quality ready proof"
-}')"
+} + (if $team_id == "" or $server_id == "" then {} else {
+  connectors: [
+    {
+      id: "knowledge-base",
+      team_id: $team_id,
+      server_id: $server_id,
+      tool_name: $tool_name,
+      samples: [
+        {
+          object_id: "kb-fresh-1",
+          retrieved_at: "2026-05-17T00:00:00Z",
+          citation_url: "https://kb.example/policy/vendor-ai",
+          metadata: {
+            source_id: "page-fresh-1",
+            reference: "KB-2026-05",
+            retrieval_actor: "connector-pilot"
+          },
+          content: {
+            title: "Vendor AI policy",
+            snippet: "Grounded source with retained provenance."
+          }
+        }
+      ]
+    }
+  ]
+})' --arg team_id "$CONNECTOR_TEAM_ID" --arg server_id "$CONNECTOR_SERVER_ID" --arg tool_name "$CONNECTOR_TOOL_NAME")"
 connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$ready_connector_quality_payload")"
 archive_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/archive" \
   '{"reason":"Whiskey WorkflowPack adoption archive proof"}')"
@@ -325,6 +413,10 @@ connector_quality_ready_connector_count="$(jq -r '.response.ready_connector_coun
 connector_quality_sample_count="$(jq -r '[.response.connector_results[]?.sample_count] | add // 0' "$connector_quality_file")"
 connector_quality_passing_sample_count="$(jq -r '[.response.connector_results[]?.passing_sample_count] | add // 0' "$connector_quality_file")"
 connector_quality_blocker_count="$(jq -r '[.response.blockers[]?] | length' "$connector_quality_file")"
+connector_quality_bound_team_id="$(jq -r '.response.connector_results[0].bound_team_id // "none"' "$connector_quality_file")"
+connector_quality_bound_server_id="$(jq -r '.response.connector_results[0].bound_server_id // "none"' "$connector_quality_file")"
+connector_quality_bound_server_name="$(jq -r '.response.connector_results[0].bound_server_name // "none"' "$connector_quality_file")"
+connector_quality_bound_server_health_status="$(jq -r '.response.connector_results[0].bound_server_health_status // "none"' "$connector_quality_file")"
 archive_status="$(jq -r '.response.status // "unknown"' "$archive_file")"
 eval_gate_status="$(jq -r '.response.eval_gate_status // "unknown"' "$release_file")"
 release_gate_status="$(jq -r '.response.release_gate_status // "unknown"' "$release_file")"
@@ -384,6 +476,10 @@ if [[ "$onboarding_status" != "ready" || "$onboarding_workflow" != "profile-onbo
 fi
 if [[ "$blocked_connector_quality_status" != "blocked" ]]; then
   echo "workflow pack blocked connector quality assessment did not fail closed" >&2
+  exit 1
+fi
+if [[ "$REQUIRE_CONNECTOR_BINDING" == "1" && ( "$connector_quality_bound_team_id" == "none" || "$connector_quality_bound_server_id" == "none" ) ]]; then
+  echo "workflow pack connector quality assessment did not bind to a real MCP server" >&2
   exit 1
 fi
 if [[ "$connector_quality_status" != "ready" || "$connector_quality_requirement_count" != "1" || "$connector_quality_ready_connector_count" != "1" || "$connector_quality_sample_count" != "1" || "$connector_quality_passing_sample_count" != "1" || "$connector_quality_blocker_count" != "0" ]]; then
@@ -462,6 +558,10 @@ fi
   echo "connector_quality_sample_count=$connector_quality_sample_count"
   echo "connector_quality_passing_sample_count=$connector_quality_passing_sample_count"
   echo "connector_quality_blocker_count=$connector_quality_blocker_count"
+  echo "connector_quality_bound_team_id=$connector_quality_bound_team_id"
+  echo "connector_quality_bound_server_id=$connector_quality_bound_server_id"
+  echo "connector_quality_bound_server_name=$connector_quality_bound_server_name"
+  echo "connector_quality_bound_server_health_status=$connector_quality_bound_server_health_status"
   echo "installed_default_profile_asset_count=$installed_default_profile_asset_count"
   echo "updated_default_profile_asset_count=$updated_default_profile_asset_count"
   echo "persisted_profile_asset_count=$persisted_profile_asset_count"
