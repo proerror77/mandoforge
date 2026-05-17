@@ -57,6 +57,16 @@ Install should parse and validate the manifest, copy the package into a tenant-s
 
 Update should create a new pack version. Existing released versions remain immutable. A new version must pass manifest validation, pack evals, policy gates, and release approval before tenant behavior changes.
 
+The initial Stage 3 update API implements the immutable-version contract:
+
+- `POST /api/workflow-packs/installations/{id}/update` only accepts active `released` or `rolled_back` source installations.
+- The update manifest must validate against the same package contract as install.
+- The update manifest must keep the same pack `id` and `kind` as the source installation and must declare a different `version`.
+- Update creates a separate `installed` installation with pending eval and release gates. It does not mutate the source installation, release timestamp, validation report, manifest snapshot, or rollback evidence.
+- The new installation records source provenance under `gate_evidence.version_update` with the source installation id, source status, source version, reason, and creation timestamp.
+- `workflow_pack.version_created` audit evidence records the source installation id and the new version.
+- The new version must still pass stage and release gates before tenant behavior changes.
+
 ### Stage
 
 Stage should materialize draft agent versions, connector definitions, policy revisions, eval suites, and profile requirements in a non-production state. Staging must preserve tenant scope and must not bypass provider, tool, approval, MCP, or audit governance.
@@ -101,4 +111,4 @@ The Whiskey evidence gate exercises the API lifecycle end to end:
 WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml scripts/workflow-pack-evidence-gate.sh
 ```
 
-It validates the manifest, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, archives the rolled-back installation, and verifies archived installs are removed from active reads.
+It validates the manifest, installs the pack, verifies release fails before staging, stages the installation, verifies release fails without passing gates, releases with passing eval/release gate evidence, rolls back the released installation, creates a new installed version from an updated manifest, verifies the rolled-back source remains unchanged and active before archive, archives the rolled-back source installation, and verifies archive removes only the source while the new installed version stays active.

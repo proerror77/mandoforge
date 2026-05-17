@@ -689,6 +689,13 @@ struct InstallWorkflowPack {
 }
 
 #[derive(Debug, Deserialize)]
+struct WorkflowPackUpdateRequest {
+    manifest_path: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct WorkflowPackStageRequest {
     #[serde(default)]
     reason: Option<String>,
@@ -4323,6 +4330,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-packs/installations/{id}/stage",
             post(stage_workflow_pack_installation_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/update",
+            post(update_workflow_pack_installation_route),
         )
         .route(
             "/api/workflow-packs/installations/{id}/release",
@@ -8045,6 +8056,84 @@ async fn stage_workflow_pack_installation_route(
         &installation,
         "workflow_pack.staged",
         json!({"reason": input.reason}),
+    )
+    .await?;
+    Ok(Json(installation))
+}
+
+async fn update_workflow_pack_installation_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<WorkflowPackUpdateRequest>,
+) -> Result<Json<WorkflowPackInstallation>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    let current = state.get_workflow_pack_installation(id).await?;
+    if !matches!(current.status.as_str(), "released" | "rolled_back") {
+        return Err(AppError::bad_request(
+            "only released or rolled back workflow packs can create a new version",
+        ));
+    }
+    let (manifest_path, manifest, report) = load_and_validate_workflow_pack(&input.manifest_path)?;
+    let kind = workflow_pack_kind_label(&manifest.kind);
+    if manifest.id != current.pack_id || kind != current.kind {
+        return Err(AppError::bad_request(
+            "workflow pack update manifest must match the source pack id and kind",
+        ));
+    }
+    if manifest.version == current.version {
+        return Err(AppError::bad_request(
+            "workflow pack update manifest must declare a new version",
+        ));
+    }
+
+    let now = Utc::now();
+    let installation = state
+        .create_workflow_pack_installation(WorkflowPackInstallation {
+            id: Uuid::new_v4(),
+            pack_id: manifest.id.clone(),
+            kind: kind.to_string(),
+            version: manifest.version.clone(),
+            manifest_path: manifest_path.display().to_string(),
+            manifest: serde_json::to_value(&manifest)?,
+            validation_report: serde_json::to_value(&report)?,
+            status: "installed".to_string(),
+            eval_gate_status: "pending".to_string(),
+            release_gate_status: "pending".to_string(),
+            gate_evidence: json!({
+                "version_update": {
+                    "source_installation_id": current.id,
+                    "source_status": current.status,
+                    "source_version": current.version,
+                    "reason": input.reason,
+                    "created_at": now,
+                },
+            }),
+            staged_at: None,
+            released_at: None,
+            archived_at: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    record_workflow_pack_installation_audit(
+        &state,
+        &installation,
+        "workflow_pack.version_created",
+        json!({
+            "source_installation_id": current.id,
+            "source_status": current.status,
+            "source_version": current.version,
+            "new_version": installation.version,
+            "validation_report": installation.validation_report,
+        }),
     )
     .await?;
     Ok(Json(installation))
@@ -36008,6 +36097,53 @@ not json
             json!("rollback-ai-governance-1")
         );
 
+        let update_manifest_path = ai_governance_update_manifest_path_string("0.1.1");
+        let updated: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/update", installed.id),
+                json!({
+                    "manifest_path": update_manifest_path,
+                    "reason": "customer policy pack revision"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_ne!(updated.id, installed.id);
+        assert_eq!(updated.pack_id, "ai-governance");
+        assert_eq!(updated.kind, "WorkflowPack");
+        assert_eq!(updated.version, "0.1.1");
+        assert_eq!(updated.status, "installed");
+        assert_eq!(updated.eval_gate_status, "pending");
+        assert_eq!(updated.release_gate_status, "pending");
+        assert!(updated.staged_at.is_none());
+        assert!(updated.released_at.is_none());
+        assert_eq!(
+            updated.gate_evidence["version_update"]["source_installation_id"],
+            json!(installed.id)
+        );
+        assert_eq!(
+            updated.gate_evidence["version_update"]["source_version"],
+            json!("0.1.0")
+        );
+
+        let old_after_update: WorkflowPackInstallation = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(old_after_update.status, "rolled_back");
+        assert_eq!(old_after_update.released_at, released.released_at);
+
         let archived: WorkflowPackInstallation = request_json(
             app.clone(),
             json_request_with_headers(
@@ -36049,7 +36185,9 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(active_installations.is_empty());
+        assert_eq!(active_installations.len(), 1);
+        assert_eq!(active_installations[0].id, updated.id);
+        assert_eq!(active_installations[0].status, "installed");
 
         let audit_logs: Vec<AuditLog> = request_json(
             app,
@@ -36074,6 +36212,11 @@ not json
                 "missing audit action {expected}"
             );
         }
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "workflow_pack.version_created"
+                && log.resource_id == Some(updated.id)
+                && log.details["details"]["source_installation_id"] == json!(installed.id)
+        }));
     }
 
     #[test]
@@ -45439,6 +45582,42 @@ not json
         .expect("AI governance manifest exists")
         .display()
         .to_string()
+    }
+
+    fn ai_governance_update_manifest_path_string(version: &str) -> String {
+        let source_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("packs/ai-governance");
+        let target_dir = test_workspace_root()
+            .join("workflow-pack-updates")
+            .join(Uuid::new_v4().to_string());
+        copy_dir_all(&source_dir, &target_dir).expect("copy workflow pack fixture");
+        let manifest_path = target_dir.join("package.yaml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("read copied manifest");
+        std::fs::write(
+            &manifest_path,
+            manifest.replacen("version: 0.1.0", &format!("version: {version}"), 1),
+        )
+        .expect("write updated manifest");
+        std::fs::canonicalize(manifest_path)
+            .expect("updated manifest exists")
+            .display()
+            .to_string()
+    }
+
+    fn copy_dir_all(source: &Path, target: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(target)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let target_path = target.join(entry.file_name());
+            if ty.is_dir() {
+                copy_dir_all(&entry.path(), &target_path)?;
+            } else {
+                std::fs::copy(entry.path(), target_path)?;
+            }
+        }
+        Ok(())
     }
 
     async fn request_json<T: for<'de> Deserialize<'de>>(app: Router, request: Request<Body>) -> T {

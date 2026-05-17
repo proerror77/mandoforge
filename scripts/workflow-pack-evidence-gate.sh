@@ -6,6 +6,8 @@ SUBJECT="${MANDOFORGE_WORKFLOW_PACK_GATE_SUBJECT:-workflow-pack-evidence-gate}"
 ROLES="${MANDOFORGE_WORKFLOW_PACK_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/workflow-pack-evidence}"
 MANIFEST_PATH="${WORKFLOW_PACK_MANIFEST_PATH:-packs/ai-governance/package.yaml}"
+UPDATE_MANIFEST_PATH="${WORKFLOW_PACK_UPDATE_MANIFEST_PATH:-}"
+UPDATE_VERSION="${WORKFLOW_PACK_UPDATE_VERSION:-0.1.1}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -91,11 +93,30 @@ fetch_json() {
 
 require_cmd curl
 require_cmd jq
+require_cmd awk
 mkdir -p "$EVIDENCE_DIR"
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
 
+if [[ -z "$UPDATE_MANIFEST_PATH" ]]; then
+  source_dir="$(cd "$(dirname "$MANIFEST_PATH")" && pwd -P)"
+  update_package_dir="$EVIDENCE_DIR/workflow-pack-update-package"
+  rm -rf "$update_package_dir"
+  cp -R "$source_dir" "$update_package_dir"
+  awk -v version="$UPDATE_VERSION" '
+    !updated && $0 ~ /^version: / {
+      print "version: " version
+      updated = 1
+      next
+    }
+    { print }
+  ' "$update_package_dir/package.yaml" >"$update_package_dir/package.yaml.tmp"
+  mv "$update_package_dir/package.yaml.tmp" "$update_package_dir/package.yaml"
+  UPDATE_MANIFEST_PATH="$update_package_dir/package.yaml"
+fi
+
 manifest_payload="$(jq -nc --arg manifest_path "$MANIFEST_PATH" '{manifest_path: $manifest_path}')"
+update_manifest_payload="$(jq -nc --arg manifest_path "$UPDATE_MANIFEST_PATH" --arg reason "Whiskey WorkflowPack version update proof" '{manifest_path: $manifest_path, reason: $reason}')"
 validate_file="$(fetch_json POST /api/workflow-packs/validate "$manifest_payload")"
 install_file="$(fetch_json POST /api/workflow-packs/install "$manifest_payload")"
 installation_id="$(jq -r '.response.id // empty' "$install_file")"
@@ -131,6 +152,14 @@ rolled_back_get_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$i
 rolled_back_list_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-after-rollback.json"
 cp "$rolled_back_get_file" "$rolled_back_get_snapshot_file"
 cp "$rolled_back_list_file" "$rolled_back_list_snapshot_file"
+update_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/update" "$update_manifest_payload")"
+updated_installation_id="$(jq -r '.response.id // empty' "$update_file")"
+old_after_update_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id")"
+list_after_update_file="$(fetch_json GET /api/workflow-packs/installations)"
+old_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$installation_id-after-update.json"
+list_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-after-update.json"
+cp "$old_after_update_file" "$old_after_update_snapshot_file"
+cp "$list_after_update_file" "$list_after_update_snapshot_file"
 archive_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/archive" \
   '{"reason":"Whiskey WorkflowPack adoption archive proof"}')"
 archived_get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id" "{}" 4)"
@@ -142,6 +171,11 @@ install_status="$(jq -r '.response.status // "unknown"' "$install_file")"
 stage_status="$(jq -r '.response.status // "unknown"' "$stage_file")"
 release_status="$(jq -r '.response.status // "unknown"' "$release_file")"
 rollback_status="$(jq -r '.response.status // "unknown"' "$rollback_file")"
+update_status="$(jq -r '.response.status // "unknown"' "$update_file")"
+update_version="$(jq -r '.response.version // "unknown"' "$update_file")"
+update_source_id="$(jq -r '.response.gate_evidence.version_update.source_installation_id // "unknown"' "$update_file")"
+old_after_update_status="$(jq -r '.response.status // "unknown"' "$old_after_update_snapshot_file")"
+old_after_update_released_at="$(jq -r '.response.released_at // "missing"' "$old_after_update_snapshot_file")"
 archive_status="$(jq -r '.response.status // "unknown"' "$archive_file")"
 eval_gate_status="$(jq -r '.response.eval_gate_status // "unknown"' "$release_file")"
 release_gate_status="$(jq -r '.response.release_gate_status // "unknown"' "$release_file")"
@@ -149,8 +183,11 @@ released_get_status="$(jq -r '.response.status // "unknown"' "$released_get_file
 released_list_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id and .status == "released")] | length' "$released_list_file")"
 rolled_back_get_status="$(jq -r '.response.status // "unknown"' "$rolled_back_get_snapshot_file")"
 rolled_back_list_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id and .status == "rolled_back")] | length' "$rolled_back_list_snapshot_file")"
+updated_list_count="$(jq -r --arg id "$updated_installation_id" '[.response[]? | select(.id == $id and .status == "installed")] | length' "$list_after_update_snapshot_file")"
+old_after_update_list_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id and .status == "rolled_back")] | length' "$list_after_update_snapshot_file")"
 archived_get_status="$(jq -r '.http_status // 0' "$archived_get_file")"
 active_after_archive_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id)] | length' "$list_after_archive_file")"
+updated_active_after_archive_count="$(jq -r --arg id "$updated_installation_id" '[.response[]? | select(.id == $id and .status == "installed")] | length' "$list_after_archive_file")"
 
 if [[ "$validation_pack_id" != "ai-governance" ]]; then
   echo "workflow pack validation returned unexpected pack_id=$validation_pack_id" >&2
@@ -180,25 +217,49 @@ if [[ "$rolled_back_get_status" != "rolled_back" || "$rolled_back_list_count" !=
   echo "workflow pack rolled back installation was not retrievable" >&2
   exit 1
 fi
+if [[ -z "$updated_installation_id" || "$update_status" != "installed" || "$update_version" != "$UPDATE_VERSION" ]]; then
+  echo "workflow pack update did not create an installed new version" >&2
+  exit 1
+fi
+if [[ "$update_source_id" != "$installation_id" ]]; then
+  echo "workflow pack update did not record the source installation id" >&2
+  exit 1
+fi
+if [[ "$old_after_update_status" != "rolled_back" || "$old_after_update_released_at" == "missing" ]]; then
+  echo "workflow pack update mutated the source installation unexpectedly" >&2
+  exit 1
+fi
+if [[ "$updated_list_count" != "1" || "$old_after_update_list_count" != "1" ]]; then
+  echo "workflow pack update did not preserve source and new version in active reads" >&2
+  exit 1
+fi
 if [[ "$archive_status" != "archived" ]]; then
   echo "workflow pack archive did not reach archived state" >&2
   exit 1
 fi
-if [[ "$archived_get_status" != "404" || "$active_after_archive_count" != "0" ]]; then
-  echo "workflow pack archive did not remove installation from active reads" >&2
+if [[ "$archived_get_status" != "404" || "$active_after_archive_count" != "0" || "$updated_active_after_archive_count" != "1" ]]; then
+  echo "workflow pack archive did not remove only the source installation from active reads" >&2
   exit 1
 fi
 
 {
-  echo "workflow_pack_status=archived_after_rollback"
+  echo "workflow_pack_status=version_created_after_rollback_and_archive"
   echo "pack_id=$validation_pack_id"
   echo "manifest_path=$MANIFEST_PATH"
+  echo "update_manifest_path=$UPDATE_MANIFEST_PATH"
   echo "installation_id=$installation_id"
+  echo "updated_installation_id=$updated_installation_id"
   echo "validated_file_count=$validated_file_count"
   echo "install_status=$install_status"
   echo "stage_status=$stage_status"
   echo "release_status=$release_status"
   echo "rollback_status=$rollback_status"
+  echo "update_status=$update_status"
+  echo "update_version=$update_version"
+  echo "update_source_id=$update_source_id"
+  echo "old_after_update_status=$old_after_update_status"
+  echo "updated_list_count=$updated_list_count"
+  echo "old_after_update_list_count=$old_after_update_list_count"
   echo "archive_status=$archive_status"
   echo "eval_gate_status=$eval_gate_status"
   echo "release_gate_status=$release_gate_status"
@@ -206,6 +267,7 @@ fi
   echo "rolled_back_list_count=$rolled_back_list_count"
   echo "archived_get_status=$archived_get_status"
   echo "active_after_archive_count=$active_after_archive_count"
+  echo "updated_active_after_archive_count=$updated_active_after_archive_count"
   echo "evidence_dir=$EVIDENCE_DIR"
 } >"$EVIDENCE_DIR/summary.txt"
 
