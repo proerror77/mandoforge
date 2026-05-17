@@ -11,6 +11,11 @@ RUN apt-get update \
     && useradd --create-home --shell /usr/sbin/nologin mandoforge
 COPY --from=builder /app/target/release/mandoforge-api /usr/local/bin/mandoforge-api
 COPY --from=builder /app/target/release/mandoforge-worker /usr/local/bin/mandoforge-worker
+COPY README.md README.zh-CN.md ./
+COPY config ./config
+COPY db ./db
+COPY schemas ./schemas
+COPY packs ./packs
 COPY web ./web
 COPY scripts ./scripts
 COPY deploy ./deploy
