@@ -12,6 +12,13 @@ const wikimediaLimit = Number(process.env.MCP_PILOT_WIKIMEDIA_LIMIT || "5");
 const githubSearchApiUrl =
   process.env.MCP_PILOT_GITHUB_API_URL || "https://api.github.com/search/repositories";
 const githubSearchLimit = Number(process.env.MCP_PILOT_GITHUB_LIMIT || "5");
+const githubRepoApiUrl =
+  process.env.MCP_PILOT_GITHUB_REPO_API_URL || "https://api.github.com/repos";
+const githubRepoOwner = process.env.MCP_PILOT_GITHUB_REPO_OWNER || "";
+const githubRepoName = process.env.MCP_PILOT_GITHUB_REPO_NAME || "";
+const githubRepoRef = process.env.MCP_PILOT_GITHUB_REPO_REF || "main";
+const githubRepoLimit = Number(process.env.MCP_PILOT_GITHUB_REPO_LIMIT || "5");
+const githubRepoSnippetLength = Number(process.env.MCP_PILOT_GITHUB_REPO_SNIPPET_LENGTH || "240");
 const githubToken = process.env.MCP_PILOT_GITHUB_TOKEN || "";
 
 function writeJson(response, statusCode, body) {
@@ -42,6 +49,32 @@ async function readJson(request) {
 
 function step(name, status, details = {}) {
   return { name, ...details, status };
+}
+
+function githubHeaders(accept = "application/vnd.github+json") {
+  const headers = {
+    "user-agent": "mandoforge-whiskey-mcp-pilot/1.0",
+    accept,
+  };
+  if (githubToken) {
+    headers.authorization = `Bearer ${githubToken}`;
+  }
+  return headers;
+}
+
+function normalizeSnippet(text) {
+  const compact = String(text || "").replace(/\s+/g, " ").trim();
+  if (compact.length <= githubRepoSnippetLength) {
+    return compact;
+  }
+  return `${compact.slice(0, Math.max(0, githubRepoSnippetLength - 3)).trimEnd()}...`;
+}
+
+function encodeGitHubPath(path) {
+  return String(path)
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
 }
 
 async function searchWikimedia(query) {
@@ -75,14 +108,7 @@ async function searchGitHubRepositories(query) {
   const url = new URL(githubSearchApiUrl);
   url.searchParams.set("q", query);
   url.searchParams.set("per_page", String(Math.max(1, githubSearchLimit)));
-  const headers = {
-    "user-agent": "mandoforge-whiskey-mcp-pilot/1.0",
-    accept: "application/vnd.github+json",
-  };
-  if (githubToken) {
-    headers.authorization = `Bearer ${githubToken}`;
-  }
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, { headers: githubHeaders() });
   if (!response.ok) {
     throw new Error(`github repository search failed with status ${response.status}`);
   }
@@ -96,6 +122,99 @@ async function searchGitHubRepositories(query) {
     reference: item.full_name || item.name || "unknown",
     retrieval_actor: "github-repository-search",
   }));
+}
+
+function scoreGitHubRepoPath(path, query) {
+  const normalizedPath = path.toLowerCase();
+  const normalizedQuery = query.trim().toLowerCase();
+  const basename = normalizedPath.split("/").pop() || normalizedPath;
+  let score = 0;
+  if (normalizedPath.includes(normalizedQuery)) {
+    score += 200;
+  }
+  if (basename.includes(normalizedQuery)) {
+    score += 80;
+  }
+  if (normalizedPath.startsWith("docs/")) {
+    score += 40;
+  }
+  if (normalizedPath.endsWith(".md")) {
+    score += 20;
+  }
+  score -= normalizedPath.length / 1000;
+  return score;
+}
+
+async function searchGitHubRepositoryContents(query) {
+  if (!githubRepoOwner || !githubRepoName) {
+    throw new Error("github repo contents mode requires repo owner and name");
+  }
+
+  const treeUrl = new URL(
+    `${githubRepoApiUrl}/${encodeURIComponent(githubRepoOwner)}/${encodeURIComponent(
+      githubRepoName,
+    )}/git/trees/${encodeURIComponent(githubRepoRef)}`,
+  );
+  treeUrl.searchParams.set("recursive", "1");
+
+  const treeResponse = await fetch(treeUrl, { headers: githubHeaders() });
+  if (!treeResponse.ok) {
+    throw new Error(`github repo tree fetch failed with status ${treeResponse.status}`);
+  }
+  const treeBody = await treeResponse.json();
+  const tree = Array.isArray(treeBody?.tree) ? treeBody.tree : [];
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const matchingFiles = tree
+    .filter((item) => item?.type === "blob" && typeof item.path === "string")
+    .filter((item) => {
+      if (!normalizedQuery) {
+        return true;
+      }
+      return item.path.toLowerCase().includes(normalizedQuery);
+    })
+    .sort((left, right) => {
+      const scoreDiff =
+        scoreGitHubRepoPath(right.path, normalizedQuery) -
+        scoreGitHubRepoPath(left.path, normalizedQuery);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return left.path.localeCompare(right.path);
+    })
+    .slice(0, Math.max(1, githubRepoLimit));
+
+  if (matchingFiles.length === 0) {
+    throw new Error(`github repo contents search returned no path matches for query "${query}"`);
+  }
+
+  const items = await Promise.all(
+    matchingFiles.map(async (item) => {
+      let snippet = `Matched repository file ${item.path}`;
+      if (item.url) {
+        const blobResponse = await fetch(item.url, {
+          headers: githubHeaders("application/vnd.github.raw+json"),
+        });
+        if (!blobResponse.ok) {
+          throw new Error(
+            `github repo blob fetch failed for ${item.path} with status ${blobResponse.status}`,
+          );
+        }
+        snippet = normalizeSnippet(await blobResponse.text()) || snippet;
+      }
+      return {
+        title: item.path,
+        url: `https://github.com/${githubRepoOwner}/${githubRepoName}/blob/${encodeURIComponent(
+          githubRepoRef,
+        )}/${encodeGitHubPath(item.path)}`,
+        snippet,
+        source_id: `${githubRepoOwner}/${githubRepoName}:${item.path}@${githubRepoRef}`,
+        reference: `${githubRepoOwner}/${githubRepoName}:${item.path}`,
+        retrieval_actor: "github-repo-contents",
+      };
+    }),
+  );
+
+  return items;
 }
 
 function pilotItems(query) {
@@ -162,6 +281,8 @@ async function handleGatewayCall(request, response) {
       ? await searchWikimedia(String(query))
       : upstreamMode === "github_repositories"
         ? await searchGitHubRepositories(String(query))
+        : upstreamMode === "github_repo_contents"
+          ? await searchGitHubRepositoryContents(String(query))
         : pilotItems(String(query));
   writeJson(response, 200, {
     result: {
@@ -173,14 +294,22 @@ async function handleGatewayCall(request, response) {
             ? githubToken
               ? "github-repository-search-authenticated"
               : "github-repository-search"
+            : upstreamMode === "github_repo_contents"
+              ? githubToken
+                ? "github-repo-contents-authenticated"
+                : "github-repo-contents"
             : "whiskey-mcp-pilot",
       auth_mode:
-        upstreamMode === "github_repositories"
+        upstreamMode === "github_repositories" || upstreamMode === "github_repo_contents"
           ? githubToken
             ? "authenticated"
             : "anonymous"
           : "not_applicable",
       query,
+      repository:
+        upstreamMode === "github_repo_contents" && githubRepoOwner && githubRepoName
+          ? `${githubRepoOwner}/${githubRepoName}@${githubRepoRef}`
+          : null,
       item_count: items.length,
       items,
     },
