@@ -560,6 +560,7 @@ mkdir -p "$LOCAL_SYNC_DIR"
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && test -f '$REMOTE_COMPOSE' && test -f '$REMOTE_ENV'"
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' '$REMOTE_ROOT/scripts' '$REMOTE_ROOT/deploy/stage2-evidence' '$REMOTE_ROOT/deploy/stage2-production-evidence' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 rsync -az scripts/ "$REMOTE_HOST:$REMOTE_ROOT/scripts/"
+rsync -az packs/ "$REMOTE_HOST:$REMOTE_ROOT/packs/"
 rsync -az deploy/stage2-evidence/ "$REMOTE_HOST:$REMOTE_ROOT/deploy/stage2-evidence/"
 rsync -az deploy/stage2-production-evidence/ "$REMOTE_HOST:$REMOTE_ROOT/deploy/stage2-production-evidence/"
 
