@@ -32,7 +32,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(organization_from_row).collect()
@@ -67,7 +67,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(organization.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&organization.name)
                 .bind(&organization.slug)
                 .bind(&organization.owner_subject)
@@ -105,7 +105,7 @@ impl AppState {
                 )
                 .bind(input.name)
                 .bind(input.slug)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(organization_id)
                 .fetch_optional(pool)
                 .await?
@@ -137,7 +137,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND organization_id = $2
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(organization_id)
                 .fetch_all(pool)
                 .await?;
@@ -170,7 +170,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(team.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team.organization_id)
                 .bind(&team.name)
                 .bind(&team.slug)
@@ -228,7 +228,7 @@ impl AppState {
                 )
                 .bind(input.name)
                 .bind(input.slug)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .fetch_optional(pool)
                 .await?
@@ -260,7 +260,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND team_id = $2
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .fetch_all(pool)
                 .await?;
@@ -297,7 +297,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(project.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(project.team_id)
                 .bind(&project.name)
                 .bind(&project.slug)
@@ -361,7 +361,7 @@ impl AppState {
                 )
                 .bind(input.name)
                 .bind(input.slug)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(project_id)
                 .fetch_optional(pool)
                 .await?
@@ -394,7 +394,7 @@ impl AppState {
                      RETURNING id, name, slug, owner_subject, created_at, archived_at",
                 )
                 .bind(archived_at)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(organization_id)
                 .fetch_optional(pool)
                 .await?
@@ -428,7 +428,7 @@ impl AppState {
                      RETURNING id, name, slug, owner_subject, created_at, archived_at",
                 )
                 .bind(owner_subject)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(organization_id)
                 .fetch_optional(pool)
                 .await?
@@ -482,7 +482,7 @@ impl AppState {
                       + (SELECT count(*) FROM memberships WHERE tenant_id = $1 AND organization_id = $2)
                       + (SELECT count(*) FROM tenant_invitations WHERE tenant_id = $1 AND organization_id = $2)",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(organization_id)
                 .fetch_one(pool)
                 .await?;
@@ -496,7 +496,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NOT NULL
                      RETURNING id, name, slug, owner_subject, created_at, archived_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(organization_id)
                 .fetch_optional(pool)
                 .await?
@@ -528,7 +528,7 @@ impl AppState {
                      RETURNING id, organization_id, name, slug, created_at, archived_at",
                 )
                 .bind(archived_at)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .fetch_optional(pool)
                 .await?
@@ -592,7 +592,7 @@ impl AppState {
                       + (SELECT count(*) FROM mcp_servers WHERE tenant_id = $1 AND team_id = $2)
                       + (SELECT count(*) FROM agents WHERE tenant_id = $1 AND team_id = $2)",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .fetch_one(pool)
                 .await?;
@@ -606,7 +606,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NOT NULL
                      RETURNING id, organization_id, name, slug, created_at, archived_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .fetch_optional(pool)
                 .await?
@@ -636,7 +636,7 @@ impl AppState {
                      RETURNING id, team_id, name, slug, created_at, archived_at",
                 )
                 .bind(archived_at)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(project_id)
                 .fetch_optional(pool)
                 .await?
@@ -687,7 +687,7 @@ impl AppState {
                       + (SELECT count(*) FROM tenant_invitations WHERE tenant_id = $1 AND project_id = $2)
                       + (SELECT count(*) FROM agents WHERE tenant_id = $1 AND project_id = $2)",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(project_id)
                 .fetch_one(pool)
                 .await?;
@@ -701,7 +701,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NOT NULL
                      RETURNING id, team_id, name, slug, created_at, archived_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(project_id)
                 .fetch_optional(pool)
                 .await?
@@ -736,7 +736,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND organization_id = $2
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(organization_id)
                 .fetch_all(pool)
                 .await?;
@@ -786,7 +786,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 )
                 .bind(membership.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&membership.user_id)
                 .bind(membership.organization_id)
                 .bind(membership.team_id)
@@ -839,7 +839,7 @@ impl AppState {
                      FROM memberships
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(membership_id)
                 .fetch_optional(pool)
                 .await?
@@ -855,7 +855,7 @@ impl AppState {
                                AND role = 'admin'
                                AND id <> $3",
                         )
-                        .bind(self.tenant_id)
+                        .bind(self.current_tenant_id())
                         .bind(organization_id)
                         .bind(membership_id)
                         .fetch_one(pool)
@@ -868,7 +868,7 @@ impl AppState {
                     }
                 }
                 sqlx::query("DELETE FROM memberships WHERE tenant_id = $1 AND id = $2")
-                    .bind(self.tenant_id)
+                    .bind(self.current_tenant_id())
                     .bind(membership_id)
                     .execute(pool)
                     .await?;
@@ -902,7 +902,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND organization_id = $2
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(organization_id)
                 .fetch_all(pool)
                 .await?;
@@ -966,7 +966,7 @@ impl AppState {
                      RETURNING id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at",
                 )
                 .bind(invitation.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(invitation.organization_id)
                 .bind(invitation.team_id)
                 .bind(invitation.project_id)
@@ -1013,7 +1013,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2 AND status = 'pending'
                      RETURNING id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(invitation_id)
                 .bind(decided_at)
                 .fetch_optional(pool)
@@ -1043,7 +1043,7 @@ impl AppState {
                      FROM tenant_invitations
                      WHERE tenant_id = $1 AND token = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(token)
                 .fetch_optional(pool)
                 .await?
@@ -1076,7 +1076,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(invitation_id)
                 .bind(decided_at)
                 .fetch_optional(pool)
@@ -1115,7 +1115,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2 AND status = 'pending'
                      RETURNING id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(invitation_id)
                 .bind(accepted_by)
                 .bind(decided_at)
@@ -1147,7 +1147,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND user_id = $2
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(subject_id)
                 .fetch_all(pool)
                 .await?;
@@ -1207,7 +1207,7 @@ impl AppState {
                           )
                     )",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(subject_id)
                 .bind(team_id)
                 .fetch_one(pool)
@@ -1269,7 +1269,7 @@ impl AppState {
                           )
                     )",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(subject_id)
                 .bind(project_id)
                 .fetch_one(pool)
@@ -1298,7 +1298,7 @@ impl AppState {
                 let exists: Option<i32> = sqlx::query_scalar(
                     "SELECT 1 FROM organizations WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(organization_id)
                 .fetch_optional(pool)
                 .await?;
@@ -1336,7 +1336,7 @@ impl AppState {
                            AND t.archived_at IS NULL
                            AND o.archived_at IS NULL",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .fetch_optional(pool)
                 .await?;
@@ -1385,7 +1385,7 @@ impl AppState {
                        AND t.archived_at IS NULL
                        AND o.archived_at IS NULL",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(project_id)
                 .bind(team_id)
                 .fetch_optional(pool)
@@ -1422,7 +1422,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND team_id = $2
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .fetch_all(pool)
                 .await?;
@@ -1462,7 +1462,7 @@ impl AppState {
                      RETURNING id, team_id, provider_name, model_allowlist, status, created_at",
                 )
                 .bind(provider_access.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(provider_access.team_id)
                 .bind(&provider_access.provider_name)
                 .bind(serde_json::json!(provider_access.model_allowlist))
@@ -1504,7 +1504,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2 AND status = 'active'
                      RETURNING id, team_id, provider_name, model_allowlist, status, created_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(access_id)
                 .bind(input.provider_name)
                 .bind(serde_json::json!(input.model_allowlist))
@@ -1539,7 +1539,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING id, team_id, provider_name, model_allowlist, status, created_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(access_id)
                 .fetch_optional(pool)
                 .await?;
@@ -1602,7 +1602,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(provider_record_from_row).collect()
@@ -1651,7 +1651,7 @@ impl AppState {
                      RETURNING id, provider_type, name, base_url, default_model, config, status, created_at",
                 )
                 .bind(provider.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&provider.provider_type)
                 .bind(&provider.name)
                 .bind(&provider.base_url)
@@ -1702,7 +1702,7 @@ impl AppState {
                 .bind(input.base_url)
                 .bind(input.default_model)
                 .bind(input.config)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(provider_id)
                 .fetch_optional(pool)
                 .await?
@@ -1735,7 +1735,7 @@ impl AppState {
                      RETURNING id, provider_type, name, base_url, default_model, config, status, created_at",
                 )
                 .bind(status)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(provider_id)
                 .fetch_optional(pool)
                 .await?
@@ -1768,7 +1768,7 @@ impl AppState {
                      RETURNING id, provider_type, name, base_url, default_model, config, status, created_at",
                 )
                 .bind(config)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(provider_id)
                 .fetch_optional(pool)
                 .await?
@@ -1796,7 +1796,7 @@ impl AppState {
                      FROM providers
                      WHERE tenant_id = $1 AND name = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(name)
                 .fetch_optional(pool)
                 .await?;
@@ -1839,7 +1839,7 @@ impl AppState {
                        AND payload->>'provider' = $2
                        AND created_at >= $3",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(provider_name)
                 .bind(since)
                 .fetch_one(pool)
@@ -1874,7 +1874,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND team_id = $2
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .fetch_all(pool)
                 .await?;
@@ -1925,7 +1925,7 @@ impl AppState {
                      RETURNING id, team_id, name, transport, config, tool_allowlist, status, created_at",
                 )
                 .bind(server.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(server.team_id)
                 .bind(&server.name)
                 .bind(&server.transport)
@@ -1961,7 +1961,7 @@ impl AppState {
                      FROM mcp_servers
                      WHERE tenant_id = $1 AND team_id = $2 AND id = $3",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .bind(server_id)
                 .fetch_optional(pool)
@@ -1997,7 +1997,7 @@ impl AppState {
                      RETURNING id, team_id, name, transport, config, tool_allowlist, status, created_at",
                 )
                 .bind(serde_json::json!(tool_allowlist))
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .bind(server_id)
                 .fetch_optional(pool)
@@ -2039,7 +2039,7 @@ impl AppState {
                 .bind(&updated.transport)
                 .bind(&updated.config)
                 .bind(serde_json::json!(updated.tool_allowlist))
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .bind(server_id)
                 .fetch_optional(pool)
@@ -2075,7 +2075,7 @@ impl AppState {
                      RETURNING id, team_id, name, transport, config, tool_allowlist, status, created_at",
                 )
                 .bind(status)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(team_id)
                 .bind(server_id)
                 .fetch_optional(pool)

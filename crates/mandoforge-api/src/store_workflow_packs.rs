@@ -31,7 +31,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND archived_at IS NULL
                      ORDER BY created_at ASC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -60,7 +60,7 @@ impl AppState {
                      FROM workflow_pack_installations
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(pool)
                 .await?
@@ -91,7 +91,7 @@ impl AppState {
                      RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
                 )
                 .bind(installation.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&installation.pack_id)
                 .bind(&installation.kind)
                 .bind(&installation.version)
@@ -148,7 +148,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL
                      RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .bind(status)
                 .bind(eval_gate_status)
@@ -190,7 +190,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL
                      RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .bind(archived_at)
                 .fetch_optional(pool)

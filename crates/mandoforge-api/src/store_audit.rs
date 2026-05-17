@@ -22,7 +22,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 )
                 .bind(audit_log.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(audit_log.session_id)
                 .bind(&audit_log.actor_type)
                 .bind(audit_log.actor_id)
@@ -65,7 +65,7 @@ impl AppState {
                              WHERE tenant_id = $1 AND session_id = $2
                              ORDER BY created_at DESC",
                         )
-                        .bind(self.tenant_id)
+                        .bind(self.current_tenant_id())
                         .bind(session_id)
                         .fetch_all(pool)
                         .await?
@@ -77,7 +77,7 @@ impl AppState {
                              WHERE tenant_id = $1
                              ORDER BY created_at DESC",
                         )
-                        .bind(self.tenant_id)
+                        .bind(self.current_tenant_id())
                         .fetch_all(pool)
                         .await?
                     }

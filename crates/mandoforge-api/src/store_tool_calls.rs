@@ -24,7 +24,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                 )
                 .bind(tool_call.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(tool_call.session_id)
                 .bind(tool_call.event_id)
                 .bind(&tool_call.tool_name)
@@ -74,7 +74,7 @@ impl AppState {
                 .bind(status)
                 .bind(result)
                 .bind(error)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(pool)
                 .await?
@@ -112,7 +112,7 @@ impl AppState {
                      RETURNING id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at",
                 )
                 .bind(args)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(pool)
                 .await?
@@ -137,7 +137,7 @@ impl AppState {
                      FROM tool_calls
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(pool)
                 .await?
@@ -174,7 +174,7 @@ impl AppState {
                              WHERE tenant_id = $1 AND session_id = $2
                              ORDER BY created_at DESC",
                         )
-                        .bind(self.tenant_id)
+                        .bind(self.current_tenant_id())
                         .bind(session_id)
                         .fetch_all(pool)
                         .await?
@@ -186,7 +186,7 @@ impl AppState {
                              WHERE tenant_id = $1
                              ORDER BY created_at DESC",
                         )
-                        .bind(self.tenant_id)
+                        .bind(self.current_tenant_id())
                         .fetch_all(pool)
                         .await?
                     }

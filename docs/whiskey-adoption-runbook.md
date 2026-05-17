@@ -81,10 +81,11 @@ Current Whiskey wiring starts a local tenant routing controller on the Docker ga
 
 ```bash
 MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED=true
+MANDOFORGE_TENANT_ROUTING_MODE=tenant_routed
 MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL=http://host.docker.internal:18790/tenant/routing/validate
 ```
 
-The controller is not a production multi-tenant router. It validates the live Whiskey API readiness report against the payload sent by `/api/tenant-isolation/routing/validate`, verifies fail-closed tenant headers and membership-scope signals, and preserves reported production blockers for single-runtime tenant routing and incomplete RLS. This gives repeatable controller evidence for Whiskey without marking the tenant routing lane production-ready.
+The API now has an explicit tenant-routed runtime mode for Whiskey adoption. In that mode, request handling resolves `x-mandoforge-tenant-id` into a request-local tenant context, store queries bind that tenant, and Postgres connections refresh `mandoforge.tenant_id` on acquire. The controller still is not a production multi-tenant router: it validates the live Whiskey API readiness report against the payload sent by `/api/tenant-isolation/routing/validate`, verifies tenant header, RLS, and membership-scope signals, and preserves any remaining production blockers. This gives repeatable tenant-routed Whiskey evidence without claiming external enterprise multi-tenant adoption.
 
 ## Codex App Server Lane
 

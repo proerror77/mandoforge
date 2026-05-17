@@ -12,8 +12,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
     Json, Router,
+    extract::Request,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
     routing::{delete, get, patch, post},
 };
@@ -142,7 +144,33 @@ struct AppState {
     #[allow(dead_code)]
     workspace_root: PathBuf,
     tenant_id: Uuid,
+    tenant_runtime_mode: TenantRuntimeMode,
     policy: Arc<RwLock<PolicyRuntime>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TenantRuntimeMode {
+    SingleRuntimeTenant,
+    TenantRouted,
+}
+
+impl TenantRuntimeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleRuntimeTenant => "single_runtime_tenant",
+            Self::TenantRouted => "tenant_routed",
+        }
+    }
+}
+
+tokio::task_local! {
+    static REQUEST_TENANT_ID: Uuid;
+}
+
+pub(crate) fn current_request_tenant_id(default_tenant_id: Uuid) -> Uuid {
+    REQUEST_TENANT_ID
+        .try_with(|tenant_id| *tenant_id)
+        .unwrap_or(default_tenant_id)
 }
 
 #[derive(Debug, Clone)]
@@ -3759,9 +3787,11 @@ async fn main() -> Result<()> {
     let policy = load_policy_config("config/policy.stage1.yaml").await?;
 
     let tenant_id = runtime_tenant_id_from_env()?;
+    let tenant_runtime_mode = tenant_runtime_mode_from_env()?;
     let store = match std::env::var("DATABASE_URL") {
         Ok(database_url) if !database_url.trim().is_empty() => {
             let tenant_setting = format!("SET mandoforge.tenant_id = '{}'", tenant_id);
+            let default_tenant_id = tenant_id;
             let pool = PgPoolOptions::new()
                 .max_connections(8)
                 .after_connect(move |conn, _meta| {
@@ -3769,6 +3799,14 @@ async fn main() -> Result<()> {
                     Box::pin(async move {
                         conn.execute(tenant_setting.as_str()).await?;
                         Ok(())
+                    })
+                })
+                .before_acquire(move |conn, _meta| {
+                    Box::pin(async move {
+                        let tenant_id = current_request_tenant_id(default_tenant_id);
+                        let tenant_setting = format!("SET mandoforge.tenant_id = '{}'", tenant_id);
+                        conn.execute(tenant_setting.as_str()).await?;
+                        Ok(true)
                     })
                 })
                 .connect(&database_url)
@@ -3803,6 +3841,7 @@ async fn main() -> Result<()> {
         approval_webhook_url: approval_webhook_url_from_env(),
         workspace_root,
         tenant_id,
+        tenant_runtime_mode,
         policy: runtime_policy(policy),
     };
     state
@@ -3871,6 +3910,28 @@ where
     Uuid::parse_str(raw.trim()).with_context(|| "MANDOFORGE_TENANT_ID must be a valid UUID")
 }
 
+fn tenant_runtime_mode_from_env() -> Result<TenantRuntimeMode> {
+    tenant_runtime_mode_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn tenant_runtime_mode_from_lookup<F>(lookup: F) -> Result<TenantRuntimeMode>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let raw = lookup("MANDOFORGE_TENANT_ROUTING_MODE")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "single_runtime_tenant".to_string());
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "single_runtime_tenant" | "single" | "default" => {
+            Ok(TenantRuntimeMode::SingleRuntimeTenant)
+        }
+        "tenant_routed" | "tenant-routed" | "routed" => Ok(TenantRuntimeMode::TenantRouted),
+        other => anyhow::bail!(
+            "unsupported MANDOFORGE_TENANT_ROUTING_MODE={other}; use single_runtime_tenant or tenant_routed"
+        ),
+    }
+}
+
 fn execution_queue_from_env(store: &StoreBackend, tenant_id: Uuid) -> Result<ExecutionQueue> {
     let selection = select_execution_queue_backend(
         std::env::var("MANDOFORGE_EXECUTION_QUEUE_BACKEND")
@@ -3911,6 +3972,7 @@ fn execution_queue_from_env(store: &StoreBackend, tenant_id: Uuid) -> Result<Exe
 }
 
 fn build_router(state: AppState) -> Router {
+    let tenant_context_state = state.clone();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/stage2/readiness", get(get_stage2_readiness))
@@ -4535,6 +4597,10 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/audit-logs", get(list_audit_logs))
         .fallback_service(ServeDir::new("web"))
+        .route_layer(middleware::from_fn_with_state(
+            tenant_context_state,
+            tenant_context_middleware,
+        ))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -5226,6 +5292,15 @@ fn session_rollout_bucket(session_id: Uuid) -> u8 {
 }
 
 impl AppState {
+    fn configured_tenant_id(&self) -> Uuid {
+        let Self { tenant_id, .. } = self;
+        *tenant_id
+    }
+
+    fn current_tenant_id(&self) -> Uuid {
+        current_request_tenant_id(self.configured_tenant_id())
+    }
+
     async fn active_policy(&self) -> PolicyConfig {
         self.policy.read().await.active.clone()
     }
@@ -5328,7 +5403,7 @@ impl AppState {
         }
         let telemetry_event = TelemetryEvent {
             name: event.event_type.clone(),
-            attributes: telemetry_attributes_for_event(event, self.tenant_id),
+            attributes: telemetry_attributes_for_event(event, self.current_tenant_id()),
         };
         if let Err(error) = self
             .telemetry_exporter
@@ -5481,7 +5556,7 @@ async fn list_agents(
 ) -> Result<Json<Vec<Agent>>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::AgentsRead,
         resource_type: "agents".to_string(),
         resource_id: None,
@@ -5549,7 +5624,7 @@ async fn validate_agent_release_deployment(
 ) -> Result<Json<AgentReleaseDeploymentValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "agent_release".to_string(),
         resource_id: None,
@@ -5683,7 +5758,7 @@ async fn validate_agent_release_orchestration(
 ) -> Result<Json<AgentReleaseOrchestrationValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "agent_release".to_string(),
         resource_id: None,
@@ -5813,7 +5888,7 @@ async fn create_agent_release(
 ) -> Result<Json<AgentRelease>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "agent".to_string(),
         resource_id: Some(id),
@@ -5835,7 +5910,7 @@ async fn request_agent_release_promotion(
 ) -> Result<Json<AgentRelease>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "agent".to_string(),
         resource_id: Some(id),
@@ -7220,7 +7295,7 @@ async fn decide_agent_release_promotion(
 ) -> Result<Json<AgentRelease>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "agent".to_string(),
         resource_id: Some(agent_id),
@@ -7278,7 +7353,7 @@ async fn rollback_agent_release(
 ) -> Result<Json<AgentRelease>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "agent".to_string(),
         resource_id: Some(id),
@@ -7364,7 +7439,7 @@ async fn list_sessions(
 ) -> Result<Json<Vec<Session>>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::SessionsRead,
         resource_type: "sessions".to_string(),
         resource_id: None,
@@ -8612,6 +8687,16 @@ async fn authorize_session_run(
     .await
 }
 
+async fn tenant_context_middleware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    let tenant_id = resolve_request_tenant_id(&state, &headers)?;
+    Ok(REQUEST_TENANT_ID.scope(tenant_id, next.run(request)).await)
+}
+
 async fn authorize_request(
     state: &AppState,
     headers: &HeaderMap,
@@ -8621,7 +8706,7 @@ async fn authorize_request(
 ) -> Result<(), AppError> {
     let principal = principal_from_request(state, headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission,
         resource_type: resource_type.into(),
         resource_id,
@@ -9104,7 +9189,7 @@ async fn authorize_tool_execution(
 ) -> Result<(), AppError> {
     let principal = principal_from_request(state, headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::ToolsExecute,
         resource_type: format!("tool:{tool_name}"),
         resource_id: None,
@@ -9116,19 +9201,7 @@ async fn principal_from_request(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Principal, AppError> {
-    let requested_tenant_id = header_value(headers, "x-mandoforge-tenant-id")
-        .map(|value| {
-            Uuid::parse_str(value.trim())
-                .map_err(|_| AppError::bad_request("x-mandoforge-tenant-id must be a valid UUID"))
-        })
-        .transpose()?;
-    if let Some(requested_tenant_id) = requested_tenant_id {
-        if requested_tenant_id != state.tenant_id {
-            return Err(AppError::forbidden(
-                "x-mandoforge-tenant-id does not match this runtime tenant",
-            ));
-        }
-    }
+    let tenant_id = resolve_request_tenant_id(state, headers)?;
     let explicit_subject = header_value(headers, "x-mandoforge-subject");
     let subject_id = explicit_subject.unwrap_or("demo-operator").to_string();
     let roles = if let Some(value) = header_value(headers, "x-mandoforge-roles") {
@@ -9143,10 +9216,33 @@ async fn principal_from_request(
     }
 
     Ok(Principal {
-        tenant_id: requested_tenant_id.unwrap_or(state.tenant_id),
+        tenant_id,
         subject_id,
         roles,
     })
+}
+
+fn resolve_request_tenant_id(state: &AppState, headers: &HeaderMap) -> Result<Uuid, AppError> {
+    let requested_tenant_id = header_value(headers, "x-mandoforge-tenant-id")
+        .map(|value| {
+            Uuid::parse_str(value.trim())
+                .map_err(|_| AppError::bad_request("x-mandoforge-tenant-id must be a valid UUID"))
+        })
+        .transpose()?;
+
+    match (state.tenant_runtime_mode, requested_tenant_id) {
+        (TenantRuntimeMode::TenantRouted, Some(tenant_id)) => Ok(tenant_id),
+        (TenantRuntimeMode::TenantRouted, None) => Ok(state.configured_tenant_id()),
+        (TenantRuntimeMode::SingleRuntimeTenant, Some(tenant_id)) => {
+            if tenant_id != state.configured_tenant_id() {
+                return Err(AppError::forbidden(
+                    "x-mandoforge-tenant-id does not match this runtime tenant",
+                ));
+            }
+            Ok(tenant_id)
+        }
+        (TenantRuntimeMode::SingleRuntimeTenant, None) => Ok(state.configured_tenant_id()),
+    }
 }
 
 fn subject_from_headers(headers: &HeaderMap) -> Result<String, AppError> {
@@ -9477,7 +9573,7 @@ async fn validate_tenant_production_routing(
 ) -> Result<Json<Value>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "tenant_isolation".to_string(),
         resource_id: None,
@@ -9575,8 +9671,9 @@ async fn build_tenant_isolation_readiness(
     let membership_scope_enforced = true;
     let audit_logs = state.list_audit_logs(None).await?;
     let mut attention_items = Vec::new();
+    let runtime_tenant_mode = state.tenant_runtime_mode.as_str();
     let production_routing = build_tenant_production_routing_readiness(
-        "single_runtime_tenant",
+        runtime_tenant_mode,
         header_fail_closed,
         membership_scope_enforced,
         &rls,
@@ -9585,11 +9682,13 @@ async fn build_tenant_isolation_readiness(
         tenant_production_routing_controller_configured(&|key| std::env::var(key).ok()),
         generated_at,
     );
-    attention_items.push(TenantIsolationAttentionItem {
-        kind: "single_runtime_tenant".to_string(),
-        severity: "warning".to_string(),
-        message: "runtime currently binds every request to one configured tenant_id; cross-tenant serving is intentionally disabled".to_string(),
-    });
+    if state.tenant_runtime_mode == TenantRuntimeMode::SingleRuntimeTenant {
+        attention_items.push(TenantIsolationAttentionItem {
+            kind: "single_runtime_tenant".to_string(),
+            severity: "warning".to_string(),
+            message: "runtime currently binds every request to one configured tenant_id; cross-tenant serving is intentionally disabled".to_string(),
+        });
+    }
     if production_routing.production_blocked {
         attention_items.push(TenantIsolationAttentionItem {
             kind: "tenant_production_routing_blocked".to_string(),
@@ -9606,11 +9705,15 @@ async fn build_tenant_isolation_readiness(
     }
 
     let runbook_actions = vec![
-        "keep x-mandoforge-tenant-id fail-closed until runtime tenant switching is implemented"
-            .to_string(),
+        if state.tenant_runtime_mode == TenantRuntimeMode::TenantRouted {
+            "keep x-mandoforge-tenant-id required for tenant-routed production clients and verify cross-tenant negative tests".to_string()
+        } else {
+            "keep x-mandoforge-tenant-id fail-closed until runtime tenant switching is implemented"
+                .to_string()
+        },
         "apply and verify db/migrations/0024_tenant_rls_policies.sql in Postgres-backed environments"
             .to_string(),
-        "keep mandoforge.tenant_id configured on every database connection before production multi-tenant serving"
+        "keep mandoforge.tenant_id configured on every acquired database connection before production multi-tenant serving"
             .to_string(),
         "run cross-tenant access tests for agents, sessions, tools, approvals, jobs, audit, and governance resources"
             .to_string(),
@@ -9636,8 +9739,8 @@ async fn build_tenant_isolation_readiness(
         }
         .to_string(),
         readiness_score,
-        runtime_tenant_id: state.tenant_id,
-        runtime_tenant_mode: "single_runtime_tenant".to_string(),
+        runtime_tenant_id: state.current_tenant_id(),
+        runtime_tenant_mode: runtime_tenant_mode.to_string(),
         header_fail_closed,
         membership_scope_enforced,
         production_routing,
@@ -9897,7 +10000,7 @@ async fn probe_tenant_rls(state: &AppState) -> Result<TenantRlsProbe, AppError> 
         .count();
     let tenant_context_configured: bool =
         sqlx::query_scalar("SELECT NULLIF(current_setting('mandoforge.tenant_id', true), '') = $1")
-            .bind(state.tenant_id.to_string())
+            .bind(state.current_tenant_id().to_string())
             .fetch_one(pool)
             .await
             .unwrap_or(false);
@@ -9979,7 +10082,7 @@ async fn create_organization(
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "organizations".to_string(),
         resource_id: None,
@@ -10010,7 +10113,7 @@ async fn bootstrap_tenant_provisioning(
 ) -> Result<Json<TenantProvisioningResult>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "tenant_provisioning".to_string(),
         resource_id: None,
@@ -10125,7 +10228,7 @@ async fn update_organization(
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "organization".to_string(),
         resource_id: Some(id),
@@ -10158,7 +10261,7 @@ async fn archive_organization(
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "organization".to_string(),
         resource_id: Some(id),
@@ -10187,7 +10290,7 @@ async fn delete_organization(
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "organization".to_string(),
         resource_id: Some(id),
@@ -10221,7 +10324,7 @@ async fn transfer_organization_ownership(
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "organization".to_string(),
         resource_id: Some(id),
@@ -10302,7 +10405,7 @@ async fn update_team(
 ) -> Result<Json<Team>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "team".to_string(),
         resource_id: Some(id),
@@ -10356,7 +10459,7 @@ async fn update_project(
 ) -> Result<Json<Project>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "project".to_string(),
         resource_id: Some(id),
@@ -10390,7 +10493,7 @@ async fn archive_team(
 ) -> Result<Json<Team>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "team".to_string(),
         resource_id: Some(id),
@@ -10419,7 +10522,7 @@ async fn delete_team(
 ) -> Result<Json<Team>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "team".to_string(),
         resource_id: Some(id),
@@ -10452,7 +10555,7 @@ async fn archive_project(
 ) -> Result<Json<Project>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "project".to_string(),
         resource_id: Some(id),
@@ -10481,7 +10584,7 @@ async fn delete_project(
 ) -> Result<Json<Project>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "project".to_string(),
         resource_id: Some(id),
@@ -10547,7 +10650,7 @@ async fn delete_membership(
 ) -> Result<Json<Membership>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "membership".to_string(),
         resource_id: Some(id),
@@ -10599,7 +10702,7 @@ async fn create_tenant_invitation(
 ) -> Result<Json<TenantInvitation>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "organization".to_string(),
         resource_id: Some(id),
@@ -10638,7 +10741,7 @@ async fn revoke_tenant_invitation(
 ) -> Result<Json<TenantInvitation>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "tenant_invitation".to_string(),
         resource_id: Some(id),
@@ -10883,7 +10986,7 @@ async fn validate_provider_deployment(
 ) -> Result<Json<ProviderDeploymentValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "providers".to_string(),
         resource_id: None,
@@ -11013,7 +11116,7 @@ async fn run_provider_policy_gate(
 ) -> Result<Json<ProviderPolicyGateRunResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "providers".to_string(),
         resource_id: None,
@@ -11090,7 +11193,7 @@ async fn run_provider_production_rollout(
 ) -> Result<Json<ProviderProductionRolloutRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "providers".to_string(),
         resource_id: None,
@@ -11115,7 +11218,7 @@ async fn run_provider_production_rollback(
 ) -> Result<Json<ProviderProductionRollbackRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "providers".to_string(),
         resource_id: None,
@@ -12395,7 +12498,7 @@ async fn simulate_policy(
 ) -> Result<Json<policy::ToolPolicyDecision>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "policy".to_string(),
         resource_id: None,
@@ -12435,7 +12538,7 @@ async fn test_policy(
 ) -> Result<Json<PolicyTestResult>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "policy".to_string(),
         resource_id: None,
@@ -12507,7 +12610,7 @@ async fn cancel_policy_rollout(
 ) -> Result<Json<PolicyRuntimeStatus>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "policy".to_string(),
         resource_id: None,
@@ -12556,7 +12659,7 @@ async fn validate_policy_rollout_orchestration(
 ) -> Result<Json<PolicyRolloutOrchestrationValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "policy".to_string(),
         resource_id: None,
@@ -12674,7 +12777,7 @@ async fn rollback_policy_rollout(
 ) -> Result<Json<PolicyRollbackResult>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "policy".to_string(),
         resource_id: None,
@@ -12729,7 +12832,7 @@ async fn run_due_policy_rollouts(
 ) -> Result<Json<PolicyScheduledRolloutRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "policy".to_string(),
         resource_id: None,
@@ -13024,7 +13127,7 @@ async fn create_policy_revision(
 ) -> Result<Json<PolicyRevision>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "policy".to_string(),
         resource_id: None,
@@ -13079,7 +13182,7 @@ async fn gate_policy_revision(
 ) -> Result<Json<PolicyRevisionGate>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "policy_revision".to_string(),
         resource_id: Some(id),
@@ -13123,7 +13226,7 @@ async fn activate_policy_revision(
 ) -> Result<Json<PolicyRevision>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "policy_revision".to_string(),
         resource_id: Some(id),
@@ -13531,7 +13634,7 @@ async fn validate_vault_kms_recovery(
 ) -> Result<Json<VaultKmsRecoveryValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "vault".to_string(),
         resource_id: None,
@@ -13659,7 +13762,7 @@ async fn create_secret_record(
 ) -> Result<Json<SecretRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "vault".to_string(),
         resource_id: None,
@@ -13701,7 +13804,7 @@ async fn rotate_secret_record(
 ) -> Result<Json<SecretRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "secret_record".to_string(),
         resource_id: Some(id),
@@ -14083,7 +14186,7 @@ async fn validate_codex_app_server_deployment(
 ) -> Result<Json<Value>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "codex_app_server".to_string(),
         resource_id: None,
@@ -14201,7 +14304,7 @@ async fn validate_codex_app_server_ops(
 ) -> Result<Json<CodexAppServerOpsValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "codex_app_server".to_string(),
         resource_id: None,
@@ -14530,7 +14633,7 @@ async fn poll_codex_app_server_run(
 ) -> Result<Json<CodexAppServerPollResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "codex_app_server".to_string(),
         resource_id: Some(run_id),
@@ -14550,7 +14653,7 @@ async fn poll_stale_codex_app_server_runs(
 ) -> Result<Json<CodexAppServerStalePollRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "codex_app_server".to_string(),
         resource_id: None,
@@ -17060,7 +17163,7 @@ async fn update_provider_status(
 ) -> Result<Json<ProviderRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "provider".to_string(),
         resource_id: Some(id),
@@ -17113,7 +17216,7 @@ async fn request_provider_status_approval(
 ) -> Result<Json<ProviderStatusApprovalResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "provider".to_string(),
         resource_id: Some(id),
@@ -17206,7 +17309,7 @@ async fn decide_provider_status_approval(
 ) -> Result<Json<ProviderStatusApprovalResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "provider".to_string(),
         resource_id: Some(id),
@@ -17304,7 +17407,7 @@ async fn rotate_provider_api_key_ref(
 ) -> Result<Json<ProviderRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "provider".to_string(),
         resource_id: Some(id),
@@ -17531,7 +17634,7 @@ async fn get_provider_health(
 ) -> Result<Json<ProviderHealth>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "provider".to_string(),
         resource_id: Some(id),
@@ -17951,7 +18054,7 @@ async fn validate_mcp_server_deployment(
 ) -> Result<Json<McpServerDeploymentValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "team".to_string(),
         resource_id: Some(team_id),
@@ -18128,7 +18231,7 @@ async fn request_mcp_server_rollout(
 ) -> Result<Json<McpServerRolloutResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "team".to_string(),
         resource_id: Some(team_id),
@@ -18186,7 +18289,7 @@ async fn apply_mcp_server_rollout(
 ) -> Result<Json<McpServerRolloutResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "team".to_string(),
         resource_id: Some(team_id),
@@ -18212,7 +18315,7 @@ async fn rollback_mcp_server_rollout(
 ) -> Result<Json<McpServerRolloutResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "team".to_string(),
         resource_id: Some(team_id),
@@ -20078,7 +20181,7 @@ async fn create_eval_judge_profile(
 ) -> Result<Json<ProviderRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "eval_judge_profile".to_string(),
         resource_id: None,
@@ -20135,7 +20238,7 @@ async fn bootstrap_stage2_eval_suite(
 ) -> Result<Json<EvalSuiteBootstrap>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "eval_suite".to_string(),
         resource_id: None,
@@ -20477,7 +20580,7 @@ async fn run_usage_finance_operations(
 ) -> Result<Json<UsageFinanceOperationsRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "usage_finance_operations".to_string(),
         resource_id: None,
@@ -20495,7 +20598,7 @@ async fn run_usage_finance_reconciliation(
 ) -> Result<Json<Value>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "usage_finance_operations".to_string(),
         resource_id: None,
@@ -21487,7 +21590,7 @@ async fn export_usage_csv(
 ) -> Result<Response, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "usage_export".to_string(),
         resource_id: None,
@@ -21532,7 +21635,7 @@ async fn deliver_usage_export(
 ) -> Result<Json<UsageFinanceExportDelivery>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "usage_export".to_string(),
         resource_id: None,
@@ -21685,7 +21788,7 @@ async fn validate_scheduler_deployment(
 ) -> Result<Json<SchedulerDeploymentValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "scheduler".to_string(),
         resource_id: None,
@@ -22914,7 +23017,7 @@ async fn validate_observability_collector_deployment(
 ) -> Result<Json<Value>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "observability".to_string(),
         resource_id: None,
@@ -23030,7 +23133,7 @@ async fn validate_observability_collector_cluster_rollout(
 ) -> Result<Json<ObservabilityCollectorClusterRolloutValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "observability".to_string(),
         resource_id: None,
@@ -24211,7 +24314,7 @@ async fn acknowledge_cost_alert(
 ) -> Result<Json<CostAlertAcknowledgement>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "usage_alerts".to_string(),
         resource_id: None,
@@ -24275,7 +24378,7 @@ async fn create_cost_alert_route(
 ) -> Result<Json<CostAlertRoute>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "usage_alert_routes".to_string(),
         resource_id: None,
@@ -25902,7 +26005,7 @@ async fn create_approval_group(
 ) -> Result<Json<ApprovalGroup>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "approval_groups".to_string(),
         resource_id: None,
@@ -25952,7 +26055,7 @@ async fn create_approval_escalation_rule(
 ) -> Result<Json<ApprovalEscalationRule>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "approval_escalation_rules".to_string(),
         resource_id: None,
@@ -26073,7 +26176,7 @@ async fn escalate_approval(
 ) -> Result<Json<Approval>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "approval".to_string(),
         resource_id: Some(id),
@@ -26293,7 +26396,7 @@ async fn run_approval_notifications(
 ) -> Result<Json<ApprovalNotificationDeliveryRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "approval_notifications".to_string(),
         resource_id: None,
@@ -26317,7 +26420,7 @@ async fn validate_approval_notification_deployment(
 ) -> Result<Json<ApprovalNotificationDeploymentValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "approval_notifications".to_string(),
         resource_id: None,
@@ -26448,7 +26551,7 @@ async fn validate_approval_notification_ops(
 ) -> Result<Json<ApprovalNotificationOpsValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "approval_notifications".to_string(),
         resource_id: None,
@@ -26620,7 +26723,7 @@ async fn create_approval_notification_channel_policy(
 ) -> Result<Json<ApprovalNotificationChannelPolicy>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "approval_notification_channel_policies".to_string(),
         resource_id: None,
@@ -26662,7 +26765,7 @@ async fn archive_approval_notification_channel_policy(
 ) -> Result<Json<ApprovalNotificationChannelPolicy>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "approval_notification_channel_policy".to_string(),
         resource_id: Some(id),
@@ -27968,7 +28071,7 @@ async fn authorize_approval_decision(
 ) -> Result<(), AppError> {
     let principal = principal_from_request(state, headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::ApprovalsDecide,
         resource_type: "approval".to_string(),
         resource_id: Some(approval_id),
@@ -27976,7 +28079,7 @@ async fn authorize_approval_decision(
     state.authorizer.authorize(&principal, &request).await?;
     let approval = state.get_approval(approval_id).await?;
     let session_request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::SessionsRead,
         resource_type: "session".to_string(),
         resource_id: Some(approval.session_id),
@@ -28208,7 +28311,7 @@ async fn validate_remote_computer_state_sync(
 ) -> Result<Json<RemoteComputerStateSyncValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::Admin,
         resource_type: "remote_computer_state_sync".to_string(),
         resource_id: None,
@@ -31508,7 +31611,7 @@ async fn authorize_execution_job_run(
 ) -> Result<(), AppError> {
     let principal = principal_from_request(state, headers).await?;
     let request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::ExecutionJobsRun,
         resource_type: "execution_job".to_string(),
         resource_id: Some(job_id),
@@ -31516,7 +31619,7 @@ async fn authorize_execution_job_run(
     state.authorizer.authorize(&principal, &request).await?;
     let job = state.execution_queue.get(job_id).await?;
     let session_request = AuthorizationRequest {
-        tenant_id: state.tenant_id,
+        tenant_id: state.current_tenant_id(),
         permission: Permission::SessionsRead,
         resource_type: "session".to_string(),
         resource_id: Some(job.session_id),
@@ -32019,6 +32122,30 @@ mod tests {
             error
                 .to_string()
                 .contains("MANDOFORGE_TENANT_ID must be a valid UUID")
+        );
+    }
+
+    #[test]
+    fn tenant_runtime_mode_defaults_and_parses_env_override() {
+        assert_eq!(
+            tenant_runtime_mode_from_lookup(|_| None).expect("default tenant mode"),
+            TenantRuntimeMode::SingleRuntimeTenant
+        );
+        assert_eq!(
+            tenant_runtime_mode_from_lookup(|key| {
+                (key == "MANDOFORGE_TENANT_ROUTING_MODE").then(|| "tenant_routed".to_string())
+            })
+            .expect("tenant routed mode"),
+            TenantRuntimeMode::TenantRouted
+        );
+        let error = tenant_runtime_mode_from_lookup(|key| {
+            (key == "MANDOFORGE_TENANT_ROUTING_MODE").then(|| "unsafe".to_string())
+        })
+        .expect_err("unsupported tenant mode should fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported MANDOFORGE_TENANT_ROUTING_MODE")
         );
     }
 
@@ -41170,6 +41297,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         }
     }
@@ -41510,6 +41638,7 @@ not json
             approval_webhook_url: Some(approval_webhook_url),
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -42795,6 +42924,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         let record = state
@@ -43086,6 +43216,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -43208,6 +43339,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -43587,6 +43719,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -43731,6 +43864,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -43916,6 +44050,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -44070,6 +44205,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -44344,6 +44480,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         let route = CostAlertRoute {
@@ -44517,6 +44654,7 @@ not json
             approval_webhook_url: None,
             workspace_root: test_workspace_root(),
             tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
             policy: runtime_policy(PolicyConfig::default()),
         };
         state.seed_demo_agent().await.expect("seed demo agent");
@@ -45943,6 +46081,72 @@ not json
         assert!(readiness.attention_items.iter().any(|item| {
             item.kind == "tenant_production_routing_blocked" && item.severity == "critical"
         }));
+    }
+
+    #[tokio::test]
+    async fn tenant_routed_mode_uses_request_tenant_context() {
+        let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.tenant_runtime_mode = TenantRuntimeMode::TenantRouted;
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state);
+        let alternate_tenant = "00000000-0000-4000-8000-000000000099";
+
+        let default_agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(default_agents.len(), 1);
+
+        let alternate_agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-tenant-id", alternate_tenant)
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(alternate_agents.len(), 1);
+
+        let readiness: TenantIsolationReadinessReport = request_json(
+            app,
+            Request::builder()
+                .uri("/api/tenant-isolation/readiness")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-tenant-id", alternate_tenant)
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(readiness.runtime_tenant_mode, "tenant_routed");
+        assert_eq!(
+            readiness.runtime_tenant_id,
+            Uuid::parse_str(alternate_tenant).expect("valid tenant")
+        );
+        assert!(readiness.production_routing.cross_tenant_routing_supported);
+        assert!(
+            !readiness
+                .production_routing
+                .blocking_reasons
+                .iter()
+                .any(|reason| reason
+                    == "runtime still serves one configured tenant instead of routing per tenant")
+        );
+        assert!(
+            !readiness
+                .attention_items
+                .iter()
+                .any(|item| item.kind == "single_runtime_tenant")
+        );
     }
 
     #[tokio::test]

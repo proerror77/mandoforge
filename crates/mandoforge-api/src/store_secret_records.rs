@@ -28,7 +28,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(secret_record_from_row).collect()
@@ -71,7 +71,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(record.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&record.name)
                 .bind(&record.path)
                 .bind(&record.key)
@@ -113,7 +113,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING id, name, path, key, scope_type, scope_id, status, version, created_at, updated_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .bind(&input.path)
                 .bind(&input.key)

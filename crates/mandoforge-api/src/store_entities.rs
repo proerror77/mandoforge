@@ -24,7 +24,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND archived_at IS NULL
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(agent_from_row).collect()
@@ -78,7 +78,7 @@ impl AppState {
                      FROM agents
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(agent_id)
                 .fetch_optional(pool)
                 .await?
@@ -123,7 +123,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(agent.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&agent.name)
                 .bind(&agent.kind)
                 .bind(agent.team_id)
@@ -218,7 +218,7 @@ impl AppState {
                      WHERE a.tenant_id = $1 AND av.agent_id = $2
                      ORDER BY av.version ASC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(agent_id)
                 .fetch_all(pool)
                 .await?;
@@ -252,7 +252,7 @@ impl AppState {
                      JOIN agents a ON a.id = av.agent_id
                      WHERE a.tenant_id = $1 AND av.agent_id = $2 AND av.version = $3",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(agent_id)
                 .bind(version)
                 .fetch_optional(pool)
@@ -287,7 +287,7 @@ impl AppState {
                      JOIN agent_versions av ON av.agent_id = a.id AND av.version = a.current_version
                      WHERE a.tenant_id = $1 AND a.id = $2 AND a.archived_at IS NULL",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(agent_id)
                 .fetch_optional(pool)
                 .await?
@@ -336,7 +336,7 @@ impl AppState {
                      ORDER BY CASE WHEN av.id = s.agent_version_id THEN 0 ELSE 1 END
                      LIMIT 1",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(session_id)
                 .fetch_optional(pool)
                 .await?
@@ -358,7 +358,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(session_from_row).collect()
@@ -427,7 +427,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 )
                 .bind(session.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(session.agent_id)
                 .bind(session.agent_version_id)
                 .bind(&session.title)
@@ -458,7 +458,7 @@ impl AppState {
                 let exists: bool = sqlx::query_scalar(
                     "SELECT EXISTS(SELECT 1 FROM agents WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL)",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(agent_id)
                 .fetch_one(pool)
                 .await?;
@@ -482,7 +482,7 @@ impl AppState {
                      FROM sessions
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(pool)
                 .await?
@@ -516,7 +516,7 @@ impl AppState {
                      RETURNING id, agent_id, agent_version_id, title, status, created_at, updated_at",
                 )
                 .bind(status.as_str())
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(session_id)
                 .fetch_optional(pool)
                 .await?

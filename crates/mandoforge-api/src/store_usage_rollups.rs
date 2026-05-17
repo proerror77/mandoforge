@@ -24,7 +24,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(usage_rollup_from_row).collect()
@@ -59,7 +59,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(rollup.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(rollup.period_start)
                 .bind(rollup.period_end)
                 .bind(&rollup.summary)

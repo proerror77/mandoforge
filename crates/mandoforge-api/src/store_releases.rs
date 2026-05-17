@@ -37,7 +37,7 @@ impl AppState {
                      ORDER BY created_at DESC"
                 );
                 let rows = sqlx::query(&sql)
-                    .bind(self.tenant_id)
+                    .bind(self.current_tenant_id())
                     .bind(agent_id)
                     .fetch_all(pool)
                     .await?;
@@ -68,7 +68,7 @@ impl AppState {
                      ORDER BY created_at DESC"
                 );
                 let rows = sqlx::query(&sql)
-                    .bind(self.tenant_id)
+                    .bind(self.current_tenant_id())
                     .fetch_all(pool)
                     .await?;
                 rows.into_iter().map(agent_release_from_row).collect()
@@ -98,7 +98,7 @@ impl AppState {
                      ORDER BY created_at ASC"
                 );
                 let rows = sqlx::query(&sql)
-                    .bind(self.tenant_id)
+                    .bind(self.current_tenant_id())
                     .fetch_all(pool)
                     .await?;
                 rows.into_iter().map(agent_release_from_row).collect()
@@ -150,7 +150,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
                 )
                 .bind(release.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(release.agent_id)
                 .bind(release.agent_version_id)
                 .bind(&release.environment)
@@ -223,7 +223,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
                 )
                 .bind(release.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(release.agent_id)
                 .bind(release.agent_version_id)
                 .bind(&release.environment)
@@ -305,7 +305,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND agent_id = $2 AND id = $3"
                 );
                 let existing = sqlx::query(&sql)
-                    .bind(self.tenant_id)
+                    .bind(self.current_tenant_id())
                     .bind(agent_id)
                     .bind(release_id)
                     .fetch_optional(pool)
@@ -321,7 +321,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
                      RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(agent_id)
                 .bind(release_id)
                 .fetch_one(pool)
@@ -409,7 +409,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND agent_id = $2 AND id = $3"
                 );
                 let existing = sqlx::query(&sql)
-                    .bind(self.tenant_id)
+                    .bind(self.current_tenant_id())
                     .bind(agent_id)
                     .bind(release_id)
                     .fetch_optional(pool)
@@ -431,7 +431,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
                      RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(agent_id)
                 .bind(release_id)
                 .bind(next_status)
@@ -494,7 +494,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND agent_id = $2 AND id = $3"
                 );
                 let existing = sqlx::query(&sql)
-                    .bind(self.tenant_id)
+                    .bind(self.current_tenant_id())
                     .bind(agent_id)
                     .bind(release_id)
                     .fetch_optional(pool)
@@ -520,7 +520,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
                      RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(agent_id)
                 .bind(release_id)
                 .bind(next_status)

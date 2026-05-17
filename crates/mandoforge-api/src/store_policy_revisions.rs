@@ -29,7 +29,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(policy_revision_from_row).collect()
@@ -72,7 +72,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(revision.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&revision.name)
                 .bind(&revision.body)
                 .bind(&revision.status)
@@ -104,7 +104,7 @@ impl AppState {
                      FROM policy_revisions
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(pool)
                 .await?
@@ -138,7 +138,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING id, name, body, status, created_by, created_at, activated_at, gate_status, gate_result, gated_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(gate.revision_id)
                 .bind(&gate.status)
                 .bind(&gate_result)
@@ -191,7 +191,7 @@ impl AppState {
                      FROM policy_revisions
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(&mut *tx)
                 .await?
@@ -207,7 +207,7 @@ impl AppState {
                      SET status = 'archived'
                      WHERE tenant_id = $1 AND status = 'active' AND id <> $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
@@ -217,7 +217,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING id, name, body, status, created_by, created_at, activated_at, gate_status, gate_result, gated_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(existing.id)
                 .bind(Utc::now())
                 .fetch_one(&mut *tx)
@@ -261,7 +261,7 @@ impl AppState {
                      ORDER BY activated_at DESC
                      LIMIT 1",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(current_id)
                 .fetch_optional(pool)
                 .await?;
@@ -310,7 +310,7 @@ impl AppState {
                      FROM policy_revisions
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(current_id)
                 .fetch_optional(&mut *tx)
                 .await?;
@@ -329,7 +329,7 @@ impl AppState {
                      FROM policy_revisions
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(target_id)
                 .fetch_optional(&mut *tx)
                 .await?;
@@ -352,7 +352,7 @@ impl AppState {
                      SET status = 'archived'
                      WHERE tenant_id = $1 AND status = 'active'",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .execute(&mut *tx)
                 .await?;
                 let row = sqlx::query(
@@ -361,7 +361,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING id, name, body, status, created_by, created_at, activated_at, gate_status, gate_result, gated_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(target_id)
                 .bind(rolled_back_at)
                 .fetch_one(&mut *tx)

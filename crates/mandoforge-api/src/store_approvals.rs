@@ -23,7 +23,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 )
                 .bind(approval.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(approval.session_id)
                 .bind(approval.tool_call_id)
                 .bind(&approval.action)
@@ -54,7 +54,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(approval_from_row).collect()
@@ -77,7 +77,7 @@ impl AppState {
                      FROM approvals
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(approval_id)
                 .fetch_optional(pool)
                 .await?
@@ -111,7 +111,7 @@ impl AppState {
                      RETURNING id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, expires_at, created_at, decided_at",
                 )
                 .bind(status)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(approval_id)
                 .fetch_optional(pool)
                 .await?
@@ -154,7 +154,7 @@ impl AppState {
                      RETURNING id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, expires_at, created_at, decided_at",
                 )
                 .bind(&decision_payload)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(approval_id)
                 .fetch_optional(pool)
                 .await?
@@ -187,7 +187,7 @@ impl AppState {
                      RETURNING id, session_id, tool_call_id, action, risk_level, reason, evidence, decision_payload, status, expires_at, created_at, decided_at",
                 )
                 .bind(&evidence)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(approval_id)
                 .fetch_optional(pool)
                 .await?

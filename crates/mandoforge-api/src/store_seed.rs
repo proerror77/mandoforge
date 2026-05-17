@@ -42,7 +42,7 @@ impl AppState {
                      ON CONFLICT (id) DO NOTHING",
                 )
                 .bind(agent.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&agent.name)
                 .bind(&agent.kind)
                 .bind(&agent.provider)

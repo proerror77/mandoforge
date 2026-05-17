@@ -27,7 +27,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND session_id = $2
                      ORDER BY seq ASC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(session_id)
                 .fetch_all(pool)
                 .await?;
@@ -88,7 +88,7 @@ impl AppState {
                      FROM next_seq
                      RETURNING id, session_id, seq, parent_event_id, actor_type, actor_id, event_type, payload, created_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(session_id)
                 .bind(Uuid::new_v4())
                 .bind(actor_type)

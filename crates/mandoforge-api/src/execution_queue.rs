@@ -114,6 +114,12 @@ struct PostgresExecutionQueue {
     tenant_id: Uuid,
 }
 
+impl PostgresExecutionQueue {
+    fn current_tenant_id(&self) -> Uuid {
+        crate::current_request_tenant_id(self.tenant_id)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ExecutionQueueState {
     jobs: Vec<ExecutionJob>,
@@ -353,7 +359,7 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(job.id)
-        .bind(self.tenant_id)
+        .bind(self.current_tenant_id())
         .bind(job.session_id)
         .bind(job.approval_id)
         .bind(job.tool_call_id)
@@ -404,7 +410,7 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
              RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
         )
         .bind(error)
-        .bind(self.tenant_id)
+        .bind(self.current_tenant_id())
         .bind(job_id)
         .fetch_optional(&self.pool)
         .await?
@@ -419,7 +425,7 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
              WHERE tenant_id = $1
              ORDER BY enqueued_at ASC",
         )
-        .bind(self.tenant_id)
+        .bind(self.current_tenant_id())
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(execution_job_from_row).collect()
@@ -431,7 +437,7 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
              FROM execution_jobs
              WHERE tenant_id = $1 AND id = $2",
         )
-        .bind(self.tenant_id)
+        .bind(self.current_tenant_id())
         .bind(job_id)
         .fetch_optional(&self.pool)
         .await?
@@ -457,7 +463,7 @@ impl PostgresExecutionQueue {
                  RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(worker_id.unwrap_or("api"))
-            .bind(self.tenant_id)
+            .bind(self.current_tenant_id())
             .bind(job_id)
             .fetch_optional(&self.pool)
             .await?,
@@ -468,7 +474,7 @@ impl PostgresExecutionQueue {
                  RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(status.as_str())
-            .bind(self.tenant_id)
+            .bind(self.current_tenant_id())
             .bind(job_id)
             .fetch_optional(&self.pool)
             .await?,
@@ -478,7 +484,7 @@ impl PostgresExecutionQueue {
                  WHERE tenant_id = $1 AND id = $2
                  RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
-            .bind(self.tenant_id)
+            .bind(self.current_tenant_id())
             .bind(job_id)
             .fetch_optional(&self.pool)
             .await?,

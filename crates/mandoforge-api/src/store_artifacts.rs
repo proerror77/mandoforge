@@ -21,7 +21,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 )
                 .bind(artifact.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(artifact.session_id)
                 .bind(&artifact.artifact_type)
                 .bind(&artifact.name)
@@ -52,7 +52,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND session_id = $2
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(session_id)
                 .fetch_all(pool)
                 .await?;

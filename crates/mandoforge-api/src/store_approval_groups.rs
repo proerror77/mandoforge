@@ -31,7 +31,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(approval_group_from_row).collect()
@@ -54,7 +54,7 @@ impl AppState {
                      FROM approval_groups
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(pool)
                 .await?
@@ -93,7 +93,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind(group.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&group.name)
                 .bind(serde_json::to_value(&group.subjects)?)
                 .bind(&group.status)
@@ -127,7 +127,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY order_index ASC, created_at ASC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -174,7 +174,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 )
                 .bind(rule.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&rule.name)
                 .bind(&rule.risk_level)
                 .bind(rule.group_id)

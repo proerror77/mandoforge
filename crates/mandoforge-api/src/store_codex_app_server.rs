@@ -26,7 +26,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(run.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&run.operation)
                 .bind(&run.thread_id)
                 .bind(&run.turn_id)
@@ -61,7 +61,7 @@ impl AppState {
                      FROM codex_app_server_runs
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(run_id)
                 .fetch_optional(pool)
                 .await?
@@ -100,7 +100,7 @@ impl AppState {
                 .bind(status)
                 .bind(response)
                 .bind(error)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(run_id)
                 .fetch_optional(pool)
                 .await?
@@ -133,7 +133,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()

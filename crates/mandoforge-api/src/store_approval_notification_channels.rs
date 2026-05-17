@@ -32,7 +32,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -80,7 +80,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 )
                 .bind(policy.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&policy.name)
                 .bind(&policy.channel)
                 .bind(&policy.target_env)
@@ -116,7 +116,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING id, name, channel, target_env, risk_filter, max_attempts, backoff_seconds, status, created_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(pool)
                 .await?

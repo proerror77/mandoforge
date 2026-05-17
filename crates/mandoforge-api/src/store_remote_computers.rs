@@ -36,7 +36,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(remote_computer_from_row).collect()
@@ -99,7 +99,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 )
                 .bind(record.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&record.name)
                 .bind(&record.profile)
                 .bind(&record.status)
@@ -140,7 +140,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -187,7 +187,7 @@ impl AppState {
                      WHERE tenant_id = $2 AND id = $3",
                 )
                 .bind(now)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(remote_computer_id)
                 .execute(pool)
                 .await?;
@@ -200,7 +200,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(lease.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(lease.remote_computer_id)
                 .bind(lease.session_id)
                 .bind(&lease.status)
@@ -277,7 +277,7 @@ impl AppState {
                 .bind(input.metadata)
                 .bind(input.reason)
                 .bind(now)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(lease_id)
                 .fetch_optional(pool)
                 .await?
@@ -296,7 +296,7 @@ impl AppState {
                     )
                     .bind(computer_status)
                     .bind(now)
-                    .bind(self.tenant_id)
+                    .bind(self.current_tenant_id())
                     .bind(lease.remote_computer_id)
                     .execute(pool)
                     .await?;
@@ -329,7 +329,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -362,7 +362,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -418,7 +418,7 @@ impl AppState {
                      FROM remote_computer_leases
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(input.lease_id)
                 .fetch_optional(pool)
                 .await?
@@ -431,7 +431,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND execution_job_id = $2 AND status = 'assigned'
                      LIMIT 1",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(execution_job_id)
                 .fetch_optional(pool)
                 .await?;
@@ -453,7 +453,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(assignment.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(assignment.execution_job_id)
                 .bind(assignment.remote_computer_id)
                 .bind(assignment.lease_id)
@@ -504,7 +504,7 @@ impl AppState {
                 .bind(status)
                 .bind(metadata)
                 .bind(now)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(assignment_id)
                 .fetch_optional(pool)
                 .await?
@@ -545,7 +545,7 @@ impl AppState {
                      WHERE tenant_id = $2 AND status = 'held' AND expires_at IS NOT NULL AND expires_at <= $1",
                 )
                 .bind(now)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .execute(pool)
                 .await?;
                 let rows = sqlx::query(
@@ -554,7 +554,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -612,7 +612,7 @@ impl AppState {
                      WHERE tenant_id = $2 AND status = 'held' AND expires_at IS NOT NULL AND expires_at <= $1",
                 )
                 .bind(now)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .execute(pool)
                 .await?;
                 let existing: Option<(Uuid,)> = sqlx::query_as(
@@ -621,7 +621,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND lock_key = $2 AND status = 'held'
                      LIMIT 1",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&lock.lock_key)
                 .fetch_optional(pool)
                 .await?;
@@ -636,7 +636,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 )
                 .bind(lock.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&lock.lock_key)
                 .bind(&lock.status)
                 .bind(lock.remote_computer_id)
@@ -695,7 +695,7 @@ impl AppState {
                 )
                 .bind(now)
                 .bind(&metadata)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(lock_id)
                 .fetch_optional(pool)
                 .await?;
@@ -730,7 +730,7 @@ impl AppState {
                      ORDER BY observed_at DESC
                      LIMIT 250",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -789,7 +789,7 @@ impl AppState {
                 let exists: Option<(Uuid,)> = sqlx::query_as(
                     "SELECT id FROM remote_computers WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(heartbeat.remote_computer_id)
                 .fetch_optional(pool)
                 .await?;
@@ -802,7 +802,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 )
                 .bind(heartbeat.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(heartbeat.remote_computer_id)
                 .bind(heartbeat.session_id)
                 .bind(heartbeat.assignment_id)
@@ -902,7 +902,7 @@ impl AppState {
                      FROM remote_computer_leases
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(lease_id)
                 .fetch_optional(pool)
                 .await?
@@ -926,7 +926,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND lease_id = $2 AND status = 'attached'
                      LIMIT 1",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(lease_id)
                 .fetch_optional(pool)
                 .await?;
@@ -957,7 +957,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 )
                 .bind(attachment.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(attachment.remote_computer_id)
                 .bind(attachment.lease_id)
                 .bind(attachment.session_id)
@@ -1016,7 +1016,7 @@ impl AppState {
                 .bind(input.metadata)
                 .bind(input.reason)
                 .bind(now)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(attachment_id)
                 .fetch_optional(pool)
                 .await?

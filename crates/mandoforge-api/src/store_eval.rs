@@ -36,7 +36,7 @@ impl AppState {
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(eval_dataset_from_row).collect()
@@ -68,7 +68,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5)",
                 )
                 .bind(dataset.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(&dataset.name)
                 .bind(&dataset.description)
                 .bind(dataset.created_at)
@@ -104,7 +104,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND dataset_id = $2
                      ORDER BY created_at DESC",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(dataset_id)
                 .fetch_all(pool)
                 .await?;
@@ -137,7 +137,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 )
                 .bind(case.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(case.dataset_id)
                 .bind(&case.input)
                 .bind(&case.expected)
@@ -177,7 +177,7 @@ impl AppState {
                              WHERE tenant_id = $1 AND dataset_id = $2
                              ORDER BY created_at DESC",
                         )
-                        .bind(self.tenant_id)
+                        .bind(self.current_tenant_id())
                         .bind(dataset_id)
                         .fetch_all(pool)
                         .await?
@@ -189,7 +189,7 @@ impl AppState {
                              WHERE tenant_id = $1
                              ORDER BY created_at DESC",
                         )
-                        .bind(self.tenant_id)
+                        .bind(self.current_tenant_id())
                         .fetch_all(pool)
                         .await?
                     }
@@ -249,7 +249,7 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 )
                 .bind(run.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(run.dataset_id)
                 .bind(run.agent_id)
                 .bind(run.agent_version_id)
@@ -603,7 +603,7 @@ impl AppState {
                 let exists: Option<i32> = sqlx::query_scalar(
                     "SELECT 1 FROM eval_datasets WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(dataset_id)
                 .fetch_optional(pool)
                 .await?;

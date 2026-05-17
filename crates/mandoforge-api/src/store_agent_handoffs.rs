@@ -36,7 +36,7 @@ impl AppState {
                              WHERE tenant_id = $1 AND source_session_id = $2
                              ORDER BY created_at ASC",
                         )
-                        .bind(self.tenant_id)
+                        .bind(self.current_tenant_id())
                         .bind(session_id)
                         .fetch_all(pool)
                         .await?
@@ -48,7 +48,7 @@ impl AppState {
                              WHERE tenant_id = $1
                              ORDER BY created_at ASC",
                         )
-                        .bind(self.tenant_id)
+                        .bind(self.current_tenant_id())
                         .fetch_all(pool)
                         .await?
                     }
@@ -76,7 +76,7 @@ impl AppState {
                      FROM agent_handoff_events
                      WHERE tenant_id = $1 AND id = $2",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .fetch_optional(pool)
                 .await?
@@ -107,7 +107,7 @@ impl AppState {
                      RETURNING id, source_session_id, source_agent_id, target_agent_id, intent, payload, schema_version, risk_level, approval_required, status, audit_trace_id, created_at, updated_at",
                 )
                 .bind(event.id)
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(event.source_session_id)
                 .bind(event.source_agent_id)
                 .bind(event.target_agent_id)
@@ -153,7 +153,7 @@ impl AppState {
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING id, source_session_id, source_agent_id, target_agent_id, intent, payload, schema_version, risk_level, approval_required, status, audit_trace_id, created_at, updated_at",
                 )
-                .bind(self.tenant_id)
+                .bind(self.current_tenant_id())
                 .bind(id)
                 .bind(status)
                 .bind(audit_trace_id)

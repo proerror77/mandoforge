@@ -81,7 +81,7 @@ Context / Data Foundation
 
 The code supports two backends:
 
-- Postgres backend: enabled when `DATABASE_URL` is set. Startup connects through SQLx, executes Stage 1 migrations, sets the Postgres `mandoforge.tenant_id` session context from `MANDOFORGE_TENANT_ID` (or the default demo tenant), seeds that tenant, and inserts the Generic Orchestrator Agent.
+- Postgres backend: enabled when `DATABASE_URL` is set. Startup connects through SQLx, executes Stage 1 migrations, sets the default Postgres `mandoforge.tenant_id` session context from `MANDOFORGE_TENANT_ID` (or the default demo tenant), refreshes that setting on pool acquire from the request-local tenant context, seeds the configured tenant, and inserts the Generic Orchestrator Agent.
 - Memory backend: enabled when `DATABASE_URL` is missing. This keeps local UI/API demos fast and avoids requiring Docker for every small change.
 
 The public API shape is identical for both backends. Route handlers call `AppState` methods instead of touching storage directly.
@@ -240,11 +240,11 @@ Current worker boundary:
 
 ## Tenant Isolation Boundary
 
-- Keep the runtime bound to one configured tenant ID until cross-tenant request routing is implemented. Incoming `x-mandoforge-tenant-id` headers must match that runtime tenant and fail closed otherwise.
+- The default runtime remains bound to one configured tenant ID. Set `MANDOFORGE_TENANT_ROUTING_MODE=tenant_routed` only for production-like adoption environments where incoming `x-mandoforge-tenant-id` should select the request-local tenant context.
 - Keep org/team/project membership enforcement as the application-layer scope boundary for Stage 2 team pilots.
-- Keep `GET /api/tenant-isolation/readiness` as the operator gate for this boundary. It reports runtime tenant mode, header fail-closed status, scoped resource counts, tenant-scoped table coverage, Postgres Row Level Security migration/runtime state, and a production routing gate that remains blocked while the runtime is single-tenant.
-- `db/migrations/0024_tenant_rls_policies.sql` enables and forces RLS for tracked tenant-scoped tables, including an indirect `agent_versions` policy through `agents`. Postgres connections set `mandoforge.tenant_id` to the configured runtime tenant before use.
-- Keep runtime tenant switching and cross-tenant RLS tests as production blockers before claiming full production multi-tenant serving.
+- Keep `GET /api/tenant-isolation/readiness` as the operator gate for this boundary. It reports runtime tenant mode, header fail-closed status, scoped resource counts, tenant-scoped table coverage, Postgres Row Level Security migration/runtime state, and a production routing gate that remains blocked until runtime tenant routing, RLS, membership scope, and controller freshness are all ready.
+- `db/migrations/0024_tenant_rls_policies.sql` enables and forces RLS for tracked tenant-scoped tables, including an indirect `agent_versions` policy through `agents`. Postgres connections refresh `mandoforge.tenant_id` before acquire so request-scoped queries and RLS policy checks use the same tenant.
+- Keep cross-tenant RLS and external enterprise target tests as production blockers before claiming full production multi-tenant serving.
 
 ## Vault Boundary
 
