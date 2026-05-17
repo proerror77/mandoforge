@@ -54,7 +54,8 @@ impl AppState {
                 .await?;
             }
         }
-        self.insert_agent_version(&agent, 1).await?;
+        self.insert_agent_version(&agent, 1, serde_json::json!({}))
+            .await?;
         Ok(())
     }
 }

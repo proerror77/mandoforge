@@ -190,7 +190,7 @@
 - [ ] Stage 3: add external scheduler integration with idempotent due-plan/run ownership, retry policy, and audit evidence.
 - [ ] Stage 3: add richer per-turn Codex App Server trace dashboards for command, poll, interrupt, worker lease, retry, fallback, and artifact sync paths.
 - [ ] Stage 3: productize assigned Remote Computer Pod execution without bypassing Tool Router, Policy Engine, Approval Engine, event log, or audit paths.
-- [ ] Stage 3: add typed agent handoff events with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
+- [x] Stage 3: add typed agent handoff events with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
 - [ ] Stage 3: add first-class WorkflowPack / DomainPack install, validation, staging, eval, and release gates.
 - [ ] Stage 3: add Stage 3 lane-local verification scripts and integration-owner gates for scheduler, Codex traces, Remote Computer execution, handoffs, and workflow packs.
 
@@ -213,7 +213,7 @@
 - [x] Record the Workflow Pack adaptation plan from vertical workflow plugin references.
 - [x] Define the `WorkflowPack` / `DomainPack` manifest contract and package validation rules.
 - [x] Add profile onboarding / cold-start workflow contract for company, department, approval matrix, connector map, risk policy, and output style.
-- [ ] Add typed `agent_handoff_events` with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
+- [x] Add typed `agent_handoff_events` with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
 - [ ] Add Reader / Analyzer / Writer worker role declarations and tool-scope enforcement for untrusted input workflows.
 - [ ] Add connector manifest policy fields for provenance, tenant scope, write gating, and prompt-injection boundary.
 - [ ] Build the first AI Governance Pack slice: AI use-case triage, AI impact assessment, vendor AI review, and policy monitor.

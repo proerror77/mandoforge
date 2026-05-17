@@ -3,11 +3,11 @@ use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
 use crate::{
-    Agent, AgentRelease, AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
-    ApprovalNotificationChannelPolicy, Artifact, AuditLog, CostAlertRoute, EvalCase, EvalDataset,
-    EvalRun, McpServerRecord, Membership, Organization, PolicyRevision, Project, ProviderAccess,
-    ProviderRecord, SecretRecord, Session, SessionEvent, Team, TenantInvitation, ToolCall,
-    UsageRollup,
+    Agent, AgentHandoffEvent, AgentRelease, AgentVersion, AppError, Approval,
+    ApprovalEscalationRule, ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog,
+    CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
+    PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent,
+    Team, TenantInvitation, ToolCall, UsageRollup,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -125,6 +125,24 @@ pub(crate) fn event_from_row(row: PgRow) -> Result<SessionEvent, AppError> {
         event_type: row.try_get("event_type")?,
         payload: row.try_get("payload")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn agent_handoff_event_from_row(row: PgRow) -> Result<AgentHandoffEvent, AppError> {
+    Ok(AgentHandoffEvent {
+        id: row.try_get("id")?,
+        source_session_id: row.try_get("source_session_id")?,
+        source_agent_id: row.try_get("source_agent_id")?,
+        target_agent_id: row.try_get("target_agent_id")?,
+        intent: row.try_get("intent")?,
+        payload: row.try_get("payload")?,
+        schema_version: row.try_get("schema_version")?,
+        risk_level: row.try_get("risk_level")?,
+        approval_required: row.try_get("approval_required")?,
+        status: row.try_get("status")?,
+        audit_trace_id: row.try_get("audit_trace_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 

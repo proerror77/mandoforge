@@ -137,7 +137,8 @@ impl AppState {
                 .await?;
             }
         }
-        self.insert_agent_version(&agent, 1).await?;
+        self.insert_agent_version(&agent, 1, input.runtime_config)
+            .await?;
         Ok(agent)
     }
 
@@ -145,6 +146,7 @@ impl AppState {
         &self,
         agent: &Agent,
         version: i32,
+        runtime_config: serde_json::Value,
     ) -> Result<(), AppError> {
         let agent_version = AgentVersion {
             id: Uuid::new_v4(),
@@ -154,7 +156,7 @@ impl AppState {
             system_prompt: agent.system_prompt.clone(),
             tools: agent.tools.clone(),
             tool_names: agent.tools.clone(),
-            runtime_config: json!({}),
+            runtime_config,
             approval_policy: json!({}),
             created_at: Utc::now(),
         };

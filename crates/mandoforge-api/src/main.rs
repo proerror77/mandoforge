@@ -45,6 +45,7 @@ mod provider;
 mod remote_computer_runner;
 mod secrets;
 mod shell_runner;
+mod store_agent_handoffs;
 mod store_approval_groups;
 mod store_approval_notification_channels;
 mod store_approvals;
@@ -272,6 +273,8 @@ struct CreateAgent {
     project_id: Option<Uuid>,
     #[serde(default)]
     system_prompt: String,
+    #[serde(default = "empty_json_object")]
+    runtime_config: Value,
     #[serde(default)]
     tools: Vec<String>,
 }
@@ -589,6 +592,40 @@ struct SessionEvent {
     event_type: String,
     payload: Value,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentHandoffEvent {
+    id: Uuid,
+    source_session_id: Uuid,
+    source_agent_id: Uuid,
+    target_agent_id: Uuid,
+    intent: String,
+    payload: Value,
+    schema_version: String,
+    risk_level: String,
+    approval_required: bool,
+    status: String,
+    audit_trace_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAgentHandoffEvent {
+    target_agent_id: Uuid,
+    intent: String,
+    payload: Value,
+    schema_version: String,
+    risk_level: String,
+    #[serde(default)]
+    approval_required: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransitionAgentHandoffEvent {
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3791,6 +3828,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/sessions/{id}/messages", post(add_message))
         .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/events", get(list_events))
+        .route(
+            "/api/sessions/{id}/agent-handoffs",
+            get(list_session_agent_handoff_events).post(create_agent_handoff_event),
+        )
         .route("/api/sessions/{id}/stream", get(stream_events))
         .route("/api/sessions/{id}/artifacts", get(list_artifacts))
         .route(
@@ -4300,6 +4341,24 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computer-leases/{id}/fail",
             post(fail_remote_computer_lease),
+        )
+        .route("/api/agent-handoffs", get(list_agent_handoff_events))
+        .route("/api/agent-handoffs/{id}", get(get_agent_handoff_event))
+        .route(
+            "/api/agent-handoffs/{id}/accept",
+            post(accept_agent_handoff_event),
+        )
+        .route(
+            "/api/agent-handoffs/{id}/reject",
+            post(reject_agent_handoff_event),
+        )
+        .route(
+            "/api/agent-handoffs/{id}/fail",
+            post(fail_agent_handoff_event),
+        )
+        .route(
+            "/api/agent-handoffs/{id}/complete",
+            post(complete_agent_handoff_event),
         )
         .route(
             "/api/execution-jobs/{id}/run",
@@ -7220,6 +7279,404 @@ fn new_audit_log(
     }
 }
 
+async fn list_agent_handoff_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AgentHandoffEvent>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "agent_handoff_events",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_agent_handoff_events(None).await?))
+}
+
+async fn list_session_agent_handoff_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AgentHandoffEvent>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_agent_handoff_events(Some(id)).await?))
+}
+
+async fn get_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    let event = state.get_agent_handoff_event(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(event.source_session_id),
+    )
+    .await?;
+    Ok(Json(event))
+}
+
+async fn create_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(session_id),
+    )
+    .await?;
+    let session = state.get_session(session_id).await?;
+    let source_version = state.agent_version_for_session(session_id).await?;
+    let _target_agent = state.get_agent(input.target_agent_id).await?;
+    let intent = validate_handoff_token("intent", &input.intent)?;
+    let schema_version = validate_handoff_schema_version(&input.schema_version)?;
+    let risk_level = normalize_handoff_risk_level(&input.risk_level)?;
+    if risk_level == "high" && !input.approval_required {
+        return Err(AppError::bad_request(
+            "high-risk handoffs must require approval",
+        ));
+    }
+    if !input.payload.is_object() {
+        return Err(AppError::bad_request(
+            "handoff payload must be a JSON object",
+        ));
+    }
+    let rule = matching_handoff_rule(
+        &source_version.runtime_config,
+        input.target_agent_id,
+        &intent,
+        &schema_version,
+        &risk_level,
+        input.approval_required,
+    )?;
+    validate_handoff_payload_schema(&input.payload, rule.get("payload_schema"))?;
+
+    let now = Utc::now();
+    let event = state
+        .create_agent_handoff_event(AgentHandoffEvent {
+            id: Uuid::new_v4(),
+            source_session_id: session_id,
+            source_agent_id: session.agent_id,
+            target_agent_id: input.target_agent_id,
+            intent,
+            payload: input.payload,
+            schema_version,
+            risk_level,
+            approval_required: input.approval_required,
+            status: "requested".to_string(),
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    let audit =
+        record_agent_handoff_audit_and_event(&state, &event, "agent_handoff.requested", None)
+            .await?;
+    let event = state
+        .update_agent_handoff_event_status(event.id, "requested", Some(audit.id))
+        .await?;
+    Ok(Json(event))
+}
+
+async fn accept_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<TransitionAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    transition_agent_handoff_event(state, id, headers, input, "accepted").await
+}
+
+async fn reject_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<TransitionAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    transition_agent_handoff_event(state, id, headers, input, "rejected").await
+}
+
+async fn fail_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<TransitionAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    transition_agent_handoff_event(state, id, headers, input, "failed").await
+}
+
+async fn complete_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<TransitionAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    transition_agent_handoff_event(state, id, headers, input, "completed").await
+}
+
+async fn transition_agent_handoff_event(
+    state: AppState,
+    id: Uuid,
+    headers: HeaderMap,
+    input: TransitionAgentHandoffEvent,
+    next_status: &str,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    let current = state.get_agent_handoff_event(id).await?;
+    let permission = if next_status == "accepted"
+        && (current.approval_required || current.risk_level == "high")
+    {
+        Permission::ApprovalsDecide
+    } else {
+        Permission::SessionsRun
+    };
+    authorize_request(
+        &state,
+        &headers,
+        permission,
+        "session",
+        Some(current.source_session_id),
+    )
+    .await?;
+    ensure_agent_handoff_transition(&current.status, next_status)?;
+    let event_type = format!("agent_handoff.{next_status}");
+    let audit =
+        record_agent_handoff_audit_and_event(&state, &current, &event_type, input.reason).await?;
+    let updated = state
+        .update_agent_handoff_event_status(current.id, next_status, Some(audit.id))
+        .await?;
+    Ok(Json(updated))
+}
+
+async fn record_agent_handoff_audit_and_event(
+    state: &AppState,
+    handoff: &AgentHandoffEvent,
+    action: &str,
+    reason: Option<String>,
+) -> Result<AuditLog, AppError> {
+    let details = json!({
+        "agent_handoff_event_id": handoff.id,
+        "source_session_id": handoff.source_session_id,
+        "source_agent_id": handoff.source_agent_id,
+        "target_agent_id": handoff.target_agent_id,
+        "intent": handoff.intent,
+        "schema_version": handoff.schema_version,
+        "risk_level": handoff.risk_level,
+        "approval_required": handoff.approval_required,
+        "status": handoff.status,
+        "reason": reason,
+    });
+    state
+        .append_event(
+            "agent",
+            Some(handoff.source_agent_id),
+            handoff.source_session_id,
+            action,
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(handoff.source_session_id),
+            "agent",
+            Some(handoff.source_agent_id),
+            action,
+            "agent_handoff_event",
+            Some(handoff.id),
+            details,
+        ))
+        .await
+}
+
+fn ensure_agent_handoff_transition(current: &str, next: &str) -> Result<(), AppError> {
+    let allowed = matches!(
+        (current, next),
+        ("requested", "accepted")
+            | ("requested", "rejected")
+            | ("requested", "failed")
+            | ("accepted", "completed")
+            | ("accepted", "failed")
+    );
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(format!(
+            "cannot transition agent handoff from {current} to {next}"
+        )))
+    }
+}
+
+fn validate_handoff_token(field: &str, value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 128
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
+    {
+        return Err(AppError::bad_request(format!(
+            "{field} must be a lowercase slug"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_handoff_schema_version(value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 128
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | '/'))
+    {
+        return Err(AppError::bad_request(
+            "schema_version must be a non-empty schema identifier",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_handoff_risk_level(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "low" | "medium" | "high") {
+        Ok(normalized)
+    } else {
+        Err(AppError::bad_request(
+            "risk_level must be one of low, medium, or high",
+        ))
+    }
+}
+
+fn matching_handoff_rule<'a>(
+    runtime_config: &'a Value,
+    target_agent_id: Uuid,
+    intent: &str,
+    schema_version: &str,
+    risk_level: &str,
+    approval_required: bool,
+) -> Result<&'a Value, AppError> {
+    let rules = runtime_config
+        .get("handoffs")
+        .and_then(|handoffs| handoffs.get("allowed_targets"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            AppError::forbidden("source agent version has no handoff allowed_targets")
+        })?;
+    rules
+        .iter()
+        .find(|rule| {
+            let rule_requires_approval =
+                handoff_rule_bool(rule, "approval_required").unwrap_or(false);
+            handoff_rule_target_id(rule) == Some(target_agent_id)
+                && json_string_array_contains(rule.get("intents"), intent)
+                && json_optional_string_array_contains(rule.get("schema_versions"), schema_version)
+                && json_optional_string_array_contains(rule.get("risk_levels"), risk_level)
+                && (!rule_requires_approval || approval_required)
+        })
+        .ok_or_else(|| {
+            AppError::forbidden(
+                "agent handoff target, intent, schema_version, risk_level, or approval requirement is not allowlisted",
+            )
+        })
+}
+
+fn handoff_rule_target_id(rule: &Value) -> Option<Uuid> {
+    rule.get("target_agent_id")
+        .or_else(|| rule.get("target_agent"))
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+fn handoff_rule_bool(rule: &Value, key: &str) -> Option<bool> {
+    rule.get(key).and_then(Value::as_bool)
+}
+
+fn json_string_array_contains(value: Option<&Value>, expected: &str) -> bool {
+    value
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(expected)))
+}
+
+fn json_optional_string_array_contains(value: Option<&Value>, expected: &str) -> bool {
+    match value.and_then(Value::as_array) {
+        Some(items) => items.iter().any(|item| item.as_str() == Some(expected)),
+        None => true,
+    }
+}
+
+fn validate_handoff_payload_schema(
+    payload: &Value,
+    schema: Option<&Value>,
+) -> Result<(), AppError> {
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return Err(AppError::bad_request(
+            "handoff payload_schema must declare type object",
+        ));
+    }
+    let Some(payload_object) = payload.as_object() else {
+        return Err(AppError::bad_request(
+            "handoff payload must be a JSON object",
+        ));
+    };
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        for key in required.iter().filter_map(Value::as_str) {
+            if !payload_object.contains_key(key) {
+                return Err(AppError::bad_request(format!(
+                    "handoff payload missing required field {key}"
+                )));
+            }
+        }
+    }
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for (key, property_schema) in properties {
+        let Some(value) = payload_object.get(key) else {
+            continue;
+        };
+        let Some(expected_type) = property_schema.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let matches_type = match expected_type {
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "boolean" => value.is_boolean(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            _ => {
+                return Err(AppError::bad_request(format!(
+                    "unsupported handoff payload_schema type {expected_type}"
+                )));
+            }
+        };
+        if !matches_type {
+            return Err(AppError::bad_request(format!(
+                "handoff payload field {key} must be {expected_type}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn build_harness_context(
     state: &AppState,
     session_id: Uuid,
@@ -8945,6 +9402,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "remote_computer_job_assignments",
         "remote_computer_state_locks",
         "remote_computer_sidecar_heartbeats",
+        "agent_handoff_events",
         "mcp_servers",
         "eval_datasets",
         "eval_cases",
@@ -33634,6 +34092,423 @@ not json
         }));
     }
 
+    #[tokio::test]
+    async fn agent_handoff_events_require_allowlist_approval_and_payload_schema() {
+        let app = test_app().await;
+        let target: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Governance Analyzer",
+                    "kind": "analyzer",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Assess AI governance evidence."
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let source: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Governance Orchestrator",
+                    "kind": "orchestrator",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Route governance work.",
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": target.id,
+                                "intents": ["draft_assessment"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["high"],
+                                "approval_required": true,
+                                "payload_schema": {
+                                    "type": "object",
+                                    "required": ["assessment_id"],
+                                    "properties": {
+                                        "assessment_id": {"type": "string"},
+                                        "impact_score": {"type": "number"}
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": source.id, "title": "governance handoff"}),
+            ),
+        )
+        .await;
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": target.id,
+                    "intent": "draft_assessment",
+                    "payload": {"assessment_id": "a-1", "impact_score": 0.8},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "high",
+                    "approval_required": false
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"].as_str(),
+            Some("high-risk handoffs must require approval")
+        );
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": target.id,
+                    "intent": "draft_assessment",
+                    "payload": {"impact_score": 0.8},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "high",
+                    "approval_required": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"].as_str(),
+            Some("handoff payload missing required field assessment_id")
+        );
+
+        let handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": target.id,
+                    "intent": "draft_assessment",
+                    "payload": {"assessment_id": "a-1", "impact_score": 0.8},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "high",
+                    "approval_required": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(handoff.status, "requested");
+        assert_eq!(handoff.source_session_id, session.id);
+        assert_eq!(handoff.source_agent_id, source.id);
+        assert_eq!(handoff.target_agent_id, target.id);
+        assert!(handoff.audit_trace_id.is_some());
+
+        let handoffs: Vec<AgentHandoffEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/agent-handoffs", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].id, handoff.id);
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "agent_handoff.requested"
+                    && event.payload["agent_handoff_event_id"] == json!(handoff.id))
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent_handoff.requested" && log.resource_id == Some(handoff.id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn agent_handoff_accept_complete_and_reject_fail_paths_are_audited() {
+        let app = test_app().await;
+        let target: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Writer Worker",
+                    "kind": "writer",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Write governed output."
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let source: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Analyzer Worker",
+                    "kind": "analyzer",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Analyze then hand off.",
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": target.id,
+                                "intents": ["write_summary", "escalate_gap"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["low", "medium"],
+                                "approval_required": false
+                            }]
+                        }
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": source.id, "title": "handoff transitions"}),
+            ),
+        )
+        .await;
+        let handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": target.id,
+                    "intent": "write_summary",
+                    "payload": {"artifact_id": "artifact-1"},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "low"
+                }),
+            ),
+        )
+        .await;
+        let accepted: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/accept", handoff.id),
+                json!({"reason": "worker available"}),
+            ),
+        )
+        .await;
+        assert_eq!(accepted.status, "accepted");
+        let completed: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/complete", handoff.id),
+                json!({"reason": "artifact produced"}),
+            ),
+        )
+        .await;
+        assert_eq!(completed.status, "completed");
+
+        let rejected_handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": target.id,
+                    "intent": "escalate_gap",
+                    "payload": {"gap_id": "gap-1"},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "medium"
+                }),
+            ),
+        )
+        .await;
+        let rejected: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/reject", rejected_handoff.id),
+                json!({"reason": "not actionable"}),
+            ),
+        )
+        .await;
+        assert_eq!(rejected.status, "rejected");
+
+        let failed_handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": target.id,
+                    "intent": "write_summary",
+                    "payload": {"artifact_id": "artifact-2"},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "low"
+                }),
+            ),
+        )
+        .await;
+        let failed: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/fail", failed_handoff.id),
+                json!({"reason": "worker failed"}),
+            ),
+        )
+        .await;
+        assert_eq!(failed.status, "failed");
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "agent_handoff.accepted",
+            "agent_handoff.completed",
+            "agent_handoff.rejected",
+            "agent_handoff.failed",
+        ] {
+            assert!(
+                events.iter().any(|event| event.event_type == expected),
+                "missing event {expected}"
+            );
+        }
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "agent_handoff.accepted",
+            "agent_handoff.completed",
+            "agent_handoff.rejected",
+            "agent_handoff.failed",
+        ] {
+            assert!(
+                audit_logs.iter().any(|log| log.action == expected),
+                "missing audit action {expected}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_handoff_blocks_unallowlisted_target_or_intent() {
+        let app = test_app().await;
+        let target: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Unlisted Target",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let source: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "No Handoff Source",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": source.id, "title": "blocked handoff"}),
+            ),
+        )
+        .await;
+        let (status, error) = request_value(
+            app,
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": target.id,
+                    "intent": "write_summary",
+                    "payload": {},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "low"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error["error"].as_str(),
+            Some("source agent version has no handoff allowed_targets")
+        );
+    }
+
     #[test]
     fn parses_openai_compatible_tool_calls() {
         let response = json!({
@@ -33769,6 +34644,7 @@ not json
         assert!(names.contains(&"0024_tenant_rls_policies.sql"));
         assert!(names.contains(&"0025_remote_computer_state_locks.sql"));
         assert!(names.contains(&"0026_remote_computer_sidecar_heartbeats.sql"));
+        assert!(names.contains(&"0027_agent_handoff_events.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -33778,10 +34654,11 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
-            include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql")
+            include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
+            include_str!("../../../db/migrations/0027_agent_handoff_events.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
@@ -42248,6 +43125,7 @@ not json
                 team_id: Some(team.id),
                 project_id: None,
                 system_prompt: "Use governed MCP tools.".to_string(),
+                runtime_config: json!({}),
                 tools: vec!["mcp.call".to_string()],
             })
             .await

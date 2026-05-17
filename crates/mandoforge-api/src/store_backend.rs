@@ -5,13 +5,13 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
-    Agent, AgentRelease, AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup,
-    ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun, CostAlertRoute,
-    EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization, PolicyRevision,
-    Project, ProviderAccess, ProviderRecord, RemoteComputer, RemoteComputerAttachment,
-    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerSidecarHeartbeat,
-    RemoteComputerStateLock, SecretRecord, Session, SessionEvent, Team, TenantInvitation, ToolCall,
-    UsageRollup,
+    Agent, AgentHandoffEvent, AgentRelease, AgentVersion, Approval, ApprovalEscalationRule,
+    ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun,
+    CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
+    PolicyRevision, Project, ProviderAccess, ProviderRecord, RemoteComputer,
+    RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
+    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord, Session, SessionEvent,
+    Team, TenantInvitation, ToolCall, UsageRollup,
 };
 
 #[derive(Default)]
@@ -51,6 +51,7 @@ pub(crate) struct MemoryStore {
     pub(crate) remote_computer_job_assignments: HashMap<Uuid, RemoteComputerJobAssignment>,
     pub(crate) remote_computer_state_locks: HashMap<Uuid, RemoteComputerStateLock>,
     pub(crate) remote_computer_sidecar_heartbeats: HashMap<Uuid, RemoteComputerSidecarHeartbeat>,
+    pub(crate) agent_handoff_events: HashMap<Uuid, AgentHandoffEvent>,
 }
 
 #[derive(Clone)]
