@@ -13456,6 +13456,13 @@ async fn validate_vault_kms_recovery(
             Ok(execution) => {
                 if execution.get("status").and_then(Value::as_str) != Some("validated") {
                     issues.push("vault KMS recovery controller did not validate".to_string());
+                } else {
+                    // The current drill is the evidence for these readiness blockers.
+                    issues.retain(|issue| {
+                        issue != "no validated KMS recovery drill evidence exists"
+                            && issue
+                                != "vault KMS recovery controller evidence is missing or not validated"
+                    });
                 }
                 controller_execution = execution;
             }

@@ -27,7 +27,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, and the Whiskey approval notification controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, the Whiskey approval notification controller, and the Whiskey Vault/KMS controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
 
 The default image is:
 
@@ -59,8 +59,9 @@ The script:
 - seeds a diagnostics approval path for observability remediation, runs `scripts/observability-collector-evidence-gate.sh`, and captures deployment, rollout, and remediation evidence;
 - seeds a Whiskey mock provider, runs `scripts/provider-governance-evidence-gate.sh`, and captures provider deployment, policy-gate, rollout, and rollback evidence;
 - seeds a routable approval plus webhook policy, runs `scripts/approval-notification-evidence-gate.sh`, and captures deployment, ops, and delivery evidence;
+- seeds a Vault secret catalog record, runs `scripts/vault-evidence-gate.sh`, and captures Vault health, KMS rotation, and KMS recovery controller evidence;
 - runs the synced `scripts/workflow-pack-evidence-gate.sh` on the Whiskey host against the loopback API;
-- seeds another Whiskey eval/release request, another observability remediation path, another Whiskey mock provider, and another routable approval before running the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
+- seeds another Whiskey eval/release request, another observability remediation path, another Whiskey mock provider, another routable approval, and another Vault secret catalog record before running the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
 - archives Stage 2 evidence and full pilot evidence under `/opt/mandoforge-adoption/archives`;
 - syncs archive copies to `.mandoforge/remote-adoption/whiskey/`;
 - verifies the Stage 2 archive locally with `ALLOW_BLOCKED=1`.
@@ -198,6 +199,27 @@ MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_URL=http://host.docker.internal:
 The evidence script seeds an active webhook notification policy, rejects stale pending approvals that have no delegated approver or group target, creates a fresh pending approval delegated to `whiskey-approver`, and runs the focused approval notification gate with `RUN_STAGE2_APPROVAL_DELIVERY=1`. The strict Stage 2 gate also records deployment, ops, and delivery evidence.
 
 This is a Whiskey pilot notification proof. It validates routing, channel policy, webhook delivery, deployment-controller evidence, and ops-controller evidence against the live Whiskey API. It is not a claim that an external Slack, email, PagerDuty, or enterprise notification provider has been adopted.
+
+## Vault/KMS Lane
+
+Current Whiskey wiring starts a local Vault/KMS pilot controller on the Docker gateway and configures the API with:
+
+```bash
+MANDOFORGE_SECRET_PROVIDER=vault
+MANDOFORGE_VAULT_ADDR=http://host.docker.internal:18797
+MANDOFORGE_VAULT_MOUNT=kv
+MANDOFORGE_KMS_PROVIDER=mock-kms
+MANDOFORGE_KMS_KEY_ID=whiskey-kms-key-1
+MANDOFORGE_KMS_ROTATION_POLICY=whiskey-manual-confirmed
+MANDOFORGE_KMS_VALIDATION_MODE=external
+MANDOFORGE_KMS_ENDPOINT=http://host.docker.internal:18797/kms/rotate
+MANDOFORGE_KMS_RECOVERY_CONTROLLER_REQUIRED=true
+MANDOFORGE_KMS_RECOVERY_CONTROLLER_URL=http://host.docker.internal:18797/kms/recovery/validate
+```
+
+The controller exposes a minimal Vault-compatible health and KV v2 surface plus KMS rotation and recovery validation endpoints. The evidence script seeds a catalog-only secret reference, runs the focused Vault gate with `RUN_STAGE2_SECRET_LIFECYCLE=1`, then includes the same lifecycle flag in the strict Stage 2 gate.
+
+This is a Whiskey pilot KMS lifecycle proof. It validates the API's Vault provider health path, external KMS rotation boundary, recovery-controller boundary, audit trail, and archive coverage against the live Whiskey API. It is not a claim that a real HSM, enterprise Vault cluster, envelope-encryption policy, or secret rollback procedure has been adopted.
 
 ## Observability Collector Lane
 
