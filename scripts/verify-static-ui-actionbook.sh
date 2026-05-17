@@ -9,10 +9,16 @@ ACTIONBOOK_EVAL_JSON="${ACTIONBOOK_EVAL_JSON:-/tmp/mandoforge-actionbook-eval.js
 ACTIONBOOK_SMOKE_URL="${ACTIONBOOK_SMOKE_URL:-$BASE_URL/?actionbook_smoke=$(date +%s)}"
 CHROME_PATH="${CHROME_PATH:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 CHROME_USER_DATA_DIR="${CHROME_USER_DATA_DIR:-/tmp/mandoforge-actionbook-chrome}"
+ACTIONBOOK_SESSION_ID=""
+ACTIONBOOK_TAB_ID=""
+ACTIONBOOK_DRIVER_MODE=""
 API_PID=""
 CHROME_PID=""
 
 cleanup() {
+  if [[ -n "${ACTIONBOOK_SESSION_ID:-}" && "${ACTIONBOOK_DRIVER_MODE:-}" == "browser-start" ]]; then
+    actionbook browser close --session "$ACTIONBOOK_SESSION_ID" --json >/tmp/mandoforge-actionbook-close.json 2>/dev/null || true
+  fi
   if [[ -n "${API_PID:-}" ]]; then
     kill "$API_PID" >/dev/null 2>&1 || true
     wait "$API_PID" 2>/dev/null || true
@@ -39,6 +45,45 @@ require_command() {
   fi
 }
 
+actionbook_uses_browser_start() {
+  actionbook browser start --help 2>/dev/null | grep -q -- "--cdp-endpoint"
+}
+
+actionbook_browser_eval() {
+  local expression="$1"
+  if [[ "$ACTIONBOOK_DRIVER_MODE" == "browser-start" ]]; then
+    actionbook browser eval "$expression" --session "$ACTIONBOOK_SESSION_ID" --tab "$ACTIONBOOK_TAB_ID" --json
+  else
+    actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser eval "$expression" --json
+  fi
+}
+
+actionbook_browser_text() {
+  if [[ "$ACTIONBOOK_DRIVER_MODE" == "browser-start" ]]; then
+    actionbook browser text --session "$ACTIONBOOK_SESSION_ID" --tab "$ACTIONBOOK_TAB_ID" --json
+  else
+    actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser text --json
+  fi
+}
+
+actionbook_browser_screenshot() {
+  local path="$1"
+  if [[ "$ACTIONBOOK_DRIVER_MODE" == "browser-start" ]]; then
+    actionbook browser screenshot "$path" --session "$ACTIONBOOK_SESSION_ID" --tab "$ACTIONBOOK_TAB_ID" --json
+  else
+    actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser screenshot "$path" --json
+  fi
+}
+
+actionbook_open_smoke_url() {
+  if [[ "$ACTIONBOOK_DRIVER_MODE" == "browser-start" ]]; then
+    actionbook browser goto "$ACTIONBOOK_SMOKE_URL" --session "$ACTIONBOOK_SESSION_ID" --tab "$ACTIONBOOK_TAB_ID" --json >/tmp/mandoforge-actionbook-open.json
+  else
+    actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser connect "$ACTIONBOOK_CDP_PORT" --json >/tmp/mandoforge-actionbook-connect.json
+    actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser open "$ACTIONBOOK_SMOKE_URL" --json >/tmp/mandoforge-actionbook-open.json
+  fi
+}
+
 wait_for_url() {
   local url="$1"
   for _ in $(seq 1 240); do
@@ -53,7 +98,7 @@ wait_for_url() {
 wait_for_static_ui() {
   local attempt
   for attempt in $(seq 1 40); do
-    actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser eval "
+    actionbook_browser_eval "
 (() => {
   const text = document.body?.innerText || '';
   const result = {
@@ -158,12 +203,13 @@ wait_for_static_ui() {
   cat "$ACTIONBOOK_EVAL_JSON" >&2 || true
   echo >&2
   echo "visible text:" >&2
-  actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser text --json >&2 || true
+  actionbook_browser_text >&2 || true
   exit 1
 }
 
 require_command actionbook
 require_command curl
+require_command jq
 
 if ! curl -fsS "$BASE_URL/healthz" >/dev/null 2>&1; then
   MANDOFORGE_ADDR="$GATE_ADDR" cargo run -p mandoforge-api >/tmp/mandoforge-actionbook-api.log 2>&1 &
@@ -306,12 +352,25 @@ if ! curl -fsS "http://127.0.0.1:$ACTIONBOOK_CDP_PORT/json/version" >/dev/null 2
   wait_for_url "http://127.0.0.1:$ACTIONBOOK_CDP_PORT/json/version"
 fi
 
-actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser connect "$ACTIONBOOK_CDP_PORT" --json >/tmp/mandoforge-actionbook-connect.json
-actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser open "$ACTIONBOOK_SMOKE_URL" --json >/tmp/mandoforge-actionbook-open.json
+if actionbook_uses_browser_start; then
+  ACTIONBOOK_DRIVER_MODE="browser-start"
+  ACTIONBOOK_SESSION_ID="actionbook-smoke-$$"
+  ACTIONBOOK_TAB_ID="t1"
+  ACTIONBOOK_CDP_ENDPOINT="$(curl -fsS "http://127.0.0.1:$ACTIONBOOK_CDP_PORT/json/version" | jq -r '.webSocketDebuggerUrl')"
+  actionbook browser start \
+    --set-session-id "$ACTIONBOOK_SESSION_ID" \
+    --profile "$ACTIONBOOK_SESSION_ID" \
+    --cdp-endpoint "$ACTIONBOOK_CDP_ENDPOINT" \
+    --json >/tmp/mandoforge-actionbook-connect.json
+else
+  ACTIONBOOK_DRIVER_MODE="legacy-cdp"
+fi
+
+actionbook_open_smoke_url
 
 wait_for_static_ui
 
-actionbook --cdp "$ACTIONBOOK_CDP_PORT" browser screenshot "$ACTIONBOOK_SCREENSHOT" --json >/tmp/mandoforge-actionbook-screenshot.json
+actionbook_browser_screenshot "$ACTIONBOOK_SCREENSHOT" >/tmp/mandoforge-actionbook-screenshot.json
 
 echo "static UI actionbook smoke ok"
 echo "base_url=$BASE_URL"
