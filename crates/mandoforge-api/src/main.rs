@@ -9051,7 +9051,8 @@ async fn assess_workflow_pack_connector_quality(
             .map(ToString::to_string);
         let mut passing_sample_count = 0usize;
         let mut connector_blockers = Vec::new();
-        if let (Some(team_id), Some(server_id)) = (input_connector.team_id, input_connector.server_id)
+        if let (Some(team_id), Some(server_id)) =
+            (input_connector.team_id, input_connector.server_id)
         {
             let server = state
                 .list_mcp_servers(team_id)
@@ -9074,10 +9075,7 @@ async fn assess_workflow_pack_connector_quality(
                 .to_string();
             bound_server_health_status = Some(server_health_status.clone());
             if server.status != "active" {
-                connector_blockers.push(format!(
-                    "bound MCP server {} is not active",
-                    server.name
-                ));
+                connector_blockers.push(format!("bound MCP server {} is not active", server.name));
             }
             if server
                 .config
@@ -9085,10 +9083,7 @@ async fn assess_workflow_pack_connector_quality(
                 .and_then(Value::as_bool)
                 != Some(true)
             {
-                connector_blockers.push(format!(
-                    "bound MCP server {} is not healthy",
-                    server.name
-                ));
+                connector_blockers.push(format!("bound MCP server {} is not healthy", server.name));
             }
             let last_checked_at = server
                 .config
@@ -37534,7 +37529,10 @@ not json
         assert_eq!(blocked.connector_results[0].sample_count, 1);
         assert_eq!(blocked.connector_results[0].passing_sample_count, 0);
         assert_eq!(blocked.connector_results[0].bound_team_id, Some(team.id));
-        assert_eq!(blocked.connector_results[0].bound_server_id, Some(mcp_server.id));
+        assert_eq!(
+            blocked.connector_results[0].bound_server_id,
+            Some(mcp_server.id)
+        );
         assert_eq!(
             blocked.connector_results[0].bound_server_name.as_deref(),
             Some("whiskey-docs")
@@ -37613,7 +37611,10 @@ not json
         assert_eq!(ready.connector_results[0].status, "ready");
         assert_eq!(ready.connector_results[0].passing_sample_count, 1);
         assert_eq!(ready.connector_results[0].bound_team_id, Some(team.id));
-        assert_eq!(ready.connector_results[0].bound_server_id, Some(mcp_server.id));
+        assert_eq!(
+            ready.connector_results[0].bound_server_id,
+            Some(mcp_server.id)
+        );
         assert!(ready.connector_results[0].blockers.is_empty());
         assert!(ready.blockers.is_empty());
 
