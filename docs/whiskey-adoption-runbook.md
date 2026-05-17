@@ -49,6 +49,8 @@ The script:
 - ensures `Whiskey Adoption Org` and `Whiskey Pilot Team` exist;
 - runs `scripts/scheduler-evidence-gate.sh`;
 - runs `scripts/codex-app-server-evidence-gate.sh`;
+- runs `scripts/worker-evidence-gate.sh`;
+- runs `scripts/remote-computer-evidence-gate.sh`;
 - runs `scripts/stage2-production-evidence-gate.sh` with `ALLOW_BLOCKED=1`;
 - archives Stage 2 evidence and full pilot evidence under `/opt/mandoforge-adoption/archives`;
 - syncs archive copies to `.mandoforge/remote-adoption/whiskey/`;
@@ -87,8 +89,12 @@ Completion evidence must show `codex_app_server_health_status` healthy, deployme
 
 If the evidence script reports `Codex App Server is disabled until MANDOFORGE_CODEX_APP_SERVER_URL is configured`, the lane is still blocked and should stay in the external production adoption backlog.
 
+Current Whiskey observation: the host runs `codex app-server --listen unix://` plus `codex app-server proxy`. The Codex CLI reports supported transports as `stdio://`, `unix://`, `unix://PATH`, `ws://IP:PORT`, and `off`; MandoForge's current Codex App Server adapter expects an HTTP endpoint. Until an HTTP bridge, a ws/unix adapter, or a separate HTTP-compatible controller exists, do not mark this lane passed.
+
 ## Worker And Remote Computer Lane
 
-Whiskey can collect single-host worker readiness evidence without Kubernetes. Complete Remote Computer production evidence requires a real cluster or a `k3s` pilot on Whiskey.
+Whiskey can collect single-host worker readiness evidence without Kubernetes. The standard evidence script records worker readiness and load-validation evidence under `/evidence/worker`, then includes it in the full pilot archive.
+
+Without a real cluster, Remote Computer evidence is an inventory lane. The standard evidence script records readiness, runner, and state-sync validation evidence under `/evidence/remote-computer`, but production state sync should remain blocked until a distributed state filesystem and lock-aware state-sync manager are configured. Complete Remote Computer production evidence requires a real cluster or a `k3s` pilot on Whiskey.
 
 Before installing `k3s`, decide whether Whiskey should carry that operational burden. The host has limited memory, so cluster work should be isolated from existing services and measured before claiming Remote Computer production readiness.
