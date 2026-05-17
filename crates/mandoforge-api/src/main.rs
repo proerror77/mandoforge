@@ -14102,7 +14102,21 @@ async fn validate_codex_app_server_ops(
         }
     });
     let mut issues = Vec::new();
-    if summary.production_ops.production_blocked {
+    let production_blocked_only_by_missing_controller_evidence = controller_required
+        && controller_configured
+        && summary.production_ops.configured
+        && summary.production_ops.failed_turn_count == 0
+        && summary.production_ops.stale_candidate_count == 0
+        && summary.production_ops.latest_stale_poll_at.is_some()
+        && summary.production_ops.latest_stale_poll_failed_count == 0
+        && summary
+            .production_ops
+            .latest_stale_poll_age_hours
+            .map_or(true, |age_hours| age_hours < 24)
+        && !summary.production_ops.latest_controller_validated;
+    if summary.production_ops.production_blocked
+        && !production_blocked_only_by_missing_controller_evidence
+    {
         issues.push(summary.production_ops.message.clone());
     }
     if controller_configured {

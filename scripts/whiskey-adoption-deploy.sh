@@ -71,20 +71,25 @@ ensure_env MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_URL http://host.docker.int
 ensure_env MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN $CODEX_CONTROLLER_TOKEN"
 
 ssh "$REMOTE_HOST" "set -euo pipefail
-if ! ss -ltn | awk '{print \$4}' | grep -q ':$CODEX_WS_PORT$'; then
+docker_gateway_ip=\$(ip -4 addr show docker0 2>/dev/null | awk '/inet /{print \$2}' | cut -d/ -f1 | head -1)
+if [[ -z \"\$docker_gateway_ip\" ]]; then
+  echo 'docker0 gateway IP is required for container-to-host Codex App Server wiring' >&2
+  exit 1
+fi
+if ! ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_WS_PORT$\"; then
   command -v codex >/dev/null 2>&1 || { echo 'codex CLI is required for Whiskey Codex App Server WS target' >&2; exit 1; }
-  nohup codex app-server --listen ws://127.0.0.1:$CODEX_WS_PORT > '$REMOTE_ROOT/codex-app-server-ws.log' 2>&1 &
+  nohup codex app-server --listen ws://\$docker_gateway_ip:$CODEX_WS_PORT > '$REMOTE_ROOT/codex-app-server-ws.log' 2>&1 &
   echo \$! > '$REMOTE_ROOT/codex-app-server-ws.pid'
   sleep 2
 fi
-ss -ltn | awk '{print \$4}' | grep -q ':$CODEX_WS_PORT$' || { cat '$REMOTE_ROOT/codex-app-server-ws.log' >&2; exit 1; }
-if ! ss -ltn | awk '{print \$4}' | grep -q ':$CODEX_CONTROLLER_PORT$'; then
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_WS_PORT$\" || { cat '$REMOTE_ROOT/codex-app-server-ws.log' >&2; exit 1; }
+if ! ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_CONTROLLER_PORT$\"; then
   command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey Codex App Server controller' >&2; exit 1; }
-  nohup env CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:$CODEX_WS_PORT CODEX_CONTROLLER_PORT=$CODEX_CONTROLLER_PORT CODEX_CONTROLLER_TOKEN='$CODEX_CONTROLLER_TOKEN' node '$REMOTE_CODEX_CONTROLLER' > '$REMOTE_ROOT/codex-app-server-controller.log' 2>&1 &
+  nohup env CODEX_APP_SERVER_WS_URL=ws://\$docker_gateway_ip:$CODEX_WS_PORT CODEX_CONTROLLER_HOST=\$docker_gateway_ip CODEX_CONTROLLER_PORT=$CODEX_CONTROLLER_PORT CODEX_CONTROLLER_TOKEN='$CODEX_CONTROLLER_TOKEN' node '$REMOTE_CODEX_CONTROLLER' > '$REMOTE_ROOT/codex-app-server-controller.log' 2>&1 &
   echo \$! > '$REMOTE_ROOT/codex-app-server-controller.pid'
   sleep 2
 fi
-ss -ltn | awk '{print \$4}' | grep -q ':$CODEX_CONTROLLER_PORT$' || { cat '$REMOTE_ROOT/codex-app-server-controller.log' >&2; exit 1; }"
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/codex-app-server-controller.log' >&2; exit 1; }"
 
 remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"
 if [[ "$PULL_IMAGE" == "1" ]]; then
