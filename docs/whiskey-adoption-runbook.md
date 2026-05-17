@@ -57,7 +57,7 @@ The script:
 - runs `scripts/remote-computer-evidence-gate.sh` with sidecar recovery capture enabled so the archive records the audited no-op or replacement plan while preserving the state-sync production blocker;
 - runs `scripts/whiskey-remote-computer-k3s-host-inventory.sh` locally and syncs the timestamped plus `-latest` k3s preflight, verify, and consolidated host-inventory artifacts into `/opt/mandoforge-adoption/evidence/remote-computer` and strict `stage2-production/remote-computer-k3s/`;
 - seeds a Whiskey eval/release request, runs `scripts/eval-release-evidence-gate.sh`, and captures rollout, orchestration, deployment, and rollback evidence;
-- seeds a diagnostics approval path for observability remediation, runs `scripts/observability-collector-evidence-gate.sh`, and captures deployment, rollout, and remediation evidence;
+- seeds a diagnostics approval path for observability remediation, runs `scripts/observability-collector-evidence-gate.sh`, and captures deployment, rollout, remediation, plus `otel-collector` service and live-signal log evidence;
 - seeds or refreshes the Whiskey provider rollout target, preferring the real DeepSeek-backed provider when `DEEPSEEK_API_KEY` is available on Whiskey and falling back to `whiskey-mock-provider` otherwise, then runs `scripts/provider-governance-evidence-gate.sh`;
 - seeds a routable approval plus webhook policy, runs `scripts/approval-notification-evidence-gate.sh`, and captures deployment, ops, and delivery evidence;
 - seeds a Vault secret catalog record, runs `scripts/vault-evidence-gate.sh`, and captures Vault health, KMS rotation, and KMS recovery controller evidence;
@@ -260,8 +260,8 @@ Current Whiskey wiring starts a local observability controller on the Docker gat
 
 ```bash
 MANDOFORGE_SERVICE_NAME=mandoforge-api
-MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:18794
-MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT=http://host.docker.internal:18794/healthz
+MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT=http://otel-collector:13133/healthz
 MANDOFORGE_OTEL_SAMPLE_RATIO=1.0
 MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_REQUIRED=true
 MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL=http://host.docker.internal:18794/observability/collector/deployment/validate
@@ -271,9 +271,11 @@ MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_REQUIRED=true
 MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_URL=http://host.docker.internal:18794/observability/remediation/run
 ```
 
-The controller exposes a small OTLP-compatible pilot target for `/v1/logs`, `/v1/traces`, and `/v1/metrics`, plus deployment, cluster-rollout, and remediation validation endpoints. The evidence script seeds a diagnostics session so remediation supervision has real pending-approval material to inspect, then runs the focused observability gate and the strict Stage 2 gate with `RUN_STAGE2_OBSERVABILITY_REMEDIATION=1`.
+The deploy script now also starts a real single-node `otel/opentelemetry-collector-contrib:0.123.0` service from [otel-collector-config.yaml](../deploy/whiskey/otel-collector-config.yaml). The API emits logs, traces, and metrics to that collector over the Compose network, while the host-side observability controller continues to provide deployment, cluster-rollout, and remediation validation endpoints.
 
-This is a Whiskey pilot collector proof. It validates that the deployed API emits to a reachable collector target and that the Stage 2 controller hooks are wired, fresh, and fail-closed. It is not a claim that an external production collector cluster, retention backend, alert route, or cross-node telemetry pipeline has been adopted.
+The evidence script seeds a diagnostics session so remediation supervision has real pending-approval material to inspect, then runs the focused observability gate and the strict Stage 2 gate with `RUN_STAGE2_OBSERVABILITY_REMEDIATION=1`. It also captures `otel-collector-evidence.json`, `otel-collector-service.json`, and `otel-collector-live-signals.log` so the archive proves that the official collector service is running and receiving telemetry batches.
+
+This is now a Whiskey real collector proof on a single node. It validates that the deployed API emits to a reachable official OTel collector service on Whiskey, that collector health is fresh, that logs/traces/metrics were received, and that the Stage 2 controller hooks are wired, fresh, and fail-closed. It is still not a claim that an external production collector cluster, retention backend, alert route, or cross-node telemetry pipeline has been adopted.
 
 ## WorkflowPack Lane
 

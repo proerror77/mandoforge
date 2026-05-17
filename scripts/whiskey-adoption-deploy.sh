@@ -11,6 +11,7 @@ LOCAL_WORKER_CONTROLLER="${WHISKEY_WORKER_LOAD_CONTROLLER_FILE:-deploy/whiskey/w
 LOCAL_MCP_CONTROLLER="${WHISKEY_MCP_CONTROLLER_FILE:-deploy/whiskey/mcp-pilot-controller.mjs}"
 LOCAL_EVAL_RELEASE_CONTROLLER="${WHISKEY_EVAL_RELEASE_CONTROLLER_FILE:-deploy/whiskey/eval-release-controller.mjs}"
 LOCAL_OBSERVABILITY_CONTROLLER="${WHISKEY_OBSERVABILITY_CONTROLLER_FILE:-deploy/whiskey/observability-controller.mjs}"
+LOCAL_OTEL_COLLECTOR_CONFIG="${WHISKEY_OTEL_COLLECTOR_CONFIG_FILE:-deploy/whiskey/otel-collector-config.yaml}"
 LOCAL_PROVIDER_CONTROLLER="${WHISKEY_PROVIDER_CONTROLLER_FILE:-deploy/whiskey/provider-rollout-controller.mjs}"
 LOCAL_APPROVAL_NOTIFICATION_CONTROLLER="${WHISKEY_APPROVAL_NOTIFICATION_CONTROLLER_FILE:-deploy/whiskey/approval-notification-controller.mjs}"
 LOCAL_VAULT_KMS_CONTROLLER="${WHISKEY_VAULT_KMS_CONTROLLER_FILE:-deploy/whiskey/vault-kms-controller.mjs}"
@@ -23,6 +24,7 @@ REMOTE_WORKER_CONTROLLER="$REMOTE_ROOT/worker-load-controller.mjs"
 REMOTE_MCP_CONTROLLER="$REMOTE_ROOT/mcp-pilot-controller.mjs"
 REMOTE_EVAL_RELEASE_CONTROLLER="$REMOTE_ROOT/eval-release-controller.mjs"
 REMOTE_OBSERVABILITY_CONTROLLER="$REMOTE_ROOT/observability-controller.mjs"
+REMOTE_OTEL_COLLECTOR_CONFIG="$REMOTE_ROOT/otel-collector-config.yaml"
 REMOTE_PROVIDER_CONTROLLER="$REMOTE_ROOT/provider-rollout-controller.mjs"
 REMOTE_APPROVAL_NOTIFICATION_CONTROLLER="$REMOTE_ROOT/approval-notification-controller.mjs"
 REMOTE_VAULT_KMS_CONTROLLER="$REMOTE_ROOT/vault-kms-controller.mjs"
@@ -115,6 +117,10 @@ if [[ ! -f "$LOCAL_OBSERVABILITY_CONTROLLER" ]]; then
   echo "missing Whiskey observability controller file: $LOCAL_OBSERVABILITY_CONTROLLER" >&2
   exit 1
 fi
+if [[ ! -f "$LOCAL_OTEL_COLLECTOR_CONFIG" ]]; then
+  echo "missing Whiskey OTel collector config file: $LOCAL_OTEL_COLLECTOR_CONFIG" >&2
+  exit 1
+fi
 if [[ ! -f "$LOCAL_PROVIDER_CONTROLLER" ]]; then
   echo "missing Whiskey provider controller file: $LOCAL_PROVIDER_CONTROLLER" >&2
   exit 1
@@ -144,6 +150,7 @@ rsync -az "$LOCAL_WORKER_CONTROLLER" "$REMOTE_HOST:$REMOTE_WORKER_CONTROLLER"
 rsync -az "$LOCAL_MCP_CONTROLLER" "$REMOTE_HOST:$REMOTE_MCP_CONTROLLER"
 rsync -az "$LOCAL_EVAL_RELEASE_CONTROLLER" "$REMOTE_HOST:$REMOTE_EVAL_RELEASE_CONTROLLER"
 rsync -az "$LOCAL_OBSERVABILITY_CONTROLLER" "$REMOTE_HOST:$REMOTE_OBSERVABILITY_CONTROLLER"
+rsync -az "$LOCAL_OTEL_COLLECTOR_CONFIG" "$REMOTE_HOST:$REMOTE_OTEL_COLLECTOR_CONFIG"
 rsync -az "$LOCAL_PROVIDER_CONTROLLER" "$REMOTE_HOST:$REMOTE_PROVIDER_CONTROLLER"
 rsync -az "$LOCAL_APPROVAL_NOTIFICATION_CONTROLLER" "$REMOTE_HOST:$REMOTE_APPROVAL_NOTIFICATION_CONTROLLER"
 rsync -az "$LOCAL_VAULT_KMS_CONTROLLER" "$REMOTE_HOST:$REMOTE_VAULT_KMS_CONTROLLER"
@@ -170,6 +177,15 @@ ensure_env() {
     if grep -q \"^\${key}=$\" '$REMOTE_ENV'; then
       sed -i \"s#^\${key}=.*#\${key}=\${value}#\" '$REMOTE_ENV'
     fi
+  else
+    printf '%s=%s\n' \"\$key\" \"\$value\" >> '$REMOTE_ENV'
+  fi
+}
+set_env() {
+  local key=\"\$1\"
+  local value=\"\$2\"
+  if grep -q \"^\${key}=\" '$REMOTE_ENV'; then
+    sed -i \"s#^\${key}=.*#\${key}=\${value}#\" '$REMOTE_ENV'
   else
     printf '%s=%s\n' \"\$key\" \"\$value\" >> '$REMOTE_ENV'
   fi
@@ -225,8 +241,8 @@ ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED true
 ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL http://host.docker.internal:$EVAL_RELEASE_CONTROLLER_PORT/agents/releases/rollout/rollback
 ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_TOKEN $EVAL_RELEASE_CONTROLLER_TOKEN
 ensure_env MANDOFORGE_SERVICE_NAME $OBSERVABILITY_SERVICE_NAME
-ensure_env MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT http://host.docker.internal:$OBSERVABILITY_CONTROLLER_PORT
-ensure_env MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT http://host.docker.internal:$OBSERVABILITY_CONTROLLER_PORT/healthz
+set_env MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT http://otel-collector:4318
+set_env MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT http://otel-collector:13133/healthz
 ensure_env MANDOFORGE_OTEL_SAMPLE_RATIO 1.0
 ensure_env MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_REQUIRED true
 ensure_env MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL http://host.docker.internal:$OBSERVABILITY_CONTROLLER_PORT/observability/collector/deployment/validate
@@ -416,7 +432,7 @@ remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"
 if [[ "$PULL_IMAGE" == "1" ]]; then
   remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' pull"
 fi
-remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d postgres && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d --force-recreate api worker && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' ps"
+remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d postgres otel-collector && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d --force-recreate api worker && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' ps"
 
 ssh "$REMOTE_HOST" "bash -lc $(printf '%q' "$remote_cmd")"
 

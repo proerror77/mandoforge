@@ -15,6 +15,21 @@ services:
       timeout: 3s
       retries: 20
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/collector.yaml:ro
+    restart: unless-stopped
+
   api:
     image: ${MANDOFORGE_IMAGE:-ghcr.io/proerror77/mandoforge/mandoforge-api:${MANDOFORGE_IMAGE_TAG:-latest}}
     environment:
@@ -55,8 +70,8 @@ services:
       MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_TIMEOUT_SECONDS: ${MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_TIMEOUT_SECONDS:-15}
       MANDOFORGE_SHELL_RUNNER: ${MANDOFORGE_SHELL_RUNNER:-host}
       MANDOFORGE_SERVICE_NAME: ${MANDOFORGE_SERVICE_NAME:-mandoforge-api}
-      MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT: ${MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT: ${MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT:-}
+      MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT: ${MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT: ${MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT:-http://otel-collector:13133/healthz}
       MANDOFORGE_OTEL_SAMPLE_RATIO: ${MANDOFORGE_OTEL_SAMPLE_RATIO:-1.0}
       MANDOFORGE_CODEX_APP_SERVER_URL: ${MANDOFORGE_CODEX_APP_SERVER_URL:-}
       MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_REQUIRED: ${MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_REQUIRED:-false}

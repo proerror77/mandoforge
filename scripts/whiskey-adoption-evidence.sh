@@ -92,6 +92,40 @@ sync_remote_computer_k3s_inventory() {
     "$REMOTE_HOST:$remote_dir/"
 }
 
+capture_whiskey_otel_collector_evidence() {
+  local remote_dir="$1"
+  local remote_cmd
+
+  remote_cmd="$(cat <<REMOTE
+set -euo pipefail
+mkdir -p '$remote_dir'
+cd '$REMOTE_ROOT'
+tmp_service_ps="\$(mktemp)"
+docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' ps --format json > "\$tmp_service_ps"
+jq -s '[.[] | select(.Service == "otel-collector")]' "\$tmp_service_ps" > '$remote_dir/otel-collector-service.json'
+rm -f "\$tmp_service_ps"
+docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' logs --no-color --tail 200 otel-collector > '$remote_dir/otel-collector-live-signals.log'
+jq -n \
+  --arg generated_at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg service "otel-collector" \
+  --arg otlp_endpoint "http://otel-collector:4318" \
+  --arg health_endpoint "http://otel-collector:13133/healthz" \
+  --arg log_file "otel-collector-live-signals.log" \
+  --slurpfile service_ps '$remote_dir/otel-collector-service.json' \
+  '{
+    generated_at: \$generated_at,
+    service: \$service,
+    otlp_endpoint: \$otlp_endpoint,
+    health_endpoint: \$health_endpoint,
+    service_ps: (\$service_ps[0] // []),
+    log_file: \$log_file
+  }' > '$remote_dir/otel-collector-evidence.json'
+REMOTE
+)"
+
+  ssh "$REMOTE_HOST" "bash -lc $(printf '%q' "$remote_cmd")"
+}
+
 seed_eval_release_evidence() {
   local evidence_dir="$1"
   local reason="$2"
@@ -859,6 +893,7 @@ seed_observability_remediation_evidence "$REMOTE_ROOT/evidence/observability-col
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/observability-collector' ALLOW_BLOCKED=1 RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 scripts/observability-collector-evidence-gate.sh"
+capture_whiskey_otel_collector_evidence "$REMOTE_ROOT/evidence/observability-collector"
 
 seed_policy_rollout_evidence "$REMOTE_ROOT/evidence/policy-rollout" "Whiskey focused policy rollout orchestration evidence"
 
@@ -916,6 +951,7 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
   chrome_bin=\$(command -v google-chrome || command -v chromium || command -v chromium-browser) && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/stage2-production' ALLOW_BLOCKED=1 RUN_STAGE2_PRODUCTION_VALIDATIONS=$RUN_STRICT_VALIDATIONS RUN_STAGE2_MCP_DUE_RUN=1 RUN_STAGE2_MCP_ROLLBACK=1 RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1 RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 RUN_STAGE2_POLICY_DUE_RUN=1 RUN_STAGE2_PROVIDER_ROLLOUT=1 RUN_STAGE2_APPROVAL_DELIVERY=1 RUN_STAGE2_CODEX_STALE_POLL=1 RUN_STAGE2_SECRET_LIFECYCLE=1 RUN_STAGE2_FINANCE_CONTROLLERS=1 RUN_STAGE2_FINANCE_EXPORT=1 RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 RUN_STAGE2_UI_ACTIONBOOK=1 RUN_STAGE2_UI_STATIC_ASSETS=1 CHROME_PATH=\"\$chrome_bin\" MANDOFORGE_EVAL_RELEASE_ROLLBACK_ENVIRONMENT=whiskey-eval-release MANDOFORGE_SCHEDULER_TOKEN=\"\${MANDOFORGE_SCHEDULER_TOKEN:-}\" scripts/stage2-production-evidence-gate.sh"
 sync_remote_computer_k3s_inventory "$REMOTE_ROOT/evidence/stage2-production/remote-computer-k3s"
+capture_whiskey_otel_collector_evidence "$REMOTE_ROOT/evidence/stage2-production/observability-collector"
 
 archive_paths="$(ssh "$REMOTE_HOST" "set -euo pipefail
   mkdir -p '$REMOTE_ROOT/archives'
