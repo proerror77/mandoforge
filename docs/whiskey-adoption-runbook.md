@@ -27,7 +27,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, and the Whiskey provider rollout controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, and the Whiskey approval notification controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
 
 The default image is:
 
@@ -58,8 +58,9 @@ The script:
 - seeds a Whiskey eval/release request, runs `scripts/eval-release-evidence-gate.sh`, and captures rollout, orchestration, deployment, and rollback evidence;
 - seeds a diagnostics approval path for observability remediation, runs `scripts/observability-collector-evidence-gate.sh`, and captures deployment, rollout, and remediation evidence;
 - seeds a Whiskey mock provider, runs `scripts/provider-governance-evidence-gate.sh`, and captures provider deployment, policy-gate, rollout, and rollback evidence;
+- seeds a routable approval plus webhook policy, runs `scripts/approval-notification-evidence-gate.sh`, and captures deployment, ops, and delivery evidence;
 - runs the synced `scripts/workflow-pack-evidence-gate.sh` on the Whiskey host against the loopback API;
-- seeds another Whiskey eval/release request, another observability remediation path, and another Whiskey mock provider before running the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
+- seeds another Whiskey eval/release request, another observability remediation path, another Whiskey mock provider, and another routable approval before running the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
 - archives Stage 2 evidence and full pilot evidence under `/opt/mandoforge-adoption/archives`;
 - syncs archive copies to `.mandoforge/remote-adoption/whiskey/`;
 - verifies the Stage 2 archive locally with `ALLOW_BLOCKED=1`.
@@ -181,6 +182,22 @@ MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL=http://host.docker.internal:
 The evidence script seeds an active `mock` provider named `whiskey-mock-provider` with a daily request budget, then runs the focused provider governance gate with `RUN_STAGE2_PROVIDER_ROLLOUT=1`. The strict Stage 2 gate also runs provider deployment validation, policy gate, rollout, and rollback evidence.
 
 This is a Whiskey pilot provider target proof. It validates the provider governance policy gate, deployment-controller hook, production rollout hook, and rollback hook against the live Whiskey API. It does not claim that an external OpenAI-compatible provider fleet, credential-rotation process, or production traffic switch has been adopted.
+
+## Approval Notification Lane
+
+Current Whiskey wiring starts a local approval notification controller on the Docker gateway and configures the API with:
+
+```bash
+MANDOFORGE_APPROVAL_WEBHOOK_URL=http://host.docker.internal:18796/approval/webhook
+MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_REQUIRED=true
+MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_URL=http://host.docker.internal:18796/approval-notification/deployment/validate
+MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_REQUIRED=true
+MANDOFORGE_APPROVAL_NOTIFICATION_OPS_CONTROLLER_URL=http://host.docker.internal:18796/approval-notification/ops/validate
+```
+
+The evidence script seeds an active webhook notification policy, rejects stale pending approvals that have no delegated approver or group target, creates a fresh pending approval delegated to `whiskey-approver`, and runs the focused approval notification gate with `RUN_STAGE2_APPROVAL_DELIVERY=1`. The strict Stage 2 gate also records deployment, ops, and delivery evidence.
+
+This is a Whiskey pilot notification proof. It validates routing, channel policy, webhook delivery, deployment-controller evidence, and ops-controller evidence against the live Whiskey API. It is not a claim that an external Slack, email, PagerDuty, or enterprise notification provider has been adopted.
 
 ## Observability Collector Lane
 

@@ -78,7 +78,7 @@ write_summary() {
   local blocked_count
 
   routing_status="$(jq -r '.status // "unknown"' "$routing_file")"
-  configured_channels="$(jq -r '.configured_channel_count // (.configured_channels // [] | length)' "$routing_file")"
+  configured_channels="$(jq -r '.configured_channel_count // .channel_count // (.configured_channels // [] | length)' "$routing_file")"
   active_policies="$(jq -r '.active_policy_count // .active_channel_policy_count // 0' "$routing_file")"
   pending_approvals="$(jq -r '.pending_approval_count // .pending_count // 0' "$routing_file")"
   unroutable_pending="$(jq -r '.unroutable_pending_approval_count // .unroutable_pending_count // 0' "$routing_file")"
@@ -95,8 +95,8 @@ write_summary() {
   if [[ -s "$delivery_evidence_file" ]]; then
     delivery_evidence_status="$(jq -r '.status // "unknown"' "$delivery_evidence_file")"
     delivery_status="$(jq -r '.response.status // "unknown"' "$delivery_evidence_file")"
-    delivery_target_count="$(jq -r '.response.target_count // 0' "$delivery_evidence_file")"
-    delivery_delivered="$(jq -r '.response.delivered // false' "$delivery_evidence_file")"
+    delivery_target_count="$(jq -r '[.response.deliveries[]?.target_count // 0] | add // 0' "$delivery_evidence_file")"
+    delivery_delivered="$(jq -r '(.response.delivered_count // 0) > 0' "$delivery_evidence_file")"
   fi
   blocked_count="$(jq -r '[
       .production_ops.production_blocked,
