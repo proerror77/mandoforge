@@ -7,13 +7,14 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 ## Current Deployment
 
 - Host: `wishky-2-1`.
-- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:0f8361b`.
+- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:ed85014`.
 - API: `127.0.0.1:18787`.
 - Postgres: `127.0.0.1:15432`.
 - Compose project: `mandoforge-adoption`.
-- Latest remote archive: `/opt/mandoforge-adoption/archives/mandoforge-whiskey-pilot-20260517T084848Z.tar.gz`.
-- Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260517T084848Z.tar.gz`.
-- Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260517T084848Z.tar.gz`.
+- Latest remote archive: `/opt/mandoforge-adoption/archives/mandoforge-whiskey-pilot-20260517T092054Z.tar.gz`.
+- Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260517T092054Z.tar.gz`.
+- Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260517T092054Z.tar.gz`.
+- Latest strict archive summary: `stage2_status=ready`, `completion_blocked=false`, `open_gap_count=0`, `validation_missing_endpoint_count=3`.
 
 ## Lane Matrix
 
@@ -28,14 +29,14 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 | OTel collector | Passed for Whiskey pilot collector target | Strict evidence archive `stage2-production-whiskey-20260517T084848Z.tar.gz` reports `api-observability-collector-readiness.json` with `status=ready`, `production_ops.status=ready`, `deployment_readiness.status=ready`, `cluster_rollout.status=ready`, and `remediation_supervision.status=ready`. The API validation artifacts report deployment `status=healthy` with controller execution `validated`, cluster rollout `status=validated` with controller execution `validated`, and remediation `status=completed` with controller execution `remediated`. | Keep this as a Whiskey pilot collector proof; external production collector targets still need their own collector endpoint, storage/retention, alerting, and controller credentials. |
 | Provider rollout/rollback | Passed for Whiskey pilot provider target | Strict evidence archive `stage2-production-whiskey-20260517T084848Z.tar.gz` reports `provider_count=1`, `active_provider_count=1`, `provider_policy_gate_status=passed`, `provider_policy_gate_enforcement_status=ready`, `deployment_readiness.status=ready`, deployment controller `status=validated`, rollout `status=applied` with controller execution `applied`, rollback `status=rolled_back` with controller execution `rolled_back`, and `production_blocked_count=0`. | Keep this as a Whiskey pilot provider proof; external production provider fleets, credential rotation, and real traffic switch targets still need their own controller credentials and rollout policy. |
 | Approval notifications | Passed for Whiskey pilot webhook target | Strict evidence archive `stage2-production-whiskey-20260517T084848Z.tar.gz` reports `production_ops.status=ready`, `deployment_readiness.status=ready`, `channel_count=1`, `active_policy_count=1`, `unroutable_pending_count=0`, latest delivery run `status=delivered`, `delivered_count=1`, `failed_count=0`, deployment controller `status=validated`, and ops controller `status=validated`. | Keep this as a Whiskey pilot webhook proof; external Slack, email, incident, or enterprise notification providers still need their own delivery targets and controller credentials. |
-| Vault/KMS/HSM | Not validated on Whiskey | Stage 2 inventory still lists KMS recovery and rotation endpoints as missing strict validations. | Requires real KMS/HSM or Vault-backed lifecycle targets. |
+| Vault/KMS/HSM | Passed for Whiskey pilot KMS lifecycle target | Strict evidence archive `stage2-production-whiskey-20260517T092054Z.tar.gz` reports `api-vault-readiness.json` with `status=passed`, `secret_provider.status=healthy`, `kms.status=ready`, `production_rotation.status=ready`, and `production_recovery.status=ready`. Rotation evidence reports `status=validated`, `rotated_count=1`, `catalog_updated_count=1`, and external execution `status=validated`; recovery evidence reports `status=validated`, `latest_rotation_validated=true`, controller execution `status=validated`, and no issues. | Keep this as a Whiskey pilot lifecycle proof; real KMS/HSM or enterprise Vault adoption still needs external target credentials, envelope-encryption policy, approval-backed secret value rotation, and recovery/rollback procedures. |
 | Finance/accounting reconciliation | Not validated on Whiskey | Stage 2 inventory still lists finance run and reconcile endpoints as missing strict validations. | Requires a real accounting/export/reconciliation target. |
 
 ## Stage 3 Pilot Matrix
 
 | Lane | Whiskey status | Evidence | Next action |
 | --- | --- | --- | --- |
-| WorkflowPack / AI Governance Pack | Passed for Whiskey pilot lifecycle | Full pilot archive `mandoforge-whiskey-pilot-20260517T084848Z.tar.gz` includes `workflow-packs/summary.txt` with `workflow_pack_status=released`, `pack_id=ai-governance`, `validated_file_count=42`, `install_status=installed`, `stage_status=staged`, `release_status=released`, `eval_gate_status=passed`, and `release_gate_status=passed`. The release evidence records explicit gate evidence from `workflow-pack-evidence-gate`. | Keep extending from lifecycle proof to customer-specific onboarding quality, connector data quality, and WorkflowPack rollback/archive semantics. |
+| WorkflowPack / AI Governance Pack | Passed for Whiskey pilot lifecycle | Full pilot archive `mandoforge-whiskey-pilot-20260517T092054Z.tar.gz` includes `workflow-packs/summary.txt` with `workflow_pack_status=released`, `pack_id=ai-governance`, `validated_file_count=42`, `install_status=installed`, `stage_status=staged`, `release_status=released`, `eval_gate_status=passed`, and `release_gate_status=passed`. The release evidence records explicit gate evidence from `workflow-pack-evidence-gate`. | Keep extending from lifecycle proof to customer-specific onboarding quality, connector data quality, and WorkflowPack rollback/archive semantics. |
 
 ## k3s Decision
 
