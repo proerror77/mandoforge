@@ -55,6 +55,7 @@ The script:
 - runs `scripts/tenant-isolation-evidence-gate.sh`;
 - runs `scripts/worker-evidence-gate.sh`;
 - runs `scripts/remote-computer-evidence-gate.sh`;
+- runs the synced `scripts/workflow-pack-evidence-gate.sh` on the Whiskey host against the loopback API;
 - runs the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
 - archives Stage 2 evidence and full pilot evidence under `/opt/mandoforge-adoption/archives`;
 - syncs archive copies to `.mandoforge/remote-adoption/whiskey/`;
@@ -145,6 +146,19 @@ MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL=http://host.docker.internal:18792
 ```
 
 The evidence script seeds a `whiskey-docs` connector on the Whiskey pilot team, keeps the `search` tool allowlisted, creates a due rollout when one is not already pending, and enables strict MCP due-run plus rollback evidence. This validates the real MandoForge MCP gateway HTTP boundary and rollout controller hooks without requiring an external SaaS connector.
+
+## WorkflowPack Lane
+
+Current Whiskey evidence also exercises the Stage 3 WorkflowPack live API against the packaged AI Governance Pack:
+
+```bash
+BASE_URL=http://127.0.0.1:18787 \
+EVIDENCE_DIR=/opt/mandoforge-adoption/evidence/workflow-packs \
+WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml \
+scripts/workflow-pack-evidence-gate.sh
+```
+
+The gate validates the manifest contract, installs the pack, confirms release fails before staging, stages the installation, confirms release fails unless eval and release gates pass, then releases the pack with explicit gate evidence. This is a Whiskey pilot proof for the WorkflowPack install/stage/release lifecycle; it does not yet prove customer-specific pack onboarding quality or external connector data quality.
 
 Before installing `k3s`, decide whether Whiskey should carry that operational burden. The host has limited memory, so cluster work should be isolated from existing services and measured before claiming Remote Computer production readiness.
 

@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
+SUBJECT="${MANDOFORGE_WORKFLOW_PACK_GATE_SUBJECT:-workflow-pack-evidence-gate}"
+ROLES="${MANDOFORGE_WORKFLOW_PACK_GATE_ROLES:-admin}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/workflow-pack-evidence}"
+MANIFEST_PATH="${WORKFLOW_PACK_MANIFEST_PATH:-packs/ai-governance/package.yaml}"
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "workflow pack evidence gate requires $1" >&2
+    exit 1
+  fi
+}
+
+slugify() {
+  printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
+}
+
+write_request() {
+  local target="$1"
+  local payload="$2"
+  printf '%s' "$payload" >"$target"
+}
+
+fetch_json() {
+  local method="$1"
+  local path="$2"
+  local payload
+  local expected_prefix="${4:-2}"
+  local label
+  label="$(slugify "$path")"
+  local target="$EVIDENCE_DIR/$label.json"
+  local request_target="$EVIDENCE_DIR/$label.request.json"
+  local response_body
+  local response_json
+  local http_status
+  response_body="$(mktemp)"
+  response_json="$(mktemp)"
+  if [[ $# -ge 3 ]]; then
+    payload="$3"
+  else
+    payload="{}"
+  fi
+  write_request "$request_target" "$payload"
+
+  if [[ "$method" == "GET" ]]; then
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" \
+      -H "x-mandoforge-subject: $SUBJECT" \
+      -H "x-mandoforge-roles: $ROLES" \
+      "$BASE_URL$path")"
+  else
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" -X "$method" \
+      -H "x-mandoforge-subject: $SUBJECT" \
+      -H "x-mandoforge-roles: $ROLES" \
+      -H "content-type: application/json" \
+      -d "$payload" \
+      "$BASE_URL$path")"
+  fi
+
+  if [[ "$http_status" != "$expected_prefix"* ]]; then
+    echo "workflow pack evidence request failed: $method $path returned HTTP $http_status" >&2
+    sed -n '1,80p' "$response_body" >&2
+    rm -f "$response_body" "$response_json"
+    exit 1
+  fi
+
+  if ! jq . "$response_body" >"$response_json" 2>/dev/null; then
+    jq -n --rawfile raw "$response_body" '{raw: $raw}' >"$response_json"
+  fi
+
+  jq -n \
+    --arg method "$method" \
+    --arg path "$path" \
+    --arg request_file "$request_target" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --argjson http_status "$http_status" \
+    --slurpfile response "$response_json" \
+    '{
+      method: $method,
+      path: $path,
+      request_file: $request_file,
+      generated_at: $generated_at,
+      http_status: $http_status,
+      response: ($response[0] // {})
+    }' >"$target"
+  rm -f "$response_body" "$response_json"
+  printf '%s\n' "$target"
+}
+
+require_cmd curl
+require_cmd jq
+mkdir -p "$EVIDENCE_DIR"
+
+curl -fsS "$BASE_URL/healthz" >/dev/null
+
+manifest_payload="$(jq -nc --arg manifest_path "$MANIFEST_PATH" '{manifest_path: $manifest_path}')"
+validate_file="$(fetch_json POST /api/workflow-packs/validate "$manifest_payload")"
+install_file="$(fetch_json POST /api/workflow-packs/install "$manifest_payload")"
+installation_id="$(jq -r '.response.id // empty' "$install_file")"
+if [[ -z "$installation_id" ]]; then
+  echo "workflow pack install evidence did not return an installation id" >&2
+  exit 1
+fi
+
+fetch_json POST "/api/workflow-packs/installations/$installation_id/release" \
+  '{"eval_gate_status":"passed","release_gate_status":"passed","gate_evidence":{"expected_failure":"release_before_stage"}}' \
+  4 >/dev/null
+
+stage_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/stage" \
+  '{"reason":"Whiskey WorkflowPack adoption evidence"}')"
+
+fetch_json POST "/api/workflow-packs/installations/$installation_id/release" \
+  '{"eval_gate_status":"pending","release_gate_status":"passed","gate_evidence":{"expected_failure":"eval_gate_not_passed"}}' \
+  4 >/dev/null
+
+release_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/release" \
+  '{"eval_gate_status":"passed","release_gate_status":"passed","gate_evidence":{"source":"workflow-pack-evidence-gate","eval_archive":"whiskey-ai-governance-regression","policy_gate":"approval-policy"},"reason":"Whiskey WorkflowPack adoption release proof"}')"
+get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id")"
+list_file="$(fetch_json GET /api/workflow-packs/installations)"
+
+validation_pack_id="$(jq -r '.response.pack_id // empty' "$validate_file")"
+validated_file_count="$(jq -r '.response.validated_file_count // 0' "$validate_file")"
+install_status="$(jq -r '.response.status // "unknown"' "$install_file")"
+stage_status="$(jq -r '.response.status // "unknown"' "$stage_file")"
+release_status="$(jq -r '.response.status // "unknown"' "$release_file")"
+eval_gate_status="$(jq -r '.response.eval_gate_status // "unknown"' "$release_file")"
+release_gate_status="$(jq -r '.response.release_gate_status // "unknown"' "$release_file")"
+released_get_status="$(jq -r '.response.status // "unknown"' "$get_file")"
+released_list_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id and .status == "released")] | length' "$list_file")"
+
+if [[ "$validation_pack_id" != "ai-governance" ]]; then
+  echo "workflow pack validation returned unexpected pack_id=$validation_pack_id" >&2
+  exit 1
+fi
+if [[ "$validated_file_count" -lt 1 ]]; then
+  echo "workflow pack validation did not validate referenced files" >&2
+  exit 1
+fi
+if [[ "$install_status" != "installed" || "$stage_status" != "staged" || "$release_status" != "released" ]]; then
+  echo "workflow pack lifecycle did not reach released state" >&2
+  exit 1
+fi
+if [[ "$eval_gate_status" != "passed" || "$release_gate_status" != "passed" ]]; then
+  echo "workflow pack release gates did not pass" >&2
+  exit 1
+fi
+if [[ "$released_get_status" != "released" || "$released_list_count" != "1" ]]; then
+  echo "workflow pack released installation was not retrievable" >&2
+  exit 1
+fi
+
+{
+  echo "workflow_pack_status=released"
+  echo "pack_id=$validation_pack_id"
+  echo "manifest_path=$MANIFEST_PATH"
+  echo "installation_id=$installation_id"
+  echo "validated_file_count=$validated_file_count"
+  echo "install_status=$install_status"
+  echo "stage_status=$stage_status"
+  echo "release_status=$release_status"
+  echo "eval_gate_status=$eval_gate_status"
+  echo "release_gate_status=$release_gate_status"
+  echo "evidence_dir=$EVIDENCE_DIR"
+} >"$EVIDENCE_DIR/summary.txt"
+
+cat "$EVIDENCE_DIR/summary.txt"
