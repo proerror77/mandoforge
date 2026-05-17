@@ -27,7 +27,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, and the Whiskey MCP pilot controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, and the Whiskey eval/release controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
 
 The default image is:
 
@@ -55,8 +55,9 @@ The script:
 - runs `scripts/tenant-isolation-evidence-gate.sh`;
 - runs `scripts/worker-evidence-gate.sh`;
 - runs `scripts/remote-computer-evidence-gate.sh`;
+- seeds a Whiskey eval/release request, runs `scripts/eval-release-evidence-gate.sh`, and captures rollout, orchestration, deployment, and rollback evidence;
 - runs the synced `scripts/workflow-pack-evidence-gate.sh` on the Whiskey host against the loopback API;
-- runs the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
+- seeds another Whiskey eval/release request and runs the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
 - archives Stage 2 evidence and full pilot evidence under `/opt/mandoforge-adoption/archives`;
 - syncs archive copies to `.mandoforge/remote-adoption/whiskey/`;
 - verifies the Stage 2 archive locally with `ALLOW_BLOCKED=1`.
@@ -146,6 +147,23 @@ MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL=http://host.docker.internal:18792
 ```
 
 The evidence script seeds a `whiskey-docs` connector on the Whiskey pilot team, keeps the `search` tool allowlisted, creates a due rollout when one is not already pending, and enables strict MCP due-run plus rollback evidence. This validates the real MandoForge MCP gateway HTTP boundary and rollout controller hooks without requiring an external SaaS connector.
+
+## Eval/Release Lane
+
+Current Whiskey wiring starts a local agent release rollout/deployment/orchestration/rollback controller on the Docker gateway and configures the API with:
+
+```bash
+MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED=true
+MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL=http://host.docker.internal:18793/agents/releases/rollout/apply
+MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED=true
+MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_URL=http://host.docker.internal:18793/agents/releases/deployment/validate
+MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED=true
+MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_URL=http://host.docker.internal:18793/agents/releases/orchestration/validate
+MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED=true
+MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL=http://host.docker.internal:18793/agents/releases/rollout/rollback
+```
+
+The evidence script bootstraps the Stage 2 regression suite, runs it against the Whiskey pilot agent, creates an auto-approved `whiskey-eval-release` request, runs the due-release automation, validates orchestration and deployment through the controller, then rolls the promoted release back. This is a Whiskey pilot release target proof; external production release targets still need their own controller credentials and promotion/rollback policy.
 
 ## WorkflowPack Lane
 

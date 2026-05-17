@@ -11,9 +11,9 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 - API: `127.0.0.1:18787`.
 - Postgres: `127.0.0.1:15432`.
 - Compose project: `mandoforge-adoption`.
-- Latest remote archive: `/opt/mandoforge-adoption/archives/mandoforge-whiskey-pilot-20260517T074456Z.tar.gz`.
-- Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260517T074456Z.tar.gz`.
-- Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260517T074456Z.tar.gz`.
+- Latest remote archive: `/opt/mandoforge-adoption/archives/mandoforge-whiskey-pilot-20260517T080520Z.tar.gz`.
+- Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260517T080520Z.tar.gz`.
+- Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260517T080520Z.tar.gz`.
 
 ## Lane Matrix
 
@@ -24,7 +24,7 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 | Remote Computer cluster/state | Inventory collected; production state sync blocked | `remote_computer_status=critical`, `production_state_sync_status=blocked`, `production_blocked_count=1` | Requires distributed state filesystem plus lock-aware state sync. Full pod/state/sidecar evidence requires k3s or another real cluster. |
 | Tenant routing/RLS | Controller evidence collected; production routing still blocked | Strict evidence archive `stage2-production-whiskey-20260517T065120Z.tar.gz` includes `api-tenant-isolation-routing-validate.json` with controller `status=validated`; readiness reports `controller_evidence_fresh=true`, `rls_ready=true`, and the remaining blocker `runtime still serves one configured tenant instead of routing per tenant`. | Implement real tenant-routed runtime before marking this lane production-ready; strict evidence now proceeds past the tenant controller URL blocker and exposes the later optional rollout/rollback/finance/sidecar gaps. |
 | MCP connector rollout | Passed for Whiskey pilot connector | Strict evidence archive `stage2-production-whiskey-20260517T074456Z.tar.gz` reports `server_count=1`, `healthy_count=1`, deployment controller `status=validated`, due rollout `applied_count=1`, `failed_count=0`, `controller_execution_count=1`, and rollback `status=rolled_back` for the team-scoped `whiskey-docs` connector. | Keep this as a Whiskey pilot connector proof; external SaaS MCP targets still need their own controller credentials and rollout evidence. |
-| Eval/release rollout | Not validated on Whiskey | Stage 2 inventory still lists release deployment/orchestration/due-run endpoints as missing strict validations. | Requires a real release controller and rollback target. |
+| Eval/release rollout | Passed for Whiskey pilot release target | Strict evidence archive `stage2-production-whiskey-20260517T080520Z.tar.gz` reports due-run `promoted_count=1`, `controller_execution_count=1`, `controller_failed_count=0`, orchestration validation `status=validated`, deployment validation `status=healthy`, deployment and orchestration controller execution `status=validated`, and rollback response `status=rolled_back` for the `whiskey-eval-release` target. | Keep this as a Whiskey pilot release proof; external production release targets still need their own rollout/orchestration/deployment/rollback controllers and policy. |
 | OTel collector | Not validated on Whiskey | Stage 2 inventory still lists collector deployment/cluster validation and remediation endpoints as missing strict validations. | Requires a real collector deployment target. |
 | Provider rollout/rollback | Not validated on Whiskey | Stage 2 inventory still lists provider deployment, rollout, rollback, and policy-gate validation endpoints as missing strict validations. | Requires real provider deployment targets. |
 | Approval notifications | Not validated on Whiskey | Stage 2 inventory still lists notification deployment/ops/run endpoints as missing strict validations. | Requires real webhook, Slack, or email routes. |
@@ -35,7 +35,7 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 
 | Lane | Whiskey status | Evidence | Next action |
 | --- | --- | --- | --- |
-| WorkflowPack / AI Governance Pack | Passed for Whiskey pilot lifecycle | Full pilot archive `mandoforge-whiskey-pilot-20260517T074456Z.tar.gz` includes `workflow-packs/summary.txt` with `workflow_pack_status=released`, `pack_id=ai-governance`, `validated_file_count=42`, `install_status=installed`, `stage_status=staged`, `release_status=released`, `eval_gate_status=passed`, and `release_gate_status=passed`. The release evidence records explicit gate evidence from `workflow-pack-evidence-gate`. | Keep extending from lifecycle proof to customer-specific onboarding quality, connector data quality, and WorkflowPack rollback/archive semantics. |
+| WorkflowPack / AI Governance Pack | Passed for Whiskey pilot lifecycle | Full pilot archive `mandoforge-whiskey-pilot-20260517T080520Z.tar.gz` includes `workflow-packs/summary.txt` with `workflow_pack_status=released`, `pack_id=ai-governance`, `validated_file_count=42`, `install_status=installed`, `stage_status=staged`, `release_status=released`, `eval_gate_status=passed`, and `release_gate_status=passed`. The release evidence records explicit gate evidence from `workflow-pack-evidence-gate`. | Keep extending from lifecycle proof to customer-specific onboarding quality, connector data quality, and WorkflowPack rollback/archive semantics. |
 
 ## k3s Decision
 

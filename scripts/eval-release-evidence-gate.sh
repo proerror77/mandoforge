@@ -179,10 +179,10 @@ write_summary() {
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
     echo "release_attention_items:"
-    jq -r '.attention_items[]? | "- \(.reason // .message // .kind // \"attention\")"' "$rollout_summary_file"
+    jq -r '.attention_items[]? | "- \(.reason // .message // .kind // "attention")"' "$rollout_summary_file"
     echo
     echo "automation_attention_items:"
-    jq -r '.attention_items[]? | "- \(.message // .kind // \"attention\")"' "$automation_file"
+    jq -r '.attention_items[]? | "- \(.message // .kind // "attention")"' "$automation_file"
     echo
     echo "deployment_blocking_reasons:"
     jq -r '.deployment_readiness.blocking_reasons[]? | "- \(.)"' "$automation_file"
@@ -277,9 +277,11 @@ capture_rollback_evidence() {
   local rollback_file="$EVIDENCE_DIR/eval-release-rollback-evidence.json"
   local agent_id
   local release_id
+  local rollback_environment="${MANDOFORGE_EVAL_RELEASE_ROLLBACK_ENVIRONMENT:-}"
 
-  jq '[
+  jq --arg environment "$rollback_environment" '[
       .latest_promoted_by_environment[]?
+      | select(($environment == "") or (.environment == $environment))
       | select((.agent_id // null) != null)
       | select((.release_id // null) != null)
     ][0] // {}' "$rollout_summary_file" >"$selected_file"
@@ -327,16 +329,19 @@ mkdir -p "$EVIDENCE_DIR"
 curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/agents/releases/summary >/dev/null
 fetch_json GET /api/agents/releases/automation-runs >/dev/null
-capture_deployment_validation_evidence
-capture_orchestration_validation_evidence
 
 if [[ "$RUN_EVAL_RELEASE_AUTOMATION" == "1" ]]; then
   capture_stage2_regression_evidence
   capture_due_run_evidence
+  fetch_json GET /api/agents/releases/automation-runs >/dev/null
+  fetch_json GET /api/agents/releases/summary >/dev/null
 else
   echo "skipping eval/release automation; set RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 to include regression and release due-run evidence" >&2
 fi
 
+capture_orchestration_validation_evidence
+capture_orchestration_validation_evidence
+capture_deployment_validation_evidence
 fetch_json GET /api/agents/releases/automation-runs >/dev/null
 fetch_json GET /api/agents/releases/summary >/dev/null
 if [[ "$RUN_EVAL_RELEASE_ROLLBACK" == "1" ]]; then

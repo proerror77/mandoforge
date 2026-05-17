@@ -410,10 +410,12 @@ capture_eval_release_rollback_validation() {
   local rollback_file="$EVIDENCE_DIR/eval-release-rollback-evidence.json"
   local agent_id
   local release_id
+  local rollback_environment="${MANDOFORGE_EVAL_RELEASE_ROLLBACK_ENVIRONMENT:-}"
 
   summary_file="$(fetch_json GET /api/agents/releases/summary)"
-  jq '[
+  jq --arg environment "$rollback_environment" '[
       .latest_promoted_by_environment[]?
+      | select(($environment == "") or (.environment == $environment))
       | select((.agent_id // null) != null)
       | select((.release_id // null) != null)
     ][0] // {}' "$summary_file" >"$selected_file"
@@ -844,8 +846,6 @@ run_controller_validations() {
   fetch_json POST /api/approvals/notifications/ops/validate >/dev/null
   fetch_json POST /api/codex-app-server/deployment/validate >/dev/null
   fetch_json POST /api/codex-app-server/ops/validate >/dev/null
-  capture_eval_release_deployment_validation
-  capture_eval_release_orchestration_validation
   capture_observability_collector_deployment_validation
   capture_observability_collector_cluster_validation
   fetch_json POST /api/scheduler/deployment/validate >/dev/null
@@ -860,6 +860,17 @@ run_controller_validations() {
   else
     echo "skipping MCP connector validation; set MANDOFORGE_STAGE2_TEAM_ID to include team-scoped MCP rollout evidence" >&2
   fi
+
+  if [[ "${RUN_STAGE2_EVAL_RELEASE_AUTOMATION:-0}" == "1" ]]; then
+    capture_eval_release_stage2_regression
+    capture_eval_release_due_run
+  else
+    echo "skipping eval/release automation; set RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 to include regression and release due-run evidence" >&2
+  fi
+
+  capture_eval_release_orchestration_validation
+  capture_eval_release_orchestration_validation
+  capture_eval_release_deployment_validation
 
   fetch_json POST /api/scheduler/run-due >/dev/null
 
@@ -904,13 +915,6 @@ run_controller_validations() {
     capture_codex_app_server_stale_poll_validation
   else
     echo "skipping Codex App Server stale poll; set RUN_STAGE2_CODEX_STALE_POLL=1 to include stale-run supervision evidence" >&2
-  fi
-
-  if [[ "${RUN_STAGE2_EVAL_RELEASE_AUTOMATION:-0}" == "1" ]]; then
-    capture_eval_release_stage2_regression
-    capture_eval_release_due_run
-  else
-    echo "skipping eval/release automation; set RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 to include regression and release due-run evidence" >&2
   fi
 
   if [[ "${RUN_STAGE2_EVAL_RELEASE_ROLLBACK:-0}" == "1" ]]; then

@@ -9,11 +9,13 @@ LOCAL_CODEX_CONTROLLER="${WHISKEY_CODEX_CONTROLLER_FILE:-deploy/whiskey/codex-ap
 LOCAL_TENANT_CONTROLLER="${WHISKEY_TENANT_CONTROLLER_FILE:-deploy/whiskey/tenant-routing-controller.mjs}"
 LOCAL_WORKER_CONTROLLER="${WHISKEY_WORKER_LOAD_CONTROLLER_FILE:-deploy/whiskey/worker-load-controller.mjs}"
 LOCAL_MCP_CONTROLLER="${WHISKEY_MCP_CONTROLLER_FILE:-deploy/whiskey/mcp-pilot-controller.mjs}"
+LOCAL_EVAL_RELEASE_CONTROLLER="${WHISKEY_EVAL_RELEASE_CONTROLLER_FILE:-deploy/whiskey/eval-release-controller.mjs}"
 REMOTE_COMPOSE="$REMOTE_ROOT/docker-compose.yml"
 REMOTE_CODEX_CONTROLLER="$REMOTE_ROOT/codex-app-server-controller.mjs"
 REMOTE_TENANT_CONTROLLER="$REMOTE_ROOT/tenant-routing-controller.mjs"
 REMOTE_WORKER_CONTROLLER="$REMOTE_ROOT/worker-load-controller.mjs"
 REMOTE_MCP_CONTROLLER="$REMOTE_ROOT/mcp-pilot-controller.mjs"
+REMOTE_EVAL_RELEASE_CONTROLLER="$REMOTE_ROOT/eval-release-controller.mjs"
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
 IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-latest}"
 PULL_IMAGE="${WHISKEY_PULL_IMAGE:-1}"
@@ -27,6 +29,9 @@ WORKER_CONTROLLER_TOKEN="${WHISKEY_WORKER_LOAD_CONTROLLER_TOKEN:-whiskey-worker-
 MCP_CONTROLLER_PORT="${WHISKEY_MCP_CONTROLLER_PORT:-18792}"
 MCP_CONTROLLER_TOKEN="${WHISKEY_MCP_CONTROLLER_TOKEN:-whiskey-mcp-controller-token}"
 MCP_SERVER_NAME="${WHISKEY_MCP_SERVER_NAME:-whiskey-docs}"
+EVAL_RELEASE_CONTROLLER_PORT="${WHISKEY_EVAL_RELEASE_CONTROLLER_PORT:-18793}"
+EVAL_RELEASE_CONTROLLER_TOKEN="${WHISKEY_EVAL_RELEASE_CONTROLLER_TOKEN:-whiskey-eval-release-controller-token}"
+EVAL_RELEASE_ENVIRONMENT="${WHISKEY_EVAL_RELEASE_ENVIRONMENT:-whiskey-eval-release}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -58,6 +63,10 @@ if [[ ! -f "$LOCAL_MCP_CONTROLLER" ]]; then
   echo "missing Whiskey MCP controller file: $LOCAL_MCP_CONTROLLER" >&2
   exit 1
 fi
+if [[ ! -f "$LOCAL_EVAL_RELEASE_CONTROLLER" ]]; then
+  echo "missing Whiskey eval/release controller file: $LOCAL_EVAL_RELEASE_CONTROLLER" >&2
+  exit 1
+fi
 
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 rsync -az "$LOCAL_COMPOSE" "$REMOTE_HOST:$REMOTE_COMPOSE"
@@ -65,6 +74,7 @@ rsync -az "$LOCAL_CODEX_CONTROLLER" "$REMOTE_HOST:$REMOTE_CODEX_CONTROLLER"
 rsync -az "$LOCAL_TENANT_CONTROLLER" "$REMOTE_HOST:$REMOTE_TENANT_CONTROLLER"
 rsync -az "$LOCAL_WORKER_CONTROLLER" "$REMOTE_HOST:$REMOTE_WORKER_CONTROLLER"
 rsync -az "$LOCAL_MCP_CONTROLLER" "$REMOTE_HOST:$REMOTE_MCP_CONTROLLER"
+rsync -az "$LOCAL_EVAL_RELEASE_CONTROLLER" "$REMOTE_HOST:$REMOTE_EVAL_RELEASE_CONTROLLER"
 
 ssh "$REMOTE_HOST" "if [[ ! -f '$REMOTE_ENV' ]]; then cat > '$REMOTE_ENV' <<'ENV'
 MANDOFORGE_IMAGE_TAG=$IMAGE_TAG
@@ -113,7 +123,19 @@ ensure_env MANDOFORGE_MCP_ROLLOUT_CONTROLLER_URL http://host.docker.internal:$MC
 ensure_env MANDOFORGE_MCP_ROLLOUT_CONTROLLER_TOKEN $MCP_CONTROLLER_TOKEN
 ensure_env MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_REQUIRED true
 ensure_env MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL http://host.docker.internal:$MCP_CONTROLLER_PORT/mcp/rollback/validate
-ensure_env MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_TOKEN $MCP_CONTROLLER_TOKEN"
+ensure_env MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_TOKEN $MCP_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL http://host.docker.internal:$EVAL_RELEASE_CONTROLLER_PORT/agents/releases/rollout/apply
+ensure_env MANDOFORGE_AGENT_RELEASE_CONTROLLER_TOKEN $EVAL_RELEASE_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_URL http://host.docker.internal:$EVAL_RELEASE_CONTROLLER_PORT/agents/releases/deployment/validate
+ensure_env MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_TOKEN $EVAL_RELEASE_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_URL http://host.docker.internal:$EVAL_RELEASE_CONTROLLER_PORT/agents/releases/orchestration/validate
+ensure_env MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_TOKEN $EVAL_RELEASE_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL http://host.docker.internal:$EVAL_RELEASE_CONTROLLER_PORT/agents/releases/rollout/rollback
+ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_TOKEN $EVAL_RELEASE_CONTROLLER_TOKEN"
 
 ssh "$REMOTE_HOST" "set -euo pipefail
 docker_gateway_ip=\$(ip -4 addr show docker0 2>/dev/null | awk '/inet /{print \$2}' | cut -d/ -f1 | head -1)
@@ -164,7 +186,17 @@ command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey MCP pilo
 nohup env MCP_PILOT_CONTROLLER_HOST=\$docker_gateway_ip MCP_PILOT_CONTROLLER_PORT=$MCP_CONTROLLER_PORT MCP_PILOT_CONTROLLER_TOKEN='$MCP_CONTROLLER_TOKEN' MCP_PILOT_SERVER_NAME='$MCP_SERVER_NAME' node '$REMOTE_MCP_CONTROLLER' > '$REMOTE_ROOT/mcp-pilot-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/mcp-pilot-controller.pid'
 sleep 2
-ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$MCP_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/mcp-pilot-controller.log' >&2; exit 1; }"
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$MCP_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/mcp-pilot-controller.log' >&2; exit 1; }
+if [[ -f '$REMOTE_ROOT/eval-release-controller.pid' ]]; then
+  kill \$(cat '$REMOTE_ROOT/eval-release-controller.pid') >/dev/null 2>&1 || true
+  rm -f '$REMOTE_ROOT/eval-release-controller.pid'
+  sleep 1
+fi
+command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey eval/release controller' >&2; exit 1; }
+nohup env EVAL_RELEASE_CONTROLLER_HOST=\$docker_gateway_ip EVAL_RELEASE_CONTROLLER_PORT=$EVAL_RELEASE_CONTROLLER_PORT EVAL_RELEASE_CONTROLLER_TOKEN='$EVAL_RELEASE_CONTROLLER_TOKEN' EVAL_RELEASE_CONTROLLER_ENVIRONMENT='$EVAL_RELEASE_ENVIRONMENT' node '$REMOTE_EVAL_RELEASE_CONTROLLER' > '$REMOTE_ROOT/eval-release-controller.log' 2>&1 &
+echo \$! > '$REMOTE_ROOT/eval-release-controller.pid'
+sleep 2
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$EVAL_RELEASE_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/eval-release-controller.log' >&2; exit 1; }"
 
 remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"
 if [[ "$PULL_IMAGE" == "1" ]]; then
