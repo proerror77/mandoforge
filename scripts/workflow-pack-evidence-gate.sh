@@ -99,20 +99,25 @@ mkdir -p "$EVIDENCE_DIR"
 curl -fsS "$BASE_URL/healthz" >/dev/null
 
 if [[ -z "$UPDATE_MANIFEST_PATH" ]]; then
-  source_dir="$(cd "$(dirname "$MANIFEST_PATH")" && pwd -P)"
-  update_package_dir="$EVIDENCE_DIR/workflow-pack-update-package"
-  rm -rf "$update_package_dir"
-  cp -R "$source_dir" "$update_package_dir"
-  awk -v version="$UPDATE_VERSION" '
-    !updated && $0 ~ /^version: / {
-      print "version: " version
-      updated = 1
-      next
-    }
-    { print }
-  ' "$update_package_dir/package.yaml" >"$update_package_dir/package.yaml.tmp"
-  mv "$update_package_dir/package.yaml.tmp" "$update_package_dir/package.yaml"
-  UPDATE_MANIFEST_PATH="$update_package_dir/package.yaml"
+  update_fixture_path="$(dirname "$MANIFEST_PATH")/package-v${UPDATE_VERSION}.yaml"
+  if [[ -f "$update_fixture_path" ]]; then
+    UPDATE_MANIFEST_PATH="$update_fixture_path"
+  else
+    source_dir="$(cd "$(dirname "$MANIFEST_PATH")" && pwd -P)"
+    update_package_dir="$EVIDENCE_DIR/workflow-pack-update-package"
+    rm -rf "$update_package_dir"
+    cp -R "$source_dir" "$update_package_dir"
+    awk -v version="$UPDATE_VERSION" '
+      !updated && $0 ~ /^version: / {
+        print "version: " version
+        updated = 1
+        next
+      }
+      { print }
+    ' "$update_package_dir/package.yaml" >"$update_package_dir/package.yaml.tmp"
+    mv "$update_package_dir/package.yaml.tmp" "$update_package_dir/package.yaml"
+    UPDATE_MANIFEST_PATH="$update_package_dir/package.yaml"
+  fi
 fi
 
 manifest_payload="$(jq -nc --arg manifest_path "$MANIFEST_PATH" '{manifest_path: $manifest_path}')"

@@ -1,0 +1,213 @@
+schema_version: workflowpack.mandoforge.dev/v1
+kind: WorkflowPack
+id: ai-governance
+name: AI Governance Pack
+version: 0.1.1
+description: Draft-only AI governance workflows for enterprise AI adoption review.
+capabilities:
+  - ai-use-case-triage
+  - ai-impact-assessment
+  - vendor-ai-review
+  - policy-monitor
+profiles:
+  - id: default
+    path: profiles/default.md
+    required: true
+  - id: onboarding
+    path: profiles/onboarding.md
+    required: true
+  - id: company
+    path: profiles/company.md
+    required: true
+  - id: department
+    path: profiles/department.md
+    required: true
+  - id: approval-matrix
+    path: profiles/approval_matrix.yaml
+    required: true
+  - id: connector-map
+    path: profiles/connector_map.yaml
+    required: true
+  - id: risk-policy
+    path: profiles/risk_policy.yaml
+    required: true
+  - id: output-style
+    path: profiles/output_style.md
+    required: true
+skills:
+  - id: ai-use-case-triage
+    path: skills/ai-use-case-triage/skill.md
+    required: true
+  - id: ai-impact-assessment
+    path: skills/ai-impact-assessment/skill.md
+    required: true
+  - id: vendor-ai-review
+    path: skills/vendor-ai-review/skill.md
+    required: true
+  - id: policy-monitor
+    path: skills/policy-monitor/skill.md
+    required: true
+workflows:
+  - id: ai-use-case-triage
+    path: workflows/ai-use-case-triage.workflow.yaml
+    entry_agent: reader
+  - id: ai-impact-assessment
+    path: workflows/ai-impact-assessment.workflow.yaml
+    entry_agent: reader
+  - id: vendor-ai-review
+    path: workflows/vendor-ai-review.workflow.yaml
+    entry_agent: reader
+  - id: policy-monitor
+    path: workflows/policy-monitor.workflow.yaml
+    entry_agent: reader
+  - id: profile-onboarding
+    path: workflows/profile-onboarding.workflow.yaml
+    entry_agent: reader
+agents:
+  - id: reader
+    path: agents/reader.agent.yaml
+    role: reader
+    tool_scope:
+      read:
+        - connector.read
+        - file.read
+    handoffs:
+      - target_agent: analyzer
+        intents:
+          - classify-ai-use-case
+          - classify-ai-impact
+          - classify-vendor-ai-risk
+          - classify-policy-monitor-signal
+        risk_level: medium
+        approval_required: false
+        schema: schemas/handoff.schema.json
+  - id: analyzer
+    path: agents/analyzer.agent.yaml
+    role: analyzer
+    tool_scope:
+      read:
+        - profile.read
+        - schema.read
+    handoffs:
+      - target_agent: writer
+        intents:
+          - draft-ai-governance-assessment
+          - draft-ai-impact-assessment
+          - draft-vendor-ai-review
+          - draft-policy-monitor-finding
+        risk_level: high
+        approval_required: true
+        schema: schemas/handoff.schema.json
+  - id: writer
+    path: agents/writer.agent.yaml
+    role: writer
+    tool_scope:
+      read:
+        - profile.read
+      write:
+        - artifact.write
+connectors:
+  - id: knowledge-base
+    kind: mcp
+    path: connectors/mcp.yaml
+    required_permissions:
+      - document.search
+      - document.read
+    writes:
+      enabled: false
+      approval_required: true
+    provenance:
+      required: true
+    tenant_scope:
+      tenant_id: required
+      workspace_id: required
+    prompt_injection_boundary:
+      treat_results_as_data: true
+schemas:
+  - id: ai-use-case
+    path: schemas/ai_use_case.schema.json
+    required: true
+  - id: ai-impact-assessment
+    path: schemas/ai_impact_assessment.schema.json
+    required: true
+  - id: vendor-ai-review
+    path: schemas/vendor_ai_review.schema.json
+    required: true
+  - id: policy-monitor-finding
+    path: schemas/policy_monitor_finding.schema.json
+    required: true
+  - id: handoff
+    path: schemas/handoff.schema.json
+    required: true
+  - id: company-profile
+    path: schemas/company_profile.schema.json
+    required: true
+  - id: department-profile
+    path: schemas/department_profile.schema.json
+    required: true
+  - id: approval-matrix
+    path: schemas/approval_matrix.schema.json
+    required: true
+  - id: connector-map
+    path: schemas/connector_map.schema.json
+    required: true
+  - id: risk-policy
+    path: schemas/risk_policy.schema.json
+    required: true
+  - id: output-style
+    path: schemas/output_style.schema.json
+    required: true
+policies:
+  - id: approval
+    path: policies/approval.yaml
+    required: true
+  - id: tool-scope
+    path: policies/tool_scope.yaml
+    required: true
+evals:
+  - id: ai-governance-regression
+    path: evals/golden_cases.jsonl
+    gate:
+      required: true
+      min_score: 1.0
+  - id: profile-onboarding-regression
+    path: evals/profile_onboarding_cases.jsonl
+    gate:
+      required: true
+      min_score: 1.0
+release_gates:
+  - id: pack-regression
+    gate_type: eval
+    required: true
+  - id: approval-policy
+    gate_type: policy
+    required: true
+onboarding:
+  workflow: profile-onboarding
+  required_profiles:
+    - company
+    - department
+    - approval-matrix
+    - connector-map
+    - risk-policy
+    - output-style
+  profile_schemas:
+    - id: company-profile
+      path: schemas/company_profile.schema.json
+      required: true
+    - id: department-profile
+      path: schemas/department_profile.schema.json
+      required: true
+    - id: approval-matrix
+      path: schemas/approval_matrix.schema.json
+      required: true
+    - id: connector-map
+      path: schemas/connector_map.schema.json
+      required: true
+    - id: risk-policy
+      path: schemas/risk_policy.schema.json
+      required: true
+    - id: output-style
+      path: schemas/output_style.schema.json
+      required: true
+  eval: profile-onboarding-regression
