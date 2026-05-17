@@ -27,7 +27,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, and the Whiskey eval/release controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, and the Whiskey observability controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
 
 The default image is:
 
@@ -56,8 +56,9 @@ The script:
 - runs `scripts/worker-evidence-gate.sh`;
 - runs `scripts/remote-computer-evidence-gate.sh`;
 - seeds a Whiskey eval/release request, runs `scripts/eval-release-evidence-gate.sh`, and captures rollout, orchestration, deployment, and rollback evidence;
+- seeds a diagnostics approval path for observability remediation, runs `scripts/observability-collector-evidence-gate.sh`, and captures deployment, rollout, and remediation evidence;
 - runs the synced `scripts/workflow-pack-evidence-gate.sh` on the Whiskey host against the loopback API;
-- seeds another Whiskey eval/release request and runs the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
+- seeds another Whiskey eval/release request plus another observability remediation path and runs the synced `scripts/stage2-production-evidence-gate.sh` on the Whiskey host against the loopback API with `ALLOW_BLOCKED=1`;
 - archives Stage 2 evidence and full pilot evidence under `/opt/mandoforge-adoption/archives`;
 - syncs archive copies to `.mandoforge/remote-adoption/whiskey/`;
 - verifies the Stage 2 archive locally with `ALLOW_BLOCKED=1`.
@@ -164,6 +165,27 @@ MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL=http://host.docker.internal:187
 ```
 
 The evidence script bootstraps the Stage 2 regression suite, runs it against the Whiskey pilot agent, creates an auto-approved `whiskey-eval-release` request, runs the due-release automation, validates orchestration and deployment through the controller, then rolls the promoted release back. This is a Whiskey pilot release target proof; external production release targets still need their own controller credentials and promotion/rollback policy.
+
+## Observability Collector Lane
+
+Current Whiskey wiring starts a local observability controller on the Docker gateway and configures the API with:
+
+```bash
+MANDOFORGE_SERVICE_NAME=mandoforge-api
+MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:18794
+MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT=http://host.docker.internal:18794/healthz
+MANDOFORGE_OTEL_SAMPLE_RATIO=1.0
+MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_REQUIRED=true
+MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL=http://host.docker.internal:18794/observability/collector/deployment/validate
+MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_REQUIRED=true
+MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_URL=http://host.docker.internal:18794/observability/collector/cluster/validate
+MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_REQUIRED=true
+MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_URL=http://host.docker.internal:18794/observability/remediation/run
+```
+
+The controller exposes a small OTLP-compatible pilot target for `/v1/logs`, `/v1/traces`, and `/v1/metrics`, plus deployment, cluster-rollout, and remediation validation endpoints. The evidence script seeds a diagnostics session so remediation supervision has real pending-approval material to inspect, then runs the focused observability gate and the strict Stage 2 gate with `RUN_STAGE2_OBSERVABILITY_REMEDIATION=1`.
+
+This is a Whiskey pilot collector proof. It validates that the deployed API emits to a reachable collector target and that the Stage 2 controller hooks are wired, fresh, and fail-closed. It is not a claim that an external production collector cluster, retention backend, alert route, or cross-node telemetry pipeline has been adopted.
 
 ## WorkflowPack Lane
 

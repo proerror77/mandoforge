@@ -10,12 +10,14 @@ LOCAL_TENANT_CONTROLLER="${WHISKEY_TENANT_CONTROLLER_FILE:-deploy/whiskey/tenant
 LOCAL_WORKER_CONTROLLER="${WHISKEY_WORKER_LOAD_CONTROLLER_FILE:-deploy/whiskey/worker-load-controller.mjs}"
 LOCAL_MCP_CONTROLLER="${WHISKEY_MCP_CONTROLLER_FILE:-deploy/whiskey/mcp-pilot-controller.mjs}"
 LOCAL_EVAL_RELEASE_CONTROLLER="${WHISKEY_EVAL_RELEASE_CONTROLLER_FILE:-deploy/whiskey/eval-release-controller.mjs}"
+LOCAL_OBSERVABILITY_CONTROLLER="${WHISKEY_OBSERVABILITY_CONTROLLER_FILE:-deploy/whiskey/observability-controller.mjs}"
 REMOTE_COMPOSE="$REMOTE_ROOT/docker-compose.yml"
 REMOTE_CODEX_CONTROLLER="$REMOTE_ROOT/codex-app-server-controller.mjs"
 REMOTE_TENANT_CONTROLLER="$REMOTE_ROOT/tenant-routing-controller.mjs"
 REMOTE_WORKER_CONTROLLER="$REMOTE_ROOT/worker-load-controller.mjs"
 REMOTE_MCP_CONTROLLER="$REMOTE_ROOT/mcp-pilot-controller.mjs"
 REMOTE_EVAL_RELEASE_CONTROLLER="$REMOTE_ROOT/eval-release-controller.mjs"
+REMOTE_OBSERVABILITY_CONTROLLER="$REMOTE_ROOT/observability-controller.mjs"
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
 IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-latest}"
 PULL_IMAGE="${WHISKEY_PULL_IMAGE:-1}"
@@ -32,6 +34,9 @@ MCP_SERVER_NAME="${WHISKEY_MCP_SERVER_NAME:-whiskey-docs}"
 EVAL_RELEASE_CONTROLLER_PORT="${WHISKEY_EVAL_RELEASE_CONTROLLER_PORT:-18793}"
 EVAL_RELEASE_CONTROLLER_TOKEN="${WHISKEY_EVAL_RELEASE_CONTROLLER_TOKEN:-whiskey-eval-release-controller-token}"
 EVAL_RELEASE_ENVIRONMENT="${WHISKEY_EVAL_RELEASE_ENVIRONMENT:-whiskey-eval-release}"
+OBSERVABILITY_CONTROLLER_PORT="${WHISKEY_OBSERVABILITY_CONTROLLER_PORT:-18794}"
+OBSERVABILITY_CONTROLLER_TOKEN="${WHISKEY_OBSERVABILITY_CONTROLLER_TOKEN:-whiskey-observability-controller-token}"
+OBSERVABILITY_SERVICE_NAME="${WHISKEY_OBSERVABILITY_SERVICE_NAME:-mandoforge-api}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -67,6 +72,10 @@ if [[ ! -f "$LOCAL_EVAL_RELEASE_CONTROLLER" ]]; then
   echo "missing Whiskey eval/release controller file: $LOCAL_EVAL_RELEASE_CONTROLLER" >&2
   exit 1
 fi
+if [[ ! -f "$LOCAL_OBSERVABILITY_CONTROLLER" ]]; then
+  echo "missing Whiskey observability controller file: $LOCAL_OBSERVABILITY_CONTROLLER" >&2
+  exit 1
+fi
 
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 rsync -az "$LOCAL_COMPOSE" "$REMOTE_HOST:$REMOTE_COMPOSE"
@@ -75,6 +84,7 @@ rsync -az "$LOCAL_TENANT_CONTROLLER" "$REMOTE_HOST:$REMOTE_TENANT_CONTROLLER"
 rsync -az "$LOCAL_WORKER_CONTROLLER" "$REMOTE_HOST:$REMOTE_WORKER_CONTROLLER"
 rsync -az "$LOCAL_MCP_CONTROLLER" "$REMOTE_HOST:$REMOTE_MCP_CONTROLLER"
 rsync -az "$LOCAL_EVAL_RELEASE_CONTROLLER" "$REMOTE_HOST:$REMOTE_EVAL_RELEASE_CONTROLLER"
+rsync -az "$LOCAL_OBSERVABILITY_CONTROLLER" "$REMOTE_HOST:$REMOTE_OBSERVABILITY_CONTROLLER"
 
 ssh "$REMOTE_HOST" "if [[ ! -f '$REMOTE_ENV' ]]; then cat > '$REMOTE_ENV' <<'ENV'
 MANDOFORGE_IMAGE_TAG=$IMAGE_TAG
@@ -135,7 +145,20 @@ ensure_env MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_URL http://host.doc
 ensure_env MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_TOKEN $EVAL_RELEASE_CONTROLLER_TOKEN
 ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED true
 ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL http://host.docker.internal:$EVAL_RELEASE_CONTROLLER_PORT/agents/releases/rollout/rollback
-ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_TOKEN $EVAL_RELEASE_CONTROLLER_TOKEN"
+ensure_env MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_TOKEN $EVAL_RELEASE_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_SERVICE_NAME $OBSERVABILITY_SERVICE_NAME
+ensure_env MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT http://host.docker.internal:$OBSERVABILITY_CONTROLLER_PORT
+ensure_env MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT http://host.docker.internal:$OBSERVABILITY_CONTROLLER_PORT/healthz
+ensure_env MANDOFORGE_OTEL_SAMPLE_RATIO 1.0
+ensure_env MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL http://host.docker.internal:$OBSERVABILITY_CONTROLLER_PORT/observability/collector/deployment/validate
+ensure_env MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_TOKEN $OBSERVABILITY_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_URL http://host.docker.internal:$OBSERVABILITY_CONTROLLER_PORT/observability/collector/cluster/validate
+ensure_env MANDOFORGE_OBSERVABILITY_COLLECTOR_CLUSTER_CONTROLLER_TOKEN $OBSERVABILITY_CONTROLLER_TOKEN
+ensure_env MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_REQUIRED true
+ensure_env MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_URL http://host.docker.internal:$OBSERVABILITY_CONTROLLER_PORT/observability/remediation/run
+ensure_env MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_TOKEN $OBSERVABILITY_CONTROLLER_TOKEN"
 
 ssh "$REMOTE_HOST" "set -euo pipefail
 docker_gateway_ip=\$(ip -4 addr show docker0 2>/dev/null | awk '/inet /{print \$2}' | cut -d/ -f1 | head -1)
@@ -196,7 +219,17 @@ command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey eval/rel
 nohup env EVAL_RELEASE_CONTROLLER_HOST=\$docker_gateway_ip EVAL_RELEASE_CONTROLLER_PORT=$EVAL_RELEASE_CONTROLLER_PORT EVAL_RELEASE_CONTROLLER_TOKEN='$EVAL_RELEASE_CONTROLLER_TOKEN' EVAL_RELEASE_CONTROLLER_ENVIRONMENT='$EVAL_RELEASE_ENVIRONMENT' node '$REMOTE_EVAL_RELEASE_CONTROLLER' > '$REMOTE_ROOT/eval-release-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/eval-release-controller.pid'
 sleep 2
-ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$EVAL_RELEASE_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/eval-release-controller.log' >&2; exit 1; }"
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$EVAL_RELEASE_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/eval-release-controller.log' >&2; exit 1; }
+if [[ -f '$REMOTE_ROOT/observability-controller.pid' ]]; then
+  kill \$(cat '$REMOTE_ROOT/observability-controller.pid') >/dev/null 2>&1 || true
+  rm -f '$REMOTE_ROOT/observability-controller.pid'
+  sleep 1
+fi
+command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey observability controller' >&2; exit 1; }
+nohup env OBSERVABILITY_CONTROLLER_HOST=\$docker_gateway_ip OBSERVABILITY_CONTROLLER_PORT=$OBSERVABILITY_CONTROLLER_PORT OBSERVABILITY_CONTROLLER_TOKEN='$OBSERVABILITY_CONTROLLER_TOKEN' OBSERVABILITY_CONTROLLER_SERVICE_NAME='$OBSERVABILITY_SERVICE_NAME' node '$REMOTE_OBSERVABILITY_CONTROLLER' > '$REMOTE_ROOT/observability-controller.log' 2>&1 &
+echo \$! > '$REMOTE_ROOT/observability-controller.pid'
+sleep 2
+ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$OBSERVABILITY_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/observability-controller.log' >&2; exit 1; }"
 
 remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"
 if [[ "$PULL_IMAGE" == "1" ]]; then
