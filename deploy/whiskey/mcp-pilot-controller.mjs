@@ -1,5 +1,9 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import http from "node:http";
+
+const execFileAsync = promisify(execFile);
 
 const listenHost = process.env.MCP_PILOT_CONTROLLER_HOST || "127.0.0.1";
 const listenPort = Number(process.env.MCP_PILOT_CONTROLLER_PORT || "18792");
@@ -20,6 +24,13 @@ const githubRepoRef = process.env.MCP_PILOT_GITHUB_REPO_REF || "main";
 const githubRepoLimit = Number(process.env.MCP_PILOT_GITHUB_REPO_LIMIT || "5");
 const githubRepoSnippetLength = Number(process.env.MCP_PILOT_GITHUB_REPO_SNIPPET_LENGTH || "240");
 const githubToken = process.env.MCP_PILOT_GITHUB_TOKEN || "";
+const larkCliBin = process.env.MCP_PILOT_LARK_CLI_BIN || "lark-cli";
+const larkIdentity = process.env.MCP_PILOT_LARK_AS || "user";
+const larkUserOpenId = process.env.MCP_PILOT_LARK_USER_OPEN_ID || "";
+const larkChatId = process.env.MCP_PILOT_LARK_CHAT_ID || "";
+const larkMessageLimit = Number(process.env.MCP_PILOT_LARK_MESSAGE_LIMIT || "10");
+const larkSnippetLength = Number(process.env.MCP_PILOT_LARK_SNIPPET_LENGTH || "240");
+const larkTimeoutMs = Number(process.env.MCP_PILOT_LARK_TIMEOUT_MS || "10000");
 
 function writeJson(response, statusCode, body) {
   response.writeHead(statusCode, { "content-type": "application/json" });
@@ -217,6 +228,60 @@ async function searchGitHubRepositoryContents(query) {
   return items;
 }
 
+function normalizeLarkMessageText(text) {
+  return normalizeSnippet(String(text || "").replace(/\r/g, ""));
+}
+
+async function searchLarkChatMessages(query) {
+  if (!larkUserOpenId && !larkChatId) {
+    throw new Error("lark chat messages mode requires a user open id or chat id");
+  }
+
+  const args = [
+    "im",
+    "+chat-messages-list",
+    "--as",
+    larkIdentity,
+    "--page-size",
+    String(Math.max(1, larkMessageLimit)),
+  ];
+  if (larkChatId) {
+    args.push("--chat-id", larkChatId);
+  } else {
+    args.push("--user-id", larkUserOpenId);
+  }
+
+  const { stdout } = await execFileAsync(larkCliBin, args, {
+    timeout: larkTimeoutMs,
+    maxBuffer: 1024 * 1024,
+  });
+  const response = JSON.parse(stdout || "{}");
+  if (response.ok !== true) {
+    throw new Error(response.error?.message || "lark chat messages request failed");
+  }
+  const messages = Array.isArray(response.data?.messages) ? response.data.messages : [];
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const matchingMessages = messages.filter((message) => {
+    if (!normalizedQuery) {
+      return true;
+    }
+    return String(message.content || "").toLowerCase().includes(normalizedQuery);
+  });
+
+  if (matchingMessages.length === 0) {
+    throw new Error(`lark chat messages search returned no matches for query "${query}"`);
+  }
+
+  return matchingMessages.slice(0, Math.max(1, larkMessageLimit)).map((message) => ({
+    title: `${message.sender?.name || "Lark"} message ${message.message_id || "unknown"}`,
+    url: message.message_app_link || null,
+    snippet: normalizeLarkMessageText(message.content || "").slice(0, larkSnippetLength),
+    source_id: message.message_id || message.message_position || "unknown",
+    reference: `${message.chat_id || "unknown"}:${message.message_position || "unknown"}`,
+    retrieval_actor: "lark-chat-messages",
+  }));
+}
+
 function pilotItems(query) {
   return [
     {
@@ -254,6 +319,16 @@ function validateConnectors(payload) {
   };
 }
 
+function sourceAuthMode() {
+  if (upstreamMode === "github_repositories" || upstreamMode === "github_repo_contents") {
+    return githubToken ? "authenticated" : "anonymous";
+  }
+  if (upstreamMode === "lark_chat_messages") {
+    return "authenticated";
+  }
+  return "not_applicable";
+}
+
 async function handleGatewayCall(request, response) {
   const payload = await readJson(request);
   if (payload.server !== allowedServer) {
@@ -283,6 +358,8 @@ async function handleGatewayCall(request, response) {
         ? await searchGitHubRepositories(String(query))
         : upstreamMode === "github_repo_contents"
           ? await searchGitHubRepositoryContents(String(query))
+          : upstreamMode === "lark_chat_messages"
+            ? await searchLarkChatMessages(String(query))
         : pilotItems(String(query));
   writeJson(response, 200, {
     result: {
@@ -298,17 +375,18 @@ async function handleGatewayCall(request, response) {
               ? githubToken
                 ? "github-repo-contents-authenticated"
                 : "github-repo-contents"
+            : upstreamMode === "lark_chat_messages"
+                ? "lark-chat-messages-authenticated"
             : "whiskey-mcp-pilot",
-      auth_mode:
-        upstreamMode === "github_repositories" || upstreamMode === "github_repo_contents"
-          ? githubToken
-            ? "authenticated"
-            : "anonymous"
-          : "not_applicable",
+      auth_mode: sourceAuthMode(),
       query,
       repository:
         upstreamMode === "github_repo_contents" && githubRepoOwner && githubRepoName
           ? `${githubRepoOwner}/${githubRepoName}@${githubRepoRef}`
+          : null,
+      chat_target:
+        upstreamMode === "lark_chat_messages"
+          ? larkChatId || larkUserOpenId || null
           : null,
       item_count: items.length,
       items,

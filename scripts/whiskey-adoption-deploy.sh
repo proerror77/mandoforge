@@ -39,11 +39,15 @@ WORKER_CONTROLLER_TOKEN="${WHISKEY_WORKER_LOAD_CONTROLLER_TOKEN:-whiskey-worker-
 MCP_CONTROLLER_PORT="${WHISKEY_MCP_CONTROLLER_PORT:-18792}"
 MCP_CONTROLLER_TOKEN="${WHISKEY_MCP_CONTROLLER_TOKEN:-whiskey-mcp-controller-token}"
 MCP_SERVER_NAME="${WHISKEY_MCP_SERVER_NAME:-whiskey-docs}"
-MCP_UPSTREAM_MODE="${WHISKEY_MCP_UPSTREAM_MODE:-github_repo_contents}"
+MCP_UPSTREAM_MODE="${WHISKEY_MCP_UPSTREAM_MODE:-lark_chat_messages}"
 MCP_GITHUB_REPO_OWNER="${WHISKEY_MCP_GITHUB_REPO_OWNER:-proerror77}"
 MCP_GITHUB_REPO_NAME="${WHISKEY_MCP_GITHUB_REPO_NAME:-Goodchance}"
 MCP_GITHUB_REPO_REF="${WHISKEY_MCP_GITHUB_REPO_REF:-main}"
 MCP_GITHUB_REPO_LIMIT="${WHISKEY_MCP_GITHUB_REPO_LIMIT:-5}"
+MCP_LARK_AS="${WHISKEY_MCP_LARK_AS:-user}"
+MCP_LARK_USER_OPEN_ID="${WHISKEY_MCP_LARK_USER_OPEN_ID:-}"
+MCP_LARK_CHAT_ID="${WHISKEY_MCP_LARK_CHAT_ID:-}"
+MCP_LARK_MESSAGE_LIMIT="${WHISKEY_MCP_LARK_MESSAGE_LIMIT:-10}"
 EVAL_RELEASE_CONTROLLER_PORT="${WHISKEY_EVAL_RELEASE_CONTROLLER_PORT:-18793}"
 EVAL_RELEASE_CONTROLLER_TOKEN="${WHISKEY_EVAL_RELEASE_CONTROLLER_TOKEN:-whiskey-eval-release-controller-token}"
 EVAL_RELEASE_ENVIRONMENT="${WHISKEY_EVAL_RELEASE_ENVIRONMENT:-whiskey-eval-release}"
@@ -307,7 +311,19 @@ github_token=""
 if command -v gh >/dev/null 2>&1; then
   github_token="$(gh auth token 2>/dev/null || true)"
 fi
-nohup env MCP_PILOT_CONTROLLER_HOST=\$docker_gateway_ip MCP_PILOT_CONTROLLER_PORT=$MCP_CONTROLLER_PORT MCP_PILOT_CONTROLLER_TOKEN='$MCP_CONTROLLER_TOKEN' MCP_PILOT_SERVER_NAME='$MCP_SERVER_NAME' MCP_PILOT_UPSTREAM_MODE='$MCP_UPSTREAM_MODE' MCP_PILOT_GITHUB_API_URL=https://api.github.com/search/repositories MCP_PILOT_GITHUB_REPO_API_URL=https://api.github.com/repos MCP_PILOT_GITHUB_REPO_OWNER='$MCP_GITHUB_REPO_OWNER' MCP_PILOT_GITHUB_REPO_NAME='$MCP_GITHUB_REPO_NAME' MCP_PILOT_GITHUB_REPO_REF='$MCP_GITHUB_REPO_REF' MCP_PILOT_GITHUB_REPO_LIMIT='$MCP_GITHUB_REPO_LIMIT' MCP_PILOT_GITHUB_TOKEN=\"\$github_token\" node '$REMOTE_MCP_CONTROLLER' > '$REMOTE_ROOT/mcp-pilot-controller.log' 2>&1 &
+lark_open_id="$MCP_LARK_USER_OPEN_ID"
+if [[ '$MCP_UPSTREAM_MODE' == 'lark_chat_messages' ]]; then
+  command -v lark-cli >/dev/null 2>&1 || { echo 'lark-cli is required for Whiskey Lark MCP source' >&2; exit 1; }
+  command -v jq >/dev/null 2>&1 || { echo 'jq is required for Whiskey Lark MCP source autodiscovery' >&2; exit 1; }
+  if [[ -z "\$lark_open_id" && -z '$MCP_LARK_CHAT_ID' ]]; then
+    lark_open_id=\"\$(lark-cli auth status 2>/dev/null | jq -r '.userOpenId // empty' || true)\"
+  fi
+  if [[ -z "\$lark_open_id" && -z '$MCP_LARK_CHAT_ID' ]]; then
+    lark_open_id=\"\$(lark-cli contact +get-user --format json 2>/dev/null | jq -r '.data.user.open_id // empty' || true)\"
+  fi
+  [[ -n "\$lark_open_id" || -n '$MCP_LARK_CHAT_ID' ]] || { echo 'could not resolve Whiskey Lark user/chat target for MCP source' >&2; exit 1; }
+fi
+nohup env MCP_PILOT_CONTROLLER_HOST=\$docker_gateway_ip MCP_PILOT_CONTROLLER_PORT=$MCP_CONTROLLER_PORT MCP_PILOT_CONTROLLER_TOKEN='$MCP_CONTROLLER_TOKEN' MCP_PILOT_SERVER_NAME='$MCP_SERVER_NAME' MCP_PILOT_UPSTREAM_MODE='$MCP_UPSTREAM_MODE' MCP_PILOT_GITHUB_API_URL=https://api.github.com/search/repositories MCP_PILOT_GITHUB_REPO_API_URL=https://api.github.com/repos MCP_PILOT_GITHUB_REPO_OWNER='$MCP_GITHUB_REPO_OWNER' MCP_PILOT_GITHUB_REPO_NAME='$MCP_GITHUB_REPO_NAME' MCP_PILOT_GITHUB_REPO_REF='$MCP_GITHUB_REPO_REF' MCP_PILOT_GITHUB_REPO_LIMIT='$MCP_GITHUB_REPO_LIMIT' MCP_PILOT_GITHUB_TOKEN=\"\$github_token\" MCP_PILOT_LARK_AS='$MCP_LARK_AS' MCP_PILOT_LARK_USER_OPEN_ID=\"\$lark_open_id\" MCP_PILOT_LARK_CHAT_ID='$MCP_LARK_CHAT_ID' MCP_PILOT_LARK_MESSAGE_LIMIT='$MCP_LARK_MESSAGE_LIMIT' node '$REMOTE_MCP_CONTROLLER' > '$REMOTE_ROOT/mcp-pilot-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/mcp-pilot-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$MCP_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/mcp-pilot-controller.log' >&2; exit 1; }
