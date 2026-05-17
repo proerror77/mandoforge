@@ -667,7 +667,8 @@ cleanup() {
 trap cleanup EXIT
 
 curl -fsS "\${auth_headers[@]}" "\$base_url/api/vault/secrets" >"\$secrets_before"
-secret_id="\$(jq -r 'map(select(.name == "whiskey-kms-provider-secret" and .path == "providers/whiskey" and .key == "api_key")) | .[0].id // empty' "\$secrets_before")"
+secret_id="\$(jq -r 'map(select(.name == "whiskey-kms-provider-secret" and .key == "api_key")) | .[0].id // empty' "\$secrets_before")"
+secret_path="\$(jq -r 'map(select(.id == "'"\$secret_id"'" )) | .[0].path // empty' "\$secrets_before")"
 if [[ -z "\$secret_id" ]]; then
   jq -n \
     '{
@@ -682,15 +683,18 @@ if [[ -z "\$secret_id" ]]; then
     -d @"\$secret_body" \
     "\$base_url/api/vault/secrets" >"\$secret_file"
 else
-  jq -n \
-    --arg path "providers/whiskey-deepseek" \
-    --arg key "api_key" \
-    --arg value "\$DEEPSEEK_API_KEY" \
-    '{path: \$path, key: \$key, value: \$value}' >"\$secret_body"
-  curl -fsS -X POST "\${auth_headers[@]}" \
-    -H "content-type: application/json" \
-    -d @"\$secret_body" \
-    "\$base_url/api/vault/secrets/\$secret_id/rotate" >"\$secret_file"
+  if [[ "\$secret_path" != "providers/whiskey" ]]; then
+    jq -n \
+      --arg path "providers/whiskey" \
+      --arg key "api_key" \
+      '{path: \$path, key: \$key}' >"\$secret_body"
+    curl -fsS -X POST "\${auth_headers[@]}" \
+      -H "content-type: application/json" \
+      -d @"\$secret_body" \
+      "\$base_url/api/vault/secrets/\$secret_id/rotate" >"\$secret_file"
+  else
+    jq -n --arg id "\$secret_id" '{id: \$id, reused: true}' >"\$secret_file"
+  fi
 fi
 
 curl -fsS "\${auth_headers[@]}" "\$base_url/api/vault/secrets" >"\$secrets_after"
