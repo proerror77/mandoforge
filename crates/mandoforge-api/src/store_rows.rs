@@ -7,7 +7,7 @@ use crate::{
     ApprovalEscalationRule, ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog,
     CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
     PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent,
-    Team, TenantInvitation, ToolCall, UsageRollup,
+    Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -141,6 +141,29 @@ pub(crate) fn agent_handoff_event_from_row(row: PgRow) -> Result<AgentHandoffEve
         approval_required: row.try_get("approval_required")?,
         status: row.try_get("status")?,
         audit_trace_id: row.try_get("audit_trace_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn workflow_pack_installation_from_row(
+    row: PgRow,
+) -> Result<WorkflowPackInstallation, AppError> {
+    Ok(WorkflowPackInstallation {
+        id: row.try_get("id")?,
+        pack_id: row.try_get("pack_id")?,
+        kind: row.try_get("kind")?,
+        version: row.try_get("version")?,
+        manifest_path: row.try_get("manifest_path")?,
+        manifest: row.try_get("manifest")?,
+        validation_report: row.try_get("validation_report")?,
+        status: row.try_get("status")?,
+        eval_gate_status: row.try_get("eval_gate_status")?,
+        release_gate_status: row.try_get("release_gate_status")?,
+        gate_evidence: row.try_get("gate_evidence")?,
+        staged_at: row.try_get("staged_at")?,
+        released_at: row.try_get("released_at")?,
+        archived_at: row.try_get("archived_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

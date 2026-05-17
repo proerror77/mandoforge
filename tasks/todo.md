@@ -191,7 +191,7 @@
 - [ ] Stage 3: add richer per-turn Codex App Server trace dashboards for command, poll, interrupt, worker lease, retry, fallback, and artifact sync paths.
 - [ ] Stage 3: productize assigned Remote Computer Pod execution without bypassing Tool Router, Policy Engine, Approval Engine, event log, or audit paths.
 - [x] Stage 3: add typed agent handoff events with allowlisted target agents, enum intents, JSON schema validation, risk level, approval requirement, and audit trace.
-- [ ] Stage 3: add first-class WorkflowPack / DomainPack install, validation, staging, eval, and release gates.
+- [x] Stage 3: add first-class WorkflowPack / DomainPack install, validation, staging, eval, and release gates.
 - [ ] Stage 3: add Stage 3 lane-local verification scripts and integration-owner gates for scheduler, Codex traces, Remote Computer execution, handoffs, and workflow packs.
 
 ## External Production Adoption Backlog
@@ -217,4 +217,4 @@
 - [x] Add Reader / Analyzer / Writer worker role declarations and tool-scope enforcement for untrusted input workflows.
 - [x] Add connector manifest policy fields for provenance, tenant scope, write gating, and prompt-injection boundary.
 - [ ] Build the first AI Governance Pack slice: AI use-case triage, AI impact assessment, vendor AI review, and policy monitor.
-- [ ] Add pack-level eval fixtures and release gates so workflow pack behavior cannot regress silently.
+- [x] Add pack-level eval fixtures and release gates so workflow pack behavior cannot regress silently.

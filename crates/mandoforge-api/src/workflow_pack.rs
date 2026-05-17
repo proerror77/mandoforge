@@ -203,7 +203,7 @@ struct ToolScopePolicy {
     roles: BTreeMap<String, ToolScope>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorkflowPackValidationReport {
     pub pack_id: String,
     pub schema_version: String,

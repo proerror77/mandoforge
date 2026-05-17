@@ -66,6 +66,7 @@ mod store_secret_records;
 mod store_seed;
 mod store_tool_calls;
 mod store_usage_rollups;
+mod store_workflow_packs;
 mod workflow_pack;
 
 use authorization::{
@@ -624,6 +625,52 @@ struct CreateAgentHandoffEvent {
 
 #[derive(Debug, Deserialize)]
 struct TransitionAgentHandoffEvent {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackInstallation {
+    id: Uuid,
+    pack_id: String,
+    kind: String,
+    version: String,
+    manifest_path: String,
+    manifest: Value,
+    validation_report: Value,
+    status: String,
+    eval_gate_status: String,
+    release_gate_status: String,
+    gate_evidence: Value,
+    staged_at: Option<DateTime<Utc>>,
+    released_at: Option<DateTime<Utc>>,
+    archived_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidateWorkflowPack {
+    manifest_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InstallWorkflowPack {
+    manifest_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowPackStageRequest {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowPackReleaseRequest {
+    eval_gate_status: String,
+    release_gate_status: String,
+    #[serde(default = "empty_json_object")]
+    gate_evidence: Value,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -4104,6 +4151,30 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/codex-app-server/artifacts/sync",
             post(sync_codex_artifacts),
+        )
+        .route(
+            "/api/workflow-packs/validate",
+            post(validate_workflow_pack_route),
+        )
+        .route(
+            "/api/workflow-packs/install",
+            post(install_workflow_pack_route),
+        )
+        .route(
+            "/api/workflow-packs/installations",
+            get(list_workflow_pack_installations_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}",
+            get(get_workflow_pack_installation_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/stage",
+            post(stage_workflow_pack_installation_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/release",
+            post(release_workflow_pack_installation_route),
         )
         .route(
             "/api/eval/datasets",
@@ -7677,6 +7748,270 @@ fn validate_handoff_payload_schema(
     Ok(())
 }
 
+async fn validate_workflow_pack_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ValidateWorkflowPack>,
+) -> Result<Json<workflow_pack::WorkflowPackValidationReport>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "workflow_pack", None).await?;
+    let manifest_path = resolve_workflow_pack_manifest_path(&input.manifest_path)?;
+    let report = workflow_pack::validate_workflow_pack_manifest_path(&manifest_path)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    Ok(Json(report))
+}
+
+async fn list_workflow_pack_installations_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkflowPackInstallation>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installations",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_workflow_pack_installations().await?))
+}
+
+async fn get_workflow_pack_installation_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<WorkflowPackInstallation>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.get_workflow_pack_installation(id).await?))
+}
+
+async fn install_workflow_pack_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<InstallWorkflowPack>,
+) -> Result<Json<WorkflowPackInstallation>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "workflow_pack", None).await?;
+    let (manifest_path, manifest, report) = load_and_validate_workflow_pack(&input.manifest_path)?;
+    let now = Utc::now();
+    let installation = state
+        .create_workflow_pack_installation(WorkflowPackInstallation {
+            id: Uuid::new_v4(),
+            pack_id: manifest.id.clone(),
+            kind: workflow_pack_kind_label(&manifest.kind).to_string(),
+            version: manifest.version.clone(),
+            manifest_path: manifest_path.display().to_string(),
+            manifest: serde_json::to_value(&manifest)?,
+            validation_report: serde_json::to_value(&report)?,
+            status: "installed".to_string(),
+            eval_gate_status: "pending".to_string(),
+            release_gate_status: "pending".to_string(),
+            gate_evidence: json!({}),
+            staged_at: None,
+            released_at: None,
+            archived_at: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    record_workflow_pack_installation_audit(
+        &state,
+        &installation,
+        "workflow_pack.installed",
+        json!({"validation_report": installation.validation_report}),
+    )
+    .await?;
+    Ok(Json(installation))
+}
+
+async fn stage_workflow_pack_installation_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<WorkflowPackStageRequest>,
+) -> Result<Json<WorkflowPackInstallation>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    let current = state.get_workflow_pack_installation(id).await?;
+    if current.status != "installed" {
+        return Err(AppError::bad_request(
+            "only installed workflow packs can be staged",
+        ));
+    }
+    let staged_at = Utc::now();
+    let installation = state
+        .update_workflow_pack_installation_state(
+            id,
+            "staged",
+            &current.eval_gate_status,
+            &current.release_gate_status,
+            current.gate_evidence.clone(),
+            Some(staged_at),
+            current.released_at,
+        )
+        .await?;
+    record_workflow_pack_installation_audit(
+        &state,
+        &installation,
+        "workflow_pack.staged",
+        json!({"reason": input.reason}),
+    )
+    .await?;
+    Ok(Json(installation))
+}
+
+async fn release_workflow_pack_installation_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<WorkflowPackReleaseRequest>,
+) -> Result<Json<WorkflowPackInstallation>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    let current = state.get_workflow_pack_installation(id).await?;
+    if current.status != "staged" {
+        return Err(AppError::bad_request(
+            "only staged workflow packs can be released",
+        ));
+    }
+    if input.eval_gate_status != "passed" || input.release_gate_status != "passed" {
+        return Err(AppError::bad_request(
+            "workflow pack release requires passed eval and release gates",
+        ));
+    }
+    if !input.gate_evidence.is_object() {
+        return Err(AppError::bad_request(
+            "workflow pack release gate_evidence must be a JSON object",
+        ));
+    }
+    let released_at = Utc::now();
+    let gate_evidence = json!({
+        "reason": input.reason,
+        "evidence": input.gate_evidence,
+        "released_at": released_at,
+    });
+    let installation = state
+        .update_workflow_pack_installation_state(
+            id,
+            "released",
+            &input.eval_gate_status,
+            &input.release_gate_status,
+            gate_evidence,
+            current.staged_at,
+            Some(released_at),
+        )
+        .await?;
+    record_workflow_pack_installation_audit(
+        &state,
+        &installation,
+        "workflow_pack.released",
+        json!({
+            "eval_gate_status": installation.eval_gate_status,
+            "release_gate_status": installation.release_gate_status,
+            "gate_evidence": installation.gate_evidence,
+        }),
+    )
+    .await?;
+    Ok(Json(installation))
+}
+
+fn load_and_validate_workflow_pack(
+    manifest_path: &str,
+) -> Result<
+    (
+        PathBuf,
+        workflow_pack::WorkflowPackManifest,
+        workflow_pack::WorkflowPackValidationReport,
+    ),
+    AppError,
+> {
+    let manifest_path = resolve_workflow_pack_manifest_path(manifest_path)?;
+    let input = std::fs::read_to_string(&manifest_path)?;
+    let manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&input)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let package_dir = manifest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let report = manifest
+        .validate_package_dir(package_dir)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    Ok((manifest_path, manifest, report))
+}
+
+fn resolve_workflow_pack_manifest_path(input: &str) -> Result<PathBuf, AppError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::bad_request("manifest_path is required"));
+    }
+    let path = PathBuf::from(trimmed);
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(AppError::bad_request(
+            "manifest_path must not contain parent directory components",
+        ));
+    }
+    if !path.is_file() {
+        return Err(AppError::bad_request(format!(
+            "workflow pack manifest {} does not exist",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+fn workflow_pack_kind_label(kind: &workflow_pack::PackKind) -> &'static str {
+    match kind {
+        workflow_pack::PackKind::WorkflowPack => "WorkflowPack",
+        workflow_pack::PackKind::DomainPack => "DomainPack",
+    }
+}
+
+async fn record_workflow_pack_installation_audit(
+    state: &AppState,
+    installation: &WorkflowPackInstallation,
+    action: &str,
+    details: Value,
+) -> Result<AuditLog, AppError> {
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            action,
+            "workflow_pack_installation",
+            Some(installation.id),
+            json!({
+                "pack_id": installation.pack_id,
+                "kind": installation.kind,
+                "version": installation.version,
+                "status": installation.status,
+                "eval_gate_status": installation.eval_gate_status,
+                "release_gate_status": installation.release_gate_status,
+                "details": details,
+            }),
+        ))
+        .await
+}
+
 async fn build_harness_context(
     state: &AppState,
     session_id: Uuid,
@@ -9403,6 +9738,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "remote_computer_state_locks",
         "remote_computer_sidecar_heartbeats",
         "agent_handoff_events",
+        "workflow_pack_installations",
         "mcp_servers",
         "eval_datasets",
         "eval_cases",
@@ -34509,6 +34845,156 @@ not json
         );
     }
 
+    #[tokio::test]
+    async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
+        let app = test_app().await;
+        let manifest_path = ai_governance_manifest_path_string();
+        let report: workflow_pack::WorkflowPackValidationReport = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-packs/validate",
+                json!({"manifest_path": manifest_path}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(report.pack_id, "ai-governance");
+        assert_eq!(report.required_eval_gate_count, 2);
+
+        let manifest_path = ai_governance_manifest_path_string();
+        let installed: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-packs/install",
+                json!({"manifest_path": manifest_path}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(installed.pack_id, "ai-governance");
+        assert_eq!(installed.kind, "WorkflowPack");
+        assert_eq!(installed.status, "installed");
+        assert_eq!(installed.eval_gate_status, "pending");
+        assert_eq!(installed.release_gate_status, "pending");
+        assert!(installed.validation_report["required_eval_gate_count"] == json!(2));
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/release", installed.id),
+                json!({
+                    "eval_gate_status": "passed",
+                    "release_gate_status": "passed",
+                    "gate_evidence": {"eval_run_id": "eval-1"}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"].as_str(),
+            Some("only staged workflow packs can be released")
+        );
+
+        let staged: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/stage", installed.id),
+                json!({"reason": "ready for eval gate"}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(staged.status, "staged");
+        assert!(staged.staged_at.is_some());
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/release", installed.id),
+                json!({
+                    "eval_gate_status": "pending",
+                    "release_gate_status": "passed",
+                    "gate_evidence": {}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"].as_str(),
+            Some("workflow pack release requires passed eval and release gates")
+        );
+
+        let released: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/release", installed.id),
+                json!({
+                    "eval_gate_status": "passed",
+                    "release_gate_status": "passed",
+                    "reason": "eval and policy gates passed",
+                    "gate_evidence": {
+                        "eval_run_id": "eval-ai-governance-1",
+                        "release_gate_id": "pack-regression"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(released.status, "released");
+        assert_eq!(released.eval_gate_status, "passed");
+        assert_eq!(released.release_gate_status, "passed");
+        assert!(released.released_at.is_some());
+        assert_eq!(
+            released.gate_evidence["evidence"]["eval_run_id"],
+            json!("eval-ai-governance-1")
+        );
+
+        let installations: Vec<WorkflowPackInstallation> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/workflow-packs/installations")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(installations.len(), 1);
+        assert_eq!(installations[0].id, installed.id);
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "workflow_pack.installed",
+            "workflow_pack.staged",
+            "workflow_pack.released",
+        ] {
+            assert!(
+                audit_logs
+                    .iter()
+                    .any(|log| log.action == expected && log.resource_id == Some(installed.id)),
+                "missing audit action {expected}"
+            );
+        }
+    }
+
     #[test]
     fn parses_openai_compatible_tool_calls() {
         let response = json!({
@@ -34645,6 +35131,7 @@ not json
         assert!(names.contains(&"0025_remote_computer_state_locks.sql"));
         assert!(names.contains(&"0026_remote_computer_sidecar_heartbeats.sql"));
         assert!(names.contains(&"0027_agent_handoff_events.sql"));
+        assert!(names.contains(&"0028_workflow_pack_installations.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -34654,11 +35141,12 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
-            include_str!("../../../db/migrations/0027_agent_handoff_events.sql")
+            include_str!("../../../db/migrations/0027_agent_handoff_events.sql"),
+            include_str!("../../../db/migrations/0028_workflow_pack_installations.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
@@ -43844,6 +44332,17 @@ not json
 
     fn test_workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.mandoforge/test-workspaces")
+    }
+
+    fn ai_governance_manifest_path_string() -> String {
+        std::fs::canonicalize(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("packs/ai-governance/package.yaml"),
+        )
+        .expect("AI governance manifest exists")
+        .display()
+        .to_string()
     }
 
     async fn request_json<T: for<'de> Deserialize<'de>>(app: Router, request: Request<Body>) -> T {

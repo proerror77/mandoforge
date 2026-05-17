@@ -11,7 +11,7 @@ use crate::{
     PolicyRevision, Project, ProviderAccess, ProviderRecord, RemoteComputer,
     RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
     RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord, Session, SessionEvent,
-    Team, TenantInvitation, ToolCall, UsageRollup,
+    Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
 };
 
 #[derive(Default)]
@@ -52,6 +52,7 @@ pub(crate) struct MemoryStore {
     pub(crate) remote_computer_state_locks: HashMap<Uuid, RemoteComputerStateLock>,
     pub(crate) remote_computer_sidecar_heartbeats: HashMap<Uuid, RemoteComputerSidecarHeartbeat>,
     pub(crate) agent_handoff_events: HashMap<Uuid, AgentHandoffEvent>,
+    pub(crate) workflow_pack_installations: HashMap<Uuid, WorkflowPackInstallation>,
 }
 
 #[derive(Clone)]
