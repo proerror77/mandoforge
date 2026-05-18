@@ -318,6 +318,24 @@ struct AgentRuntimeProfile {
     archived_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentRuntimeProfileReleaseGate {
+    profile_id: Uuid,
+    name: String,
+    runtime_type: String,
+    command: String,
+    status: String,
+    release_state: String,
+    fail_closed: bool,
+    requires_managed_profile: bool,
+    runtime_type_supported: bool,
+    runtime_allowlisted: bool,
+    command_allowlisted: bool,
+    remote_computer_required: bool,
+    allowed_commands: Vec<String>,
+    blocking_reasons: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateAgentRuntimeProfile {
     name: String,
@@ -4598,10 +4616,18 @@ fn build_router(state: AppState) -> Router {
             get(list_agent_runtime_profiles).post(create_agent_runtime_profile),
         )
         .route(
+            "/api/agent-runtime-profile-release-gates",
+            get(list_agent_runtime_profile_release_gates),
+        )
+        .route(
             "/api/agent-runtime-profiles/{id}",
             get(get_agent_runtime_profile)
                 .patch(update_agent_runtime_profile)
                 .delete(archive_agent_runtime_profile),
+        )
+        .route(
+            "/api/agent-runtime-profiles/{id}/release-gate",
+            get(get_agent_runtime_profile_release_gate),
         )
         .route(
             "/api/semantic-sources",
@@ -6326,6 +6352,27 @@ async fn list_agent_runtime_profiles(
     Ok(Json(state.list_agent_runtime_profiles().await?))
 }
 
+async fn list_agent_runtime_profile_release_gates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AgentRuntimeProfileReleaseGate>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "agent_runtime_profiles",
+        None,
+    )
+    .await?;
+    let profiles = state.list_agent_runtime_profiles().await?;
+    Ok(Json(
+        profiles
+            .iter()
+            .map(evaluate_agent_runtime_profile_release_gate)
+            .collect(),
+    ))
+}
+
 async fn create_agent_runtime_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6375,6 +6422,23 @@ async fn get_agent_runtime_profile(
     )
     .await?;
     Ok(Json(state.get_agent_runtime_profile(id).await?))
+}
+
+async fn get_agent_runtime_profile_release_gate(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<AgentRuntimeProfileReleaseGate>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "agent_runtime_profile",
+        Some(id),
+    )
+    .await?;
+    let profile = state.get_agent_runtime_profile(id).await?;
+    Ok(Json(evaluate_agent_runtime_profile_release_gate(&profile)))
 }
 
 async fn update_agent_runtime_profile(
@@ -6461,6 +6525,119 @@ async fn archive_agent_runtime_profile(
         ))
         .await?;
     Ok(Json(profile))
+}
+
+pub(crate) fn evaluate_agent_runtime_profile_release_gate(
+    profile: &AgentRuntimeProfile,
+) -> AgentRuntimeProfileReleaseGate {
+    let runtime_type_supported = supported_agent_runtime_profile_types()
+        .iter()
+        .any(|runtime_type| runtime_type == &profile.runtime_type);
+    let requires_managed_profile =
+        agent_runtime_profile_requires_managed_gate(&profile.runtime_type);
+    let allowed_commands = agent_runtime_profile_allowed_commands(&profile.runtime_type)
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let runtime_allowlisted = if profile.runtime_type == "agent_cli" {
+        true
+    } else {
+        runtime_type_supported
+    };
+    let command_allowlisted = if profile.runtime_type == "hosted" {
+        false
+    } else if allowed_commands.is_empty() {
+        profile.runtime_type == "agent_cli"
+    } else {
+        let command = profile
+            .command
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        allowed_commands
+            .iter()
+            .any(|allowed| allowed == command || profile.command == *allowed)
+    };
+    let mut blocking_reasons = Vec::new();
+    if !runtime_type_supported {
+        blocking_reasons.push(format!(
+            "runtime type is not supported: {}",
+            profile.runtime_type
+        ));
+    }
+    if profile.status != "enabled" {
+        blocking_reasons.push(format!("profile status is {}", profile.status));
+    }
+    if requires_managed_profile && !runtime_allowlisted {
+        blocking_reasons.push(format!(
+            "runtime type is not in the managed runtime allowlist: {}",
+            profile.runtime_type
+        ));
+    }
+    if requires_managed_profile && !command_allowlisted {
+        blocking_reasons.push(format!(
+            "command is not allowlisted for runtime type {}",
+            profile.runtime_type
+        ));
+    }
+    if profile.runtime_type == "hosted" {
+        blocking_reasons.push(
+            "hosted runtimes are reserved until a production hosted-runtime policy is installed"
+                .to_string(),
+        );
+    }
+    let release_state = if blocking_reasons.is_empty() {
+        "passed"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    AgentRuntimeProfileReleaseGate {
+        profile_id: profile.id,
+        name: profile.name.clone(),
+        runtime_type: profile.runtime_type.clone(),
+        command: profile.command.clone(),
+        status: profile.status.clone(),
+        release_state,
+        fail_closed: !blocking_reasons.is_empty(),
+        requires_managed_profile,
+        runtime_type_supported,
+        runtime_allowlisted,
+        command_allowlisted,
+        remote_computer_required: profile.remote_computer_required,
+        allowed_commands,
+        blocking_reasons,
+    }
+}
+
+fn supported_agent_runtime_profile_types() -> &'static [&'static str] {
+    &[
+        "agent_cli",
+        "codex_app_server",
+        "claude_code",
+        "gemini",
+        "opencode",
+        "aider",
+        "hosted",
+    ]
+}
+
+fn agent_runtime_profile_requires_managed_gate(runtime_type: &str) -> bool {
+    matches!(
+        runtime_type,
+        "codex_app_server" | "claude_code" | "gemini" | "opencode" | "aider" | "hosted"
+    )
+}
+
+fn agent_runtime_profile_allowed_commands(runtime_type: &str) -> Vec<&'static str> {
+    match runtime_type {
+        "codex_app_server" => vec!["codex-app-server", "codex_app_server"],
+        "claude_code" => vec!["claude", "claude-code", "claude_code"],
+        "gemini" => vec!["gemini", "gemini-cli"],
+        "opencode" => vec!["opencode"],
+        "aider" => vec!["aider"],
+        _ => Vec::new(),
+    }
 }
 
 async fn list_semantic_sources(
@@ -50775,6 +50952,160 @@ not json
         assert!(audit_logs.iter().any(|log| {
             log.action == "agent_runtime_profile.archived" && log.resource_id == Some(profile.id)
         }));
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_profile_release_gates_cover_hosted_runtime_allowlist() {
+        let app = test_app().await;
+        let runtime_profiles = [
+            ("codex-app-server", "codex_app_server", "codex-app-server"),
+            ("claude-code", "claude_code", "claude"),
+            ("gemini-worker", "gemini", "gemini"),
+            ("opencode-worker", "opencode", "opencode"),
+            ("aider-worker", "aider", "aider"),
+        ];
+        let mut created_profile_ids = Vec::new();
+        for (name, runtime_type, command) in runtime_profiles {
+            let profile: AgentRuntimeProfile = request_json(
+                app.clone(),
+                json_request_with_headers(
+                    "POST",
+                    "/api/agent-runtime-profiles",
+                    json!({
+                        "name": name,
+                        "runtime_type": runtime_type,
+                        "command": command,
+                        "remote_computer_required": true
+                    }),
+                    &[
+                        ("x-mandoforge-subject", "admin-1"),
+                        ("x-mandoforge-roles", "admin"),
+                    ],
+                ),
+            )
+            .await;
+            assert_eq!(profile.runtime_type, runtime_type);
+            created_profile_ids.push(profile.id);
+        }
+
+        let hosted_profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "future-hosted-runtime",
+                    "runtime_type": "hosted",
+                    "command": "future-hosted",
+                    "status": "disabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(hosted_profile.runtime_type, "hosted");
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "bad-claude-runtime",
+                    "runtime_type": "claude_code",
+                    "command": "curl"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("release gate")
+        );
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/agent-runtime-profiles/{}", hosted_profile.id),
+                json!({"status": "enabled"}),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("hosted runtimes are reserved")
+        );
+
+        let gates: Vec<AgentRuntimeProfileReleaseGate> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agent-runtime-profile-release-gates")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for profile_id in &created_profile_ids {
+            let gate = gates
+                .iter()
+                .find(|gate| gate.profile_id == *profile_id)
+                .expect("runtime gate");
+            assert_eq!(gate.release_state, "passed");
+            assert!(!gate.fail_closed);
+            assert!(gate.runtime_type_supported);
+            assert!(gate.runtime_allowlisted);
+            assert!(gate.command_allowlisted);
+        }
+        let hosted_gate = gates
+            .iter()
+            .find(|gate| gate.profile_id == hosted_profile.id)
+            .expect("hosted runtime gate");
+        assert_eq!(hosted_gate.release_state, "blocked");
+        assert!(hosted_gate.fail_closed);
+        assert!(hosted_gate.requires_managed_profile);
+        assert!(hosted_gate.runtime_type_supported);
+        assert!(!hosted_gate.command_allowlisted);
+        assert!(
+            hosted_gate
+                .blocking_reasons
+                .iter()
+                .any(|reason| { reason.contains("hosted runtimes are reserved") })
+        );
+
+        let codex_gate: AgentRuntimeProfileReleaseGate = request_json(
+            app,
+            Request::builder()
+                .uri(format!(
+                    "/api/agent-runtime-profiles/{}/release-gate",
+                    created_profile_ids[0]
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(codex_gate.runtime_type, "codex_app_server");
+        assert_eq!(codex_gate.release_state, "passed");
     }
 
     #[tokio::test]

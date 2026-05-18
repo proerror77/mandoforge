@@ -7,6 +7,7 @@ use crate::store_backend::StoreBackend;
 use crate::store_rows::agent_runtime_profile_from_row;
 use crate::{
     AgentRuntimeProfile, AppError, AppState, CreateAgentRuntimeProfile, UpdateAgentRuntimeProfile,
+    evaluate_agent_runtime_profile_release_gate,
 };
 
 impl AppState {
@@ -139,6 +140,7 @@ impl AppState {
             updated_at: now,
             archived_at: None,
         };
+        ensure_enabled_runtime_profile_release_gate(&profile)?;
 
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -199,12 +201,14 @@ impl AppState {
                     .filter(|profile| profile.archived_at.is_none())
                     .ok_or_else(|| AppError::not_found("agent runtime profile not found"))?;
                 apply_runtime_profile_update(profile, input, updated_at);
+                ensure_enabled_runtime_profile_release_gate(profile)?;
                 Ok(profile.clone())
             }
             StoreBackend::Postgres(pool) => {
                 let existing = self.get_agent_runtime_profile(id).await?;
                 let mut profile = existing;
                 apply_runtime_profile_update(&mut profile, input, updated_at);
+                ensure_enabled_runtime_profile_release_gate(&profile)?;
                 let row = sqlx::query(
                     "UPDATE agent_runtime_profiles
                      SET command = $3,
@@ -321,6 +325,22 @@ fn apply_runtime_profile_update(
     profile.updated_at = updated_at;
 }
 
+fn ensure_enabled_runtime_profile_release_gate(
+    profile: &AgentRuntimeProfile,
+) -> Result<(), AppError> {
+    if profile.status != "enabled" {
+        return Ok(());
+    }
+    let gate = evaluate_agent_runtime_profile_release_gate(profile);
+    if gate.fail_closed {
+        return Err(AppError::bad_request(format!(
+            "agent runtime profile cannot be enabled until its release gate passes: {}",
+            gate.blocking_reasons.join("; ")
+        )));
+    }
+    Ok(())
+}
+
 fn normalize_runtime_profile_name(name: &str) -> Result<String, AppError> {
     let normalized = name.trim().to_ascii_lowercase();
     if normalized.is_empty()
@@ -338,7 +358,8 @@ fn normalize_runtime_profile_name(name: &str) -> Result<String, AppError> {
 fn normalize_runtime_type(runtime_type: &str) -> Result<String, AppError> {
     let normalized = runtime_type.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "agent_cli" | "codex_app_server" | "hosted" => Ok(normalized),
+        "agent_cli" | "codex_app_server" | "claude_code" | "gemini" | "opencode" | "aider"
+        | "hosted" => Ok(normalized),
         _ => Err(AppError::bad_request(format!(
             "unsupported agent runtime profile type: {normalized}"
         ))),

@@ -163,6 +163,8 @@ Current repo slice:
 - create, update, and archive operations emit audit records.
 - `agent_cli.exec` resolves an enabled managed `agent_cli` profile before falling back to legacy environment allowlist configuration.
 - profiles with `remote_computer_required: true` fail closed on local execution and must use the Remote Computer path.
+- Runtime profile release gates now cover `codex_app_server`, `claude_code`, `gemini`, `opencode`, `aider`, and reserved `hosted` runtimes. Enabled managed profiles must pass the type/command allowlist gate; hosted runtimes stay fail-closed until a production hosted-runtime policy exists.
+- `GET /api/agent-runtime-profile-release-gates` and `GET /api/agent-runtime-profiles/{id}/release-gate` expose runtime release status for control-plane and Console surfaces.
 
 Examples:
 
@@ -176,7 +178,7 @@ runtime_profile:
   remote_computer_required: true
 ```
 
-Profiles should support Codex, Claude Code, Gemini, OpenCode, Aider, App Server strategies, and future hosted runtimes through a governed allowlist.
+Profiles support Codex App Server, Claude Code, Gemini, OpenCode, Aider, and future hosted runtime records through governed release gates. Future hosted runtimes remain reserved and blocked by default.
 
 ### Stage 4.2 Managed Agent Registry
 
