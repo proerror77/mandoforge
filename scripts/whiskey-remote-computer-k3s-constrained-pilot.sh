@@ -129,8 +129,10 @@ jq -n \
   --arg install_text "$install_text" \
   --arg verify_json "$verify_json" \
   --arg verify_text "$verify_text" \
+  --arg next_stage_command "scripts/whiskey-remote-computer-k3s-cluster-stage.sh --apply-manifests --run-evidence" \
   --arg next_evidence_command "RUN_STAGE2_PRODUCTION_VALIDATIONS=1 scripts/whiskey-adoption-evidence.sh" \
-  --arg next_apply_command "kubectl apply -k deploy" \
+  --arg next_apply_command "scripts/whiskey-remote-computer-k3s-cluster-stage.sh --apply-manifests --run-evidence" \
+  --arg next_manifest_apply_command "kubectl apply -k deploy" \
   --argjson apply_host_prereqs "$( [[ "$APPLY_HOST_PREREQS" == "1" ]] && echo true || echo false )" \
   --argjson install_k3s "$( [[ "$INSTALL_K3S" == "1" ]] && echo true || echo false )" \
   --slurpfile inventory "$inventory_json" \
@@ -145,7 +147,9 @@ jq -n \
     install_k3s: $install_k3s,
     manifest_render_status: $manifest_render_status,
     manifest_render_details: $manifest_render_details,
+    next_stage_command: $next_stage_command,
     next_apply_command: $next_apply_command,
+    next_manifest_apply_command: $next_manifest_apply_command,
     next_evidence_command: $next_evidence_command,
     inventory: ($inventory[0] // {}),
     prepare: ($prepare[0] // {}),
@@ -178,6 +182,10 @@ jq -r '
     "manifest_render_status=" + .manifest_render_status,
     "manifest_render_details=" + .manifest_render_details,
     "",
+    "next_stage_command:",
+    "- " + .next_stage_command,
+    "next_manifest_apply_command:",
+    "- " + .next_manifest_apply_command,
     "next_apply_command:",
     "- " + .next_apply_command,
     "next_evidence_command:",
