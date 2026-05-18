@@ -3,7 +3,7 @@ set -euo pipefail
 
 REMOTE_HOST="${WHISKEY_REMOTE_HOST:-wishky-2-1}"
 SYNC_DIR="${WHISKEY_LOCAL_SYNC_DIR:-.mandoforge/remote-adoption/whiskey}"
-QUERY="${WHISKEY_MCP_LARK_DOCS_QUERY:-mandoforge-usage-export.csv}"
+QUERY="${WHISKEY_MCP_LARK_DOCS_QUERY:-README}"
 APPLY=0
 REFRESH_PROMPT=0
 
@@ -115,4 +115,5 @@ if [[ "$scope_status" == "ready" ]]; then
   printf 'WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search WHISKEY_WORKFLOW_PACK_MCP_QUERY=%q RUN_STAGE2_PRODUCTION_VALIDATIONS=1 scripts/whiskey-adoption-evidence.sh\n' "$QUERY"
 else
   printf 'scope is not ready; complete Feishu device-flow login before apply\n'
+  printf 'post_auth_apply_command=scripts/whiskey-mcp-lark-docs-adopt.sh --apply --query %q\n' "$QUERY"
 fi

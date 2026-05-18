@@ -12,6 +12,8 @@ For the fastest operator handoff from the latest local artifacts, run:
 scripts/whiskey-adoption-next-actions.sh
 ```
 
+That helper reads the latest synced Whiskey artifacts and prints the exact next repo-native command for the two real remaining unblock paths: the constrained `k3s` Remote Computer pilot and the Lark docs/wiki scope upgrade.
+
 ## Host Contract
 
 - SSH host: `wishky-2-1`.
@@ -184,6 +186,12 @@ scripts/whiskey-mcp-lark-docs-scope.sh --start-login
 scripts/whiskey-mcp-lark-docs-adopt.sh
 ```
 
+Once `search:docs:read` is granted, the direct repo-native apply step is:
+
+```bash
+scripts/whiskey-mcp-lark-docs-adopt.sh --apply --query README
+```
+
 ## Eval/Release Lane
 
 Current Whiskey wiring starts a local agent release rollout/deployment/orchestration/rollback controller on the Docker gateway and configures the API with:
@@ -325,7 +333,21 @@ Before installing `k3s`, run the host preflight first:
 scripts/whiskey-remote-computer-k3s-preflight.sh
 ```
 
-If the preflight result is accepted, the next repo-native command is:
+If the preflight result is accepted, the approval-ready repo-native wrapper is:
+
+```bash
+scripts/whiskey-remote-computer-k3s-constrained-pilot.sh
+```
+
+That wrapper stays in `dry_run` by default and records the latest host inventory, prerequisite plan, install plan, and verify baseline into `.mandoforge/remote-adoption/whiskey/`.
+
+After explicit approval, the next mutating repo-native step is:
+
+```bash
+scripts/whiskey-remote-computer-k3s-constrained-pilot.sh --apply-host-prereqs --install-k3s
+```
+
+If you need to review the prerequisite and install sub-steps separately, the underlying commands are still:
 
 ```bash
 scripts/whiskey-remote-computer-k3s-prepare.sh
@@ -357,6 +379,12 @@ After installation, verify the single-node pilot with:
 
 ```bash
 scripts/whiskey-remote-computer-k3s-verify.sh
+```
+
+Once `scripts/whiskey-remote-computer-k3s-verify.sh` reports `status=ready`, the post-install repo-native stage/apply/evidence step is:
+
+```bash
+scripts/whiskey-remote-computer-k3s-cluster-stage.sh --apply-manifests --run-evidence
 ```
 
 Before approval, the current Whiskey host returns `status=not_installed` with no reserved port collisions and no kubeconfig or Ready nodes, which is the expected baseline.
