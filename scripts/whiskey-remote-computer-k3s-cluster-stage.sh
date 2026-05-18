@@ -148,16 +148,24 @@ fi
 remote_render_file="$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-remote-render-$stamp.txt"
 ssh "$REMOTE_HOST" "kubectl kustomize '$REMOTE_DEPLOY_DIR'" >"$remote_render_file"
 remote_render_lines="$(wc -l <"$remote_render_file" | awk '{print $1}')"
+apply_dry_run_file="$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-apply-dry-run-$stamp.txt"
 
 apply_status="planned"
+apply_dry_run_status="not_requested"
 if [[ "$APPLY_MANIFESTS" == "1" ]]; then
   ensure_remote_keda "$REMOTE_HOST" "$KEDA_INSTALL_URL"
-  ssh "$REMOTE_HOST" "kubectl apply -k '$REMOTE_DEPLOY_DIR'"
-  apply_status="applied"
+  if ssh "$REMOTE_HOST" "kubectl apply --dry-run=server -k '$REMOTE_DEPLOY_DIR'" >"$apply_dry_run_file" 2>&1; then
+    apply_dry_run_status="passed"
+    ssh "$REMOTE_HOST" "kubectl apply -k '$REMOTE_DEPLOY_DIR'"
+    apply_status="applied"
+  else
+    apply_dry_run_status="failed"
+    apply_status="blocked"
+  fi
 fi
 
 evidence_status="not_requested"
-if [[ "$RUN_EVIDENCE" == "1" ]]; then
+if [[ "$RUN_EVIDENCE" == "1" && "$apply_status" != "blocked" ]]; then
   WHISKEY_WORKFLOW_PACK_MCP_QUERY="${WHISKEY_WORKFLOW_PACK_MCP_QUERY:-README}" \
   WHISKEY_REMOTE_HOST="$REMOTE_HOST" \
   WHISKEY_REMOTE_ROOT="$REMOTE_ROOT" \
@@ -165,6 +173,8 @@ if [[ "$RUN_EVIDENCE" == "1" ]]; then
   RUN_STAGE2_PRODUCTION_VALIDATIONS=1 \
   scripts/whiskey-adoption-evidence.sh
   evidence_status="rerun_completed"
+elif [[ "$RUN_EVIDENCE" == "1" && "$apply_status" == "blocked" ]]; then
+  evidence_status="blocked_by_apply_dry_run"
 fi
 
 jq -n \
@@ -176,6 +186,8 @@ jq -n \
   --arg runtime_env_file "${RUNTIME_ENV_FILE:-}" \
   --arg verify_status "$verify_status" \
   --arg apply_status "$apply_status" \
+  --arg apply_dry_run_status "$apply_dry_run_status" \
+  --arg apply_dry_run_file "$apply_dry_run_file" \
   --arg evidence_status "$evidence_status" \
   --argjson base_render_lines "$base_render_lines" \
   --argjson pilot_render_lines "$pilot_render_lines" \
@@ -189,6 +201,8 @@ jq -n \
     rendered_juicefs_profile: (if $rendered_juicefs_profile == "" then null else $rendered_juicefs_profile end),
     runtime_env_file: (if $runtime_env_file == "" then null else $runtime_env_file end),
     verify_status: $verify_status,
+    apply_dry_run_status: $apply_dry_run_status,
+    apply_dry_run_file: (if $apply_dry_run_status == "not_requested" then null else $apply_dry_run_file end),
     apply_status: $apply_status,
     evidence_status: $evidence_status,
     render: {
@@ -207,6 +221,8 @@ jq -r '
     "verify_status=" + .verify_status,
     "rendered_juicefs_profile=" + (.rendered_juicefs_profile // "none"),
     "runtime_env_file=" + (.runtime_env_file // "none"),
+    "apply_dry_run_status=" + .apply_dry_run_status,
+    "apply_dry_run_file=" + (.apply_dry_run_file // "none"),
     "apply_status=" + .apply_status,
     "evidence_status=" + .evidence_status,
     "local_base_render_lines=" + (.render.local_base_lines | tostring),
@@ -219,6 +235,13 @@ jq -r '
 cp "$plan_json" "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-latest.json"
 cp "$plan_text" "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-latest.txt"
 cp "$remote_render_file" "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-remote-render-latest.txt"
+if [[ "$apply_dry_run_status" != "not_requested" ]]; then
+  cp "$apply_dry_run_file" "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-apply-dry-run-latest.txt"
+fi
 
 cat "$plan_text"
 printf '\njson=%s\ntext=%s\n' "$plan_json" "$plan_text"
+
+if [[ "$apply_status" == "blocked" ]]; then
+  exit 1
+fi
