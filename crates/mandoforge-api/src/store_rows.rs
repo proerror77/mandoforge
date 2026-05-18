@@ -5,11 +5,11 @@ use sqlx::{Row, postgres::PgRow};
 use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
     AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
-    ApprovalNotificationChannelPolicy, Artifact, AuditLog, CostAlertRoute, EvalCase, EvalDataset,
-    EvalRun, ManagerAgentPlan, McpServerRecord, Membership, Organization, PolicyRevision, Project,
-    ProviderAccess, ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource,
-    Session, SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
-    WorkflowPackProfileAsset,
+    ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket, CostAlertRoute, EvalCase,
+    EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership, Organization,
+    PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, SemanticLink,
+    SemanticObject, SemanticSource, Session, SessionEvent, Team, TenantInvitation, ToolCall,
+    UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -151,6 +151,35 @@ pub(crate) fn semantic_link_from_row(row: PgRow) -> Result<SemanticLink, AppErro
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn context_packet_from_row(row: PgRow) -> Result<ContextPacket, AppError> {
+    let agent: Value = row.try_get("agent")?;
+    let runtime_profile: Option<Value> = row.try_get("runtime_profile")?;
+    let policy_reminders: Value = row.try_get("policy_reminders")?;
+    let freshness_warnings: Value = row.try_get("freshness_warnings")?;
+    let source_refs: Value = row.try_get("source_refs")?;
+    let retrieved_objects: Value = row.try_get("retrieved_objects")?;
+    Ok(ContextPacket {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        agent_id: row.try_get("agent_id")?,
+        agent_version_id: row.try_get("agent_version_id")?,
+        version: row.try_get("version")?,
+        generated_at: row.try_get("generated_at")?,
+        task: row.try_get("task")?,
+        agent: serde_json::from_value(agent)?,
+        runtime_profile: runtime_profile.map(serde_json::from_value).transpose()?,
+        semantic_scopes: row.try_get("semantic_scopes")?,
+        tool_policy: row.try_get("tool_policy")?,
+        policy_reminders: serde_json::from_value(policy_reminders)?,
+        freshness_warnings: serde_json::from_value(freshness_warnings)?,
+        source_refs: serde_json::from_value(source_refs)?,
+        retrieved_objects: serde_json::from_value(retrieved_objects)?,
+        replay_summary: row.try_get("replay_summary")?,
+        audit_trace_id: row.try_get("audit_trace_id")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 

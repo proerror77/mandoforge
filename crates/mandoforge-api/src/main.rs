@@ -55,6 +55,7 @@ mod store_artifacts;
 mod store_audit;
 mod store_backend;
 mod store_codex_app_server;
+mod store_context_packets;
 mod store_cost_alert_routes;
 mod store_entities;
 mod store_eval;
@@ -1045,6 +1046,7 @@ struct ContextPacket {
     session_id: Uuid,
     agent_id: Uuid,
     agent_version_id: Option<Uuid>,
+    version: i64,
     generated_at: DateTime<Utc>,
     task: Value,
     agent: ContextPacketAgent,
@@ -1054,6 +1056,10 @@ struct ContextPacket {
     policy_reminders: Vec<String>,
     freshness_warnings: Vec<String>,
     source_refs: Vec<ContextPacketSourceRef>,
+    retrieved_objects: Vec<ContextPacketSemanticObject>,
+    replay_summary: Value,
+    audit_trace_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1084,6 +1090,21 @@ struct ContextPacketSourceRef {
     source_type: String,
     source_id: String,
     freshness: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextPacketSemanticObject {
+    id: Uuid,
+    object_type: String,
+    object_key: String,
+    title: String,
+    summary: String,
+    source_id: Option<Uuid>,
+    source_uri: Option<String>,
+    trust_level: String,
+    freshness: String,
+    semantic_scopes: Value,
+    provenance: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4622,6 +4643,11 @@ fn build_router(state: AppState) -> Router {
             "/api/sessions/{id}/context-packet",
             get(get_session_context_packet),
         )
+        .route(
+            "/api/sessions/{id}/context-packets",
+            get(list_session_context_packets),
+        )
+        .route("/api/context-packets/{id}", get(get_context_packet))
         .route(
             "/api/sessions/{id}/agent-handoffs",
             get(list_session_agent_handoff_events).post(create_agent_handoff_event),
@@ -11574,26 +11600,74 @@ async fn get_session_context_packet(
         Some(id),
     )
     .await?;
-    let packet = build_context_packet(&state, id).await?;
+    let packet = generate_and_persist_context_packet(&state, id).await?;
+    Ok(Json(packet))
+}
+
+async fn list_session_context_packets(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ContextPacket>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    state.get_session(id).await?;
+    Ok(Json(state.list_context_packets(id).await?))
+}
+
+async fn get_context_packet(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ContextPacket>, AppError> {
+    let packet = state.get_context_packet(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "context_packet",
+        Some(packet.session_id),
+    )
+    .await?;
+    Ok(Json(packet))
+}
+
+async fn generate_and_persist_context_packet(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<ContextPacket, AppError> {
+    let packet = build_context_packet(state, session_id).await?;
+    let packet = state.create_context_packet(packet).await?;
+    let event_details = context_packet_replay_details(&packet);
     state
         .append_event(
             "system",
             Some(packet.id),
-            id,
+            session_id,
             "context_packet.generated",
-            json!({
-                "context_packet_id": packet.id,
-                "agent_id": packet.agent_id,
-                "agent_version_id": packet.agent_version_id,
-                "runtime_profile_id": packet.runtime_profile.as_ref().map(|profile| profile.id),
-                "semantic_scope_keys": semantic_scope_keys(&packet.semantic_scopes),
-                "policy_reminder_count": packet.policy_reminders.len(),
-                "freshness_warning_count": packet.freshness_warnings.len(),
-                "source_refs": packet.source_refs,
-            }),
+            event_details.clone(),
         )
         .await?;
-    Ok(Json(packet))
+    let audit = state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "system",
+            Some(packet.id),
+            "context_packet.generated",
+            "context_packet",
+            Some(packet.id),
+            event_details,
+        ))
+        .await?;
+    state
+        .update_context_packet_audit_trace(packet.id, audit.id)
+        .await
 }
 
 async fn build_context_packet(
@@ -11619,6 +11693,8 @@ async fn build_context_packet(
     let runtime_profile_error = runtime_profile_lookup
         .as_ref()
         .and_then(|(profile_id, result)| result.as_ref().err().map(|error| (*profile_id, error)));
+    let version = state.next_context_packet_version(session_id).await?;
+    let retrieved_objects = retrieve_context_packet_semantic_objects(state, &agent).await?;
     let source_refs = build_context_packet_source_refs(
         &session,
         &agent,
@@ -11626,6 +11702,7 @@ async fn build_context_packet(
         runtime_profile.as_ref(),
         runtime_profile_error.map(|(profile_id, _)| profile_id),
         events.len(),
+        &retrieved_objects,
     );
     let last_user_message = events
         .iter()
@@ -11640,20 +11717,32 @@ async fn build_context_packet(
         last_user_message.as_deref(),
     );
 
+    let generated_at = Utc::now();
+    let task = json!({
+        "title": session.title,
+        "status": session.status.as_str(),
+        "last_user_message": last_user_message,
+        "event_count": events.len(),
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    });
+    let policy_reminders = build_context_policy_reminders(&policy, &agent_version);
+    let replay_summary = json!({
+        "version": version,
+        "source_ref_count": source_refs.len(),
+        "retrieved_object_count": retrieved_objects.len(),
+        "policy_reminder_count": policy_reminders.len(),
+        "freshness_warning_count": freshness_warnings.len(),
+        "semantic_scope_keys": semantic_scope_keys(&agent.semantic_scopes),
+    });
     Ok(ContextPacket {
         id: Uuid::new_v4(),
         session_id,
         agent_id: agent.id,
         agent_version_id: session.agent_version_id.or(Some(agent_version.id)),
-        generated_at: Utc::now(),
-        task: json!({
-            "title": session.title,
-            "status": session.status.as_str(),
-            "last_user_message": last_user_message,
-            "event_count": events.len(),
-            "created_at": session.created_at,
-            "updated_at": session.updated_at,
-        }),
+        version,
+        generated_at,
+        task,
         agent: ContextPacketAgent {
             id: agent.id,
             name: agent.name.clone(),
@@ -11669,9 +11758,13 @@ async fn build_context_packet(
         runtime_profile,
         semantic_scopes: agent.semantic_scopes.clone(),
         tool_policy: agent.tool_policy.clone(),
-        policy_reminders: build_context_policy_reminders(&policy, &agent_version),
+        policy_reminders,
         freshness_warnings,
         source_refs,
+        retrieved_objects,
+        replay_summary,
+        audit_trace_id: None,
+        created_at: generated_at,
     })
 }
 
@@ -11778,6 +11871,7 @@ fn build_context_packet_source_refs(
     runtime_profile: Option<&ContextPacketRuntimeProfile>,
     missing_runtime_profile_id: Option<Uuid>,
     event_count: usize,
+    retrieved_objects: &[ContextPacketSemanticObject],
 ) -> Vec<ContextPacketSourceRef> {
     let mut source_refs = vec![
         context_source_ref("session", session.id, "current"),
@@ -11830,7 +11924,120 @@ fn build_context_packet_source_refs(
             });
         }
     }
+    for object in retrieved_objects {
+        source_refs.push(ContextPacketSourceRef {
+            source_type: "semantic_object".to_string(),
+            source_id: object.id.to_string(),
+            freshness: format!("{}:{}", object.freshness, object.trust_level),
+        });
+        if let Some(source_id) = object.source_id {
+            source_refs.push(ContextPacketSourceRef {
+                source_type: "semantic_source".to_string(),
+                source_id: source_id.to_string(),
+                freshness: object.freshness.clone(),
+            });
+        }
+    }
     source_refs
+}
+
+async fn retrieve_context_packet_semantic_objects(
+    state: &AppState,
+    agent: &Agent,
+) -> Result<Vec<ContextPacketSemanticObject>, AppError> {
+    let mut objects = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| object.status == "active")
+        .filter(|object| semantic_object_matches_agent_scope(object, agent))
+        .map(|object| ContextPacketSemanticObject {
+            id: object.id,
+            object_type: object.object_type,
+            object_key: object.object_key,
+            title: object.title,
+            summary: object.summary,
+            source_id: object.source_id,
+            source_uri: object.source_uri,
+            trust_level: object.trust_level,
+            freshness: object.freshness,
+            semantic_scopes: object.semantic_scopes,
+            provenance: object.provenance,
+        })
+        .collect::<Vec<_>>();
+    objects.sort_by(|left, right| {
+        semantic_object_rank(right)
+            .cmp(&semantic_object_rank(left))
+            .then_with(|| left.object_key.cmp(&right.object_key))
+    });
+    objects.truncate(12);
+    Ok(objects)
+}
+
+fn semantic_object_matches_agent_scope(object: &SemanticObject, agent: &Agent) -> bool {
+    let Some(object_scopes) = object.semantic_scopes.as_object() else {
+        return false;
+    };
+    let Some(agent_scopes) = agent.semantic_scopes.as_object() else {
+        return false;
+    };
+    object_scopes.iter().any(|(key, object_value)| {
+        object_value
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .is_some_and(|object_scope| {
+                agent_scopes
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|agent_scope| agent_scope == object_scope)
+            })
+    })
+}
+
+fn semantic_object_rank(object: &ContextPacketSemanticObject) -> i32 {
+    let freshness_score = match object.freshness.as_str() {
+        "current" => 30,
+        "unknown" => 10,
+        "stale" => 5,
+        "expired" => 0,
+        _ => 0,
+    };
+    let trust_score = match object.trust_level.as_str() {
+        "system_verified" => 30,
+        "human_verified" => 25,
+        "source_attested" => 15,
+        "unverified" => 5,
+        _ => 0,
+    };
+    freshness_score + trust_score
+}
+
+fn context_packet_replay_details(packet: &ContextPacket) -> Value {
+    json!({
+        "context_packet_id": packet.id,
+        "version": packet.version,
+        "agent_id": packet.agent_id,
+        "agent_version_id": packet.agent_version_id,
+        "runtime_profile_id": packet.runtime_profile.as_ref().map(|profile| profile.id),
+        "semantic_scope_keys": semantic_scope_keys(&packet.semantic_scopes),
+        "policy_reminder_count": packet.policy_reminders.len(),
+        "freshness_warning_count": packet.freshness_warnings.len(),
+        "source_ref_count": packet.source_refs.len(),
+        "retrieved_object_count": packet.retrieved_objects.len(),
+        "source_refs": packet.source_refs,
+        "retrieved_objects": packet.retrieved_objects.iter().map(|object| {
+            json!({
+                "id": object.id,
+                "object_type": object.object_type,
+                "object_key": object.object_key,
+                "title": object.title,
+                "trust_level": object.trust_level,
+                "freshness": object.freshness,
+                "source_id": object.source_id,
+                "source_uri": object.source_uri,
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn context_source_ref(
@@ -13167,6 +13374,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "semantic_sources",
         "semantic_objects",
         "semantic_links",
+        "context_packets",
     ]
 }
 
@@ -41264,6 +41472,7 @@ not json
         assert!(names.contains(&"0033_agent_handoff_assignment_fields.sql"));
         assert!(names.contains(&"0034_agent_handoff_assignments.sql"));
         assert!(names.contains(&"0035_semantic_kernel.sql"));
+        assert!(names.contains(&"0036_context_packets.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -41273,7 +41482,7 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
@@ -41283,7 +41492,8 @@ not json
             include_str!("../../../db/migrations/0030_agent_runtime_profiles.sql"),
             include_str!("../../../db/migrations/0032_manager_agent_plans.sql"),
             include_str!("../../../db/migrations/0034_agent_handoff_assignments.sql"),
-            include_str!("../../../db/migrations/0035_semantic_kernel.sql")
+            include_str!("../../../db/migrations/0035_semantic_kernel.sql"),
+            include_str!("../../../db/migrations/0036_context_packets.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
@@ -50033,6 +50243,223 @@ not json
             event.event_type == "context_packet.generated"
                 && event.payload["context_packet_id"] == json!(packet.id)
                 && event.payload["policy_reminder_count"] == json!(packet.policy_reminders.len())
+        }));
+    }
+
+    #[tokio::test]
+    async fn context_packets_are_versioned_persisted_and_include_semantic_objects() {
+        let app = test_app().await;
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "repo_doc",
+                    "source_uri": "repo://tasks/todo.md",
+                    "display_name": "Task Roadmap",
+                    "metadata": {"path": "tasks/todo.md"},
+                    "freshness": {"state": "workspace_current"}
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let semantic_object: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "workflow",
+                    "object_key": "workflow:context-os",
+                    "title": "Context OS packet generation",
+                    "summary": "Context packets must persist the semantic objects, source refs, policy reminders, and freshness warnings visible before execution.",
+                    "content": {"stage": "5.2"},
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "context-os",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "provenance": {"source_ref": "tasks/todo.md"},
+                    "trust_level": "human_verified",
+                    "freshness": "current"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Context OS Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Use durable Context OS packets.",
+                    "tools": ["file.read"],
+                    "tool_policy": {"read_only": true},
+                    "workflow_pack_ids": ["coding-pack"],
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "context-os",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "release_state": "active"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "persist context packet",
+                    "message": "Build a replayable context packet with semantic objects."
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        let packet_v1: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/context-packet", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(packet_v1.version, 1);
+        assert!(packet_v1.audit_trace_id.is_some());
+        assert!(packet_v1.retrieved_objects.iter().any(|object| {
+            object.id == semantic_object.id
+                && object.object_key == "workflow:context-os"
+                && object.trust_level == "human_verified"
+                && object.freshness == "current"
+        }));
+        assert!(packet_v1.source_refs.iter().any(|source_ref| {
+            source_ref.source_type == "semantic_object"
+                && source_ref.source_id == semantic_object.id.to_string()
+        }));
+        assert!(packet_v1.source_refs.iter().any(|source_ref| {
+            source_ref.source_type == "semantic_source"
+                && source_ref.source_id == source.id.to_string()
+        }));
+        assert_eq!(packet_v1.replay_summary["version"], json!(1));
+        assert_eq!(
+            packet_v1.replay_summary["retrieved_object_count"],
+            json!(packet_v1.retrieved_objects.len())
+        );
+
+        let packet_v2: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/context-packet", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(packet_v2.version, 2);
+        assert_ne!(packet_v1.id, packet_v2.id);
+
+        let packets: Vec<ContextPacket> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/context-packets", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(packets.len(), 2);
+        assert_eq!(
+            packets
+                .iter()
+                .map(|packet| packet.version)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let fetched: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/context-packets/{}", packet_v1.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(fetched.id, packet_v1.id);
+        assert_eq!(fetched.version, 1);
+        assert_eq!(fetched.retrieved_objects[0].id, semantic_object.id);
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "context_packet.generated"
+                && event.payload["context_packet_id"] == json!(packet_v1.id)
+                && event.payload["version"] == json!(1)
+                && event.payload["retrieved_object_count"] == json!(1)
+                && event.payload["retrieved_objects"][0]["id"] == json!(semantic_object.id)
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "context_packet.generated"
+                && log.resource_id == Some(packet_v1.id)
+                && log.details["version"] == json!(1)
+                && log.details["retrieved_object_count"] == json!(1)
         }));
     }
 

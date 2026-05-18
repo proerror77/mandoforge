@@ -7,9 +7,9 @@ use uuid::Uuid;
 use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
     AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup,
-    ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun, CostAlertRoute,
-    EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership, Organization,
-    PolicyRevision, Project, ProviderAccess, ProviderRecord, RemoteComputer,
+    ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun, ContextPacket,
+    CostAlertRoute, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership,
+    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, RemoteComputer,
     RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
     RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord, SemanticLink,
     SemanticObject, SemanticSource, Session, SessionEvent, Team, TenantInvitation, ToolCall,
@@ -62,6 +62,7 @@ pub(crate) struct MemoryStore {
     pub(crate) semantic_sources: HashMap<Uuid, SemanticSource>,
     pub(crate) semantic_objects: HashMap<Uuid, SemanticObject>,
     pub(crate) semantic_links: HashMap<Uuid, SemanticLink>,
+    pub(crate) context_packets: HashMap<Uuid, ContextPacket>,
 }
 
 #[derive(Clone)]

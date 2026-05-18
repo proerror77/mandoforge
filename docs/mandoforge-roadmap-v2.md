@@ -220,9 +220,9 @@ This prevents Agent Registry from becoming only a runtime/tool table. The Manage
 Current repo slice:
 
 - Managed Agent registry now stores the minimal semantic scope fields on each agent.
-- `GET /api/sessions/{id}/context-packet` generates a source-attributed context packet from the session, agent registry entry, agent version, runtime profile, runtime policy, session events, and key repo docs.
-- Context packet generation writes a `context_packet.generated` timeline event so operators can replay when governed context was assembled.
-- This is an on-demand Stage 4 context packet builder. Stage 5 still owns durable `semantic_sources`, `semantic_objects`, `semantic_links`, versioned `context_packets`, retrieval backends, and memory writeback.
+- `GET /api/sessions/{id}/context-packet` now generates and persists a source-attributed context packet from the session, agent registry entry, agent version, runtime profile, runtime policy, session events, key repo docs, and matching Stage 5 semantic objects.
+- Context packet generation writes a `context_packet.generated` timeline event and audit record so operators can replay what governed context was assembled before execution.
+- Stage 5.2 promotes context packets from an on-demand Stage 4 helper into versioned `context_packets`; Stage 5.3 still owns memory writeback.
 
 ### Stage 4.4 Manager Agent Planner
 
@@ -298,7 +298,7 @@ Current repo slice:
 
 ## Stage 5: Full Semantic Layer / Context OS
 
-Status: not yet implemented beyond early source, artifact, session, Workflow Pack, and Remote Computer state primitives.
+Status: implemented through the semantic registry and versioned context packet substrate. Memory writeback, trust gates, ontology expansion, and optional retrieval backends remain later Stage 5 work.
 
 Stage 5 expands the minimal semantic kernel into a full Context OS:
 
@@ -320,7 +320,9 @@ Current repo slice:
 - `semantic_objects` stores durable decisions, runbooks, code modules, workflows, policies, memories, artifacts, projects, repos, services, and packs with source URI, provenance, trust, freshness, status, and minimal semantic scopes.
 - `semantic_links` relates agents, projects, repos, services, workflows, policies, packs, memories, artifacts, sessions, Manager Agent plans, runtime profiles, semantic sources, and semantic objects.
 - All three resources have RLS-backed Postgres tables, in-memory store support, CRUD-style API surfaces, and audit records for create/update/archive.
-- This is still the registry layer, not retrieval/ranking. Context Packet generation remains Stage 5.2.
+- `context_packets` stores versioned snapshots of task intent, Managed Agent config, runtime profile, semantic scopes, policy reminders, freshness warnings, source refs, and retrieved semantic objects.
+- `/api/sessions/{id}/context-packets` and `/api/context-packets/{id}` expose replayable packet history so the Session Timeline can show what context an agent saw before acting.
+- Retrieval is intentionally conservative: Stage 5.2 matches active semantic objects by shared semantic scopes and stores the selected objects in the packet. Vector ranking remains optional Stage 5.5 work.
 
 The target object model:
 
