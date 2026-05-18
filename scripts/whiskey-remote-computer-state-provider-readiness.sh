@@ -194,6 +194,7 @@ jq \
   | .next_actions = (
       []
       + (if .readiness.state_filesystem.distributed_filesystem_configured != true then ["set MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER to juicefs, cephfs, longhorn-rwx, or another real shared-state provider"] else [] end)
+      + (if .juicefs_secret.present == true and .juicefs_secret.placeholder_values_detected == true then ["render a non-placeholder JuiceFS Secret/PV manifest with scripts/render-remote-computer-juicefs-profile.sh <env-file>"] else [] end)
       + (if .juicefs_secret.present == true and .juicefs_secret.placeholder_values_detected == true then ["replace placeholder JuiceFS secret values in deploy/k8s/remote-computer-state-juicefs-profile.yaml before reapplying the profile"] else [] end)
       + (if .readiness.state_filesystem.lock_manager_configured != true then ["enable MANDOFORGE_REMOTE_COMPUTER_STATE_LOCK_MANAGER and validate lock-aware shared-write coordination"] else [] end)
       + (if .runner.mode != "kubernetes" then ["set MANDOFORGE_REMOTE_COMPUTER_RUNNER=kubernetes"] else [] end)

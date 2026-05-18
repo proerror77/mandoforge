@@ -410,3 +410,9 @@ Current blocker after the constrained pilot is no longer Kubernetes bootstrap. I
 ```bash
 scripts/whiskey-remote-computer-state-provider-readiness.sh
 ```
+
+If the audit still reports placeholder JuiceFS values, render a real Secret/PV manifest from an env file with:
+
+```bash
+scripts/render-remote-computer-juicefs-profile.sh deploy/k8s/remote-computer-state-juicefs.env.example
+```
