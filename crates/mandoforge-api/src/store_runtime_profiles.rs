@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::agent_runtime_profile_from_row;
-use crate::{AgentRuntimeProfile, AppError, AppState, CreateAgentRuntimeProfile};
+use crate::{
+    AgentRuntimeProfile, AppError, AppState, CreateAgentRuntimeProfile, UpdateAgentRuntimeProfile,
+};
 
 impl AppState {
     pub(crate) async fn list_agent_runtime_profiles(
@@ -180,6 +182,143 @@ impl AppState {
             }
         }
     }
+
+    pub(crate) async fn update_agent_runtime_profile(
+        &self,
+        id: Uuid,
+        input: UpdateAgentRuntimeProfile,
+    ) -> Result<AgentRuntimeProfile, AppError> {
+        validate_runtime_profile_update(&input)?;
+        let updated_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let profile = store
+                    .agent_runtime_profiles
+                    .get_mut(&id)
+                    .filter(|profile| profile.archived_at.is_none())
+                    .ok_or_else(|| AppError::not_found("agent runtime profile not found"))?;
+                apply_runtime_profile_update(profile, input, updated_at);
+                Ok(profile.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let existing = self.get_agent_runtime_profile(id).await?;
+                let mut profile = existing;
+                apply_runtime_profile_update(&mut profile, input, updated_at);
+                let row = sqlx::query(
+                    "UPDATE agent_runtime_profiles
+                     SET command = $3,
+                         default_args = $4,
+                         env = $5,
+                         timeout_seconds = $6,
+                         remote_computer_required = $7,
+                         status = $8,
+                         updated_at = $9
+                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL
+                     RETURNING id, name, runtime_type, command, default_args, env, timeout_seconds, remote_computer_required, status, created_at, updated_at, archived_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(&profile.command)
+                .bind(json!(profile.default_args))
+                .bind(&profile.env)
+                .bind(profile.timeout_seconds)
+                .bind(profile.remote_computer_required)
+                .bind(&profile.status)
+                .bind(profile.updated_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent runtime profile not found"))?;
+                agent_runtime_profile_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn archive_agent_runtime_profile(
+        &self,
+        id: Uuid,
+    ) -> Result<AgentRuntimeProfile, AppError> {
+        let archived_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let profile = store
+                    .agent_runtime_profiles
+                    .get_mut(&id)
+                    .filter(|profile| profile.archived_at.is_none())
+                    .ok_or_else(|| AppError::not_found("agent runtime profile not found"))?;
+                profile.status = "disabled".to_string();
+                profile.archived_at = Some(archived_at);
+                profile.updated_at = archived_at;
+                Ok(profile.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE agent_runtime_profiles
+                     SET status = 'disabled', archived_at = $3, updated_at = $3
+                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL
+                     RETURNING id, name, runtime_type, command, default_args, env, timeout_seconds, remote_computer_required, status, created_at, updated_at, archived_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(archived_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent runtime profile not found"))?;
+                agent_runtime_profile_from_row(row)
+            }
+        }
+    }
+}
+
+fn validate_runtime_profile_update(input: &UpdateAgentRuntimeProfile) -> Result<(), AppError> {
+    if let Some(command) = input.command.as_ref() {
+        if command.trim().is_empty() {
+            return Err(AppError::bad_request(
+                "agent runtime profile command cannot be empty",
+            ));
+        }
+    }
+    if let Some(env) = input.env.as_ref() {
+        validate_runtime_profile_env(env)?;
+    }
+    if let Some(Some(timeout_seconds)) = input.timeout_seconds {
+        if !(1..=3600).contains(&timeout_seconds) {
+            return Err(AppError::bad_request(
+                "agent runtime profile timeout_seconds must be between 1 and 3600",
+            ));
+        }
+    }
+    if let Some(status) = input.status.as_ref() {
+        validate_runtime_profile_status(status)?;
+    }
+    Ok(())
+}
+
+fn apply_runtime_profile_update(
+    profile: &mut AgentRuntimeProfile,
+    input: UpdateAgentRuntimeProfile,
+    updated_at: chrono::DateTime<Utc>,
+) {
+    if let Some(command) = input.command {
+        profile.command = command.trim().to_string();
+    }
+    if let Some(default_args) = input.default_args {
+        profile.default_args = default_args;
+    }
+    if let Some(env) = input.env {
+        profile.env = env;
+    }
+    if let Some(timeout_seconds) = input.timeout_seconds {
+        profile.timeout_seconds = timeout_seconds;
+    }
+    if let Some(remote_computer_required) = input.remote_computer_required {
+        profile.remote_computer_required = remote_computer_required;
+    }
+    if let Some(status) = input.status {
+        profile.status = status;
+    }
+    profile.updated_at = updated_at;
 }
 
 fn normalize_runtime_profile_name(name: &str) -> Result<String, AppError> {

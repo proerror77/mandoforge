@@ -159,6 +159,8 @@ Current repo slice:
 
 - `agent_runtime_profiles` is now a tenant-scoped Agent OS resource.
 - `GET/POST /api/agent-runtime-profiles` and `GET /api/agent-runtime-profiles/{id}` expose the first control-plane API.
+- `PATCH /api/agent-runtime-profiles/{id}` and `DELETE /api/agent-runtime-profiles/{id}` add governed update, disable, and archive lifecycle controls.
+- create, update, and archive operations emit audit records.
 - `agent_cli.exec` resolves an enabled managed `agent_cli` profile before falling back to legacy environment allowlist configuration.
 - profiles with `remote_computer_required: true` fail closed on local execution and must use the Remote Computer path.
 
