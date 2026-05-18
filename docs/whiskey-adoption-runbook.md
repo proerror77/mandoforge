@@ -6,6 +6,12 @@ It does not claim full production validation. Whiskey is a single-host pilot unl
 
 For the latest lane status and residual backlog, see [Whiskey Adoption Status](whiskey-adoption-status.md).
 
+For the fastest operator handoff from the latest local artifacts, run:
+
+```bash
+scripts/whiskey-adoption-next-actions.sh
+```
+
 ## Host Contract
 
 - SSH host: `wishky-2-1`.
