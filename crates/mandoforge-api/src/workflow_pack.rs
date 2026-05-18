@@ -229,7 +229,7 @@ pub struct WorkflowPackValidationReport {
 
 impl WorkflowPackManifest {
     pub fn from_yaml_str(input: &str) -> Result<Self> {
-        serde_yml::from_str(input).map_err(Into::into)
+        serde_yaml::from_str(input).map_err(Into::into)
     }
 
     pub fn validate_package_dir(&self, package_dir: &Path) -> Result<WorkflowPackValidationReport> {
@@ -422,7 +422,7 @@ impl WorkflowPackManifest {
             .ok_or_else(|| anyhow::anyhow!("manifest must declare tool-scope policy"))?;
         validate_relative_existing_path(package_dir, &policy.path)?;
         let input = fs::read_to_string(package_dir.join(&policy.path))?;
-        let policy: ToolScopePolicy = serde_yml::from_str(&input)?;
+        let policy: ToolScopePolicy = serde_yaml::from_str(&input)?;
         if policy.roles.is_empty() {
             bail!("tool-scope policy must declare roles");
         }
@@ -431,7 +431,7 @@ impl WorkflowPackManifest {
 
     fn validate_agent_file_contract(&self, agent: &AgentRef, package_dir: &Path) -> Result<()> {
         let input = fs::read_to_string(package_dir.join(&agent.path))?;
-        let contract: AgentFileContract = serde_yml::from_str(&input)?;
+        let contract: AgentFileContract = serde_yaml::from_str(&input)?;
         if contract.id != agent.id {
             bail!(
                 "agent file {} id {} must match manifest agent {}",

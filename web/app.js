@@ -391,6 +391,10 @@ function adminHeaders(extra = {}) {
   return headers;
 }
 
+function confirmDestructiveAction(label, id) {
+  return window.confirm(`${label}\n\n${id}`);
+}
+
 async function boot() {
   state.agents = await api("/api/agents");
   renderAgents();
@@ -561,6 +565,7 @@ async function createMembership(event) {
 }
 
 async function deleteMembership(membershipId) {
+  if (!confirmDestructiveAction("Delete membership?", membershipId)) return;
   await api(`/api/memberships/${membershipId}`, { method: "DELETE" });
   await refreshOps();
 }
@@ -602,6 +607,7 @@ async function acceptTenantInvitation(token) {
 }
 
 async function archiveOrganization(organizationId) {
+  if (!confirmDestructiveAction("Archive organization?", organizationId)) return;
   await api(`/api/organizations/${organizationId}/archive`, { method: "POST" });
   if (state.selectedOrganizationId === organizationId) {
     state.selectedOrganizationId = "";
@@ -624,6 +630,7 @@ async function transferOrganizationOwnership(event) {
 }
 
 async function deleteOrganization(organizationId) {
+  if (!confirmDestructiveAction("Delete organization?", organizationId)) return;
   await api(`/api/organizations/${organizationId}`, { method: "DELETE" });
   if (state.selectedOrganizationId === organizationId) {
     state.selectedOrganizationId = "";
@@ -633,6 +640,7 @@ async function deleteOrganization(organizationId) {
 }
 
 async function archiveTeam(teamId) {
+  if (!confirmDestructiveAction("Archive team?", teamId)) return;
   await api(`/api/teams/${teamId}/archive`, { method: "POST" });
   if (state.selectedTeamId === teamId) {
     state.selectedTeamId = "";
@@ -641,6 +649,7 @@ async function archiveTeam(teamId) {
 }
 
 async function deleteTeam(teamId) {
+  if (!confirmDestructiveAction("Delete team?", teamId)) return;
   await api(`/api/teams/${teamId}`, { method: "DELETE" });
   if (state.selectedTeamId === teamId) {
     state.selectedTeamId = "";
@@ -649,11 +658,13 @@ async function deleteTeam(teamId) {
 }
 
 async function archiveProject(projectId) {
+  if (!confirmDestructiveAction("Archive project?", projectId)) return;
   await api(`/api/projects/${projectId}/archive`, { method: "POST" });
   await refreshOps();
 }
 
 async function deleteProject(projectId) {
+  if (!confirmDestructiveAction("Delete project?", projectId)) return;
   await api(`/api/projects/${projectId}`, { method: "DELETE" });
   await refreshOps();
 }
@@ -708,6 +719,7 @@ async function createApprovalNotificationChannelPolicy(event) {
 }
 
 async function archiveApprovalNotificationChannelPolicy(id) {
+  if (!confirmDestructiveAction("Archive approval notification policy?", id)) return;
   await api(`/api/approvals/notification-channel-policies/${id}/archive`, {
     method: "POST",
   });
@@ -776,6 +788,7 @@ async function updateProviderAccess(event) {
 }
 
 async function archiveProviderAccess(accessId) {
+  if (!confirmDestructiveAction("Archive provider access?", accessId)) return;
   await api(`/api/provider-access/${accessId}/archive`, {
     method: "POST",
   });
@@ -1709,6 +1722,12 @@ async function runDueMcpRollouts() {
 
 async function updateMcpStatus(serverId, status) {
   if (!state.mcpTeamId) return;
+  if (
+    (status === "disabled" || status === "archived") &&
+    !confirmDestructiveAction(`Set MCP server status to ${status}?`, serverId)
+  ) {
+    return;
+  }
   await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/status`, {
     method: "PATCH",
     body: JSON.stringify({ status }),
@@ -5151,6 +5170,12 @@ function renderProviders() {
 }
 
 async function updateProviderStatus(providerId, status) {
+  if (
+    (status === "disabled" || status === "archived") &&
+    !confirmDestructiveAction(`Set provider status to ${status}?`, providerId)
+  ) {
+    return;
+  }
   await api(`/api/providers/${providerId}/status`, {
     method: "PATCH",
     body: JSON.stringify({

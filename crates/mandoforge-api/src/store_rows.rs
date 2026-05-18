@@ -12,6 +12,14 @@ use crate::{
     ToolCall, UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
+fn json_array_from_row<T: serde::de::DeserializeOwned>(
+    value: Value,
+    field: &str,
+) -> Result<Vec<T>, AppError> {
+    serde_json::from_value(value)
+        .map_err(|error| AppError::bad_request(format!("invalid {field} JSON array: {error}")))
+}
+
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
     let tools: Value = row.try_get("tools")?;
     let mcp_server_ids: Value = row.try_get("mcp_server_ids").unwrap_or_else(|_| json!([]));
@@ -32,11 +40,11 @@ pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
         provider: row.try_get("provider")?,
         model: row.try_get("model")?,
         system_prompt: row.try_get("system_prompt")?,
-        tools: serde_json::from_value(tools).unwrap_or_default(),
+        tools: json_array_from_row(tools, "agents.tools")?,
         tool_policy: row.try_get("tool_policy").unwrap_or_else(|_| json!({})),
-        mcp_server_ids: serde_json::from_value(mcp_server_ids).unwrap_or_default(),
-        skill_ids: serde_json::from_value(skill_ids).unwrap_or_default(),
-        workflow_pack_ids: serde_json::from_value(workflow_pack_ids).unwrap_or_default(),
+        mcp_server_ids: json_array_from_row(mcp_server_ids, "agents.mcp_server_ids")?,
+        skill_ids: json_array_from_row(skill_ids, "agents.skill_ids")?,
+        workflow_pack_ids: json_array_from_row(workflow_pack_ids, "agents.workflow_pack_ids")?,
         remote_computer_profile: row
             .try_get("remote_computer_profile")
             .unwrap_or_else(|_| json!({})),
@@ -70,8 +78,8 @@ pub(crate) fn agent_version_from_row(row: PgRow) -> Result<AgentVersion, AppErro
         version: row.try_get("version")?,
         model: row.try_get("model")?,
         system_prompt: row.try_get("system_prompt")?,
-        tools: serde_json::from_value(tools).unwrap_or_default(),
-        tool_names: serde_json::from_value(tool_names).unwrap_or_default(),
+        tools: json_array_from_row(tools, "agent_versions.tools")?,
+        tool_names: json_array_from_row(tool_names, "agent_versions.tool_names")?,
         runtime_config: row.try_get("runtime_config")?,
         approval_policy: row.try_get("approval_policy")?,
         created_at: row.try_get("created_at")?,
@@ -85,7 +93,7 @@ pub(crate) fn agent_runtime_profile_from_row(row: PgRow) -> Result<AgentRuntimeP
         name: row.try_get("name")?,
         runtime_type: row.try_get("runtime_type")?,
         command: row.try_get("command")?,
-        default_args: serde_json::from_value(default_args).unwrap_or_default(),
+        default_args: json_array_from_row(default_args, "agent_runtime_profiles.default_args")?,
         env: row.try_get("env")?,
         timeout_seconds: row.try_get("timeout_seconds")?,
         remote_computer_required: row.try_get("remote_computer_required")?,

@@ -4738,7 +4738,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/sessions/{id}/events", get(list_events))
         .route(
             "/api/sessions/{id}/context-packet",
-            get(get_session_context_packet),
+            get(get_session_context_packet).post(create_session_context_packet),
         )
         .route(
             "/api/sessions/{id}/context-packets",
@@ -11869,6 +11869,29 @@ async fn list_events(
 }
 
 async fn get_session_context_packet(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ContextPacket>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    state.get_session(id).await?;
+    let packet = state
+        .list_context_packets(id)
+        .await?
+        .into_iter()
+        .max_by_key(|packet| packet.version)
+        .ok_or_else(|| AppError::not_found("context packet not found"))?;
+    Ok(Json(packet))
+}
+
+async fn create_session_context_packet(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
@@ -35880,7 +35903,7 @@ fn worker_k8s_readiness_from_manifests() -> WorkerK8sReadiness {
 fn read_yaml_manifest_value(relative_path: &str) -> Option<Value> {
     let resolved_path = project_file_path(relative_path)?;
     let content = std::fs::read_to_string(resolved_path).ok()?;
-    serde_yml::from_str::<Value>(&content).ok()
+    serde_yaml::from_str::<Value>(&content).ok()
 }
 
 fn manifest_has_kind_name(relative_path: &str, kind: &str, name: &str) -> bool {
@@ -35916,7 +35939,7 @@ fn worker_autoscaling_readiness_from_manifests(paths: &[&str]) -> WorkerAutoscal
         let Ok(content) = std::fs::read_to_string(resolved_path) else {
             continue;
         };
-        let Ok(manifest) = serde_yml::from_str::<K8sAutoscalingManifest>(&content) else {
+        let Ok(manifest) = serde_yaml::from_str::<K8sAutoscalingManifest>(&content) else {
             continue;
         };
         let Some(spec) = manifest.spec else {
@@ -41204,6 +41227,7 @@ not json
         let context_packet: ContextPacket = request_json(
             app.clone(),
             Request::builder()
+                .method("POST")
                 .uri(format!(
                     "/api/sessions/{}/context-packet",
                     assignment.specialist_session_id
@@ -41509,6 +41533,7 @@ not json
         let context_packet: ContextPacket = request_json(
             app.clone(),
             Request::builder()
+                .method("POST")
                 .uri(format!(
                     "/api/sessions/{}/context-packet",
                     assignment.specialist_session_id
@@ -52089,6 +52114,7 @@ not json
         let packet: ContextPacket = request_json(
             app.clone(),
             Request::builder()
+                .method("POST")
                 .uri(format!("/api/sessions/{}/context-packet", session.id))
                 .header("x-mandoforge-subject", "admin-1")
                 .header("x-mandoforge-roles", "admin")
@@ -52262,6 +52288,7 @@ not json
         let packet_v1: ContextPacket = request_json(
             app.clone(),
             Request::builder()
+                .method("POST")
                 .uri(format!("/api/sessions/{}/context-packet", session.id))
                 .header("x-mandoforge-subject", "admin-1")
                 .header("x-mandoforge-roles", "admin")
@@ -52294,6 +52321,7 @@ not json
         let packet_v2: ContextPacket = request_json(
             app.clone(),
             Request::builder()
+                .method("POST")
                 .uri(format!("/api/sessions/{}/context-packet", session.id))
                 .header("x-mandoforge-subject", "admin-1")
                 .header("x-mandoforge-roles", "admin")
@@ -52322,6 +52350,30 @@ not json
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+
+        let latest: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/context-packet", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(latest.id, packet_v2.id);
+        assert_eq!(latest.version, 2);
+        let packets_after_get: Vec<ContextPacket> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/context-packets", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(packets_after_get.len(), 2);
 
         let fetched: ContextPacket = request_json(
             app.clone(),

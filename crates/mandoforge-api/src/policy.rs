@@ -188,7 +188,7 @@ pub(crate) async fn load_policy_config(path: &str) -> Result<PolicyConfig> {
     let content = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("failed to read policy config {path}"))?;
-    serde_yml::from_str(&content).with_context(|| format!("failed to parse policy config {path}"))
+    serde_yaml::from_str(&content).with_context(|| format!("failed to parse policy config {path}"))
 }
 
 pub(crate) fn ensure_read_only_sql_with_policy(
