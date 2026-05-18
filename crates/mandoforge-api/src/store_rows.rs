@@ -6,10 +6,10 @@ use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
     AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
     ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket, CostAlertRoute, EvalCase,
-    EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership, Organization,
-    PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, SemanticLink,
-    SemanticObject, SemanticSource, Session, SessionEvent, Team, TenantInvitation, ToolCall,
-    UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership, MemoryWritebackCandidate,
+    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord,
+    SemanticLink, SemanticObject, SemanticSource, Session, SessionEvent, Team, TenantInvitation,
+    ToolCall, UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -180,6 +180,38 @@ pub(crate) fn context_packet_from_row(row: PgRow) -> Result<ContextPacket, AppEr
         replay_summary: row.try_get("replay_summary")?,
         audit_trace_id: row.try_get("audit_trace_id")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn memory_writeback_candidate_from_row(
+    row: PgRow,
+) -> Result<MemoryWritebackCandidate, AppError> {
+    Ok(MemoryWritebackCandidate {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        candidate_type: row.try_get("candidate_type")?,
+        source_event_id: row.try_get("source_event_id")?,
+        source_artifact_id: row.try_get("source_artifact_id")?,
+        source_approval_id: row.try_get("source_approval_id")?,
+        source_handoff_id: row.try_get("source_handoff_id")?,
+        proposed_object_type: row.try_get("proposed_object_type")?,
+        proposed_object_key: row.try_get("proposed_object_key")?,
+        title: row.try_get("title")?,
+        summary: row.try_get("summary")?,
+        content: row.try_get("content")?,
+        semantic_scopes: row.try_get("semantic_scopes")?,
+        source_refs: row.try_get("source_refs")?,
+        provenance: row.try_get("provenance")?,
+        trust_level: row.try_get("trust_level")?,
+        freshness: row.try_get("freshness")?,
+        status: row.try_get("status")?,
+        reviewer_subject: row.try_get("reviewer_subject")?,
+        review_reason: row.try_get("review_reason")?,
+        semantic_object_id: row.try_get("semantic_object_id")?,
+        audit_trace_id: row.try_get("audit_trace_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        decided_at: row.try_get("decided_at")?,
     })
 }
 

@@ -62,6 +62,7 @@ mod store_eval;
 mod store_events;
 mod store_governance;
 mod store_manager_plans;
+mod store_memory_writeback;
 mod store_policy_revisions;
 mod store_releases;
 mod store_remote_computers;
@@ -1105,6 +1106,53 @@ struct ContextPacketSemanticObject {
     freshness: String,
     semantic_scopes: Value,
     provenance: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryWritebackCandidate {
+    id: Uuid,
+    session_id: Uuid,
+    candidate_type: String,
+    source_event_id: Option<Uuid>,
+    source_artifact_id: Option<Uuid>,
+    source_approval_id: Option<Uuid>,
+    source_handoff_id: Option<Uuid>,
+    proposed_object_type: String,
+    proposed_object_key: String,
+    title: String,
+    summary: String,
+    content: Value,
+    semantic_scopes: Value,
+    source_refs: Value,
+    provenance: Value,
+    trust_level: String,
+    freshness: String,
+    status: String,
+    reviewer_subject: Option<String>,
+    review_reason: Option<String>,
+    semantic_object_id: Option<Uuid>,
+    audit_trace_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateMemoryWritebackCandidates {
+    #[serde(default)]
+    include_session_summary: Option<bool>,
+    #[serde(default)]
+    include_artifacts: Option<bool>,
+    #[serde(default)]
+    include_handoffs: Option<bool>,
+    #[serde(default)]
+    include_approvals: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewMemoryWritebackCandidate {
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4647,7 +4695,28 @@ fn build_router(state: AppState) -> Router {
             "/api/sessions/{id}/context-packets",
             get(list_session_context_packets),
         )
+        .route(
+            "/api/sessions/{id}/memory-writeback-candidates",
+            get(list_session_memory_writeback_candidates)
+                .post(create_session_memory_writeback_candidates),
+        )
         .route("/api/context-packets/{id}", get(get_context_packet))
+        .route(
+            "/api/memory-writeback-candidates",
+            get(list_memory_writeback_candidates),
+        )
+        .route(
+            "/api/memory-writeback-candidates/{id}",
+            get(get_memory_writeback_candidate),
+        )
+        .route(
+            "/api/memory-writeback-candidates/{id}/approve",
+            post(approve_memory_writeback_candidate),
+        )
+        .route(
+            "/api/memory-writeback-candidates/{id}/reject",
+            post(reject_memory_writeback_candidate),
+        )
         .route(
             "/api/sessions/{id}/agent-handoffs",
             get(list_session_agent_handoff_events).post(create_agent_handoff_event),
@@ -11638,6 +11707,180 @@ async fn get_context_packet(
     Ok(Json(packet))
 }
 
+async fn list_session_memory_writeback_candidates(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MemoryWritebackCandidate>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    state.get_session(id).await?;
+    Ok(Json(
+        state.list_memory_writeback_candidates(Some(id)).await?,
+    ))
+}
+
+async fn create_session_memory_writeback_candidates(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateMemoryWritebackCandidates>,
+) -> Result<Json<Vec<MemoryWritebackCandidate>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(id),
+    )
+    .await?;
+    let candidates = generate_memory_writeback_candidates(&state, id, input).await?;
+    Ok(Json(candidates))
+}
+
+async fn list_memory_writeback_candidates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MemoryWritebackCandidate>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "memory_writeback_candidates",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_memory_writeback_candidates(None).await?))
+}
+
+async fn get_memory_writeback_candidate(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<MemoryWritebackCandidate>, AppError> {
+    let candidate = state.get_memory_writeback_candidate(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "memory_writeback_candidate",
+        Some(candidate.session_id),
+    )
+    .await?;
+    Ok(Json(candidate))
+}
+
+async fn approve_memory_writeback_candidate(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewMemoryWritebackCandidate>,
+) -> Result<Json<MemoryWritebackCandidate>, AppError> {
+    let candidate = state.get_memory_writeback_candidate(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ApprovalsDecide,
+        "memory_writeback_candidate",
+        Some(candidate.session_id),
+    )
+    .await?;
+    if candidate.status != "pending" {
+        return Err(AppError::bad_request(
+            "only pending memory writeback candidates can be reviewed",
+        ));
+    }
+    let principal = principal_from_request(&state, &headers).await?;
+    let semantic_object = state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: None,
+            object_type: candidate.proposed_object_type.clone(),
+            object_key: candidate.proposed_object_key.clone(),
+            title: candidate.title.clone(),
+            summary: candidate.summary.clone(),
+            content: candidate.content.clone(),
+            semantic_scopes: candidate.semantic_scopes.clone(),
+            source_uri: Some(format!(
+                "session://{}/memory-writeback-candidates/{}",
+                candidate.session_id, candidate.id
+            )),
+            provenance: candidate.provenance.clone(),
+            trust_level: "human_verified".to_string(),
+            freshness: candidate.freshness.clone(),
+            status: "active".to_string(),
+        })
+        .await?;
+    let updated = state
+        .decide_memory_writeback_candidate(
+            id,
+            "approved",
+            Some(principal.subject_id.clone()),
+            input.reason.clone(),
+            Some(semantic_object.id),
+        )
+        .await?;
+    record_memory_writeback_candidate_review(&state, &updated, "memory_writeback.approved").await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(updated.session_id),
+            "user",
+            Some(updated.id),
+            "memory_writeback.semantic_object_created",
+            "semantic_object",
+            Some(semantic_object.id),
+            json!({
+                "candidate_id": updated.id,
+                "session_id": updated.session_id,
+                "semantic_object_id": semantic_object.id,
+                "object_key": semantic_object.object_key,
+                "trust_level": semantic_object.trust_level,
+                "reviewer_subject": updated.reviewer_subject,
+            }),
+        ))
+        .await?;
+    Ok(Json(updated))
+}
+
+async fn reject_memory_writeback_candidate(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewMemoryWritebackCandidate>,
+) -> Result<Json<MemoryWritebackCandidate>, AppError> {
+    let candidate = state.get_memory_writeback_candidate(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ApprovalsDecide,
+        "memory_writeback_candidate",
+        Some(candidate.session_id),
+    )
+    .await?;
+    if candidate.status != "pending" {
+        return Err(AppError::bad_request(
+            "only pending memory writeback candidates can be reviewed",
+        ));
+    }
+    let principal = principal_from_request(&state, &headers).await?;
+    let updated = state
+        .decide_memory_writeback_candidate(
+            id,
+            "rejected",
+            Some(principal.subject_id),
+            input.reason,
+            None,
+        )
+        .await?;
+    record_memory_writeback_candidate_review(&state, &updated, "memory_writeback.rejected").await?;
+    Ok(Json(updated))
+}
+
 async fn generate_and_persist_context_packet(
     state: &AppState,
     session_id: Uuid,
@@ -11668,6 +11911,395 @@ async fn generate_and_persist_context_packet(
     state
         .update_context_packet_audit_trace(packet.id, audit.id)
         .await
+}
+
+async fn generate_memory_writeback_candidates(
+    state: &AppState,
+    session_id: Uuid,
+    input: CreateMemoryWritebackCandidates,
+) -> Result<Vec<MemoryWritebackCandidate>, AppError> {
+    let session = state.get_session(session_id).await?;
+    if !matches!(session.status, SessionStatus::Completed) {
+        return Err(AppError::bad_request(
+            "memory writeback candidates require a completed session",
+        ));
+    }
+    let agent = state.get_agent(session.agent_id).await?;
+    let events = state.list_events(session_id).await?;
+    let artifacts = state.list_artifacts(session_id).await?;
+    let approvals = state
+        .list_approvals()
+        .await?
+        .into_iter()
+        .filter(|approval| approval.session_id == session_id)
+        .collect::<Vec<_>>();
+    let handoffs = state
+        .list_agent_handoff_events(Some(session_id))
+        .await?
+        .into_iter()
+        .filter(|handoff| handoff.status == "completed")
+        .collect::<Vec<_>>();
+    let include_session_summary = input.include_session_summary.unwrap_or(true);
+    let include_artifacts = input.include_artifacts.unwrap_or(true);
+    let include_handoffs = input.include_handoffs.unwrap_or(true);
+    let include_approvals = input.include_approvals.unwrap_or(true);
+
+    let mut proposed = Vec::new();
+    if include_session_summary {
+        if let Some(event) = events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "session.completed")
+        {
+            proposed.push(memory_candidate_from_session(
+                &session, &agent, event, &events, &artifacts, &approvals, &handoffs,
+            ));
+        }
+    }
+    if include_artifacts {
+        for artifact in &artifacts {
+            proposed.push(memory_candidate_from_artifact(&session, &agent, artifact));
+        }
+    }
+    if include_handoffs {
+        for handoff in &handoffs {
+            proposed.push(memory_candidate_from_handoff(&session, &agent, handoff));
+        }
+    }
+    if include_approvals {
+        for approval in approvals
+            .iter()
+            .filter(|approval| matches!(approval.status.as_str(), "approved" | "rejected"))
+        {
+            proposed.push(memory_candidate_from_approval(&session, &agent, approval));
+        }
+    }
+
+    let mut created = Vec::new();
+    for candidate in proposed {
+        match state.create_memory_writeback_candidate(candidate).await {
+            Ok(candidate) => {
+                let audit = record_memory_writeback_candidate_created(state, &candidate).await?;
+                let candidate = state
+                    .update_memory_writeback_candidate_audit_trace(candidate.id, audit.id)
+                    .await?;
+                created.push(candidate);
+            }
+            Err(error) if error.message.contains("already exists") => {}
+            Err(error) => return Err(error),
+        }
+    }
+    state
+        .append_event(
+            "system",
+            None,
+            session_id,
+            "memory_writeback.candidates_generated",
+            json!({
+                "session_id": session_id,
+                "candidate_count": created.len(),
+                "candidate_ids": created.iter().map(|candidate| candidate.id).collect::<Vec<_>>(),
+            }),
+        )
+        .await?;
+    Ok(created)
+}
+
+fn memory_candidate_from_session(
+    session: &Session,
+    agent: &Agent,
+    event: &SessionEvent,
+    events: &[SessionEvent],
+    artifacts: &[Artifact],
+    approvals: &[Approval],
+    handoffs: &[AgentHandoffEvent],
+) -> MemoryWritebackCandidate {
+    let created_at = Utc::now();
+    MemoryWritebackCandidate {
+        id: Uuid::new_v4(),
+        session_id: session.id,
+        candidate_type: "session_summary".to_string(),
+        source_event_id: Some(event.id),
+        source_artifact_id: None,
+        source_approval_id: None,
+        source_handoff_id: None,
+        proposed_object_type: "memory".to_string(),
+        proposed_object_key: format!("memory:session:{}:summary", session.id),
+        title: format!("Session memory: {}", session.title),
+        summary: format!(
+            "Completed session produced {} events, {} artifacts, {} reviewed approvals, and {} completed handoffs.",
+            events.len(),
+            artifacts.len(),
+            approvals
+                .iter()
+                .filter(|approval| approval.status != "pending")
+                .count(),
+            handoffs.len()
+        ),
+        content: json!({
+            "session_id": session.id,
+            "title": session.title,
+            "status": session.status.as_str(),
+            "event_count": events.len(),
+            "artifact_names": artifacts.iter().map(|artifact| artifact.name.clone()).collect::<Vec<_>>(),
+            "approval_decisions": approvals.iter().map(|approval| {
+                json!({
+                    "approval_id": approval.id,
+                    "action": approval.action,
+                    "status": approval.status,
+                    "risk_level": approval.risk_level,
+                })
+            }).collect::<Vec<_>>(),
+            "completed_handoff_ids": handoffs.iter().map(|handoff| handoff.id).collect::<Vec<_>>(),
+        }),
+        semantic_scopes: agent.semantic_scopes.clone(),
+        source_refs: json!([{"source_type": "session_event", "source_id": event.id}]),
+        provenance: json!({
+            "source": "session.completed",
+            "session_id": session.id,
+            "agent_id": agent.id,
+            "observed_at": event.created_at,
+        }),
+        trust_level: "source_attested".to_string(),
+        freshness: "current".to_string(),
+        status: "pending".to_string(),
+        reviewer_subject: None,
+        review_reason: None,
+        semantic_object_id: None,
+        audit_trace_id: None,
+        created_at,
+        updated_at: created_at,
+        decided_at: None,
+    }
+}
+
+fn memory_candidate_from_artifact(
+    session: &Session,
+    agent: &Agent,
+    artifact: &Artifact,
+) -> MemoryWritebackCandidate {
+    let created_at = Utc::now();
+    MemoryWritebackCandidate {
+        id: Uuid::new_v4(),
+        session_id: session.id,
+        candidate_type: "artifact".to_string(),
+        source_event_id: None,
+        source_artifact_id: Some(artifact.id),
+        source_approval_id: None,
+        source_handoff_id: None,
+        proposed_object_type: "memory".to_string(),
+        proposed_object_key: format!("memory:artifact:{}", artifact.id),
+        title: format!("Artifact memory: {}", artifact.name),
+        summary: format!(
+            "Artifact {} of type {} was created during completed session {}.",
+            artifact.name, artifact.artifact_type, session.id
+        ),
+        content: json!({
+            "artifact_id": artifact.id,
+            "artifact_type": artifact.artifact_type,
+            "name": artifact.name,
+            "path": artifact.path,
+            "content": artifact.content,
+        }),
+        semantic_scopes: agent.semantic_scopes.clone(),
+        source_refs: json!([{"source_type": "artifact", "source_id": artifact.id}]),
+        provenance: json!({
+            "source": "artifact.created",
+            "session_id": session.id,
+            "agent_id": agent.id,
+            "observed_at": artifact.created_at,
+        }),
+        trust_level: "source_attested".to_string(),
+        freshness: "current".to_string(),
+        status: "pending".to_string(),
+        reviewer_subject: None,
+        review_reason: None,
+        semantic_object_id: None,
+        audit_trace_id: None,
+        created_at,
+        updated_at: created_at,
+        decided_at: None,
+    }
+}
+
+fn memory_candidate_from_handoff(
+    session: &Session,
+    agent: &Agent,
+    handoff: &AgentHandoffEvent,
+) -> MemoryWritebackCandidate {
+    let created_at = Utc::now();
+    MemoryWritebackCandidate {
+        id: Uuid::new_v4(),
+        session_id: session.id,
+        candidate_type: "handoff_review".to_string(),
+        source_event_id: None,
+        source_artifact_id: None,
+        source_approval_id: None,
+        source_handoff_id: Some(handoff.id),
+        proposed_object_type: "memory".to_string(),
+        proposed_object_key: format!("memory:handoff:{}", handoff.id),
+        title: format!("Handoff memory: {}", handoff.intent),
+        summary: format!(
+            "Completed handoff {} delegated intent {} from manager agent {} to specialist agent {}.",
+            handoff.id, handoff.intent, handoff.source_agent_id, handoff.target_agent_id
+        ),
+        content: json!({
+            "agent_handoff_event_id": handoff.id,
+            "manager_plan_id": handoff.manager_plan_id,
+            "intent": handoff.intent,
+            "payload": handoff.payload,
+            "review_status": handoff.review_status,
+            "human_escalation_status": handoff.human_escalation_status,
+            "risk_level": handoff.risk_level,
+        }),
+        semantic_scopes: merge_semantic_scopes(&agent.semantic_scopes, &handoff.semantic_scopes),
+        source_refs: json!([{"source_type": "agent_handoff", "source_id": handoff.id}]),
+        provenance: json!({
+            "source": "agent_handoff.completed",
+            "session_id": session.id,
+            "agent_id": agent.id,
+            "observed_at": handoff.updated_at,
+        }),
+        trust_level: "source_attested".to_string(),
+        freshness: "current".to_string(),
+        status: "pending".to_string(),
+        reviewer_subject: None,
+        review_reason: None,
+        semantic_object_id: None,
+        audit_trace_id: None,
+        created_at,
+        updated_at: created_at,
+        decided_at: None,
+    }
+}
+
+fn memory_candidate_from_approval(
+    session: &Session,
+    agent: &Agent,
+    approval: &Approval,
+) -> MemoryWritebackCandidate {
+    let created_at = Utc::now();
+    MemoryWritebackCandidate {
+        id: Uuid::new_v4(),
+        session_id: session.id,
+        candidate_type: "approval_decision".to_string(),
+        source_event_id: None,
+        source_artifact_id: None,
+        source_approval_id: Some(approval.id),
+        source_handoff_id: None,
+        proposed_object_type: "memory".to_string(),
+        proposed_object_key: format!("memory:approval:{}", approval.id),
+        title: format!("Approval memory: {}", approval.action),
+        summary: format!(
+            "Approval {} for action {} was decided as {} with {} risk.",
+            approval.id, approval.action, approval.status, approval.risk_level
+        ),
+        content: json!({
+            "approval_id": approval.id,
+            "tool_call_id": approval.tool_call_id,
+            "action": approval.action,
+            "risk_level": approval.risk_level,
+            "reason": approval.reason,
+            "evidence": approval.evidence,
+            "decision_payload": approval.decision_payload,
+            "status": approval.status,
+            "decided_at": approval.decided_at,
+        }),
+        semantic_scopes: agent.semantic_scopes.clone(),
+        source_refs: json!([{"source_type": "approval", "source_id": approval.id}]),
+        provenance: json!({
+            "source": format!("approval.{}", approval.status),
+            "session_id": session.id,
+            "agent_id": agent.id,
+            "observed_at": approval.decided_at,
+        }),
+        trust_level: "source_attested".to_string(),
+        freshness: "current".to_string(),
+        status: "pending".to_string(),
+        reviewer_subject: None,
+        review_reason: None,
+        semantic_object_id: None,
+        audit_trace_id: None,
+        created_at,
+        updated_at: created_at,
+        decided_at: None,
+    }
+}
+
+async fn record_memory_writeback_candidate_created(
+    state: &AppState,
+    candidate: &MemoryWritebackCandidate,
+) -> Result<AuditLog, AppError> {
+    state
+        .append_audit_log(new_audit_log(
+            Some(candidate.session_id),
+            "system",
+            Some(candidate.id),
+            "memory_writeback.candidate_created",
+            "memory_writeback_candidate",
+            Some(candidate.id),
+            json!({
+                "session_id": candidate.session_id,
+                "candidate_type": candidate.candidate_type,
+                "proposed_object_key": candidate.proposed_object_key,
+                "source_event_id": candidate.source_event_id,
+                "source_artifact_id": candidate.source_artifact_id,
+                "source_approval_id": candidate.source_approval_id,
+                "source_handoff_id": candidate.source_handoff_id,
+                "status": candidate.status,
+            }),
+        ))
+        .await
+}
+
+async fn record_memory_writeback_candidate_review(
+    state: &AppState,
+    candidate: &MemoryWritebackCandidate,
+    action: &str,
+) -> Result<(), AppError> {
+    state
+        .append_event(
+            "user",
+            Some(candidate.id),
+            candidate.session_id,
+            action,
+            json!({
+                "candidate_id": candidate.id,
+                "status": candidate.status,
+                "reviewer_subject": candidate.reviewer_subject,
+                "review_reason": candidate.review_reason,
+                "semantic_object_id": candidate.semantic_object_id,
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(candidate.session_id),
+            "user",
+            Some(candidate.id),
+            action,
+            "memory_writeback_candidate",
+            Some(candidate.id),
+            json!({
+                "candidate_id": candidate.id,
+                "status": candidate.status,
+                "reviewer_subject": candidate.reviewer_subject,
+                "review_reason": candidate.review_reason,
+                "semantic_object_id": candidate.semantic_object_id,
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+fn merge_semantic_scopes(base: &Value, override_scopes: &Value) -> Value {
+    let mut merged = base.as_object().cloned().unwrap_or_default();
+    if let Some(object) = override_scopes.as_object() {
+        for (key, value) in object {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(merged)
 }
 
 async fn build_context_packet(
@@ -13375,6 +14007,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "semantic_objects",
         "semantic_links",
         "context_packets",
+        "memory_writeback_candidates",
     ]
 }
 
@@ -41473,6 +42106,7 @@ not json
         assert!(names.contains(&"0034_agent_handoff_assignments.sql"));
         assert!(names.contains(&"0035_semantic_kernel.sql"));
         assert!(names.contains(&"0036_context_packets.sql"));
+        assert!(names.contains(&"0037_memory_writeback_candidates.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -41482,7 +42116,7 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
@@ -41493,7 +42127,8 @@ not json
             include_str!("../../../db/migrations/0032_manager_agent_plans.sql"),
             include_str!("../../../db/migrations/0034_agent_handoff_assignments.sql"),
             include_str!("../../../db/migrations/0035_semantic_kernel.sql"),
-            include_str!("../../../db/migrations/0036_context_packets.sql")
+            include_str!("../../../db/migrations/0036_context_packets.sql"),
+            include_str!("../../../db/migrations/0037_memory_writeback_candidates.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
@@ -50460,6 +51095,504 @@ not json
                 && log.resource_id == Some(packet_v1.id)
                 && log.details["version"] == json!(1)
                 && log.details["retrieved_object_count"] == json!(1)
+        }));
+    }
+
+    #[tokio::test]
+    async fn memory_writeback_candidates_require_review_before_durable_memory() {
+        let app = test_app().await;
+        let specialist: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Memory Writeback Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.write", "artifact.create", "approval.request"],
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "memory-writeback",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "release_state": "active"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Memory Writeback Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["artifact.create", "file.write"],
+                    "tool_policy": {
+                        "allowed_tools": ["artifact.create", "file.write"],
+                        "approval_required": [{"tool": "file.write", "risk": "medium"}]
+                    },
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": specialist.id,
+                                "intents": ["record_memory_candidate"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["medium"],
+                                "approval_required": false
+                            }]
+                        }
+                    },
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "agent-os",
+                        "workflow_scope": "memory-writeback",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "release_state": "active"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": manager.id,
+                    "title": "governed memory writeback",
+                    "message": "Capture durable memory only after review."
+                }),
+                &[
+                    ("x-mandoforge-subject", "operator-1"),
+                    ("x-mandoforge-roles", "operator"),
+                ],
+            ),
+        )
+        .await;
+
+        let _artifact_result: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/tools/artifact.create/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "name": "memory-writeback-summary.json",
+                        "artifact_type": "json",
+                        "content": {
+                            "finding": "reviewed memory writeback should be gated",
+                            "stage": "5.3"
+                        }
+                    }
+                }),
+                &[
+                    ("x-mandoforge-subject", "operator-1"),
+                    ("x-mandoforge-roles", "operator"),
+                ],
+            ),
+        )
+        .await;
+        let file_write_approval: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "path": "memory-writeback.md",
+                        "content": "# Memory Writeback\n\nApproved writeback evidence."
+                    }
+                }),
+                &[
+                    ("x-mandoforge-subject", "operator-1"),
+                    ("x-mandoforge-roles", "operator"),
+                ],
+            ),
+        )
+        .await;
+        let approval_id = file_write_approval["approval_id"]
+            .as_str()
+            .expect("file.write approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "approver-1")
+                .header("x-mandoforge-roles", "approver")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+
+        let plan: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/sessions/{}/manager-plans", session.id),
+                json!({
+                    "specialist_agent_id": specialist.id,
+                    "task_intake": {"goal": "Review memory writeback evidence"},
+                    "decomposition": {"steps": ["review artifact", "record handoff outcome"]},
+                    "specialist_selection": {"selected_agent_id": specialist.id},
+                    "risk_classification": "medium",
+                    "review": {"status": "pending"}
+                }),
+                &[
+                    ("x-mandoforge-subject", "operator-1"),
+                    ("x-mandoforge-roles", "operator"),
+                ],
+            ),
+        )
+        .await;
+        let reviewed: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/manager-plans/{}/review", plan.id),
+                json!({
+                    "status": "approved",
+                    "review": {"status": "approved", "summary": "handoff can produce review memory"}
+                }),
+                &[
+                    ("x-mandoforge-subject", "operator-1"),
+                    ("x-mandoforge-roles", "operator"),
+                ],
+            ),
+        )
+        .await;
+        let handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": specialist.id,
+                    "manager_plan_id": reviewed.id,
+                    "intent": "record_memory_candidate",
+                    "payload": {"review": "writeback evidence accepted"},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "medium",
+                    "semantic_scopes": {
+                        "workflow_scope": "memory-writeback",
+                        "handoff_scope": "review"
+                    }
+                }),
+                &[
+                    ("x-mandoforge-subject", "operator-1"),
+                    ("x-mandoforge-roles", "operator"),
+                ],
+            ),
+        )
+        .await;
+        let accepted: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/agent-handoffs/{}/accept", handoff.id),
+                json!({"reason": "specialist accepted review handoff"}),
+                &[
+                    ("x-mandoforge-subject", "operator-1"),
+                    ("x-mandoforge-roles", "operator"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(accepted.status, "accepted");
+        let completed_handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/agent-handoffs/{}/complete", handoff.id),
+                json!({"reason": "handoff review complete"}),
+                &[
+                    ("x-mandoforge-subject", "operator-1"),
+                    ("x-mandoforge-roles", "operator"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(completed_handoff.status, "completed");
+
+        let completed: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session.id))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(completed.status, SessionStatus::Completed));
+
+        let generated: Vec<MemoryWritebackCandidate> = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/sessions/{}/memory-writeback-candidates", session.id),
+                json!({}),
+                &[
+                    ("x-mandoforge-subject", "operator-1"),
+                    ("x-mandoforge-roles", "operator"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(generated.len(), 5);
+        assert_eq!(
+            generated
+                .iter()
+                .filter(|candidate| candidate.candidate_type == "artifact")
+                .count(),
+            2
+        );
+        for expected_type in [
+            "session_summary",
+            "artifact",
+            "approval_decision",
+            "handoff_review",
+        ] {
+            assert!(
+                generated
+                    .iter()
+                    .any(|candidate| candidate.candidate_type == expected_type
+                        && candidate.status == "pending"
+                        && candidate.audit_trace_id.is_some()),
+                "missing pending memory writeback candidate {expected_type}"
+            );
+        }
+        assert!(generated.iter().any(|candidate| {
+            candidate.candidate_type == "handoff_review"
+                && candidate.semantic_scopes["handoff_scope"] == "review"
+        }));
+
+        let semantic_objects_before: Vec<SemanticObject> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-objects")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            !semantic_objects_before
+                .iter()
+                .any(|object| object.object_type == "memory")
+        );
+
+        let approval_candidate = generated
+            .iter()
+            .find(|candidate| candidate.candidate_type == "approval_decision")
+            .expect("approval decision candidate");
+        let approved_candidate: MemoryWritebackCandidate = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/memory-writeback-candidates/{}/approve",
+                    approval_candidate.id
+                ),
+                json!({"reason": "approval decision should become reusable org memory"}),
+                &[
+                    ("x-mandoforge-subject", "memory-reviewer"),
+                    ("x-mandoforge-roles", "approver"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(approved_candidate.status, "approved");
+        assert_eq!(
+            approved_candidate.reviewer_subject.as_deref(),
+            Some("memory-reviewer")
+        );
+        assert_eq!(
+            approved_candidate.review_reason.as_deref(),
+            Some("approval decision should become reusable org memory")
+        );
+        let semantic_object_id = approved_candidate
+            .semantic_object_id
+            .expect("approved candidate semantic object");
+
+        let memory_object: SemanticObject = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/semantic-objects/{semantic_object_id}"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(memory_object.object_type, "memory");
+        assert_eq!(
+            memory_object.object_key,
+            approved_candidate.proposed_object_key
+        );
+        assert_eq!(memory_object.trust_level, "human_verified");
+        let expected_source_uri = format!(
+            "session://{}/memory-writeback-candidates/{}",
+            session.id, approved_candidate.id
+        );
+        assert_eq!(
+            memory_object.source_uri.as_deref(),
+            Some(expected_source_uri.as_str())
+        );
+        assert_eq!(memory_object.semantic_scopes["memory_scope"], "engineering");
+
+        let artifact_candidate = generated
+            .iter()
+            .find(|candidate| candidate.candidate_type == "artifact")
+            .expect("artifact candidate");
+        let rejected_candidate: MemoryWritebackCandidate = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/memory-writeback-candidates/{}/reject",
+                    artifact_candidate.id
+                ),
+                json!({"reason": "artifact is evidence but not reusable memory"}),
+                &[
+                    ("x-mandoforge-subject", "memory-reviewer"),
+                    ("x-mandoforge-roles", "approver"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(rejected_candidate.status, "rejected");
+        assert_eq!(rejected_candidate.semantic_object_id, None);
+        assert_eq!(
+            rejected_candidate.review_reason.as_deref(),
+            Some("artifact is evidence but not reusable memory")
+        );
+
+        let (status, duplicate_review_error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/memory-writeback-candidates/{}/approve",
+                    artifact_candidate.id
+                ),
+                json!({"reason": "cannot approve a rejected candidate"}),
+                &[
+                    ("x-mandoforge-subject", "memory-reviewer"),
+                    ("x-mandoforge-roles", "approver"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            duplicate_review_error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("pending"))
+        );
+
+        let listed: Vec<MemoryWritebackCandidate> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/memory-writeback-candidates",
+                    session.id
+                ))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(listed.len(), 5);
+        assert!(listed.iter().any(|candidate| {
+            candidate.id == approved_candidate.id
+                && candidate.status == "approved"
+                && candidate.semantic_object_id == Some(semantic_object_id)
+        }));
+        assert!(listed.iter().any(|candidate| {
+            candidate.id == rejected_candidate.id
+                && candidate.status == "rejected"
+                && candidate.semantic_object_id.is_none()
+        }));
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "memory_writeback.candidates_generated"
+                && event.payload["candidate_count"] == json!(5)
+        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "memory_writeback.approved")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "memory_writeback.rejected")
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "memory_writeback.candidate_created",
+            "memory_writeback.approved",
+            "memory_writeback.rejected",
+            "memory_writeback.semantic_object_created",
+        ] {
+            assert!(
+                audit_logs.iter().any(|log| log.action == expected),
+                "missing audit action {expected}"
+            );
+        }
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "memory_writeback.semantic_object_created"
+                && log.resource_id == Some(semantic_object_id)
+                && log.details["candidate_id"] == json!(approved_candidate.id)
+                && log.details["trust_level"] == "human_verified"
         }));
     }
 

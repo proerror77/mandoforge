@@ -298,7 +298,7 @@ Current repo slice:
 
 ## Stage 5: Full Semantic Layer / Context OS
 
-Status: implemented through the semantic registry and versioned context packet substrate. Memory writeback, trust gates, ontology expansion, and optional retrieval backends remain later Stage 5 work.
+Status: implemented through governed memory writeback. Trust gates, ontology expansion, and optional retrieval backends remain later Stage 5 work.
 
 Stage 5 expands the minimal semantic kernel into a full Context OS:
 
@@ -323,6 +323,9 @@ Current repo slice:
 - `context_packets` stores versioned snapshots of task intent, Managed Agent config, runtime profile, semantic scopes, policy reminders, freshness warnings, source refs, and retrieved semantic objects.
 - `/api/sessions/{id}/context-packets` and `/api/context-packets/{id}` expose replayable packet history so the Session Timeline can show what context an agent saw before acting.
 - Retrieval is intentionally conservative: Stage 5.2 matches active semantic objects by shared semantic scopes and stores the selected objects in the packet. Vector ranking remains optional Stage 5.5 work.
+- `memory_writeback_candidates` captures proposed memory from completed sessions, artifacts, completed handoff reviews, and human approval decisions without writing durable memory by default.
+- `/api/sessions/{id}/memory-writeback-candidates` generates and lists pending candidates; `/api/memory-writeback-candidates/{id}/approve|reject` is the human gate.
+- Approved candidates create `semantic_objects` with `object_type=memory`, `trust_level=human_verified`, source URI back to the candidate, and timeline/audit evidence; rejected candidates remain reviewed records without durable memory objects.
 
 The target object model:
 

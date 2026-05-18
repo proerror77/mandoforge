@@ -9,11 +9,11 @@ use crate::{
     AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup,
     ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun, ContextPacket,
     CostAlertRoute, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership,
-    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, RemoteComputer,
-    RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
-    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord, SemanticLink,
-    SemanticObject, SemanticSource, Session, SessionEvent, Team, TenantInvitation, ToolCall,
-    UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
+    ProviderRecord, RemoteComputer, RemoteComputerAttachment, RemoteComputerJobAssignment,
+    RemoteComputerLease, RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord,
+    SemanticLink, SemanticObject, SemanticSource, Session, SessionEvent, Team, TenantInvitation,
+    ToolCall, UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
 #[derive(Default)]
@@ -63,6 +63,7 @@ pub(crate) struct MemoryStore {
     pub(crate) semantic_objects: HashMap<Uuid, SemanticObject>,
     pub(crate) semantic_links: HashMap<Uuid, SemanticLink>,
     pub(crate) context_packets: HashMap<Uuid, ContextPacket>,
+    pub(crate) memory_writeback_candidates: HashMap<Uuid, MemoryWritebackCandidate>,
 }
 
 #[derive(Clone)]
