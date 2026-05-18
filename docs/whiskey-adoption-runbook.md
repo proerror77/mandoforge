@@ -181,6 +181,7 @@ Use the repo-native helper below to check or start that scope upgrade:
 scripts/whiskey-mcp-lark-docs-scope.sh
 scripts/whiskey-mcp-lark-docs-scope.sh --capture-login-prompt
 scripts/whiskey-mcp-lark-docs-scope.sh --start-login
+scripts/whiskey-mcp-lark-docs-adopt.sh
 ```
 
 ## Eval/Release Lane

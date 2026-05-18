@@ -6,6 +6,7 @@ OUTPUT_DIR="${WHISKEY_REMOTE_COMPUTER_PREFLIGHT_DIR:-.mandoforge/remote-adoption
 MODE="check"
 SCOPE="${WHISKEY_LARK_DOCS_SCOPE:-search:docs:read}"
 LOGIN_PROMPT_TIMEOUT_SECONDS="${WHISKEY_LARK_DOCS_LOGIN_PROMPT_TIMEOUT_SECONDS:-10}"
+OUTPUT_MODE="text"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,8 +34,12 @@ while [[ $# -gt 0 ]]; do
       LOGIN_PROMPT_TIMEOUT_SECONDS="${2:?--timeout-seconds requires a value}"
       shift 2
       ;;
+    --json)
+      OUTPUT_MODE="json"
+      shift
+      ;;
     *)
-      echo "usage: scripts/whiskey-mcp-lark-docs-scope.sh [--host <ssh-host>] [--output-dir <dir>] [--scope <scope>] [--timeout-seconds <n>] [--start-login | --capture-login-prompt]" >&2
+      echo "usage: scripts/whiskey-mcp-lark-docs-scope.sh [--host <ssh-host>] [--output-dir <dir>] [--scope <scope>] [--timeout-seconds <n>] [--json] [--start-login | --capture-login-prompt]" >&2
       exit 1
       ;;
   esac
@@ -153,6 +158,11 @@ REMOTE
   cp "$json_file" "$OUTPUT_DIR/whiskey-mcp-lark-docs-login-prompt-latest.json"
   cp "$text_file" "$OUTPUT_DIR/whiskey-mcp-lark-docs-login-prompt-latest.txt"
 
+  if [[ "$OUTPUT_MODE" == "json" ]]; then
+    cat "$json_file"
+    exit 0
+  fi
+
   cat "$text_file"
   printf '\njson=%s\ntext=%s\n' "$json_file" "$text_file"
   exit 0
@@ -228,6 +238,11 @@ jq -r '
 
 cp "$json_file" "$OUTPUT_DIR/whiskey-mcp-lark-docs-scope-latest.json"
 cp "$text_file" "$OUTPUT_DIR/whiskey-mcp-lark-docs-scope-latest.txt"
+
+if [[ "$OUTPUT_MODE" == "json" ]]; then
+  cat "$json_file"
+  exit 0
+fi
 
 cat "$text_file"
 printf '\njson=%s\ntext=%s\n' "$json_file" "$text_file"
