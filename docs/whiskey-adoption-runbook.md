@@ -413,6 +413,14 @@ scripts/whiskey-remote-computer-state-provider-readiness.sh
 
 The readiness helper also records the Whiskey host capacity and PVC/PV binding state. Treat `pilot_sizing_status=pilot_ok` as approval only for a low-concurrency pilot, not for production scale-out. On the current Whiskey class, keep the first live run to `recommended_remote_computer_pods=1-2` and `recommended_juicefs_cache_gib=5-10`; if `pvc_phase` is not `Bound`, fix the provider profile or PVC/PV binding before enabling live runner mutation.
 
+If no JuiceFS/CephFS/Longhorn backend exists yet and the goal is only to test the single-node Whiskey control path, render the local hostPath profile instead. This uses Whiskey-local disk for `/agent-state`, so it can validate the k3s/Pod/PVC/runner wiring, but it is not production distributed state storage and must not be used as multi-node evidence:
+
+```bash
+scripts/render-remote-computer-local-hostpath-profile.sh \
+  deploy/k8s/remote-computer-state-local-hostpath.env.example \
+  > .mandoforge/remote-adoption/whiskey/remote-computer-state-local-hostpath.rendered.yaml
+```
+
 If the audit still reports placeholder JuiceFS values, render a real Secret/PV manifest from an env file with:
 
 ```bash

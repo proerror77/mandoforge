@@ -8,6 +8,7 @@ REMOTE_DEPLOY_DIR="$REMOTE_ROOT/deploy"
 LOCAL_SYNC_DIR="${WHISKEY_LOCAL_SYNC_DIR:-.mandoforge/remote-adoption/whiskey}"
 KEDA_INSTALL_URL="${WHISKEY_KEDA_INSTALL_URL:-https://github.com/kedacore/keda/releases/download/v2.19.0/keda-2.19.0-core.yaml}"
 RENDERED_JUICEFS_PROFILE="${WHISKEY_REMOTE_COMPUTER_JUICEFS_PROFILE:-}"
+RENDERED_STATE_PROFILE="${WHISKEY_REMOTE_COMPUTER_STATE_PROFILE:-$RENDERED_JUICEFS_PROFILE}"
 RUNTIME_ENV_FILE="${WHISKEY_REMOTE_COMPUTER_RUNTIME_ENV_FILE:-}"
 APPLY_MANIFESTS=0
 RUN_EVIDENCE=0
@@ -28,7 +29,11 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --juicefs-profile)
-      RENDERED_JUICEFS_PROFILE="${2:?--juicefs-profile requires a value}"
+      RENDERED_STATE_PROFILE="${2:?--juicefs-profile requires a value}"
+      shift 2
+      ;;
+    --state-profile)
+      RENDERED_STATE_PROFILE="${2:?--state-profile requires a value}"
       shift 2
       ;;
     --runtime-env-file)
@@ -44,7 +49,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "usage: scripts/whiskey-remote-computer-k3s-cluster-stage.sh [--host <ssh-host>] [--remote-root <dir>] [--sync-dir <dir>] [--juicefs-profile <path>] [--runtime-env-file <path>] [--apply-manifests] [--run-evidence]" >&2
+      echo "usage: scripts/whiskey-remote-computer-k3s-cluster-stage.sh [--host <ssh-host>] [--remote-root <dir>] [--sync-dir <dir>] [--state-profile <path>] [--juicefs-profile <path>] [--runtime-env-file <path>] [--apply-manifests] [--run-evidence]" >&2
       exit 1
       ;;
   esac
@@ -62,8 +67,8 @@ require_cmd rsync
 require_cmd jq
 require_cmd kubectl
 
-if [[ -n "$RENDERED_JUICEFS_PROFILE" && ! -f "$RENDERED_JUICEFS_PROFILE" ]]; then
-  echo "rendered JuiceFS profile not found: $RENDERED_JUICEFS_PROFILE" >&2
+if [[ -n "$RENDERED_STATE_PROFILE" && ! -f "$RENDERED_STATE_PROFILE" ]]; then
+  echo "rendered state profile not found: $RENDERED_STATE_PROFILE" >&2
   exit 1
 fi
 
@@ -137,8 +142,8 @@ plan_text="$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-$stamp.txt"
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_DEPLOY_DIR'"
 rsync -az "$LOCAL_DEPLOY_DIR/" "$REMOTE_HOST:$REMOTE_DEPLOY_DIR/"
 
-if [[ -n "$RENDERED_JUICEFS_PROFILE" ]]; then
-  rsync -az "$RENDERED_JUICEFS_PROFILE" "$REMOTE_HOST:$REMOTE_DEPLOY_DIR/k8s/remote-computer-state-juicefs-profile.yaml"
+if [[ -n "$RENDERED_STATE_PROFILE" ]]; then
+  rsync -az "$RENDERED_STATE_PROFILE" "$REMOTE_HOST:$REMOTE_DEPLOY_DIR/k8s/remote-computer-state-juicefs-profile.yaml"
 fi
 
 if [[ -n "$RUNTIME_ENV_FILE" && ( "$APPLY_MANIFESTS" == "1" || "$RUN_EVIDENCE" == "1" ) ]]; then
@@ -182,7 +187,7 @@ jq -n \
   --arg remote_host "$REMOTE_HOST" \
   --arg remote_root "$REMOTE_ROOT" \
   --arg remote_deploy_dir "$REMOTE_DEPLOY_DIR" \
-  --arg rendered_juicefs_profile "${RENDERED_JUICEFS_PROFILE:-}" \
+  --arg rendered_state_profile "${RENDERED_STATE_PROFILE:-}" \
   --arg runtime_env_file "${RUNTIME_ENV_FILE:-}" \
   --arg verify_status "$verify_status" \
   --arg apply_status "$apply_status" \
@@ -198,7 +203,7 @@ jq -n \
     remote_host: $remote_host,
     remote_root: $remote_root,
     remote_deploy_dir: $remote_deploy_dir,
-    rendered_juicefs_profile: (if $rendered_juicefs_profile == "" then null else $rendered_juicefs_profile end),
+    rendered_state_profile: (if $rendered_state_profile == "" then null else $rendered_state_profile end),
     runtime_env_file: (if $runtime_env_file == "" then null else $runtime_env_file end),
     verify_status: $verify_status,
     apply_dry_run_status: $apply_dry_run_status,
@@ -219,7 +224,7 @@ jq -r '
     "generated_at=" + .generated_at,
     "remote_host=" + .remote_host,
     "verify_status=" + .verify_status,
-    "rendered_juicefs_profile=" + (.rendered_juicefs_profile // "none"),
+    "rendered_state_profile=" + (.rendered_state_profile // "none"),
     "runtime_env_file=" + (.runtime_env_file // "none"),
     "apply_dry_run_status=" + .apply_dry_run_status,
     "apply_dry_run_file=" + (.apply_dry_run_file // "none"),

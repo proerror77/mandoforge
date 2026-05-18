@@ -85,6 +85,10 @@ runner_json="$(curl -fsS "${auth_headers[@]}" "http://127.0.0.1:${api_port}/api/
 secret_json="$(kubectl -n "$namespace" get secret mandoforge-remote-computer-juicefs -o json 2>/dev/null || true)"
 pvc_json="$(kubectl -n "$namespace" get pvc mandoforge-remote-computer-state -o json 2>/dev/null || true)"
 pv_json="$(kubectl get pv mandoforge-remote-computer-state-juicefs-pv -o json 2>/dev/null || true)"
+pv_provider="unknown"
+if [[ -n "$pv_json" ]]; then
+  pv_provider="$(printf '%s\n' "$pv_json" | jq -r '.metadata.annotations["mandoforge.io/provider"] // (if .spec.hostPath then "local-hostpath" elif .spec.csi.driver == "csi.juicefs.com" then "juicefs" else "unknown" end)')"
+fi
 disk_kib_total="$(df -Pk / | awk 'NR==2 {print $2}')"
 disk_kib_used="$(df -Pk / | awk 'NR==2 {print $3}')"
 disk_kib_available="$(df -Pk / | awk 'NR==2 {print $4}')"
@@ -154,6 +158,7 @@ jq -n \
   --arg node_cpu_percent "$node_cpu_percent" \
   --arg node_memory_bytes "$node_memory_bytes" \
   --arg node_memory_percent "$node_memory_percent" \
+  --arg pv_provider "$pv_provider" \
   '{
     generated_at: $generated_at,
     remote_host: $remote_host,
@@ -184,6 +189,7 @@ jq -n \
       present: ((($pvc | type) == "object") and (($pvc.metadata.name // "") != "")),
       phase: ($pvc.status.phase // null),
       storage_class_name: ($pvc.spec.storageClassName // null),
+      storage_class_key: ($pvc.spec.storageClassName // ""),
       volume_name: ($pvc.spec.volumeName // null),
       annotations: ($pvc.metadata.annotations // {})
     },
@@ -191,6 +197,9 @@ jq -n \
       present: ((($pv | type) == "object") and (($pv.metadata.name // "") != "")),
       phase: ($pv.status.phase // null),
       storage_class_name: ($pv.spec.storageClassName // null),
+      storage_class_key: ($pv.spec.storageClassName // ""),
+      provider: (if $pv_provider == "" then "unknown" else $pv_provider end),
+      host_path: ($pv.spec.hostPath.path // null),
       csi_driver: ($pv.spec.csi.driver // null),
       annotations: ($pv.metadata.annotations // {})
     },
@@ -264,9 +273,9 @@ jq \
       []
       + (if .k3s.status != "ready" then ["k3s cluster is not ready"] else [] end)
       + (if .readiness.state_filesystem.distributed_filesystem_configured != true then ["no real distributed filesystem provider is configured"] else [] end)
-      + (if .juicefs_secret.present == true and .juicefs_secret.placeholder_values_detected == true then ["JuiceFS profile still uses placeholder secret values"] else [] end)
+      + (if .pv.provider == "juicefs" and .juicefs_secret.present == true and .juicefs_secret.placeholder_values_detected == true then ["JuiceFS profile still uses placeholder secret values"] else [] end)
       + (if .pvc.present == true and .pvc.phase != "Bound" then ["Remote Computer state PVC is not bound"] else [] end)
-      + (if .pvc.present == true and .pv.present == true and .pvc.storage_class_name != .pv.storage_class_name then ["Remote Computer PVC/PV storageClassName values do not match"] else [] end)
+      + (if .pvc.present == true and .pv.present == true and .pvc.storage_class_key != .pv.storage_class_key then ["Remote Computer PVC/PV storageClassName values do not match"] else [] end)
       + (if .readiness.state_filesystem.lock_manager_configured != true then ["lock-aware state sync manager is not configured"] else [] end)
       + (if .runner.mode != "kubernetes" then ["runner mode is not kubernetes"] else [] end)
       + (if .runner.mutation_enabled != true then ["runner mutation gate is disabled"] else [] end)
@@ -278,9 +287,9 @@ jq \
       []
       + ["render a combined reviewable state-provider bundle with scripts/render-whiskey-remote-computer-unblock-bundle.sh <juicefs-env-file> <runtime-env-file> <output-dir>"]
       + (if .readiness.state_filesystem.distributed_filesystem_configured != true then ["set MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER to juicefs, cephfs, longhorn-rwx, or another real shared-state provider"] else [] end)
-      + (if .juicefs_secret.present == true and .juicefs_secret.placeholder_values_detected == true then ["render a non-placeholder JuiceFS Secret/PV manifest with scripts/render-remote-computer-juicefs-profile.sh <env-file>"] else [] end)
-      + (if .juicefs_secret.present == true and .juicefs_secret.placeholder_values_detected == true then ["replace placeholder JuiceFS secret values in deploy/k8s/remote-computer-state-juicefs-profile.yaml before reapplying the profile"] else [] end)
-      + (if .pvc.present == true and .pv.present == true and .pvc.storage_class_name != .pv.storage_class_name then ["apply the latest JuiceFS PVC binding manifest fix; if Kubernetes rejects the immutable PVC field, request approval before replacing the existing Pending PVC"] else [] end)
+      + (if .pv.provider == "juicefs" and .juicefs_secret.present == true and .juicefs_secret.placeholder_values_detected == true then ["render a non-placeholder JuiceFS Secret/PV manifest with scripts/render-remote-computer-juicefs-profile.sh <env-file>"] else [] end)
+      + (if .pv.provider == "juicefs" and .juicefs_secret.present == true and .juicefs_secret.placeholder_values_detected == true then ["replace placeholder JuiceFS secret values in deploy/k8s/remote-computer-state-juicefs-profile.yaml before reapplying the profile"] else [] end)
+      + (if .pvc.present == true and .pv.present == true and .pvc.storage_class_key != .pv.storage_class_key then ["apply the latest state PVC binding manifest fix; if Kubernetes rejects the immutable PVC field, request approval before replacing the existing Pending PVC"] else [] end)
       + (if .readiness.state_filesystem.lock_manager_configured != true then ["enable MANDOFORGE_REMOTE_COMPUTER_STATE_LOCK_MANAGER and validate lock-aware shared-write coordination"] else [] end)
       + (if .runner.mode != "kubernetes" or .runner.mutation_enabled != true or .runner.live_mutation_enabled != true or .readiness.execution_transport.execution_enabled != true then ["render the Whiskey runtime env overrides with scripts/render-remote-computer-runtime-env.sh <env-file>"] else [] end)
       + (if .runner.mode != "kubernetes" then ["set MANDOFORGE_REMOTE_COMPUTER_RUNNER=kubernetes"] else [] end)
@@ -317,6 +326,7 @@ jq -r '
     "pvc_storage_class_name=" + (.pvc.storage_class_name // "null"),
     "pv_present=" + (.pv.present | tostring),
     "pv_phase=" + (.pv.phase // "unknown"),
+    "pv_provider=" + (.pv.provider // "unknown"),
     "pv_storage_class_name=" + (.pv.storage_class_name // "null"),
     "host_disk_available_gib=" + (((.host_capacity.disk.available_kib // 0) / 1048576) | tostring),
     "host_memory_available_mib=" + ((.host_capacity.memory.available_mib // 0) | tostring),
