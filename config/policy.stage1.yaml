@@ -16,6 +16,8 @@ approval_required:
     risk: high
   - tool: codex.exec
     risk: high
+  - tool: agent_cli.exec
+    risk: high
   - tool: file.write
     risk: medium
   - tool: http.request
@@ -28,6 +30,7 @@ allowed_tools:
     - sql.query
     - shell.exec
     - codex.exec
+    - agent_cli.exec
     - approval.request
     - artifact.create
     - mcp.call

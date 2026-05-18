@@ -10200,6 +10200,11 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
             risk: "high",
             description: "Run Codex CLI in a session workspace",
         },
+        ToolDescriptor {
+            name: "agent_cli.exec",
+            risk: "high",
+            description: "Run an allowlisted coding-agent CLI profile in a session workspace",
+        },
     ]);
     descriptors.sort_by_key(|descriptor| descriptor.name);
     descriptors
@@ -33116,7 +33121,13 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
     use tower::ServiceExt;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn allows_read_only_sql() {
@@ -45724,6 +45735,155 @@ not json
                 && event.payload["runner"] == "app-server"
                 && event.payload["status"] == "completed"
         }));
+    }
+
+    #[tokio::test]
+    async fn queue_backed_worker_runs_allowlisted_agent_cli_profile() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let shim_dir = test_workspace_root().join("agent-cli-shims");
+        fs::create_dir_all(&shim_dir).expect("create shim dir");
+        let shim_path = shim_dir.join(format!("fake-agent-cli-{}.sh", Uuid::new_v4()));
+        fs::write(
+            &shim_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"task=$MANDOFORGE_AGENT_TASK\"\necho \"argv=$*\"\n",
+        )
+        .expect("write fake agent CLI");
+        #[cfg(unix)]
+        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake agent CLI");
+
+        unsafe {
+            std::env::set_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES", "fake-coder");
+            std::env::set_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_COMMAND", &shim_path);
+            std::env::set_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_ARGS", "--mode worker");
+        }
+
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agents[0].id, "title": "queued agent CLI worker"}),
+            ),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/agent_cli.exec/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "profile": "fake-coder",
+                        "task": "Inspect workspace as coding worker",
+                        "args": ["--json"]
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(approval_required["status"], "approval_required");
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job = jobs
+            .iter()
+            .find(|job| job.approval_id == approved.id && job.tool_name == "agent_cli.exec")
+            .expect("agent CLI execution job queued");
+        assert_eq!(job.status, ExecutionJobStatus::Queued);
+        let job_id = job.id;
+
+        let completed: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "agent-cli-worker-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent_cli_call = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "agent_cli.exec")
+            .expect("agent CLI tool call");
+        assert_eq!(agent_cli_call.status, "completed");
+        let result = agent_cli_call.result.as_ref().expect("agent CLI result");
+        assert_eq!(result["runner"], "agent-cli");
+        assert_eq!(result["profile"], "fake-coder");
+        assert!(
+            result["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("profile=fake-coder")
+        );
+        assert!(
+            result["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("argv=--mode worker --json Inspect workspace as coding worker")
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "execution.queued" && event.payload["tool"] == "agent_cli.exec"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "agent_cli.task.completed"
+                && event.payload["runner"] == "agent-cli"
+                && event.payload["profile"] == "fake-coder"
+        }));
+
+        unsafe {
+            std::env::remove_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES");
+            std::env::remove_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_COMMAND");
+            std::env::remove_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_ARGS");
+        }
     }
 
     #[tokio::test]

@@ -45,6 +45,17 @@ pub(crate) struct CodexRequest {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AgentCliRequest {
+    profile: String,
+    task: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+#[allow(dead_code)]
 fn default_sandbox() -> String {
     "workspace-write".to_string()
 }
@@ -243,6 +254,21 @@ pub(crate) async fn run_execution_job(
             .await
         }
         "codex.exec" => execute_approved_codex(state, &approval, &tool_call).await,
+        "agent_cli.exec"
+            if remote_computer_assignment.is_some()
+                && remote_computer_pod_execution_requested() =>
+        {
+            execute_approved_remote_computer_agent_cli(
+                state,
+                &approval,
+                &tool_call,
+                remote_computer_assignment
+                    .as_ref()
+                    .expect("checked assignment"),
+            )
+            .await
+        }
+        "agent_cli.exec" => execute_approved_agent_cli(state, &approval, &tool_call).await,
         _ => {
             state
                 .update_tool_call_status(
@@ -1280,6 +1306,198 @@ async fn execute_approved_remote_computer_codex(
     Ok(())
 }
 
+async fn execute_approved_remote_computer_agent_cli(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+    assignment: &crate::RemoteComputerJobAssignment,
+) -> Result<(), AppError> {
+    let request: AgentCliRequest = serde_json::from_value(tool_call.args.clone())?;
+    let profile = normalize_agent_cli_profile(&request.profile)?;
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == assignment.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    let pod_name = remote_computer
+        .pod_name
+        .clone()
+        .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
+    let command = remote_agent_cli_exec_command(&request)?;
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = remote_computer_runner_for_config(&config);
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "agent_cli.task.started",
+            json!({
+                "profile": profile,
+                "task": &request.task,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "lease_id": assignment.lease_id,
+                "namespace": remote_computer.namespace,
+                "pod_name": pod_name,
+            }),
+        )
+        .await?;
+    let response = runner
+        .mutate(
+            &config,
+            RemoteComputerRunnerDryRunRequest {
+                operation: Some("live_exec".to_string()),
+                remote_computer_id: Some(remote_computer.id),
+                session_id: Some(approval.session_id),
+                pod_name: Some(pod_name.clone()),
+                metadata: Some(
+                    json!({"command": command, "tool_call_id": tool_call.id, "profile": profile}),
+                ),
+            },
+        )
+        .await;
+    let exec_result = response.exec_result.clone().ok_or_else(|| {
+        AppError::bad_request(format!(
+            "Remote Computer agent CLI exec did not return output: {}",
+            response.message
+        ))
+    })?;
+    if response.status != "exec_ok" || !response.execution_enabled {
+        return Err(AppError::bad_request(response.message));
+    }
+
+    let limit = execution_output_limit_bytes();
+    let stdout = truncate_output(
+        exec_result
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        limit,
+    );
+    let stderr = truncate_output(
+        exec_result
+            .get("stderr")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        limit,
+    );
+    let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
+    let event_type = if kubernetes_exec_status_succeeded(&status) {
+        "agent_cli.task.completed"
+    } else {
+        "agent_cli.task.failed"
+    };
+    state
+        .append_event(
+            "worker",
+            Some(tool_call.id),
+            approval.session_id,
+            "remote_computer.execution_transport_completed",
+            json!({
+                "tool_call_id": tool_call.id,
+                "assignment_id": assignment.id,
+                "remote_computer_id": remote_computer.id,
+                "lease_id": assignment.lease_id,
+                "pod_name": pod_name,
+                "tool": tool_call.tool_name,
+                "profile": profile,
+                "stdout_bytes": stdout.original_bytes,
+                "stderr_bytes": stderr.original_bytes,
+                "status": status,
+                "execution_enabled": true,
+            }),
+        )
+        .await?;
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            event_type,
+            json!({
+                "profile": profile,
+                "status": status,
+                "stdout": stdout.text,
+                "stdout_bytes": stdout.original_bytes,
+                "stdout_truncated": stdout.truncated || exec_result
+                    .get("stdout_truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                "stderr": stderr.text,
+                "stderr_bytes": stderr.original_bytes,
+                "stderr_truncated": stderr.truncated || exec_result
+                    .get("stderr_truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "lease_id": assignment.lease_id,
+            }),
+        )
+        .await?;
+    let result = json!({
+        "runner": "remote_computer_pod_exec",
+        "profile": profile,
+        "remote_computer_id": remote_computer.id,
+        "assignment_id": assignment.id,
+        "lease_id": assignment.lease_id,
+        "namespace": remote_computer.namespace,
+        "pod_name": pod_name,
+        "status": status,
+        "stdout": stdout.text,
+        "stdout_bytes": stdout.original_bytes,
+        "stdout_truncated": stdout.truncated || exec_result
+            .get("stdout_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "stderr": stderr.text,
+        "stderr_bytes": stderr.original_bytes,
+        "stderr_truncated": stderr.truncated || exec_result
+            .get("stderr_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    });
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+        )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "tool.completed",
+            "tool_call",
+            Some(tool_call.id),
+            json!({
+                "tool": tool_call.tool_name,
+                "profile": profile,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "pod_name": pod_name,
+                "status": status,
+                "stdout_chars": stdout.text.chars().count(),
+                "stderr_chars": stderr.text.chars().count(),
+                "resumed_after_approval": true
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
 async fn execute_approved_codex(
     state: &AppState,
     approval: &Approval,
@@ -1309,6 +1527,69 @@ async fn execute_approved_codex(
                     "tool_call",
                     Some(tool_call.id),
                     json!({"tool": tool_call.tool_name, "resumed_after_approval": true}),
+                ))
+                .await?;
+            Ok(())
+        }
+        Err(error) => {
+            let error_payload = json!({"error": error.message.clone()});
+            state
+                .append_event(
+                    "tool",
+                    Some(tool_call.id),
+                    approval.session_id,
+                    "tool.error",
+                    json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
+                )
+                .await?;
+            state
+                .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+                .await?;
+            state
+                .append_audit_log(new_audit_log(
+                    Some(approval.session_id),
+                    "tool",
+                    Some(tool_call.id),
+                    "tool.failed",
+                    "tool_call",
+                    Some(tool_call.id),
+                    json!({"tool": tool_call.tool_name, "error": error_payload, "resumed_after_approval": true}),
+                ))
+                .await?;
+            Err(error)
+        }
+    }
+}
+
+async fn execute_approved_agent_cli(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<(), AppError> {
+    let request: AgentCliRequest = serde_json::from_value(tool_call.args.clone())?;
+    match run_agent_cli(state, approval.session_id, request).await {
+        Ok(result) => {
+            state
+                .append_event(
+                    "tool",
+                    Some(tool_call.id),
+                    approval.session_id,
+                    "tool.result",
+                    json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+                )
+                .await?;
+            state
+                .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
+                .await?;
+            state
+                .append_audit_log(new_audit_log(
+                    Some(approval.session_id),
+                    "tool",
+                    Some(tool_call.id),
+                    "tool.completed",
+                    "tool_call",
+                    Some(tool_call.id),
+                    json!({"tool": tool_call.tool_name, "profile": result.get("profile"), "resumed_after_approval": true}),
                 ))
                 .await?;
             Ok(())
@@ -1456,6 +1737,34 @@ fn remote_codex_exec_command(request: &CodexRequest) -> String {
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn remote_agent_cli_exec_command(request: &AgentCliRequest) -> Result<String, AppError> {
+    let profile = normalize_agent_cli_profile(&request.profile)?;
+    let mut command = String::new();
+    command.push_str("set -eu\ncd /workspace\nagent_cli_profile=");
+    command.push_str(&shell_single_quote(&profile));
+    command.push('\n');
+    command.push_str(
+        "allowed=\",${MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES:-},\"\n\
+case \"$allowed\" in *\",$agent_cli_profile,\"*) ;; *) echo \"agent CLI profile is not allowlisted: $agent_cli_profile\" >&2; exit 64 ;; esac\n\
+command_var=\"MANDOFORGE_AGENT_CLI_$(printf '%s' \"$agent_cli_profile\" | tr '[:lower:]-' '[:upper:]_')_COMMAND\"\n\
+args_var=\"MANDOFORGE_AGENT_CLI_$(printf '%s' \"$agent_cli_profile\" | tr '[:lower:]-' '[:upper:]_')_ARGS\"\n\
+agent_command=\"$(eval \"printf '%s' \\\"\\${$command_var:-}\\\"\")\"\n\
+agent_args=\"$(eval \"printf '%s' \\\"\\${$args_var:-}\\\"\")\"\n\
+if [ -z \"$agent_command\" ]; then echo \"agent CLI profile $agent_cli_profile is missing $command_var\" >&2; exit 64; fi\n",
+    );
+    command.push_str("set --\n");
+    command.push_str("if [ -n \"$agent_args\" ]; then\n  # Profile args intentionally use simple whitespace splitting; wrap complex CLIs in a shim.\n  set -- $agent_args\nfi\n");
+    for arg in &request.args {
+        command.push_str(&format!("set -- \"$@\" {}\n", shell_single_quote(arg)));
+    }
+    command.push_str(&format!(
+        "MANDOFORGE_AGENT_CLI_PROFILE=\"$agent_cli_profile\" MANDOFORGE_AGENT_TASK={} \"$agent_command\" \"$@\" {}\n",
+        shell_single_quote(&request.task),
+        shell_single_quote(&request.task)
+    ));
+    Ok(command)
 }
 
 fn remote_file_write_command(relative_path: &str, content: &str) -> String {
@@ -1777,6 +2086,166 @@ fn codex_app_server_turn_status_is_terminal(status: &str) -> bool {
 
 fn codex_app_server_turn_status_succeeded(status: &str) -> bool {
     status.trim().eq_ignore_ascii_case("completed")
+}
+
+#[allow(dead_code)]
+async fn run_agent_cli(
+    state: &AppState,
+    session_id: Uuid,
+    request: AgentCliRequest,
+) -> Result<Value, AppError> {
+    let profile = normalize_agent_cli_profile(&request.profile)?;
+    let config = agent_cli_profile_config(&profile)?;
+    let workspace = state.workspace_root.join(session_id.to_string());
+    tokio::fs::create_dir_all(&workspace).await?;
+
+    state
+        .append_event(
+            "tool",
+            None,
+            session_id,
+            "agent_cli.task.started",
+            json!({
+                "profile": profile,
+                "task": &request.task,
+                "workspace": workspace,
+                "runner": "agent-cli"
+            }),
+        )
+        .await?;
+
+    let mut command = Command::new(&config.command);
+    command.current_dir(&workspace);
+    for arg in config.args {
+        command.arg(arg);
+    }
+    for arg in request.args {
+        command.arg(arg);
+    }
+    command.arg(&request.task);
+    command.env("MANDOFORGE_AGENT_CLI_PROFILE", &profile);
+    command.env("MANDOFORGE_AGENT_TASK", &request.task);
+
+    let timeout_seconds = request
+        .timeout_seconds
+        .or(config.timeout_seconds)
+        .unwrap_or(180)
+        .clamp(1, 900);
+    let output = tokio::time::timeout(Duration::from_secs(timeout_seconds), command.output())
+        .await
+        .map_err(|_| AppError::bad_request("agent CLI execution timed out"))??;
+
+    let stdout_full = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_full = String::from_utf8_lossy(&output.stderr).to_string();
+    let limit = execution_output_limit_bytes();
+    let stdout = truncate_output(&stdout_full, limit);
+    let stderr = truncate_output(&stderr_full, limit);
+    let event_type = if output.status.success() {
+        "agent_cli.task.completed"
+    } else {
+        "agent_cli.task.failed"
+    };
+    state
+        .append_event(
+            "tool",
+            None,
+            session_id,
+            event_type,
+            json!({
+                "profile": profile,
+                "exit_code": output.status.code(),
+                "stdout": stdout.text,
+                "stdout_bytes": stdout.original_bytes,
+                "stdout_truncated": stdout.truncated,
+                "stderr": stderr.text,
+                "stderr_bytes": stderr.original_bytes,
+                "stderr_truncated": stderr.truncated,
+                "runner": "agent-cli"
+            }),
+        )
+        .await?;
+
+    Ok(json!({
+        "runner": "agent-cli",
+        "profile": profile,
+        "status": output.status.code(),
+        "stdout": stdout.text,
+        "stdout_bytes": stdout.original_bytes,
+        "stdout_truncated": stdout.truncated,
+        "stderr": stderr.text,
+        "stderr_bytes": stderr.original_bytes,
+        "stderr_truncated": stderr.truncated
+    }))
+}
+
+struct AgentCliProfileConfig {
+    command: String,
+    args: Vec<String>,
+    timeout_seconds: Option<u64>,
+}
+
+fn normalize_agent_cli_profile(profile: &str) -> Result<String, AppError> {
+    let normalized = profile.trim().to_ascii_lowercase();
+    if normalized.is_empty()
+        || !normalized
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return Err(AppError::bad_request(
+            "agent CLI profile must be an allowlist-safe name",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn agent_cli_profile_config(profile: &str) -> Result<AgentCliProfileConfig, AppError> {
+    let allowed = std::env::var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES").unwrap_or_default();
+    let allowed_profiles: HashSet<String> = allowed
+        .split(',')
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if !allowed_profiles.contains(profile) {
+        return Err(AppError::bad_request(format!(
+            "agent CLI profile is not allowlisted: {profile}"
+        )));
+    }
+
+    let env_prefix = format!(
+        "MANDOFORGE_AGENT_CLI_{}",
+        profile
+            .chars()
+            .map(|ch| if ch == '-' { '_' } else { ch })
+            .collect::<String>()
+            .to_ascii_uppercase()
+    );
+    let command = std::env::var(format!("{env_prefix}_COMMAND"))
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request(format!(
+                "agent CLI profile {profile} is missing {env_prefix}_COMMAND"
+            ))
+        })?;
+    let args = std::env::var(format!("{env_prefix}_ARGS"))
+        .ok()
+        .map(|value| {
+            value
+                .split_whitespace()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let timeout_seconds = std::env::var(format!("{env_prefix}_TIMEOUT_SECONDS"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+
+    Ok(AgentCliProfileConfig {
+        command,
+        args,
+        timeout_seconds,
+    })
 }
 
 #[allow(dead_code)]

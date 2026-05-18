@@ -58,6 +58,10 @@ impl Default for PolicyConfig {
                     risk: "high".to_string(),
                 },
                 ApprovalRequiredRule {
+                    tool: "agent_cli.exec".to_string(),
+                    risk: "high".to_string(),
+                },
+                ApprovalRequiredRule {
                     tool: "file.write".to_string(),
                     risk: "medium".to_string(),
                 },
@@ -75,6 +79,7 @@ impl Default for PolicyConfig {
                     "sql.query".to_string(),
                     "shell.exec".to_string(),
                     "codex.exec".to_string(),
+                    "agent_cli.exec".to_string(),
                     "approval.request".to_string(),
                     "artifact.create".to_string(),
                     "mcp.call".to_string(),
@@ -222,7 +227,7 @@ fn tool_risk_level(name: &str) -> &'static str {
     match name {
         "file.read" | "sql.get_schema" | "approval.request" | "artifact.create" => "low",
         "file.write" | "sql.query" => "medium",
-        "shell.exec" | "codex.exec" | "http.request" | "mcp.call" => "high",
+        "shell.exec" | "codex.exec" | "agent_cli.exec" | "http.request" | "mcp.call" => "high",
         _ => "unknown",
     }
 }

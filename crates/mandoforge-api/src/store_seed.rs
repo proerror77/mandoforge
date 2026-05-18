@@ -24,6 +24,7 @@ impl AppState {
                 "sql.query".to_string(),
                 "shell.exec".to_string(),
                 "codex.exec".to_string(),
+                "agent_cli.exec".to_string(),
                 "approval.request".to_string(),
                 "artifact.create".to_string(),
                 "mcp.call".to_string(),
