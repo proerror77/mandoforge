@@ -243,7 +243,7 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [ ] Stage 4.2: Add Agent Builder / Console surfaces for runtime profile, tools, skills, MCP, Remote Computer profile, and semantic scope selection.
 - [x] Stage 4.3: Add Minimal Semantic Kernel scope fields for project, repo, service, workflow, policy, and memory scope.
 - [x] Stage 4.3: Add a minimal context packet builder that can assemble task, agent, scopes, policy reminders, relevant repo doc references, and known freshness warnings without requiring the full Stage 5 semantic layer.
-- [ ] Stage 4.4: Add Manager Agent planner records for task intake, decomposition, specialist selection, risk classification, and result review.
+- [x] Stage 4.4: Add Manager Agent planner records for task intake, decomposition, specialist selection, risk classification, and result review.
 - [ ] Stage 4.5: Extend typed agent handoff / assignment records with semantic scopes, runtime profile, Remote Computer requirement, review status, and human escalation status.
 - [ ] Stage 4.5: Add Manager Agent -> Specialist Agent handoff execution path that preserves policy, approval, audit, timeline, and Remote Computer assignment.
 - [ ] Stage 4.6: Add `backend-coder` as the first Managed Agent demo proving runtime profile, minimal semantic scopes, Manager Agent assignment, Remote Computer execution, artifacts, audit, and replay.

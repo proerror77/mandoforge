@@ -238,6 +238,13 @@ The Manager Agent is the task-control brain:
 - review results
 - escalate to humans when blocked
 
+Current repo slice:
+
+- `manager_agent_plans` stores Manager Agent planning records for task intake, decomposition, specialist selection, risk classification, review status, and audit trace.
+- `POST /api/sessions/{id}/manager-plans` creates a governed plan only when the session is bound to a manager agent; `specialist_agent_id` must point to a specialist agent.
+- `POST /api/manager-plans/{id}/review` records Manager Agent result review and writes `manager_plan.reviewed` timeline/audit evidence.
+- Stage 4.5 still owns execution-grade assignment and handoff propagation from a plan into specialist runtime work.
+
 ### Stage 4.5 Agent Handoff / Assignment
 
 Handoff must become the product surface for Manager Agent -> Specialist Agent delegation:

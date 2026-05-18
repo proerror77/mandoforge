@@ -7,11 +7,11 @@ use uuid::Uuid;
 use crate::{
     Agent, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile, AgentVersion, Approval,
     ApprovalEscalationRule, ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog,
-    CodexAppServerRun, CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership,
-    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, RemoteComputer,
-    RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
-    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord, Session, SessionEvent,
-    Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
+    CodexAppServerRun, CostAlertRoute, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan,
+    McpServerRecord, Membership, Organization, PolicyRevision, Project, ProviderAccess,
+    ProviderRecord, RemoteComputer, RemoteComputerAttachment, RemoteComputerJobAssignment,
+    RemoteComputerLease, RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord,
+    Session, SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
     WorkflowPackProfileAsset,
 };
 
@@ -54,6 +54,7 @@ pub(crate) struct MemoryStore {
     pub(crate) remote_computer_state_locks: HashMap<Uuid, RemoteComputerStateLock>,
     pub(crate) remote_computer_sidecar_heartbeats: HashMap<Uuid, RemoteComputerSidecarHeartbeat>,
     pub(crate) agent_handoff_events: HashMap<Uuid, AgentHandoffEvent>,
+    pub(crate) manager_agent_plans: HashMap<Uuid, ManagerAgentPlan>,
     pub(crate) workflow_pack_installations: HashMap<Uuid, WorkflowPackInstallation>,
     pub(crate) workflow_pack_profile_assets: HashMap<Uuid, WorkflowPackProfileAsset>,
 }

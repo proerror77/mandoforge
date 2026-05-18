@@ -5,9 +5,9 @@ use sqlx::{Row, postgres::PgRow};
 use crate::{
     Agent, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile, AgentVersion, AppError, Approval,
     ApprovalEscalationRule, ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog,
-    CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
-    PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent,
-    Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
+    CostAlertRoute, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership,
+    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session,
+    SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
     WorkflowPackProfileAsset,
 };
 
@@ -178,6 +178,24 @@ pub(crate) fn agent_handoff_event_from_row(row: PgRow) -> Result<AgentHandoffEve
         schema_version: row.try_get("schema_version")?,
         risk_level: row.try_get("risk_level")?,
         approval_required: row.try_get("approval_required")?,
+        status: row.try_get("status")?,
+        audit_trace_id: row.try_get("audit_trace_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn manager_agent_plan_from_row(row: PgRow) -> Result<ManagerAgentPlan, AppError> {
+    Ok(ManagerAgentPlan {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        manager_agent_id: row.try_get("manager_agent_id")?,
+        specialist_agent_id: row.try_get("specialist_agent_id")?,
+        task_intake: row.try_get("task_intake")?,
+        decomposition: row.try_get("decomposition")?,
+        specialist_selection: row.try_get("specialist_selection")?,
+        risk_classification: row.try_get("risk_classification")?,
+        review: row.try_get("review")?,
         status: row.try_get("status")?,
         audit_trace_id: row.try_get("audit_trace_id")?,
         created_at: row.try_get("created_at")?,

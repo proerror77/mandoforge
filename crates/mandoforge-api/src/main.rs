@@ -60,6 +60,7 @@ mod store_entities;
 mod store_eval;
 mod store_events;
 mod store_governance;
+mod store_manager_plans;
 mod store_policy_revisions;
 mod store_releases;
 mod store_remote_computers;
@@ -717,6 +718,42 @@ struct AgentHandoffEvent {
     audit_trace_id: Option<Uuid>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManagerAgentPlan {
+    id: Uuid,
+    session_id: Uuid,
+    manager_agent_id: Uuid,
+    specialist_agent_id: Option<Uuid>,
+    task_intake: Value,
+    decomposition: Value,
+    specialist_selection: Value,
+    risk_classification: String,
+    review: Value,
+    status: String,
+    audit_trace_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateManagerAgentPlan {
+    #[serde(default)]
+    specialist_agent_id: Option<Uuid>,
+    task_intake: Value,
+    decomposition: Value,
+    specialist_selection: Value,
+    risk_classification: String,
+    #[serde(default = "empty_json_object")]
+    review: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewManagerAgentPlan {
+    review: Value,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4321,6 +4358,10 @@ fn build_router(state: AppState) -> Router {
             "/api/sessions/{id}/agent-handoffs",
             get(list_session_agent_handoff_events).post(create_agent_handoff_event),
         )
+        .route(
+            "/api/sessions/{id}/manager-plans",
+            get(list_session_manager_agent_plans).post(create_manager_agent_plan),
+        )
         .route("/api/sessions/{id}/stream", get(stream_events))
         .route("/api/sessions/{id}/artifacts", get(list_artifacts))
         .route(
@@ -4882,6 +4923,12 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/agent-handoffs", get(list_agent_handoff_events))
         .route("/api/agent-handoffs/{id}", get(get_agent_handoff_event))
+        .route("/api/manager-plans", get(list_manager_agent_plans))
+        .route("/api/manager-plans/{id}", get(get_manager_agent_plan))
+        .route(
+            "/api/manager-plans/{id}/review",
+            post(review_manager_agent_plan),
+        )
         .route(
             "/api/agent-handoffs/{id}/accept",
             post(accept_agent_handoff_event),
@@ -8036,6 +8083,165 @@ async fn get_agent_handoff_event(
     Ok(Json(event))
 }
 
+async fn list_manager_agent_plans(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "manager_agent_plans",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_manager_agent_plans(None).await?))
+}
+
+async fn list_session_manager_agent_plans(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_manager_agent_plans(Some(id)).await?))
+}
+
+async fn get_manager_agent_plan(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ManagerAgentPlan>, AppError> {
+    let plan = state.get_manager_agent_plan(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(plan.session_id),
+    )
+    .await?;
+    Ok(Json(plan))
+}
+
+async fn create_manager_agent_plan(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateManagerAgentPlan>,
+) -> Result<Json<ManagerAgentPlan>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(session_id),
+    )
+    .await?;
+    let session = state.get_session(session_id).await?;
+    let manager_agent = state.get_agent(session.agent_id).await?;
+    if manager_agent.agent_role != "manager" {
+        return Err(AppError::bad_request(
+            "manager agent plans require a session bound to a manager agent",
+        ));
+    }
+    if !input.task_intake.is_object()
+        || !input.decomposition.is_object()
+        || !input.specialist_selection.is_object()
+        || !input.review.is_object()
+    {
+        return Err(AppError::bad_request(
+            "manager agent plan sections must be JSON objects",
+        ));
+    }
+    let risk_classification = normalize_manager_plan_risk(&input.risk_classification)?;
+    if let Some(specialist_agent_id) = input.specialist_agent_id {
+        let specialist = state.get_agent(specialist_agent_id).await?;
+        if specialist.agent_role != "specialist" {
+            return Err(AppError::bad_request(
+                "specialist_agent_id must reference a specialist agent",
+            ));
+        }
+    }
+    let now = Utc::now();
+    let plan = state
+        .create_manager_agent_plan(ManagerAgentPlan {
+            id: Uuid::new_v4(),
+            session_id,
+            manager_agent_id: manager_agent.id,
+            specialist_agent_id: input.specialist_agent_id,
+            task_intake: input.task_intake,
+            decomposition: input.decomposition,
+            specialist_selection: input.specialist_selection,
+            risk_classification,
+            review: input.review,
+            status: "planned".to_string(),
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    let audit =
+        record_manager_agent_plan_audit_and_event(&state, &plan, "manager_plan.created").await?;
+    let plan = state
+        .update_manager_agent_plan_review(
+            plan.id,
+            plan.review.clone(),
+            plan.status.clone(),
+            Some(audit.id),
+        )
+        .await?;
+    Ok(Json(plan))
+}
+
+async fn review_manager_agent_plan(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewManagerAgentPlan>,
+) -> Result<Json<ManagerAgentPlan>, AppError> {
+    let current = state.get_manager_agent_plan(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(current.session_id),
+    )
+    .await?;
+    if !input.review.is_object() {
+        return Err(AppError::bad_request(
+            "manager agent plan review must be a JSON object",
+        ));
+    }
+    let status = match input.status {
+        Some(status) => normalize_manager_plan_status(&status)?,
+        None => "reviewed".to_string(),
+    };
+    let reviewed = state
+        .update_manager_agent_plan_review(current.id, input.review, status, current.audit_trace_id)
+        .await?;
+    let audit =
+        record_manager_agent_plan_audit_and_event(&state, &reviewed, "manager_plan.reviewed")
+            .await?;
+    let reviewed = state
+        .update_manager_agent_plan_review(
+            reviewed.id,
+            reviewed.review.clone(),
+            reviewed.status.clone(),
+            Some(audit.id),
+        )
+        .await?;
+    Ok(Json(reviewed))
+}
+
 async fn create_agent_handoff_event(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
@@ -8210,6 +8416,65 @@ async fn record_agent_handoff_audit_and_event(
             details,
         ))
         .await
+}
+
+async fn record_manager_agent_plan_audit_and_event(
+    state: &AppState,
+    plan: &ManagerAgentPlan,
+    action: &str,
+) -> Result<AuditLog, AppError> {
+    let details = json!({
+        "manager_agent_plan_id": plan.id,
+        "session_id": plan.session_id,
+        "manager_agent_id": plan.manager_agent_id,
+        "specialist_agent_id": plan.specialist_agent_id,
+        "risk_classification": plan.risk_classification,
+        "status": plan.status,
+        "task_intake": plan.task_intake,
+        "decomposition": plan.decomposition,
+        "specialist_selection": plan.specialist_selection,
+        "review": plan.review,
+    });
+    state
+        .append_event(
+            "agent",
+            Some(plan.manager_agent_id),
+            plan.session_id,
+            action,
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(plan.session_id),
+            "agent",
+            Some(plan.manager_agent_id),
+            action,
+            "manager_agent_plan",
+            Some(plan.id),
+            details,
+        ))
+        .await
+}
+
+fn normalize_manager_plan_risk(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "low" | "medium" | "high" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "risk_classification must be one of low, medium, or high",
+        )),
+    }
+}
+
+fn normalize_manager_plan_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "planned" | "reviewed" | "approved" | "needs_changes" | "blocked" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "manager agent plan status must be planned, reviewed, approved, needs_changes, or blocked",
+        )),
+    }
 }
 
 fn ensure_agent_handoff_transition(current: &str, next: &str) -> Result<(), AppError> {
@@ -11708,6 +11973,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "remote_computer_state_locks",
         "remote_computer_sidecar_heartbeats",
         "agent_handoff_events",
+        "manager_agent_plans",
         "workflow_pack_installations",
         "workflow_pack_profile_assets",
         "agent_runtime_profiles",
@@ -37540,6 +37806,292 @@ not json
     }
 
     #[tokio::test]
+    async fn manager_agent_plans_record_planning_and_review_events() {
+        let app = test_app().await;
+        let specialist: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Backend Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["agent_cli.exec", "file.read"],
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "stage-4",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Engineering Manager Agent",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["approval.request"],
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "agent-os",
+                        "workflow_scope": "manager-planning",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": manager.id,
+                    "title": "stage 4 manager planning",
+                    "message": "Plan a backend-coder assignment."
+                }),
+            ),
+        )
+        .await;
+
+        let plan: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/manager-plans", session.id),
+                json!({
+                    "specialist_agent_id": specialist.id,
+                    "task_intake": {
+                        "goal": "Add a governed backend-coder demo",
+                        "source": "user_request"
+                    },
+                    "decomposition": {
+                        "steps": [
+                            "confirm runtime profile",
+                            "assemble context packet",
+                            "create assignment"
+                        ]
+                    },
+                    "specialist_selection": {
+                        "selected_agent_id": specialist.id,
+                        "reason": "backend coding scope and agent_cli tool"
+                    },
+                    "risk_classification": "medium",
+                    "review": {
+                        "required": true,
+                        "status": "pending"
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(plan.session_id, session.id);
+        assert_eq!(plan.manager_agent_id, manager.id);
+        assert_eq!(plan.specialist_agent_id, Some(specialist.id));
+        assert_eq!(plan.risk_classification, "medium");
+        assert_eq!(plan.status, "planned");
+        assert_eq!(
+            plan.task_intake["goal"],
+            "Add a governed backend-coder demo"
+        );
+        assert!(plan.audit_trace_id.is_some());
+
+        let listed: Vec<ManagerAgentPlan> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/manager-plans", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, plan.id);
+
+        let reviewed: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/manager-plans/{}/review", plan.id),
+                json!({
+                    "status": "approved",
+                    "review": {
+                        "status": "approved",
+                        "summary": "Plan is ready for Stage 4.5 assignment execution."
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(reviewed.status, "approved");
+        assert_eq!(
+            reviewed.review["summary"],
+            "Plan is ready for Stage 4.5 assignment execution."
+        );
+
+        let fetched: ManagerAgentPlan = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/manager-plans/{}", plan.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(fetched.id, plan.id);
+        assert_eq!(fetched.status, "approved");
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "manager_plan.created"
+                && event.payload["manager_agent_plan_id"] == json!(plan.id)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "manager_plan.reviewed" && event.payload["status"] == "approved"
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "manager_plan.created"
+                && log.resource_type == "manager_agent_plan"
+                && log.resource_id == Some(plan.id)
+        }));
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "manager_plan.reviewed"
+                && log.resource_type == "manager_agent_plan"
+                && log.resource_id == Some(plan.id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn manager_agent_plan_requires_manager_session_and_specialist_target() {
+        let app = test_app().await;
+        let worker: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Worker Only",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let other_manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Other Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let worker_session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": worker.id, "title": "worker session"}),
+            ),
+        )
+        .await;
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/manager-plans", worker_session.id),
+                json!({
+                    "specialist_agent_id": worker.id,
+                    "task_intake": {},
+                    "decomposition": {},
+                    "specialist_selection": {},
+                    "risk_classification": "low"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"],
+            "manager agent plans require a session bound to a manager agent"
+        );
+
+        let manager_session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": other_manager.id, "title": "manager session"}),
+            ),
+        )
+        .await;
+        let (status, error) = request_value(
+            app,
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/manager-plans", manager_session.id),
+                json!({
+                    "specialist_agent_id": other_manager.id,
+                    "task_intake": {},
+                    "decomposition": {},
+                    "specialist_selection": {},
+                    "risk_classification": "low"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"],
+            "specialist_agent_id must reference a specialist agent"
+        );
+    }
+
+    #[tokio::test]
     async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
         let app = test_app().await;
         let manifest_path = ai_governance_manifest_path_string();
@@ -38413,6 +38965,7 @@ not json
         assert!(names.contains(&"0029_workflow_pack_profile_assets.sql"));
         assert!(names.contains(&"0030_agent_runtime_profiles.sql"));
         assert!(names.contains(&"0031_managed_agent_registry_fields.sql"));
+        assert!(names.contains(&"0032_manager_agent_plans.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -38422,14 +38975,15 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
             include_str!("../../../db/migrations/0027_agent_handoff_events.sql"),
             include_str!("../../../db/migrations/0028_workflow_pack_installations.sql"),
             include_str!("../../../db/migrations/0029_workflow_pack_profile_assets.sql"),
-            include_str!("../../../db/migrations/0030_agent_runtime_profiles.sql")
+            include_str!("../../../db/migrations/0030_agent_runtime_profiles.sql"),
+            include_str!("../../../db/migrations/0032_manager_agent_plans.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
