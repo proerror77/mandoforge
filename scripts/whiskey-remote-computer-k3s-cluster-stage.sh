@@ -6,6 +6,7 @@ REMOTE_ROOT="${WHISKEY_REMOTE_ROOT:-/opt/mandoforge-adoption}"
 LOCAL_DEPLOY_DIR="${WHISKEY_REMOTE_COMPUTER_DEPLOY_DIR:-deploy}"
 REMOTE_DEPLOY_DIR="$REMOTE_ROOT/deploy"
 LOCAL_SYNC_DIR="${WHISKEY_LOCAL_SYNC_DIR:-.mandoforge/remote-adoption/whiskey}"
+KEDA_INSTALL_URL="${WHISKEY_KEDA_INSTALL_URL:-https://github.com/kedacore/keda/releases/download/v2.19.0/keda-2.19.0-core.yaml}"
 APPLY_MANIFESTS=0
 RUN_EVIDENCE=0
 
@@ -51,6 +52,20 @@ require_cmd rsync
 require_cmd jq
 require_cmd kubectl
 
+ensure_remote_keda() {
+  local remote_host="$1"
+  local install_url="$2"
+
+  if ssh "$remote_host" "kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1"; then
+    echo "Whiskey remote-computer k3s cluster stage: KEDA CRD already present"
+    return 0
+  fi
+
+  echo "Whiskey remote-computer k3s cluster stage: installing KEDA from $install_url"
+  ssh "$remote_host" "kubectl apply --server-side -f '$install_url'"
+  ssh "$remote_host" "kubectl wait --for=condition=Available deployment/keda-operator -n keda --timeout=180s"
+}
+
 verify_output="$(scripts/whiskey-remote-computer-k3s-verify.sh --host "$REMOTE_HOST" --output-dir "$LOCAL_SYNC_DIR")"
 printf '%s\n' "$verify_output"
 verify_json="$(printf '%s\n' "$verify_output" | sed -n 's/^json=//p' | tail -1)"
@@ -83,6 +98,7 @@ remote_render_lines="$(wc -l <"$remote_render_file" | awk '{print $1}')"
 
 apply_status="planned"
 if [[ "$APPLY_MANIFESTS" == "1" ]]; then
+  ensure_remote_keda "$REMOTE_HOST" "$KEDA_INSTALL_URL"
   ssh "$REMOTE_HOST" "kubectl apply -k '$REMOTE_DEPLOY_DIR'"
   apply_status="applied"
 fi

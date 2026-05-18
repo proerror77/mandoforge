@@ -79,6 +79,14 @@ lark_adoption_live_source=""
 if [[ -n "$latest_full_archive" && -f "$latest_full_archive" ]]; then
   lark_adoption_live_source="$(tar -xOf "$latest_full_archive" workflow-packs/summary.txt 2>/dev/null | sed -n 's/^connector_quality_live_source=//p' | head -n 1 || true)"
 fi
+remote_computer_archive_status=""
+remote_computer_state_sync_status=""
+remote_computer_runner_status=""
+if [[ -n "$latest_full_archive" && -f "$latest_full_archive" ]]; then
+  remote_computer_archive_status="$(tar -xOf "$latest_full_archive" remote-computer/summary.txt 2>/dev/null | sed -n 's/^remote_computer_status=//p' | head -n 1 || true)"
+  remote_computer_state_sync_status="$(tar -xOf "$latest_full_archive" remote-computer/summary.txt 2>/dev/null | sed -n 's/^production_state_sync_status=//p' | head -n 1 || true)"
+  remote_computer_runner_status="$(tar -xOf "$latest_full_archive" remote-computer/summary.txt 2>/dev/null | sed -n 's/^runner_status=//p' | head -n 1 || true)"
+fi
 
 remote_computer_remote_host="unknown"
 remote_computer_inventory_status="unknown"
@@ -96,7 +104,10 @@ if [[ -n "${latest_k3s_plan:-}" && -f "$latest_k3s_plan" ]]; then
   remote_computer_install_status="$(jq -r '.install.status // "unknown"' "$latest_k3s_plan")"
   remote_computer_verify_status="$(jq -r '.verify.status // "unknown"' "$latest_k3s_plan")"
 
-  if [[ "$remote_computer_verify_status" == "ready" ]]; then
+  if [[ "$remote_computer_verify_status" == "ready" && "$remote_computer_state_sync_status" == "blocked" ]]; then
+    remote_computer_next_command="none"
+    remote_computer_note="k3s and manifests are in place; remaining blocker is real distributed state storage plus live runner/state-sync hardening"
+  elif [[ "$remote_computer_verify_status" == "ready" ]]; then
     remote_computer_next_command="$remote_computer_stage_command"
     remote_computer_note="k3s is verified; apply manifests and rerun strict evidence"
   elif [[ "$remote_computer_install_status" == "applied" ]]; then
@@ -148,6 +159,9 @@ if [[ "$OUTPUT_MODE" == "json" ]]; then
     --arg remote_computer_prepare_status "$remote_computer_prepare_status" \
     --arg remote_computer_install_status "$remote_computer_install_status" \
     --arg remote_computer_verify_status "$remote_computer_verify_status" \
+    --arg remote_computer_archive_status "$remote_computer_archive_status" \
+    --arg remote_computer_state_sync_status "$remote_computer_state_sync_status" \
+    --arg remote_computer_runner_status "$remote_computer_runner_status" \
     --arg remote_computer_next_command "$remote_computer_next_command" \
     --arg remote_computer_stage_command "$remote_computer_stage_command" \
     --arg remote_computer_note "$remote_computer_note" \
@@ -171,6 +185,9 @@ if [[ "$OUTPUT_MODE" == "json" ]]; then
         prepare_status: $remote_computer_prepare_status,
         install_status: $remote_computer_install_status,
         verify_status: $remote_computer_verify_status,
+        archive_status: (if $remote_computer_archive_status == "" then null else $remote_computer_archive_status end),
+        state_sync_status: (if $remote_computer_state_sync_status == "" then null else $remote_computer_state_sync_status end),
+        runner_status: (if $remote_computer_runner_status == "" then null else $remote_computer_runner_status end),
         next_command: $remote_computer_next_command,
         post_install_stage_command: $remote_computer_stage_command,
         note: $remote_computer_note
@@ -198,6 +215,9 @@ printf 'inventory_status=%s\n' "$remote_computer_inventory_status"
 printf 'prepare_status=%s\n' "$remote_computer_prepare_status"
 printf 'install_status=%s\n' "$remote_computer_install_status"
 printf 'verify_status=%s\n' "$remote_computer_verify_status"
+printf 'archive_status=%s\n' "${remote_computer_archive_status:-unknown}"
+printf 'state_sync_status=%s\n' "${remote_computer_state_sync_status:-unknown}"
+printf 'runner_status=%s\n' "${remote_computer_runner_status:-unknown}"
 printf 'next_command=%s\n' "$remote_computer_next_command"
 printf 'post_install_stage_command=%s\n' "$remote_computer_stage_command"
 printf 'note=%s\n' "$remote_computer_note"
