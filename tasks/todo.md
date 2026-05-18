@@ -246,8 +246,8 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [x] Stage 4.4: Add Manager Agent planner records for task intake, decomposition, specialist selection, risk classification, and result review.
 - [x] Stage 4.5: Extend typed agent handoff / assignment records with semantic scopes, runtime profile, Remote Computer requirement, review status, and human escalation status.
 - [x] Stage 4.5: Add Manager Agent -> Specialist Agent handoff execution path that preserves policy, approval, audit, timeline, and Remote Computer assignment.
-- [ ] Stage 4.6: Add `backend-coder` as the first Managed Agent demo proving runtime profile, minimal semantic scopes, Manager Agent assignment, Remote Computer execution, artifacts, audit, and replay.
-- [ ] Stage 4.6: Document that `backend-coder` is a validation demo, not the MandoForge product endpoint.
+- [x] Stage 4.6: Add `backend-coder` as the first Managed Agent demo proving runtime profile, minimal semantic scopes, Manager Agent assignment, Remote Computer execution, artifacts, audit, and replay.
+- [x] Stage 4.6: Document that `backend-coder` is a validation demo, not the MandoForge product endpoint.
 
 ## Stage 5 / Semantic Layer + Context OS
 

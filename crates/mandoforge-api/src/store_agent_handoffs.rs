@@ -404,4 +404,65 @@ impl AppState {
             }
         }
     }
+
+    pub(crate) async fn attach_agent_handoff_assignment_remote_computer_job(
+        &self,
+        id: Uuid,
+        remote_computer_job_assignment_id: Uuid,
+        metadata: serde_json::Value,
+    ) -> Result<AgentHandoffAssignment, AppError> {
+        let updated_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let assignment = store
+                    .agent_handoff_assignments
+                    .get_mut(&id)
+                    .ok_or_else(|| AppError::not_found("agent handoff assignment not found"))?;
+                assignment.remote_computer_job_assignment_id =
+                    Some(remote_computer_job_assignment_id);
+                assignment.status = "assigned".to_string();
+                assignment.metadata =
+                    merge_agent_handoff_assignment_metadata(&assignment.metadata, metadata);
+                assignment.updated_at = updated_at;
+                Ok(assignment.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE agent_handoff_assignments
+                     SET remote_computer_job_assignment_id = $3,
+                         status = 'assigned',
+                         metadata = metadata || $4::jsonb,
+                         updated_at = $5
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING id, agent_handoff_event_id, manager_plan_id, source_session_id, specialist_session_id, source_agent_id, target_agent_id, semantic_scopes, runtime_profile_id, remote_computer_required, remote_computer_job_assignment_id, status, assigned_by, metadata, audit_trace_id, created_at, updated_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(remote_computer_job_assignment_id)
+                .bind(metadata)
+                .bind(updated_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent handoff assignment not found"))?;
+                agent_handoff_assignment_from_row(row)
+            }
+        }
+    }
+}
+
+fn merge_agent_handoff_assignment_metadata(
+    existing: &serde_json::Value,
+    patch: serde_json::Value,
+) -> serde_json::Value {
+    match (existing.as_object(), patch.as_object()) {
+        (Some(existing), Some(patch)) => {
+            let mut merged = existing.clone();
+            for (key, value) in patch {
+                merged.insert(key.clone(), value.clone());
+            }
+            serde_json::Value::Object(merged)
+        }
+        _ => patch,
+    }
 }

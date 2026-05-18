@@ -289,6 +289,13 @@ Outcome:
 MandoForge can receive a task, let a Manager Agent choose a Specialist Agent, bind the task to semantic scope and runtime profile, execute through the governed runtime, and review the result.
 ```
 
+Current repo slice:
+
+- `backend-coder` is covered as a validation demo in API tests, not as a hard-coded product surface.
+- The demo provisions a managed `backend-coder-runtime`, a `backend-coder` Specialist Agent, and a `backend-coder-manager` Manager Agent.
+- The flow creates and reviews a Manager Agent plan, requests and accepts a handoff, assigns a Specialist session, generates a context packet, requires approval for `agent_cli.exec`, binds the queued job to a Remote Computer lease, attaches that Remote Computer job assignment back to the handoff assignment, creates a demo artifact, and completes the handoff.
+- The expected evidence spans Manager and Specialist timelines plus audit logs. This proves the Agent OS substrate; production coding packs remain an application layer above it.
+
 ## Stage 5: Full Semantic Layer / Context OS
 
 Status: not yet implemented beyond early source, artifact, session, Workflow Pack, and Remote Computer state primitives.

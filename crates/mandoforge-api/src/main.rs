@@ -828,6 +828,13 @@ struct CreateAgentHandoffAssignment {
     metadata: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct AttachAgentHandoffRemoteComputerAssignment {
+    remote_computer_job_assignment_id: Uuid,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowPackInstallation {
     id: Uuid,
@@ -4994,6 +5001,10 @@ fn build_router(state: AppState) -> Router {
             "/api/agent-handoff-assignments/{id}",
             get(get_agent_handoff_assignment),
         )
+        .route(
+            "/api/agent-handoff-assignments/{id}/remote-computer-assignment",
+            post(attach_agent_handoff_remote_computer_assignment),
+        )
         .route("/api/manager-plans", get(list_manager_agent_plans))
         .route("/api/manager-plans/{id}", get(get_manager_agent_plan))
         .route(
@@ -8687,6 +8698,54 @@ async fn assign_agent_handoff_event(
     Ok(Json(assignment))
 }
 
+async fn attach_agent_handoff_remote_computer_assignment(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<AttachAgentHandoffRemoteComputerAssignment>,
+) -> Result<Json<AgentHandoffAssignment>, AppError> {
+    let assignment = state.get_agent_handoff_assignment(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ExecutionJobsRun,
+        "session",
+        Some(assignment.specialist_session_id),
+    )
+    .await?;
+    if !assignment.remote_computer_required {
+        return Err(AppError::bad_request(
+            "agent handoff assignment does not require Remote Computer",
+        ));
+    }
+    let remote_assignment = state
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.id == input.remote_computer_job_assignment_id)
+        .ok_or_else(|| AppError::not_found("remote computer job assignment not found"))?;
+    if remote_assignment.session_id != assignment.specialist_session_id {
+        return Err(AppError::bad_request(
+            "remote computer job assignment must belong to the specialist session",
+        ));
+    }
+    if remote_assignment.status != "assigned" {
+        return Err(AppError::bad_request(
+            "remote computer job assignment must be assigned",
+        ));
+    }
+    let updated = state
+        .attach_agent_handoff_assignment_remote_computer_job(
+            assignment.id,
+            remote_assignment.id,
+            input.metadata,
+        )
+        .await?;
+    record_agent_handoff_assignment_remote_computer_event(&state, &updated, &remote_assignment)
+        .await?;
+    Ok(Json(updated))
+}
+
 async fn transition_agent_handoff_event(
     state: AppState,
     id: Uuid,
@@ -8819,6 +8878,56 @@ async fn record_agent_handoff_assignment_audit_and_events(
             details,
         ))
         .await
+}
+
+async fn record_agent_handoff_assignment_remote_computer_event(
+    state: &AppState,
+    assignment: &AgentHandoffAssignment,
+    remote_assignment: &RemoteComputerJobAssignment,
+) -> Result<(), AppError> {
+    let details = json!({
+        "agent_handoff_assignment_id": assignment.id,
+        "agent_handoff_event_id": assignment.agent_handoff_event_id,
+        "manager_plan_id": assignment.manager_plan_id,
+        "source_session_id": assignment.source_session_id,
+        "specialist_session_id": assignment.specialist_session_id,
+        "remote_computer_job_assignment_id": remote_assignment.id,
+        "execution_job_id": remote_assignment.execution_job_id,
+        "remote_computer_id": remote_assignment.remote_computer_id,
+        "lease_id": remote_assignment.lease_id,
+        "status": assignment.status,
+        "metadata": assignment.metadata,
+    });
+    state
+        .append_event(
+            "system",
+            Some(remote_assignment.id),
+            assignment.source_session_id,
+            "agent_handoff.remote_computer_assignment_attached",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(remote_assignment.id),
+            assignment.specialist_session_id,
+            "agent_handoff.remote_computer_assignment_attached",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(assignment.specialist_session_id),
+            "system",
+            Some(remote_assignment.id),
+            "agent_handoff.remote_computer_assignment_attached",
+            "agent_handoff_assignment",
+            Some(assignment.id),
+            details,
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn record_manager_agent_plan_audit_and_event(
@@ -39042,6 +39151,489 @@ not json
                 && log.resource_id == Some(assignment.id)
                 && log.details["manager_plan_id"] == json!(reviewed.id)
                 && log.details["remote_computer_required"] == true
+        }));
+    }
+
+    #[tokio::test]
+    async fn backend_coder_demo_proves_managed_agent_os_flow() {
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let runtime_profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "backend-coder-runtime",
+                    "runtime_type": "agent_cli",
+                    "command": "codex",
+                    "default_args": ["exec"],
+                    "remote_computer_required": true
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let backend_coder: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "backend-coder",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "runtime_profile_id": runtime_profile.id,
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Implement backend tasks through the governed Agent OS runtime.",
+                    "tools": ["agent_cli.exec", "artifact.create", "file.read"],
+                    "tool_policy": {
+                        "approval_required": [{"tool": "agent_cli.exec", "risk": "high"}],
+                        "allowed_tools": ["agent_cli.exec", "artifact.create", "file.read"]
+                    },
+                    "skill_ids": ["backend-coding"],
+                    "workflow_pack_ids": ["coding-pack"],
+                    "remote_computer_profile": {"required": true, "profile": "whiskey-k3s"},
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "backend-coder-demo",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "release_state": "draft"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "backend-coder-manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["approval.request"],
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": backend_coder.id,
+                                "intents": ["implement_backend_slice"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["medium"],
+                                "approval_required": false
+                            }]
+                        }
+                    },
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "agent-os",
+                        "workflow_scope": "backend-coder-demo",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "release_state": "draft"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let manager_session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": manager.id,
+                    "title": "backend-coder demo manager session",
+                    "message": "Plan the first backend-coder validation demo."
+                }),
+            ),
+        )
+        .await;
+        let plan: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/manager-plans", manager_session.id),
+                json!({
+                    "specialist_agent_id": backend_coder.id,
+                    "task_intake": {
+                        "goal": "Validate backend-coder as the first Managed Agent demo",
+                        "source": "stage-4.6"
+                    },
+                    "decomposition": {
+                        "steps": [
+                            "assemble minimal semantic context",
+                            "assign backend-coder",
+                            "run approved agent_cli job through Remote Computer",
+                            "produce demo artifact"
+                        ]
+                    },
+                    "specialist_selection": {
+                        "selected_agent_id": backend_coder.id,
+                        "reason": "backend-coder owns mandoforge-api scope and agent_cli runtime"
+                    },
+                    "risk_classification": "medium",
+                    "review": {"status": "pending"}
+                }),
+            ),
+        )
+        .await;
+        let reviewed: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/manager-plans/{}/review", plan.id),
+                json!({
+                    "status": "approved",
+                    "review": {
+                        "status": "approved",
+                        "summary": "backend-coder demo can be assigned."
+                    }
+                }),
+            ),
+        )
+        .await;
+        let handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", manager_session.id),
+                json!({
+                    "target_agent_id": backend_coder.id,
+                    "manager_plan_id": reviewed.id,
+                    "intent": "implement_backend_slice",
+                    "payload": {"slice": "backend-coder-demo", "deliverable": "demo artifact"},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "medium"
+                }),
+            ),
+        )
+        .await;
+        let accepted: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/accept", handoff.id),
+                json!({"reason": "manager plan approved"}),
+            ),
+        )
+        .await;
+        assert_eq!(accepted.status, "accepted");
+
+        let assignment: AgentHandoffAssignment = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/assignment", handoff.id),
+                json!({
+                    "assigned_by": "backend-coder-manager",
+                    "metadata": {"demo": "backend-coder", "validation_only": true}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(assignment.status, "waiting_remote_computer");
+        assert_eq!(assignment.target_agent_id, backend_coder.id);
+        assert_eq!(assignment.runtime_profile_id, Some(runtime_profile.id));
+        assert_eq!(
+            assignment.semantic_scopes["workflow_scope"],
+            "backend-coder-demo"
+        );
+
+        let context_packet: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/context-packet",
+                    assignment.specialist_session_id
+                ))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(context_packet.agent.name, "backend-coder");
+        assert_eq!(
+            context_packet.semantic_scopes["service_scope"],
+            "mandoforge-api"
+        );
+        assert_eq!(
+            context_packet
+                .runtime_profile
+                .as_ref()
+                .map(|profile| profile.id),
+            Some(runtime_profile.id)
+        );
+        assert!(context_packet.policy_reminders.iter().any(|reminder| {
+            reminder.contains("agent_cli.exec: requires_approval")
+                && reminder.contains("requires approval")
+        }));
+
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/agent_cli.exec/execute",
+                json!({
+                    "session_id": assignment.specialist_session_id,
+                    "args": {
+                        "profile": "backend-coder-runtime",
+                        "task": "Implement the Stage 4.6 backend-coder demo and report artifacts",
+                        "args": ["--json"]
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(approval_required["status"], "approval_required");
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id && job.tool_name == "agent_cli.exec")
+        .expect("backend-coder agent_cli job queued")
+        .id;
+
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "backend-coder-demo-remote-computer",
+                        "profile": "whiskey-k3s",
+                        "pod_name": "backend-coder-demo-pod"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let lease: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computers/{}/leases", computer.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": assignment.specialist_session_id,
+                        "worker_id": "backend-coder-demo-worker",
+                        "lease_seconds": 900,
+                        "metadata": {"demo": "backend-coder"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let remote_assignment: RemoteComputerJobAssignment = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/execution-jobs/{job_id}/remote-computer-lease"
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "lease_id": lease.id,
+                        "assigned_by": "backend-coder-demo-worker",
+                        "metadata": {"demo": "backend-coder", "handoff_mode": "manual-demo"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(remote_assignment.execution_job_id, job_id);
+        assert_eq!(
+            remote_assignment.session_id,
+            assignment.specialist_session_id
+        );
+        let bound_assignment: AgentHandoffAssignment = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!(
+                    "/api/agent-handoff-assignments/{}/remote-computer-assignment",
+                    assignment.id
+                ),
+                json!({
+                    "remote_computer_job_assignment_id": remote_assignment.id,
+                    "metadata": {"remote_bound": true}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            bound_assignment.remote_computer_job_assignment_id,
+            Some(remote_assignment.id)
+        );
+        assert_eq!(bound_assignment.status, "assigned");
+
+        let artifact_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/artifact.create/execute",
+                json!({
+                    "session_id": assignment.specialist_session_id,
+                    "args": {
+                        "name": "backend-coder-demo.json",
+                        "artifact_type": "json",
+                        "content": {
+                            "demo": "backend-coder",
+                            "manager_plan_id": reviewed.id,
+                            "handoff_assignment_id": bound_assignment.id,
+                            "remote_computer_job_assignment_id": remote_assignment.id,
+                            "validation_only": true
+                        }
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(artifact_result["name"], "backend-coder-demo.json");
+
+        let completed_handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/complete", handoff.id),
+                json!({"reason": "backend-coder demo artifact created"}),
+            ),
+        )
+        .await;
+        assert_eq!(completed_handoff.status, "completed");
+
+        let artifacts: Vec<Artifact> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/artifacts",
+                    assignment.specialist_session_id
+                ))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.name == "backend-coder-demo.json"
+                && artifact.content["validation_only"] == true
+        }));
+
+        let manager_events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", manager_session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "manager_plan.created",
+            "manager_plan.reviewed",
+            "agent_handoff.requested",
+            "agent_handoff.accepted",
+            "agent_handoff.assigned",
+            "agent_handoff.completed",
+        ] {
+            assert!(
+                manager_events
+                    .iter()
+                    .any(|event| event.event_type == expected),
+                "missing manager event {expected}"
+            );
+        }
+
+        let specialist_events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/events",
+                    assignment.specialist_session_id
+                ))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "agent_handoff.assignment_received",
+            "context_packet.generated",
+            "policy.requires_approval",
+            "approval.approved",
+            "remote_computer.execution_handoff_planned",
+            "artifact.created",
+        ] {
+            assert!(
+                specialist_events
+                    .iter()
+                    .any(|event| event.event_type == expected),
+                "missing specialist event {expected}"
+            );
+        }
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "manager_plan.created",
+            "manager_plan.reviewed",
+            "agent_handoff.assigned",
+            "remote_computer.execution_handoff_planned",
+            "artifact.created",
+            "agent_handoff.completed",
+        ] {
+            assert!(
+                audit_logs.iter().any(|log| log.action == expected),
+                "missing audit action {expected}"
+            );
+        }
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent_handoff.assigned"
+                && log.resource_id == Some(bound_assignment.id)
+                && log.details["metadata"]["validation_only"] == true
         }));
     }
 
