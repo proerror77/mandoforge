@@ -3,6 +3,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: mandoforge-remote-computer-state
 spec:
+  storageClassName: ""
   accessModes:
     - ReadWriteMany
   resources:

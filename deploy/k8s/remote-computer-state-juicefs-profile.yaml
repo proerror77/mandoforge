@@ -22,6 +22,7 @@ metadata:
     mandoforge.io/profile: remote-computer-state
     mandoforge.io/provider: juicefs
 spec:
+  storageClassName: ""
   capacity:
     storage: 20Gi
   accessModes:

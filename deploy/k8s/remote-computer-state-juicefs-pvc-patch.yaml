@@ -6,4 +6,5 @@ metadata:
     mandoforge.io/profile: remote-computer-state
     mandoforge.io/provider: juicefs
 spec:
+  storageClassName: ""
   volumeName: mandoforge-remote-computer-state-juicefs-pv
