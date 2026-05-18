@@ -621,6 +621,10 @@ fn env_flag(name: &str) -> bool {
     })
 }
 
+fn host_shell_execution_allowed() -> bool {
+    env_flag("MANDOFORGE_ALLOW_HOST_SHELL_EXEC")
+}
+
 async fn execute_approved_file_write(
     state: &AppState,
     approval: &Approval,
@@ -878,6 +882,11 @@ async fn execute_approved_shell(
     approval: &Approval,
     tool_call: &ToolCall,
 ) -> Result<(), AppError> {
+    if !host_shell_execution_allowed() {
+        return Err(AppError::bad_request(
+            "host shell.exec is disabled; use Remote Computer execution or set MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1",
+        ));
+    }
     let command = tool_call
         .args
         .get("command")
@@ -906,6 +915,39 @@ async fn execute_approved_shell(
         "stderr_bytes": stderr.original_bytes,
         "stderr_truncated": stderr.truncated,
     });
+    if !output.status.success() {
+        let error_payload = json!({
+            "error": "shell.exec exited unsuccessfully",
+            "content": result
+        });
+        state
+            .append_event(
+                "tool",
+                Some(tool_call.id),
+                approval.session_id,
+                "tool.error",
+                json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(approval.session_id),
+                "tool",
+                Some(tool_call.id),
+                "tool.failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({"tool": tool_call.tool_name, "command": command, "runner": runner, "exit_code": output.status.code(), "resumed_after_approval": true}),
+            ))
+            .await?;
+        return Err(AppError::bad_request(format!(
+            "shell.exec exited unsuccessfully: {:?}",
+            output.status.code()
+        )));
+    }
     state
         .append_event(
             "tool",
@@ -1325,6 +1367,7 @@ async fn execute_approved_remote_computer_agent_cli(
         .clone()
         .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
     let profile_config = agent_cli_profile_config(state, &profile).await?;
+    enforce_bound_agent_cli_profile(state, approval.session_id, &profile).await?;
     let profile_source = match profile_config.source {
         AgentCliProfileConfigSource::Managed => "managed",
         AgentCliProfileConfigSource::Environment => "environment",
@@ -2130,6 +2173,7 @@ async fn run_agent_cli(
 ) -> Result<Value, AppError> {
     let profile = normalize_agent_cli_profile(&request.profile)?;
     let config = agent_cli_profile_config(state, &profile).await?;
+    enforce_bound_agent_cli_profile(state, session_id, &profile).await?;
     if config.remote_computer_required {
         return Err(AppError::bad_request(format!(
             "agent runtime profile requires Remote Computer execution: {profile}"
@@ -2211,6 +2255,12 @@ async fn run_agent_cli(
             }),
         )
         .await?;
+    if !output.status.success() {
+        return Err(AppError::bad_request(format!(
+            "agent CLI execution failed with exit code {:?}",
+            output.status.code()
+        )));
+    }
 
     Ok(json!({
         "runner": "agent-cli",
@@ -2253,6 +2303,56 @@ fn normalize_agent_cli_profile(profile: &str) -> Result<String, AppError> {
         ));
     }
     Ok(normalized)
+}
+
+async fn enforce_bound_agent_cli_profile(
+    state: &AppState,
+    session_id: Uuid,
+    requested_profile: &str,
+) -> Result<(), AppError> {
+    if env_flag("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE") {
+        return Ok(());
+    }
+    let Some(bound_profile_name) = bound_agent_cli_profile_name(state, session_id).await? else {
+        return Err(AppError::bad_request(
+            "agent_cli.exec requires a session-bound runtime profile",
+        ));
+    };
+    let bound_profile = normalize_agent_cli_profile(&bound_profile_name)?;
+    if bound_profile != requested_profile {
+        return Err(AppError::bad_request(format!(
+            "agent_cli.exec profile must match session runtime profile: requested {requested_profile}, bound {bound_profile}"
+        )));
+    }
+    Ok(())
+}
+
+async fn bound_agent_cli_profile_name(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    if let Some(assignment) = state
+        .list_agent_handoff_assignments(Some(session_id))
+        .await?
+        .into_iter()
+        .filter(|assignment| assignment.specialist_session_id == session_id)
+        .max_by_key(|assignment| assignment.created_at)
+    {
+        if let Some(profile_id) = assignment.runtime_profile_id {
+            let profile = state.get_agent_runtime_profile(profile_id).await?;
+            return Ok(Some(profile.name));
+        }
+    }
+
+    let session = state.get_session(session_id).await?;
+    let agent = state.get_agent(session.agent_id).await?;
+    match agent.runtime_profile_id {
+        Some(profile_id) => {
+            let profile = state.get_agent_runtime_profile(profile_id).await?;
+            Ok(Some(profile.name))
+        }
+        None => Ok(None),
+    }
 }
 
 async fn agent_cli_profile_config(
@@ -2454,6 +2554,12 @@ async fn run_codex_cli(
             }),
         )
         .await?;
+    if !output.status.success() {
+        return Err(AppError::bad_request(format!(
+            "codex exec failed with exit code {:?}",
+            output.status.code()
+        )));
+    }
     Ok(json!({
         "runner": "cli",
         "status": output.status.code(),

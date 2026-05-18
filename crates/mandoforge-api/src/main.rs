@@ -5391,9 +5391,17 @@ fn build_router(state: AppState) -> Router {
             tenant_context_state,
             tenant_context_middleware,
         ))
-        .layer(CorsLayer::permissive())
+        .layer(api_cors_layer())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+fn api_cors_layer() -> CorsLayer {
+    if insecure_dev_auth_enabled() {
+        CorsLayer::permissive()
+    } else {
+        CorsLayer::new()
+    }
 }
 
 fn execution_worker_from_env() -> Arc<dyn ExecutionWorker> {
@@ -12527,10 +12535,20 @@ async fn build_context_packet(
 ) -> Result<ContextPacket, AppError> {
     let session = state.get_session(session_id).await?;
     let agent = state.get_agent(session.agent_id).await?;
+    let handoff_assignment_context =
+        effective_handoff_assignment_context(state, session_id).await?;
+    let effective_semantic_scopes = handoff_assignment_context
+        .as_ref()
+        .map(|assignment| assignment.semantic_scopes.clone())
+        .unwrap_or_else(|| agent.semantic_scopes.clone());
+    let effective_runtime_profile_id = handoff_assignment_context
+        .as_ref()
+        .and_then(|assignment| assignment.runtime_profile_id)
+        .or(agent.runtime_profile_id);
     let agent_version = state.agent_version_for_session(session_id).await?;
     let events = state.list_events(session_id).await?;
     let policy = state.policy_for_session(session_id).await;
-    let runtime_profile_lookup = match agent.runtime_profile_id {
+    let runtime_profile_lookup = match effective_runtime_profile_id {
         Some(profile_id) => Some((
             profile_id,
             state.get_agent_runtime_profile(profile_id).await,
@@ -12545,7 +12563,8 @@ async fn build_context_packet(
         .as_ref()
         .and_then(|(profile_id, result)| result.as_ref().err().map(|error| (*profile_id, error)));
     let version = state.next_context_packet_version(session_id).await?;
-    let retrieved_objects = retrieve_context_packet_semantic_objects(state, &agent).await?;
+    let retrieved_objects =
+        retrieve_context_packet_semantic_objects(state, &effective_semantic_scopes).await?;
     let source_refs = build_context_packet_source_refs(
         &session,
         &agent,
@@ -12554,6 +12573,7 @@ async fn build_context_packet(
         runtime_profile_error.map(|(profile_id, _)| profile_id),
         events.len(),
         &retrieved_objects,
+        handoff_assignment_context.as_ref(),
     );
     let last_user_message = events
         .iter()
@@ -12564,6 +12584,8 @@ async fn build_context_packet(
         .map(str::to_string);
     let freshness_warnings = build_context_freshness_warnings(
         &agent,
+        &effective_semantic_scopes,
+        effective_runtime_profile_id,
         runtime_profile_lookup.as_ref(),
         last_user_message.as_deref(),
     );
@@ -12584,7 +12606,8 @@ async fn build_context_packet(
         "retrieved_object_count": retrieved_objects.len(),
         "policy_reminder_count": policy_reminders.len(),
         "freshness_warning_count": freshness_warnings.len(),
-        "semantic_scope_keys": semantic_scope_keys(&agent.semantic_scopes),
+        "semantic_scope_keys": semantic_scope_keys(&effective_semantic_scopes),
+        "effective_context_source": if handoff_assignment_context.is_some() { "agent_handoff_assignment" } else { "agent" },
     });
     Ok(ContextPacket {
         id: Uuid::new_v4(),
@@ -12607,7 +12630,7 @@ async fn build_context_packet(
             remote_computer_profile: agent.remote_computer_profile.clone(),
         },
         runtime_profile,
-        semantic_scopes: agent.semantic_scopes.clone(),
+        semantic_scopes: effective_semantic_scopes,
         tool_policy: agent.tool_policy.clone(),
         policy_reminders,
         freshness_warnings,
@@ -12617,6 +12640,18 @@ async fn build_context_packet(
         audit_trace_id: None,
         created_at: generated_at,
     })
+}
+
+async fn effective_handoff_assignment_context(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Option<AgentHandoffAssignment>, AppError> {
+    Ok(state
+        .list_agent_handoff_assignments(Some(session_id))
+        .await?
+        .into_iter()
+        .filter(|assignment| assignment.specialist_session_id == session_id)
+        .max_by_key(|assignment| assignment.created_at))
 }
 
 fn context_packet_runtime_profile(profile: &AgentRuntimeProfile) -> ContextPacketRuntimeProfile {
@@ -12660,11 +12695,13 @@ fn build_context_policy_reminders(
 
 fn build_context_freshness_warnings(
     agent: &Agent,
+    effective_semantic_scopes: &Value,
+    effective_runtime_profile_id: Option<Uuid>,
     runtime_profile_lookup: Option<&(Uuid, Result<AgentRuntimeProfile, AppError>)>,
     last_user_message: Option<&str>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
-    let missing_scopes = missing_semantic_scope_keys(&agent.semantic_scopes);
+    let missing_scopes = missing_semantic_scope_keys(effective_semantic_scopes);
     if !missing_scopes.is_empty() {
         warnings.push(format!(
             "semantic_scopes missing required keys: {}",
@@ -12681,7 +12718,7 @@ fn build_context_freshness_warnings(
         warnings
             .push("no workflow_pack_ids are bound; domain workflow context is generic".to_string());
     }
-    if agent.runtime_profile_id.is_none() {
+    if effective_runtime_profile_id.is_none() {
         warnings.push(
             "no runtime_profile_id is bound; execution may rely on provider or environment fallback"
                 .to_string(),
@@ -12723,6 +12760,7 @@ fn build_context_packet_source_refs(
     missing_runtime_profile_id: Option<Uuid>,
     event_count: usize,
     retrieved_objects: &[ContextPacketSemanticObject],
+    handoff_assignment_context: Option<&AgentHandoffAssignment>,
 ) -> Vec<ContextPacketSourceRef> {
     let mut source_refs = vec![
         context_source_ref("session", session.id, "current"),
@@ -12761,6 +12799,18 @@ fn build_context_packet_source_refs(
             "unavailable",
         ));
     }
+    if let Some(assignment) = handoff_assignment_context {
+        source_refs.push(context_source_ref(
+            "agent_handoff_assignment",
+            assignment.id,
+            &format!("status:{}", assignment.status),
+        ));
+        source_refs.push(context_source_ref(
+            "agent_handoff_event",
+            assignment.agent_handoff_event_id,
+            "assignment_context",
+        ));
+    }
     for path in [
         "AGENTS.md",
         "README.md",
@@ -12794,7 +12844,7 @@ fn build_context_packet_source_refs(
 
 async fn retrieve_context_packet_semantic_objects(
     state: &AppState,
-    agent: &Agent,
+    semantic_scopes: &Value,
 ) -> Result<Vec<ContextPacketSemanticObject>, AppError> {
     let registry = semantic_retrieval_backend_registry_from_env();
     if registry.effective_backend != "scope_rank" {
@@ -12808,7 +12858,7 @@ async fn retrieve_context_packet_semantic_objects(
         .await?
         .into_iter()
         .filter(|object| object.status == "active")
-        .filter(|object| semantic_object_matches_agent_scope(object, agent))
+        .filter(|object| semantic_object_matches_scope(object, semantic_scopes))
         .map(|object| ContextPacketSemanticObject {
             id: object.id,
             object_type: object.object_type,
@@ -12955,10 +13005,14 @@ where
 }
 
 fn semantic_object_matches_agent_scope(object: &SemanticObject, agent: &Agent) -> bool {
+    semantic_object_matches_scope(object, &agent.semantic_scopes)
+}
+
+fn semantic_object_matches_scope(object: &SemanticObject, semantic_scopes: &Value) -> bool {
     let Some(object_scopes) = object.semantic_scopes.as_object() else {
         return false;
     };
-    let Some(agent_scopes) = agent.semantic_scopes.as_object() else {
+    let Some(agent_scopes) = semantic_scopes.as_object() else {
         return false;
     };
     object_scopes.iter().any(|(key, object_value)| {
@@ -13556,6 +13610,113 @@ async fn principal_from_request(
     headers: &HeaderMap,
 ) -> Result<Principal, AppError> {
     let tenant_id = resolve_request_tenant_id(state, headers)?;
+    let dev_token_authenticated = dev_admin_token_authenticated(headers);
+    if dev_token_authenticated {
+        return Ok(Principal {
+            tenant_id,
+            subject_id: header_value(headers, "x-mandoforge-subject")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("dev-admin")
+                .to_string(),
+            roles: vec![Role::Admin],
+        });
+    }
+
+    let Some(explicit_subject) = header_value(headers, "x-mandoforge-subject") else {
+        if insecure_dev_auth_enabled() {
+            let roles = if let Some(value) = header_value(headers, "x-mandoforge-roles") {
+                parse_roles_header(value)?
+            } else {
+                vec![Role::Operator]
+            };
+            return Ok(Principal {
+                tenant_id,
+                subject_id: "demo-operator".to_string(),
+                roles,
+            });
+        }
+        return Err(AppError::unauthorized(
+            "x-mandoforge-subject header is required",
+        ));
+    };
+    let subject_id = explicit_subject.trim().to_string();
+    if subject_id.is_empty() {
+        return Err(AppError::bad_request(
+            "x-mandoforge-subject header cannot be empty",
+        ));
+    }
+    let roles = if insecure_dev_auth_enabled() {
+        if let Some(value) = header_value(headers, "x-mandoforge-roles") {
+            parse_roles_header(value)?
+        } else {
+            state.membership_roles_for_subject(&subject_id).await?
+        }
+    } else if header_value(headers, "x-mandoforge-roles").is_some() {
+        return Err(AppError::forbidden(
+            "x-mandoforge-roles is only accepted in explicit insecure dev auth mode",
+        ));
+    } else {
+        state.membership_roles_for_subject(&subject_id).await?
+    };
+    if roles.is_empty() {
+        return Err(AppError::forbidden("principal has no roles"));
+    }
+
+    Ok(Principal {
+        tenant_id,
+        subject_id,
+        roles,
+    })
+}
+
+fn dev_admin_token_authenticated(headers: &HeaderMap) -> bool {
+    let Some(expected) = std::env::var("MANDOFORGE_DEV_ADMIN_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(header) = header_value(headers, "authorization") else {
+        return false;
+    };
+    let Some(token) = header.trim().strip_prefix("Bearer ") else {
+        return false;
+    };
+    token.trim() == expected
+}
+
+fn insecure_dev_auth_enabled() -> bool {
+    std::env::var("MANDOFORGE_INSECURE_DEV_AUTH")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(cfg!(test))
+}
+
+fn trusted_tenant_header_enabled() -> bool {
+    std::env::var("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[allow(dead_code)]
+async fn legacy_principal_from_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Principal, AppError> {
+    let tenant_id = resolve_request_tenant_id(state, headers)?;
     let explicit_subject = header_value(headers, "x-mandoforge-subject");
     let subject_id = explicit_subject.unwrap_or("demo-operator").to_string();
     let roles = if let Some(value) = header_value(headers, "x-mandoforge-roles") {
@@ -13585,7 +13746,14 @@ fn resolve_request_tenant_id(state: &AppState, headers: &HeaderMap) -> Result<Uu
         .transpose()?;
 
     match (state.tenant_runtime_mode, requested_tenant_id) {
-        (TenantRuntimeMode::TenantRouted, Some(tenant_id)) => Ok(tenant_id),
+        (TenantRuntimeMode::TenantRouted, Some(tenant_id))
+            if insecure_dev_auth_enabled() || trusted_tenant_header_enabled() =>
+        {
+            Ok(tenant_id)
+        }
+        (TenantRuntimeMode::TenantRouted, Some(_)) => Err(AppError::forbidden(
+            "x-mandoforge-tenant-id is only accepted from trusted tenant-routing ingress",
+        )),
         (TenantRuntimeMode::TenantRouted, None) => Ok(state.configured_tenant_id()),
         (TenantRuntimeMode::SingleRuntimeTenant, Some(tenant_id)) => {
             if tenant_id != state.configured_tenant_id() {
@@ -36426,6 +36594,13 @@ struct AppError {
 }
 
 impl AppError {
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -36534,6 +36709,41 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = self.previous.as_ref() {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
     }
 
     #[test]
@@ -40991,6 +41201,37 @@ not json
         .await;
         assert_eq!(specialist_session.agent_id, specialist.id);
 
+        let context_packet: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/context-packet",
+                    assignment.specialist_session_id
+                ))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            context_packet.semantic_scopes["workflow_scope"],
+            json!("stage-4-assignment-execution")
+        );
+        assert_eq!(
+            context_packet
+                .runtime_profile
+                .as_ref()
+                .map(|profile| profile.id),
+            Some(runtime_profile.id)
+        );
+        assert_eq!(
+            context_packet.replay_summary["effective_context_source"],
+            json!("agent_handoff_assignment")
+        );
+        assert!(context_packet.source_refs.iter().any(|source| {
+            source.source_type == "agent_handoff_assignment"
+                && source.source_id == assignment.id.to_string()
+        }));
+
         let fetched: AgentHandoffAssignment = request_json(
             app.clone(),
             Request::builder()
@@ -44219,7 +44460,7 @@ not json
                     json!({
                         "session_id": session.id,
                         "worker_id": "remote-manager-reclaim",
-                        "lease_seconds": -1
+                        "lease_seconds": 30
                     })
                     .to_string(),
                 ))
@@ -44261,11 +44502,11 @@ not json
         assert_eq!(run.status, "completed");
         assert_eq!(run.stale_attachment_count, 1);
         assert_eq!(run.reclaimed_attachment_count, 1);
-        assert_eq!(run.expired_lease_count, 1);
-        assert_eq!(run.reclaimed_lease_count, 1);
+        assert_eq!(run.expired_lease_count, 0);
+        assert_eq!(run.reclaimed_lease_count, 0);
         assert!(!run.execution_enabled);
         assert_eq!(run.attachments[0].status, "released");
-        assert_eq!(run.leases[0].status, "failed");
+        assert!(run.leases.is_empty());
 
         let tool_calls: Vec<ToolCall> = request_json(
             app.clone(),
@@ -44309,7 +44550,7 @@ not json
             .map(|event| event.event_type.as_str())
             .collect();
         assert!(event_types.contains(&"remote_computer.attachment_reclaimed"));
-        assert!(event_types.contains(&"remote_computer.lease_reclaimed"));
+        assert!(!event_types.contains(&"remote_computer.lease_reclaimed"));
 
         let audit_logs: Vec<AuditLog> = request_json(
             app,
@@ -44327,7 +44568,7 @@ not json
                 .any(|log| log.action == "remote_computer.attachment_reclaimed")
         );
         assert!(
-            audit_logs
+            !audit_logs
                 .iter()
                 .any(|log| log.action == "remote_computer.lease_reclaimed")
         );
@@ -47749,6 +47990,86 @@ not json
     }
 
     #[tokio::test]
+    async fn principal_auth_fails_closed_without_dev_auth() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+        let _dev_token = EnvVarGuard::remove("MANDOFORGE_DEV_ADMIN_TOKEN");
+        let _tenant_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID");
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+
+        let missing_subject = principal_from_request(&state, &HeaderMap::new())
+            .await
+            .expect_err("missing subject should fail closed");
+        assert_eq!(missing_subject.status, StatusCode::UNAUTHORIZED);
+
+        let mut forged_roles = HeaderMap::new();
+        forged_roles.insert("x-mandoforge-subject", "admin-1".parse().unwrap());
+        forged_roles.insert("x-mandoforge-roles", "admin".parse().unwrap());
+        let forged_error = principal_from_request(&state, &forged_roles)
+            .await
+            .expect_err("client-forged roles should be rejected");
+        assert_eq!(forged_error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn tenant_routed_header_requires_trusted_ingress() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+        let tenant_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID");
+        let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.tenant_runtime_mode = TenantRuntimeMode::TenantRouted;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-mandoforge-tenant-id",
+            Uuid::new_v4().to_string().parse().unwrap(),
+        );
+
+        let error = resolve_request_tenant_id(&state, &headers)
+            .expect_err("untrusted tenant header should fail closed");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+        drop(tenant_trust);
+        let _tenant_trust = EnvVarGuard::set("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID", "1");
+        assert!(resolve_request_tenant_id(&state, &headers).is_ok());
+    }
+
+    #[tokio::test]
+    async fn remote_computer_lease_rejects_non_positive_duration() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let computer = state
+            .create_remote_computer(CreateRemoteComputer {
+                name: "lease-duration-test".to_string(),
+                profile: None,
+                namespace: None,
+                pod_name: None,
+                workspace_path: None,
+                state_mount_path: None,
+                metadata: None,
+            })
+            .await
+            .expect("create remote computer");
+
+        let error = state
+            .create_remote_computer_lease(
+                computer.id,
+                CreateRemoteComputerLease {
+                    session_id: None,
+                    worker_id: Some("worker-1".to_string()),
+                    lease_seconds: Some(0),
+                    metadata: None,
+                },
+            )
+            .await
+            .expect_err("zero lease duration should fail");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .message
+                .contains("remote computer lease_seconds must be positive")
+        );
+    }
+
+    #[tokio::test]
     async fn policy_rollout_can_rollback_and_run_due_activation() {
         let app = test_app().await;
 
@@ -50557,6 +50878,7 @@ not json
             .expect("chmod fake agent CLI");
 
         unsafe {
+            std::env::set_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE", "1");
             std::env::set_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES", "fake-coder");
             std::env::set_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_COMMAND", &shim_path);
             std::env::set_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_ARGS", "--mode worker");
@@ -50684,9 +51006,181 @@ not json
         }));
 
         unsafe {
+            std::env::remove_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
             std::env::remove_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES");
             std::env::remove_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_COMMAND");
             std::env::remove_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_ARGS");
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let shim_dir = test_workspace_root().join("agent-cli-shims");
+        fs::create_dir_all(&shim_dir).expect("create shim dir");
+        let shim_path = shim_dir.join(format!("failing-agent-cli-{}.sh", Uuid::new_v4()));
+        fs::write(
+            &shim_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho \"about to fail\"\necho \"fatal\" >&2\nexit 42\n",
+        )
+        .expect("write failing agent CLI");
+        #[cfg(unix)]
+        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod failing agent CLI");
+
+        unsafe {
+            std::env::set_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE", "1");
+            std::env::set_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES", "failing-coder");
+            std::env::set_var("MANDOFORGE_AGENT_CLI_FAILING_CODER_COMMAND", &shim_path);
+            std::env::remove_var("MANDOFORGE_AGENT_CLI_FAILING_CODER_ARGS");
+        }
+
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agents[0].id, "title": "failing queued agent CLI worker"}),
+            ),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/agent_cli.exec/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "profile": "failing-coder",
+                        "task": "This command should fail"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job_id = jobs
+            .iter()
+            .find(|job| job.approval_id == approved.id && job.tool_name == "agent_cli.exec")
+            .expect("agent CLI execution job queued")
+            .id;
+
+        let requeued: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "agent-cli-worker-fail")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(requeued.status, ExecutionJobStatus::Queued);
+        assert_eq!(requeued.attempt_count, 1);
+        assert!(
+            requeued
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("exit code")
+        );
+
+        let second_requeue: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "agent-cli-worker-fail-2")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(second_requeue.status, ExecutionJobStatus::Queued);
+        assert_eq!(second_requeue.attempt_count, 2);
+
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "agent-cli-worker-fail-3")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error["error"].as_str().unwrap().contains("exit code"));
+
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let failed_job = jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .expect("failed job");
+        assert_eq!(failed_job.status, ExecutionJobStatus::Failed);
+        assert!(
+            failed_job
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("exit code")
+        );
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent_cli_call = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "agent_cli.exec")
+            .expect("agent CLI tool call");
+        assert_eq!(agent_cli_call.status, "failed");
+        assert!(agent_cli_call.error.is_some());
+
+        unsafe {
+            std::env::remove_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
+            std::env::remove_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES");
+            std::env::remove_var("MANDOFORGE_AGENT_CLI_FAILING_CODER_COMMAND");
+            std::env::remove_var("MANDOFORGE_AGENT_CLI_FAILING_CODER_ARGS");
         }
     }
 
@@ -50741,12 +51235,25 @@ not json
         .await;
         assert!(profiles.iter().any(|listed| listed.id == profile.id));
 
-        let agents: Vec<Agent> = request_json(
+        let agent: Agent = request_json(
             app.clone(),
-            Request::builder()
-                .uri("/api/agents")
-                .body(Body::empty())
-                .expect("valid request"),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Managed Runtime Agent",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_profile_id": profile.id,
+                    "tools": ["agent_cli.exec"]
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
         )
         .await;
         let session: Session = request_json(
@@ -50754,7 +51261,7 @@ not json
             json_request(
                 "POST",
                 "/api/sessions",
-                json!({"agent_id": agents[0].id, "title": "managed agent CLI worker"}),
+                json!({"agent_id": agent.id, "title": "managed agent CLI worker"}),
             ),
         )
         .await;
@@ -50909,12 +51416,25 @@ not json
         assert_eq!(updated.timeout_seconds, Some(45));
         assert_eq!(updated.env["MANDOFORGE_PROFILE_STATE"], "disabled");
 
-        let agents: Vec<Agent> = request_json(
+        let agent: Agent = request_json(
             app.clone(),
-            Request::builder()
-                .uri("/api/agents")
-                .body(Body::empty())
-                .expect("valid request"),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Disabled Runtime Agent",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_profile_id": profile.id,
+                    "tools": ["agent_cli.exec"]
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
         )
         .await;
         let session: Session = request_json(
@@ -50922,7 +51442,7 @@ not json
             json_request(
                 "POST",
                 "/api/sessions",
-                json!({"agent_id": agents[0].id, "title": "disabled profile must not run"}),
+                json!({"agent_id": agent.id, "title": "disabled profile must not run"}),
             ),
         )
         .await;
@@ -51123,6 +51643,133 @@ not json
         assert!(audit_logs.iter().any(|log| {
             log.action == "agent_runtime_profile.archived" && log.resource_id == Some(profile.id)
         }));
+    }
+
+    #[tokio::test]
+    async fn agent_cli_exec_requires_session_bound_runtime_profile() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let _legacy_override = EnvVarGuard::remove("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "bound-only-coder",
+                    "runtime_type": "agent_cli",
+                    "command": "codex",
+                    "default_args": ["exec"]
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let unbound_session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agents[0].id, "title": "unbound requested profile"}),
+            ),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/agent_cli.exec/execute",
+                json!({
+                    "session_id": unbound_session.id,
+                    "args": {"profile": profile.name, "task": "must not execute"}
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id && job.tool_name == "agent_cli.exec")
+        .expect("agent CLI execution job queued")
+        .id;
+
+        for attempt in 1..=3 {
+            let (status, body) = request_value(
+                app.clone(),
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/execution-jobs/{job_id}/run"))
+                    .header(
+                        "x-mandoforge-worker-id",
+                        format!("agent-cli-bound-profile-worker-{attempt}"),
+                    )
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await;
+            if attempt < 3 {
+                assert_eq!(status, StatusCode::OK);
+                let job: execution_queue::ExecutionJob =
+                    serde_json::from_value(body).expect("execution job response");
+                assert_eq!(job.status, ExecutionJobStatus::Queued);
+                assert!(
+                    job.last_error
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("session-bound runtime profile")
+                );
+            } else {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(
+                    body["error"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("session-bound runtime profile")
+                );
+            }
+        }
+
+        let failed = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app,
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .expect("failed job is listed");
+        assert_eq!(failed.status, ExecutionJobStatus::Failed);
     }
 
     #[tokio::test]
@@ -52736,6 +53383,8 @@ not json
 
     #[tokio::test]
     async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
         let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
         let state = AppState {
             store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
@@ -53657,6 +54306,8 @@ not json
 
     #[tokio::test]
     async fn generic_runtime_diagnostics_replay_api_flow() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let _host_shell_exec = EnvVarGuard::set("MANDOFORGE_ALLOW_HOST_SHELL_EXEC", "1");
         let app = test_app().await;
 
         let agents: Vec<Agent> = request_json(
@@ -53875,6 +54526,112 @@ not json
                 .unwrap_or_default()
                 .contains(&session.id.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn approved_shell_exec_requires_explicit_host_execution_gate() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let _host_shell_exec = EnvVarGuard::remove("MANDOFORGE_ALLOW_HOST_SHELL_EXEC");
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agents[0].id, "title": "host shell disabled"}),
+            ),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/shell.exec/execute",
+                json!({"session_id": session.id, "args": {"command": "pwd"}}),
+            ),
+        )
+        .await;
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id && job.tool_name == "shell.exec")
+        .expect("shell execution job queued")
+        .id;
+
+        for attempt in 1..=3 {
+            let (status, body) = request_value(
+                app.clone(),
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/execution-jobs/{job_id}/run"))
+                    .header(
+                        "x-mandoforge-worker-id",
+                        format!("host-shell-worker-{attempt}"),
+                    )
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await;
+            if attempt < 3 {
+                assert_eq!(status, StatusCode::OK);
+                let job: execution_queue::ExecutionJob =
+                    serde_json::from_value(body).expect("execution job response");
+                assert_eq!(job.status, ExecutionJobStatus::Queued);
+                assert!(
+                    job.last_error
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("host shell.exec is disabled")
+                );
+            } else {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(
+                    body["error"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("host shell.exec is disabled")
+                );
+            }
+        }
+
+        let failed = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app,
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .expect("failed job is listed");
+        assert_eq!(failed.status, ExecutionJobStatus::Failed);
     }
 
     #[tokio::test]
@@ -54151,7 +54908,13 @@ not json
             .await;
 
             assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
-            assert_eq!(error["error"], "principal has no roles");
+            assert!(
+                error["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("not allowed")),
+                "{uri}: {}",
+                error["error"]
+            );
         }
 
         let (status, _) = request_value(
@@ -56667,7 +57430,7 @@ not json
                     json!({
                         "session_id": session.id,
                         "worker_id": "scheduler-remote-manager",
-                        "lease_seconds": -1
+                        "lease_seconds": 30
                     })
                     .to_string(),
                 ))
@@ -56814,7 +57577,7 @@ not json
             .expect("remote computer reclaim plan item");
         assert_eq!(remote_computer_plan.area, "remote_computers");
         assert_eq!(remote_computer_plan.status, "due");
-        assert_eq!(remote_computer_plan.due_count, 2);
+        assert_eq!(remote_computer_plan.due_count, 1);
         let remote_computer_sidecar_plan = plan
             .actions
             .iter()
@@ -56868,7 +57631,7 @@ not json
         );
         assert_eq!(run.remote_computer_reclaim.status, "completed");
         assert_eq!(run.remote_computer_reclaim.reclaimed_attachment_count, 1);
-        assert_eq!(run.remote_computer_reclaim.reclaimed_lease_count, 1);
+        assert_eq!(run.remote_computer_reclaim.reclaimed_lease_count, 0);
         assert_eq!(run.remote_computer_sidecar_supervision.status, "attention");
         assert_eq!(
             run.remote_computer_sidecar_supervision

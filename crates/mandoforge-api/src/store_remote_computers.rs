@@ -156,7 +156,13 @@ impl AppState {
         input: CreateRemoteComputerLease,
     ) -> Result<RemoteComputerLease, AppError> {
         let now = Utc::now();
-        let lease_seconds = input.lease_seconds.unwrap_or(900).clamp(-86_400, 86_400);
+        let lease_seconds = input.lease_seconds.unwrap_or(900);
+        if lease_seconds <= 0 {
+            return Err(AppError::bad_request(
+                "remote computer lease_seconds must be positive",
+            ));
+        }
+        let lease_seconds = lease_seconds.clamp(30, 86_400);
         let lease = RemoteComputerLease {
             id: Uuid::new_v4(),
             remote_computer_id,

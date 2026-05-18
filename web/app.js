@@ -380,12 +380,15 @@ async function api(path, options = {}) {
 }
 
 function adminHeaders(extra = {}) {
-  return {
+  const headers = {
     "content-type": "application/json",
-    "x-mandoforge-subject": "web-admin",
-    "x-mandoforge-roles": "admin",
     ...extra,
   };
+  const devAdminToken = window.localStorage?.getItem("mandoforge.devAdminToken");
+  if (devAdminToken) {
+    headers.authorization = `Bearer ${devAdminToken}`;
+  }
+  return headers;
 }
 
 async function boot() {

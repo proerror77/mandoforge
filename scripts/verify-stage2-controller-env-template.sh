@@ -182,7 +182,7 @@ if grep -E '(_TOKEN|_KEY_ID|MANDOFORGE_STAGE2_TEAM_ID): "[^"]+"' "$secret_manife
   exit 1
 fi
 
-if grep -q 'MANDOFORGE_STAGE2_TEAM_ID|.*_TOKEN' "$render_secret_script"; then
+if grep -q 'MANDOFORGE_STAGE2_TEAM_ID' "$render_secret_script"; then
   echo "Stage 2 controller Secret render must not require MANDOFORGE_STAGE2_TEAM_ID now that evidence gates auto-discover teams" >&2
   exit 1
 fi

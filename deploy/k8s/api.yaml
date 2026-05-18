@@ -28,7 +28,7 @@ spec:
         runAsNonRoot: true
       containers:
         - name: api
-          image: ghcr.io/proerror77/mandoforge:latest
+          image: ghcr.io/proerror77/mandoforge/mandoforge-api:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -63,4 +63,3 @@ spec:
       volumes:
         - name: workspaces
           emptyDir: {}
-
