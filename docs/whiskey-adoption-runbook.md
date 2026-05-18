@@ -422,3 +422,12 @@ If the audit still reports runner mode `reserved` or disabled mutation/exec gate
 ```bash
 scripts/render-remote-computer-runtime-env.sh deploy/whiskey/remote-computer-runtime.env.example
 ```
+
+If you want both rendered together as one reviewable bundle before touching Whiskey again, use:
+
+```bash
+scripts/render-whiskey-remote-computer-unblock-bundle.sh \
+  deploy/k8s/remote-computer-state-juicefs.env.example \
+  deploy/whiskey/remote-computer-runtime.env.example \
+  .mandoforge/remote-adoption/whiskey/remote-computer-unblock-bundle
+```
