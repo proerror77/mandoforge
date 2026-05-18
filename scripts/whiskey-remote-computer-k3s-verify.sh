@@ -10,8 +10,12 @@ while [[ $# -gt 0 ]]; do
       REMOTE_HOST="${2:?--host requires a value}"
       shift 2
       ;;
+    --output-dir)
+      OUTPUT_DIR="${2:?--output-dir requires a value}"
+      shift 2
+      ;;
     *)
-      echo "usage: scripts/whiskey-remote-computer-k3s-verify.sh [--host <ssh-host>]" >&2
+      echo "usage: scripts/whiskey-remote-computer-k3s-verify.sh [--host <ssh-host>] [--output-dir <dir>]" >&2
       exit 1
       ;;
   esac

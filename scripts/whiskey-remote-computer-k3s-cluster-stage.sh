@@ -20,6 +20,10 @@ while [[ $# -gt 0 ]]; do
       REMOTE_DEPLOY_DIR="${2}/deploy"
       shift 2
       ;;
+    --sync-dir)
+      LOCAL_SYNC_DIR="${2:?--sync-dir requires a value}"
+      shift 2
+      ;;
     --apply-manifests)
       APPLY_MANIFESTS=1
       shift
@@ -29,7 +33,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "usage: scripts/whiskey-remote-computer-k3s-cluster-stage.sh [--host <ssh-host>] [--remote-root <dir>] [--apply-manifests] [--run-evidence]" >&2
+      echo "usage: scripts/whiskey-remote-computer-k3s-cluster-stage.sh [--host <ssh-host>] [--remote-root <dir>] [--sync-dir <dir>] [--apply-manifests] [--run-evidence]" >&2
       exit 1
       ;;
   esac
@@ -47,7 +51,7 @@ require_cmd rsync
 require_cmd jq
 require_cmd kubectl
 
-verify_output="$(scripts/whiskey-remote-computer-k3s-verify.sh --host "$REMOTE_HOST")"
+verify_output="$(scripts/whiskey-remote-computer-k3s-verify.sh --host "$REMOTE_HOST" --output-dir "$LOCAL_SYNC_DIR")"
 printf '%s\n' "$verify_output"
 verify_json="$(printf '%s\n' "$verify_output" | sed -n 's/^json=//p' | tail -1)"
 verify_status="$(jq -r '.status // "unknown"' "$verify_json")"
@@ -86,6 +90,9 @@ fi
 evidence_status="not_requested"
 if [[ "$RUN_EVIDENCE" == "1" ]]; then
   WHISKEY_WORKFLOW_PACK_MCP_QUERY="${WHISKEY_WORKFLOW_PACK_MCP_QUERY:-README}" \
+  WHISKEY_REMOTE_HOST="$REMOTE_HOST" \
+  WHISKEY_REMOTE_ROOT="$REMOTE_ROOT" \
+  WHISKEY_LOCAL_SYNC_DIR="$LOCAL_SYNC_DIR" \
   RUN_STAGE2_PRODUCTION_VALIDATIONS=1 \
   scripts/whiskey-adoption-evidence.sh
   evidence_status="rerun_completed"
@@ -133,6 +140,10 @@ jq -r '
     "next_evidence_command=" + .next_evidence_command
   ] | .[]
 ' "$plan_json" >"$plan_text"
+
+cp "$plan_json" "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-latest.json"
+cp "$plan_text" "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-latest.txt"
+cp "$remote_render_file" "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-remote-render-latest.txt"
 
 cat "$plan_text"
 printf '\njson=%s\ntext=%s\n' "$plan_json" "$plan_text"

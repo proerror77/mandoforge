@@ -1,8 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REMOTE_HOST="${1:-${WHISKEY_REMOTE_HOST:-wishky-2-1}}"
+REMOTE_HOST="${WHISKEY_REMOTE_HOST:-wishky-2-1}"
 OUTPUT_DIR="${WHISKEY_REMOTE_COMPUTER_PREFLIGHT_DIR:-.mandoforge/remote-adoption/whiskey}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host)
+      REMOTE_HOST="${2:?--host requires a value}"
+      shift 2
+      ;;
+    --output-dir)
+      OUTPUT_DIR="${2:?--output-dir requires a value}"
+      shift 2
+      ;;
+    -*)
+      echo "usage: scripts/whiskey-remote-computer-k3s-preflight.sh [--host <ssh-host>] [--output-dir <dir>] [host]" >&2
+      exit 1
+      ;;
+    *)
+      REMOTE_HOST="$1"
+      shift
+      ;;
+  esac
+done
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then

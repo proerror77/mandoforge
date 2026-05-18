@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REMOTE_HOST="${WHISKEY_REMOTE_HOST:-wishky-2-1}"
+REMOTE_ROOT="${WHISKEY_REMOTE_ROOT:-/opt/mandoforge-adoption}"
 SYNC_DIR="${WHISKEY_LOCAL_SYNC_DIR:-.mandoforge/remote-adoption/whiskey}"
 QUERY="${WHISKEY_MCP_LARK_DOCS_QUERY:-README}"
 APPLY=0
@@ -17,6 +18,10 @@ while [[ $# -gt 0 ]]; do
       SYNC_DIR="${2:?--sync-dir requires a value}"
       shift 2
       ;;
+    --remote-root)
+      REMOTE_ROOT="${2:?--remote-root requires a value}"
+      shift 2
+      ;;
     --query)
       QUERY="${2:?--query requires a value}"
       shift 2
@@ -30,7 +35,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "usage: scripts/whiskey-mcp-lark-docs-adopt.sh [--host <ssh-host>] [--sync-dir <dir>] [--query <search-query>] [--apply] [--refresh-prompt]" >&2
+      echo "usage: scripts/whiskey-mcp-lark-docs-adopt.sh [--host <ssh-host>] [--sync-dir <dir>] [--remote-root <dir>] [--query <search-query>] [--apply] [--refresh-prompt]" >&2
       exit 1
       ;;
   esac
@@ -44,6 +49,34 @@ require_cmd() {
 }
 
 require_cmd jq
+
+extract_tag_from_image() {
+  local image_ref="$1"
+  if [[ -z "$image_ref" ]]; then
+    return 0
+  fi
+  printf '%s\n' "${image_ref##*:}"
+}
+
+resolve_running_image_tag() {
+  local compose_file="$REMOTE_ROOT/docker-compose.yml"
+  local ps_output
+  ps_output="$(ssh "$REMOTE_HOST" "docker compose -p mandoforge-adoption -f '$compose_file' ps --format json" 2>/dev/null || true)"
+  [[ -n "$ps_output" ]] || return 0
+
+  local image_ref
+  image_ref="$(printf '%s\n' "$ps_output" | jq -rs 'map(select(.Service == "api")) | .[0].Image // empty')"
+  extract_tag_from_image "$image_ref"
+}
+
+resolve_env_image_tag() {
+  local remote_env="$REMOTE_ROOT/whiskey.env"
+  ssh "$REMOTE_HOST" "if [[ -f '$remote_env' ]]; then sed -n 's/^MANDOFORGE_IMAGE_TAG=//p' '$remote_env' | tail -n 1; fi" 2>/dev/null | tr -d '\r'
+}
+
+resolve_status_doc_image_tag() {
+  sed -n 's/^- Image: `ghcr\.io\/proerror77\/mandoforge\/mandoforge-api:\([^`]*\)`/\1/p' docs/whiskey-adoption-status.md | head -n 1
+}
 
 find_latest() {
   local pattern="$1"
@@ -84,10 +117,29 @@ if [[ "$APPLY" == "1" ]]; then
     exit 1
   fi
 
+  require_cmd ssh
+
+  image_tag="${MANDOFORGE_IMAGE_TAG:-}"
+  if [[ -z "$image_tag" ]]; then
+    image_tag="$(resolve_running_image_tag)"
+  fi
+  if [[ -z "$image_tag" ]]; then
+    image_tag="$(resolve_env_image_tag)"
+  fi
+  if [[ -z "$image_tag" ]]; then
+    image_tag="$(resolve_status_doc_image_tag)"
+  fi
+  if [[ -z "$image_tag" ]]; then
+    echo "Whiskey Lark docs adoption could not determine a deploy image tag; set MANDOFORGE_IMAGE_TAG explicitly" >&2
+    exit 1
+  fi
+
+  MANDOFORGE_IMAGE_TAG="$image_tag" \
   WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search \
   WHISKEY_WORKFLOW_PACK_MCP_QUERY="$QUERY" \
   scripts/whiskey-adoption-deploy.sh
 
+  MANDOFORGE_IMAGE_TAG="$image_tag" \
   WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search \
   WHISKEY_WORKFLOW_PACK_MCP_QUERY="$QUERY" \
   RUN_STAGE2_PRODUCTION_VALIDATIONS=1 \

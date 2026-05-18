@@ -36,12 +36,12 @@ verify_script="$script_dir/whiskey-remote-computer-k3s-verify.sh"
 
 mkdir -p "$OUTPUT_DIR"
 
-preflight_output="$("$preflight_script" "$REMOTE_HOST")"
+preflight_output="$("$preflight_script" --host "$REMOTE_HOST" --output-dir "$OUTPUT_DIR")"
 printf '%s\n' "$preflight_output"
 preflight_json="$(printf '%s\n' "$preflight_output" | sed -n 's/^json=//p' | tail -1)"
 preflight_text="$(printf '%s\n' "$preflight_output" | sed -n 's/^text=//p' | tail -1)"
 
-verify_output="$("$verify_script" --host "$REMOTE_HOST")"
+verify_output="$("$verify_script" --host "$REMOTE_HOST" --output-dir "$OUTPUT_DIR")"
 printf '%s\n' "$verify_output"
 verify_json="$(printf '%s\n' "$verify_output" | sed -n 's/^json=//p' | tail -1)"
 verify_text="$(printf '%s\n' "$verify_output" | sed -n 's/^text=//p' | tail -1)"

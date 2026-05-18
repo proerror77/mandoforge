@@ -73,7 +73,7 @@ printf '%s\n' "$inventory_output"
 inventory_json="$(read_path_var inventory_json "$inventory_output")"
 inventory_text="$(read_path_var inventory_text "$inventory_output")"
 
-prepare_args=(--host "$REMOTE_HOST")
+prepare_args=(--host "$REMOTE_HOST" --output-dir "$OUTPUT_DIR")
 if [[ "$APPLY_HOST_PREREQS" == "1" ]]; then
   prepare_args=(--apply "${prepare_args[@]}")
 fi
@@ -82,7 +82,7 @@ printf '%s\n' "$prepare_output"
 prepare_json="$(read_path_var json "$prepare_output")"
 prepare_text="$(read_path_var text "$prepare_output")"
 
-install_args=(--host "$REMOTE_HOST" --channel "$INSTALL_CHANNEL")
+install_args=(--host "$REMOTE_HOST" --output-dir "$OUTPUT_DIR" --channel "$INSTALL_CHANNEL")
 if [[ "$INSTALL_K3S" == "1" ]]; then
   install_args=(--apply "${install_args[@]}")
 fi
@@ -91,7 +91,7 @@ printf '%s\n' "$install_output"
 install_json="$(read_path_var json "$install_output")"
 install_text="$(read_path_var text "$install_output")"
 
-verify_output="$("$verify_script" --host "$REMOTE_HOST")"
+verify_output="$("$verify_script" --host "$REMOTE_HOST" --output-dir "$OUTPUT_DIR")"
 printf '%s\n' "$verify_output"
 verify_json="$(read_path_var json "$verify_output")"
 verify_text="$(read_path_var text "$verify_output")"

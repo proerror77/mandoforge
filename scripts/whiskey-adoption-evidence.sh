@@ -20,6 +20,11 @@ require_cmd() {
 require_cmd ssh
 require_cmd rsync
 
+prepare_remote_evidence_dir() {
+  local remote_dir="$1"
+  ssh "$REMOTE_HOST" "mkdir -p '$remote_dir' && chown -R 1000:1000 '$remote_dir'"
+}
+
 WHISKEY_K3S_PREFLIGHT_JSON=""
 WHISKEY_K3S_PREFLIGHT_TEXT=""
 WHISKEY_K3S_VERIFY_JSON=""
@@ -28,6 +33,9 @@ WHISKEY_K3S_INVENTORY_JSON=""
 WHISKEY_K3S_INVENTORY_TEXT=""
 WHISKEY_K3S_CONSTRAINED_PILOT_JSON=""
 WHISKEY_K3S_CONSTRAINED_PILOT_TEXT=""
+WHISKEY_K3S_CLUSTER_STAGE_JSON=""
+WHISKEY_K3S_CLUSTER_STAGE_TEXT=""
+WHISKEY_K3S_CLUSTER_STAGE_REMOTE_RENDER=""
 WHISKEY_MCP_LARK_DOCS_SCOPE_JSON=""
 WHISKEY_MCP_LARK_DOCS_SCOPE_TEXT=""
 WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_JSON=""
@@ -81,7 +89,7 @@ collect_remote_computer_k3s_inventory() {
 
 sync_remote_computer_k3s_inventory() {
   local remote_dir="$1"
-  ssh "$REMOTE_HOST" "mkdir -p '$remote_dir'"
+  prepare_remote_evidence_dir "$remote_dir"
   rsync -az \
     "$WHISKEY_K3S_PREFLIGHT_JSON" \
     "$WHISKEY_K3S_PREFLIGHT_TEXT" \
@@ -96,6 +104,7 @@ sync_remote_computer_k3s_inventory() {
     "$LOCAL_SYNC_DIR/remote-computer-k3s-host-inventory-latest.json" \
     "$LOCAL_SYNC_DIR/remote-computer-k3s-host-inventory-latest.txt" \
     "$REMOTE_HOST:$remote_dir/"
+  prepare_remote_evidence_dir "$remote_dir"
 }
 
 collect_remote_computer_k3s_constrained_pilot() {
@@ -120,11 +129,40 @@ collect_remote_computer_k3s_constrained_pilot() {
 
 sync_remote_computer_k3s_constrained_pilot() {
   local remote_dir="$1"
-  ssh "$REMOTE_HOST" "mkdir -p '$remote_dir'"
+  prepare_remote_evidence_dir "$remote_dir"
   rsync -az \
     "$WHISKEY_K3S_CONSTRAINED_PILOT_JSON" \
     "$WHISKEY_K3S_CONSTRAINED_PILOT_TEXT" \
     "$REMOTE_HOST:$remote_dir/"
+  prepare_remote_evidence_dir "$remote_dir"
+}
+
+collect_remote_computer_k3s_cluster_stage_artifacts() {
+  WHISKEY_K3S_CLUSTER_STAGE_JSON="$(find "$LOCAL_SYNC_DIR" -maxdepth 1 -type f -name 'remote-computer-k3s-cluster-stage-*.json' -print | sort | tail -n 1)"
+  WHISKEY_K3S_CLUSTER_STAGE_TEXT="$(find "$LOCAL_SYNC_DIR" -maxdepth 1 -type f -name 'remote-computer-k3s-cluster-stage-*.txt' ! -name '*remote-render*' -print | sort | tail -n 1)"
+  WHISKEY_K3S_CLUSTER_STAGE_REMOTE_RENDER="$(find "$LOCAL_SYNC_DIR" -maxdepth 1 -type f -name 'remote-computer-k3s-cluster-stage-remote-render-*.txt' -print | sort | tail -n 1)"
+}
+
+sync_remote_computer_k3s_cluster_stage_artifacts() {
+  local remote_dir="$1"
+  local files=()
+
+  collect_remote_computer_k3s_cluster_stage_artifacts
+
+  [[ -n "$WHISKEY_K3S_CLUSTER_STAGE_JSON" && -f "$WHISKEY_K3S_CLUSTER_STAGE_JSON" ]] && files+=("$WHISKEY_K3S_CLUSTER_STAGE_JSON")
+  [[ -n "$WHISKEY_K3S_CLUSTER_STAGE_TEXT" && -f "$WHISKEY_K3S_CLUSTER_STAGE_TEXT" ]] && files+=("$WHISKEY_K3S_CLUSTER_STAGE_TEXT")
+  [[ -n "$WHISKEY_K3S_CLUSTER_STAGE_REMOTE_RENDER" && -f "$WHISKEY_K3S_CLUSTER_STAGE_REMOTE_RENDER" ]] && files+=("$WHISKEY_K3S_CLUSTER_STAGE_REMOTE_RENDER")
+  [[ -f "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-latest.json" ]] && files+=("$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-latest.json")
+  [[ -f "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-latest.txt" ]] && files+=("$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-latest.txt")
+  [[ -f "$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-remote-render-latest.txt" ]] && files+=("$LOCAL_SYNC_DIR/remote-computer-k3s-cluster-stage-remote-render-latest.txt")
+
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  prepare_remote_evidence_dir "$remote_dir"
+  rsync -az "${files[@]}" "$REMOTE_HOST:$remote_dir/"
+  prepare_remote_evidence_dir "$remote_dir"
 }
 
 collect_mcp_lark_docs_scope_evidence() {
@@ -151,13 +189,14 @@ collect_mcp_lark_docs_scope_evidence() {
 
 sync_mcp_lark_docs_scope_evidence() {
   local remote_dir="$1"
-  ssh "$REMOTE_HOST" "mkdir -p '$remote_dir'"
+  prepare_remote_evidence_dir "$remote_dir"
   rsync -az \
     "$WHISKEY_MCP_LARK_DOCS_SCOPE_JSON" \
     "$WHISKEY_MCP_LARK_DOCS_SCOPE_TEXT" \
     "$LOCAL_SYNC_DIR/whiskey-mcp-lark-docs-scope-latest.json" \
     "$LOCAL_SYNC_DIR/whiskey-mcp-lark-docs-scope-latest.txt" \
     "$REMOTE_HOST:$remote_dir/"
+  prepare_remote_evidence_dir "$remote_dir"
 }
 
 collect_mcp_lark_docs_login_prompt_artifact() {
@@ -170,11 +209,12 @@ sync_mcp_lark_docs_login_prompt_artifact() {
   if [[ ! -f "$WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_JSON" || ! -f "$WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_TEXT" ]]; then
     return 0
   fi
-  ssh "$REMOTE_HOST" "mkdir -p '$remote_dir'"
+  prepare_remote_evidence_dir "$remote_dir"
   rsync -az \
     "$WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_JSON" \
     "$WHISKEY_MCP_LARK_DOCS_LOGIN_PROMPT_TEXT" \
     "$REMOTE_HOST:$remote_dir/"
+  prepare_remote_evidence_dir "$remote_dir"
 }
 
 capture_whiskey_otel_collector_evidence() {
@@ -972,6 +1012,7 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
   '"
 sync_remote_computer_k3s_inventory "$REMOTE_ROOT/evidence/remote-computer"
 sync_remote_computer_k3s_constrained_pilot "$REMOTE_ROOT/evidence/remote-computer"
+sync_remote_computer_k3s_cluster_stage_artifacts "$REMOTE_ROOT/evidence/remote-computer"
 
 seed_eval_release_evidence "$REMOTE_ROOT/evidence/eval-release" "Whiskey focused eval/release adoption evidence"
 
@@ -1043,6 +1084,7 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/stage2-production' ALLOW_BLOCKED=1 RUN_STAGE2_PRODUCTION_VALIDATIONS=$RUN_STRICT_VALIDATIONS RUN_STAGE2_MCP_DUE_RUN=1 RUN_STAGE2_MCP_ROLLBACK=1 RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1 RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 RUN_STAGE2_POLICY_DUE_RUN=1 RUN_STAGE2_PROVIDER_ROLLOUT=1 RUN_STAGE2_APPROVAL_DELIVERY=1 RUN_STAGE2_CODEX_STALE_POLL=1 RUN_STAGE2_SECRET_LIFECYCLE=1 RUN_STAGE2_FINANCE_CONTROLLERS=1 RUN_STAGE2_FINANCE_EXPORT=1 RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 RUN_STAGE2_UI_ACTIONBOOK=1 RUN_STAGE2_UI_STATIC_ASSETS=1 CHROME_PATH=\"\$chrome_bin\" MANDOFORGE_EVAL_RELEASE_ROLLBACK_ENVIRONMENT=whiskey-eval-release MANDOFORGE_SCHEDULER_TOKEN=\"\${MANDOFORGE_SCHEDULER_TOKEN:-}\" scripts/stage2-production-evidence-gate.sh"
 sync_remote_computer_k3s_inventory "$REMOTE_ROOT/evidence/stage2-production/remote-computer-k3s"
 sync_remote_computer_k3s_constrained_pilot "$REMOTE_ROOT/evidence/stage2-production/remote-computer-k3s"
+sync_remote_computer_k3s_cluster_stage_artifacts "$REMOTE_ROOT/evidence/stage2-production/remote-computer-k3s"
 capture_whiskey_otel_collector_evidence "$REMOTE_ROOT/evidence/stage2-production/observability-collector"
 sync_mcp_lark_docs_scope_evidence "$REMOTE_ROOT/evidence/stage2-production/workflow-packs"
 sync_mcp_lark_docs_login_prompt_artifact "$REMOTE_ROOT/evidence/stage2-production/workflow-packs"

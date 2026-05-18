@@ -16,12 +16,16 @@ while [[ $# -gt 0 ]]; do
       REMOTE_HOST="${2:?--host requires a value}"
       shift 2
       ;;
+    --output-dir)
+      OUTPUT_DIR="${2:?--output-dir requires a value}"
+      shift 2
+      ;;
     --channel)
       INSTALL_CHANNEL="${2:?--channel requires a value}"
       shift 2
       ;;
     *)
-      echo "usage: scripts/whiskey-remote-computer-k3s-install.sh [--apply] [--host <ssh-host>] [--channel <stable|latest|vX.Y>]" >&2
+      echo "usage: scripts/whiskey-remote-computer-k3s-install.sh [--apply] [--host <ssh-host>] [--output-dir <dir>] [--channel <stable|latest|vX.Y>]" >&2
       exit 1
       ;;
   esac

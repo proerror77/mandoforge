@@ -30,6 +30,7 @@ require_cmd() {
 }
 
 require_cmd jq
+require_cmd tar
 
 find_latest() {
   local pattern="$1"
@@ -74,6 +75,11 @@ if [[ -n "$latest_lark_login_prompt" && -f "$latest_lark_login_prompt" ]]; then
   user_code="$(extract_user_code "$latest_lark_login_prompt")"
 fi
 
+lark_adoption_live_source=""
+if [[ -n "$latest_full_archive" && -f "$latest_full_archive" ]]; then
+  lark_adoption_live_source="$(tar -xOf "$latest_full_archive" workflow-packs/summary.txt 2>/dev/null | sed -n 's/^connector_quality_live_source=//p' | head -n 1 || true)"
+fi
+
 remote_computer_remote_host="unknown"
 remote_computer_inventory_status="unknown"
 remote_computer_prepare_status="unknown"
@@ -114,7 +120,10 @@ if [[ -n "${latest_lark_scope:-}" && -f "$latest_lark_scope" ]]; then
   lark_scope_status="$(jq -r '.status // "unknown"' "$latest_lark_scope")"
   lark_scope_message="$(jq -r '.message // "unknown"' "$latest_lark_scope")"
 
-  if [[ "$lark_scope_status" == "ready" ]]; then
+  if [[ "$lark_adoption_live_source" == "lark-docs-search-authenticated" ]]; then
+    lark_scope_message="docs search scope is available and the latest full archive already proves Lark docs adoption"
+    lark_docs_next_command="none"
+  elif [[ "$lark_scope_status" == "ready" ]]; then
     lark_docs_next_command="$lark_docs_post_auth_command"
   elif [[ -n "$login_url" ]]; then
     lark_docs_next_command="scripts/whiskey-mcp-lark-docs-scope.sh --start-login"

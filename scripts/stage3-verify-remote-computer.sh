@@ -4,6 +4,10 @@ set -euo pipefail
 cargo test -p mandoforge-api --locked remote_computer -- --nocapture
 bash -n scripts/remote-computer-evidence-gate.sh
 bash -n scripts/verify-remote-computer-k8s-manifests.sh
+bash -n scripts/whiskey-remote-computer-k3s-preflight.sh
+bash -n scripts/whiskey-remote-computer-k3s-prepare.sh
+bash -n scripts/whiskey-remote-computer-k3s-install.sh
+bash -n scripts/whiskey-remote-computer-k3s-verify.sh
 bash -n scripts/whiskey-remote-computer-k3s-host-inventory.sh
 bash -n scripts/whiskey-remote-computer-k3s-constrained-pilot.sh
 bash -n scripts/whiskey-remote-computer-k3s-cluster-stage.sh
