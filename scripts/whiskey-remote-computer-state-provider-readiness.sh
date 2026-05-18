@@ -85,6 +85,21 @@ runner_json="$(curl -fsS "${auth_headers[@]}" "http://127.0.0.1:${api_port}/api/
 secret_json="$(kubectl -n "$namespace" get secret mandoforge-remote-computer-juicefs -o json 2>/dev/null || true)"
 pvc_json="$(kubectl -n "$namespace" get pvc mandoforge-remote-computer-state -o json 2>/dev/null || true)"
 pv_json="$(kubectl get pv mandoforge-remote-computer-state-juicefs-pv -o json 2>/dev/null || true)"
+disk_kib_total="$(df -Pk / | awk 'NR==2 {print $2}')"
+disk_kib_used="$(df -Pk / | awk 'NR==2 {print $3}')"
+disk_kib_available="$(df -Pk / | awk 'NR==2 {print $4}')"
+disk_used_percent="$(df -Pk / | awk 'NR==2 {gsub("%", "", $5); print $5}')"
+memory_mib_total="$(free -m | awk '/^Mem:/ {print $2}')"
+memory_mib_used="$(free -m | awk '/^Mem:/ {print $3}')"
+memory_mib_available="$(free -m | awk '/^Mem:/ {print $7}')"
+swap_mib_total="$(free -m | awk '/^Swap:/ {print $2}')"
+swap_mib_used="$(free -m | awk '/^Swap:/ {print $3}')"
+cpu_count="$(nproc)"
+node_top="$(kubectl top node --no-headers 2>/dev/null | awk 'NR==1 {print $2 "|" $3 "|" $4 "|" $5}' || true)"
+node_cpu_cores="$(printf '%s\n' "$node_top" | cut -d '|' -f 1)"
+node_cpu_percent="$(printf '%s\n' "$node_top" | cut -d '|' -f 2 | tr -d '%')"
+node_memory_bytes="$(printf '%s\n' "$node_top" | cut -d '|' -f 3)"
+node_memory_percent="$(printf '%s\n' "$node_top" | cut -d '|' -f 4 | tr -d '%')"
 
 secret_present=false
 placeholder_secret=false
@@ -125,6 +140,20 @@ jq -n \
   --argjson runner "$runner_json" \
   --argjson pvc "$(if [[ -n "$pvc_json" ]]; then printf '%s' "$pvc_json"; else printf '{}'; fi)" \
   --argjson pv "$(if [[ -n "$pv_json" ]]; then printf '%s' "$pv_json"; else printf '{}'; fi)" \
+  --argjson disk_kib_total "${disk_kib_total:-0}" \
+  --argjson disk_kib_used "${disk_kib_used:-0}" \
+  --argjson disk_kib_available "${disk_kib_available:-0}" \
+  --argjson disk_used_percent "${disk_used_percent:-0}" \
+  --argjson memory_mib_total "${memory_mib_total:-0}" \
+  --argjson memory_mib_used "${memory_mib_used:-0}" \
+  --argjson memory_mib_available "${memory_mib_available:-0}" \
+  --argjson swap_mib_total "${swap_mib_total:-0}" \
+  --argjson swap_mib_used "${swap_mib_used:-0}" \
+  --argjson cpu_count "${cpu_count:-0}" \
+  --arg node_cpu_cores "$node_cpu_cores" \
+  --arg node_cpu_percent "$node_cpu_percent" \
+  --arg node_memory_bytes "$node_memory_bytes" \
+  --arg node_memory_percent "$node_memory_percent" \
   '{
     generated_at: $generated_at,
     remote_host: $remote_host,
@@ -153,13 +182,65 @@ jq -n \
     },
     pvc: {
       present: ((($pvc | type) == "object") and (($pvc.metadata.name // "") != "")),
+      phase: ($pvc.status.phase // null),
+      storage_class_name: ($pvc.spec.storageClassName // null),
       volume_name: ($pvc.spec.volumeName // null),
       annotations: ($pvc.metadata.annotations // {})
     },
     pv: {
       present: ((($pv | type) == "object") and (($pv.metadata.name // "") != "")),
+      phase: ($pv.status.phase // null),
+      storage_class_name: ($pv.spec.storageClassName // null),
       csi_driver: ($pv.spec.csi.driver // null),
       annotations: ($pv.metadata.annotations // {})
+    },
+    host_capacity: {
+      disk: {
+        mount: "/",
+        total_kib: $disk_kib_total,
+        used_kib: $disk_kib_used,
+        available_kib: $disk_kib_available,
+        used_percent: $disk_used_percent
+      },
+      memory: {
+        total_mib: $memory_mib_total,
+        used_mib: $memory_mib_used,
+        available_mib: $memory_mib_available
+      },
+      swap: {
+        total_mib: $swap_mib_total,
+        used_mib: $swap_mib_used
+      },
+      cpu_count: $cpu_count,
+      k3s_top: {
+        node_cpu_cores: (if $node_cpu_cores == "" then null else $node_cpu_cores end),
+        node_cpu_percent: (if $node_cpu_percent == "" then null else ($node_cpu_percent | tonumber) end),
+        node_memory_bytes: (if $node_memory_bytes == "" then null else $node_memory_bytes end),
+        node_memory_percent: (if $node_memory_percent == "" then null else ($node_memory_percent | tonumber) end)
+      },
+      pilot_sizing: {
+        status: (
+          if $cpu_count >= 2
+            and $memory_mib_total >= 3000
+            and $memory_mib_available >= 768
+            and $disk_kib_available >= 52428800
+          then "pilot_ok"
+          else "constrained"
+          end
+        ),
+        recommended_remote_computer_pods: (
+          if $cpu_count >= 2
+            and $memory_mib_total >= 3000
+            and $memory_mib_available >= 768
+            and $disk_kib_available >= 52428800
+          then "1-2"
+          else "1"
+          end
+        ),
+        recommended_juicefs_cache_gib: (
+          if $disk_kib_available >= 52428800 then "5-10" else "2-5" end
+        )
+      }
     }
   }'
 REMOTE
@@ -184,6 +265,7 @@ jq \
       + (if .k3s.status != "ready" then ["k3s cluster is not ready"] else [] end)
       + (if .readiness.state_filesystem.distributed_filesystem_configured != true then ["no real distributed filesystem provider is configured"] else [] end)
       + (if .juicefs_secret.present == true and .juicefs_secret.placeholder_values_detected == true then ["JuiceFS profile still uses placeholder secret values"] else [] end)
+      + (if .pvc.present == true and .pvc.phase != "Bound" then ["Remote Computer state PVC is not bound"] else [] end)
       + (if .readiness.state_filesystem.lock_manager_configured != true then ["lock-aware state sync manager is not configured"] else [] end)
       + (if .runner.mode != "kubernetes" then ["runner mode is not kubernetes"] else [] end)
       + (if .runner.mutation_enabled != true then ["runner mutation gate is disabled"] else [] end)
@@ -229,7 +311,17 @@ jq -r '
     "juicefs_secret_present=" + (.juicefs_secret.present | tostring),
     "juicefs_placeholder_values_detected=" + (.juicefs_secret.placeholder_values_detected | tostring),
     "pvc_present=" + (.pvc.present | tostring),
+    "pvc_phase=" + (.pvc.phase // "unknown"),
+    "pvc_storage_class_name=" + (.pvc.storage_class_name // "null"),
     "pv_present=" + (.pv.present | tostring),
+    "pv_phase=" + (.pv.phase // "unknown"),
+    "pv_storage_class_name=" + (.pv.storage_class_name // "null"),
+    "host_disk_available_gib=" + (((.host_capacity.disk.available_kib // 0) / 1048576) | tostring),
+    "host_memory_available_mib=" + ((.host_capacity.memory.available_mib // 0) | tostring),
+    "host_cpu_count=" + ((.host_capacity.cpu_count // 0) | tostring),
+    "pilot_sizing_status=" + (.host_capacity.pilot_sizing.status // "unknown"),
+    "recommended_remote_computer_pods=" + (.host_capacity.pilot_sizing.recommended_remote_computer_pods // "unknown"),
+    "recommended_juicefs_cache_gib=" + (.host_capacity.pilot_sizing.recommended_juicefs_cache_gib // "unknown"),
     "",
     "blocking_reasons:",
     (if (.blocking_reasons | length) == 0 then "- none" else (.blocking_reasons[] | "- " + .) end),

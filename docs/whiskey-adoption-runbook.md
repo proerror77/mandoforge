@@ -411,6 +411,8 @@ Current blocker after the constrained pilot is no longer Kubernetes bootstrap. I
 scripts/whiskey-remote-computer-state-provider-readiness.sh
 ```
 
+The readiness helper also records the Whiskey host capacity and PVC/PV binding state. Treat `pilot_sizing_status=pilot_ok` as approval only for a low-concurrency pilot, not for production scale-out. On the current Whiskey class, keep the first live run to `recommended_remote_computer_pods=1-2` and `recommended_juicefs_cache_gib=5-10`; if `pvc_phase` is not `Bound`, fix the provider profile or PVC/PV binding before enabling live runner mutation.
+
 If the audit still reports placeholder JuiceFS values, render a real Secret/PV manifest from an env file with:
 
 ```bash
