@@ -12,7 +12,7 @@ For the fastest operator handoff from the latest local artifacts, run:
 scripts/whiskey-adoption-next-actions.sh
 ```
 
-That helper reads the latest synced Whiskey artifacts and prints the exact next repo-native command for the current remaining unblock paths. Once the latest full archive already proves Lark docs adoption, it leaves only the constrained `k3s` Remote Computer pilot as actionable work.
+That helper reads the latest synced Whiskey artifacts and prints the exact next repo-native command for the current remaining unblock paths. Once the latest full archive already proves Lark docs adoption and the latest full archive also records `k3s` as ready with state-sync still blocked, it leaves no further repo-native command and instead surfaces the remaining product/environment blocker.
 
 ## Host Contract
 
@@ -392,17 +392,17 @@ scripts/whiskey-remote-computer-k3s-cluster-stage.sh --apply-manifests --run-evi
 
 That stage command now keeps all of its own artifacts under `.mandoforge/remote-adoption/whiskey/` (or the supplied `--sync-dir`): the timestamped plan, the `-latest` plan aliases, and the remote `kubectl kustomize` render output. When `--run-evidence` is included, `scripts/whiskey-adoption-evidence.sh` syncs those cluster-stage artifacts into both `/opt/mandoforge-adoption/evidence/remote-computer/` and strict `stage2-production/remote-computer-k3s/`, so the approved manifest-apply step leaves archiveable repo-native evidence instead of only terminal output.
 
-Before approval, the current Whiskey host returns `status=not_installed` with no reserved port collisions and no kubeconfig or Ready nodes, which is the expected baseline.
+Before approval, the Whiskey host returned `status=not_installed` with no reserved port collisions and no kubeconfig or Ready nodes, which was the expected baseline.
 
-The latest preflight on 2026-05-17 returned `status=constrained_pilot_only`. It confirmed that Whiskey is still a 2 vCPU / 3.4 GiB RAM host with only about 1.6 GiB immediately available memory, 1.4 GiB of swap already in use, no current k3s-reserved port collisions, and missing `br_netfilter` plus `bridge-nf-call-iptables`. That means cluster work should stay isolated from existing services and only proceed as an explicit constrained experiment.
+The latest constrained pilot on 2026-05-18 moved Whiskey past cluster bootstrap. `scripts/whiskey-remote-computer-k3s-verify.sh` now reports `status=ready`, `node_count=1`, and `ready_node_count=1`, while `scripts/whiskey-remote-computer-k3s-cluster-stage.sh --apply-manifests --run-evidence` successfully applied the repo manifests after auto-installing the official KEDA core manifest to supply the `ScaledObject` CRDs expected by `deploy/`.
 
 Current Whiskey capacity snapshot from the adoption check:
 
 - 2 vCPU.
-- 3.4 GiB RAM, with roughly 1.6 GiB available during the latest preflight.
-- 4.0 GiB swap, with existing swap use observed.
-- No `k3s` or `kubectl` installed.
+- 3.4 GiB RAM, with roughly 1.6 GiB available during the latest constrained-pilot evidence refresh.
+- 4.0 GiB swap, with roughly 1.9 GiB already in use during the latest constrained-pilot evidence refresh.
+- `k3s` and `kubectl` now installed; single control-plane node is `Ready`.
 - Existing public services already use ports `5432`, `8080`, `3000`, and `9377`; MandoForge remains loopback-only on `18787` and `15432`.
-- `br_netfilter` is not loaded and `net.bridge.bridge-nf-call-iptables` is missing.
+- `br_netfilter` is loaded and `net.bridge.bridge-nf-call-iptables=1`.
 
-Recommendation: keep Whiskey in single-host pilot mode unless explicitly deciding to spend this host's remaining headroom on a constrained single-node `k3s` pilot. If `k3s` is installed later, first load `br_netfilter`, enable bridge iptables, cap Remote Computer warm-pool replicas, and keep Codex/Remote Computer services on loopback or cluster-internal networking until an authenticated ingress policy exists.
+Current blocker after the constrained pilot is no longer Kubernetes bootstrap. It is the real production state layer and live execution gate: the latest `remote-computer/summary.txt` still reports `production_state_sync_status=blocked`, `runner_status=reserved`, and blocking reasons for missing distributed state storage plus missing lock-aware shared-write coordination. The next work is to configure a real `MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER`, supply non-placeholder storage credentials/profile, and validate live runner mutation before claiming Remote Computer adoption complete.
