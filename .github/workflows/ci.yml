@@ -32,6 +32,7 @@ jobs:
         run: |
           node --check web/app.js
           node --check scripts/stage2-mock-controller.js
+      - run: scripts/verify-static-ui-assets.sh
       - name: Check shell syntax
         shell: bash
         run: |

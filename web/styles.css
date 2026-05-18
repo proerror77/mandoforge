@@ -460,7 +460,7 @@ header {
   gap: 14px;
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1060px) {
   .shell {
     grid-template-columns: 1fr;
   }

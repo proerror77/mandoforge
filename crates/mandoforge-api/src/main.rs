@@ -9006,15 +9006,22 @@ async fn list_agent_handoff_events(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AgentHandoffEvent>>, AppError> {
-    authorize_request(
+    let principal = authorize_collection_request(
         &state,
         &headers,
         Permission::SessionsRead,
         "agent_handoff_events",
-        None,
     )
     .await?;
-    Ok(Json(state.list_agent_handoff_events(None).await?))
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_agent_handoff_events(None)
+            .await?
+            .into_iter()
+            .filter(|event| visible_session_ids.contains(&event.source_session_id))
+            .collect(),
+    ))
 }
 
 async fn list_session_agent_handoff_events(
@@ -9037,15 +9044,22 @@ async fn list_agent_handoff_assignments(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AgentHandoffAssignment>>, AppError> {
-    authorize_request(
+    let principal = authorize_collection_request(
         &state,
         &headers,
         Permission::SessionsRead,
         "agent_handoff_assignments",
-        None,
     )
     .await?;
-    Ok(Json(state.list_agent_handoff_assignments(None).await?))
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_agent_handoff_assignments(None)
+            .await?
+            .into_iter()
+            .filter(|assignment| visible_session_ids.contains(&assignment.source_session_id))
+            .collect(),
+    ))
 }
 
 async fn list_session_agent_handoff_assignments(
@@ -9123,15 +9137,22 @@ async fn list_manager_agent_plans(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
-    authorize_request(
+    let principal = authorize_collection_request(
         &state,
         &headers,
         Permission::SessionsRead,
         "manager_agent_plans",
-        None,
     )
     .await?;
-    Ok(Json(state.list_manager_agent_plans(None).await?))
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_manager_agent_plans(None)
+            .await?
+            .into_iter()
+            .filter(|plan| visible_session_ids.contains(&plan.session_id))
+            .collect(),
+    ))
 }
 
 async fn list_session_manager_agent_plans(
@@ -11801,6 +11822,35 @@ async fn authorize_request(
     enforce_resource_scope(state, &principal, &request).await
 }
 
+async fn authorize_collection_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    permission: Permission,
+    resource_type: impl Into<String>,
+) -> Result<Principal, AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission,
+        resource_type: resource_type.into(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    Ok(principal)
+}
+
+async fn visible_session_ids_for_principal(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<HashSet<Uuid>, AppError> {
+    Ok(state
+        .list_sessions_visible_to(principal)
+        .await?
+        .into_iter()
+        .map(|session| session.id)
+        .collect())
+}
+
 async fn enforce_resource_scope(
     state: &AppState,
     principal: &Principal,
@@ -11998,15 +12048,22 @@ async fn list_memory_writeback_candidates(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<MemoryWritebackCandidate>>, AppError> {
-    authorize_request(
+    let principal = authorize_collection_request(
         &state,
         &headers,
         Permission::SessionsRead,
         "memory_writeback_candidates",
-        None,
     )
     .await?;
-    Ok(Json(state.list_memory_writeback_candidates(None).await?))
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_memory_writeback_candidates(None)
+            .await?
+            .into_iter()
+            .filter(|candidate| visible_session_ids.contains(&candidate.session_id))
+            .collect(),
+    ))
 }
 
 async fn get_memory_writeback_candidate(
@@ -30596,15 +30653,18 @@ async fn list_approvals(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Approval>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "approvals",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_approvals().await?))
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::SessionsRead, "approvals")
+            .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_approvals()
+            .await?
+            .into_iter()
+            .filter(|approval| visible_session_ids.contains(&approval.session_id))
+            .collect(),
+    ))
 }
 
 async fn list_approval_groups(
@@ -32735,6 +32795,11 @@ async fn enforce_delegated_approver(
             group.name
         )));
     }
+    if approval.risk_level == "high" {
+        return Err(AppError::forbidden(
+            "high-risk approvals require an explicit approver subject or approval group",
+        ));
+    }
     Ok(())
 }
 
@@ -32801,15 +32866,18 @@ async fn list_tool_calls(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ToolCall>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "tool_calls",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_tool_calls(None).await?))
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::SessionsRead, "tool_calls")
+            .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_tool_calls(None)
+            .await?
+            .into_iter()
+            .filter(|tool_call| visible_session_ids.contains(&tool_call.session_id))
+            .collect(),
+    ))
 }
 
 async fn list_session_tool_calls(
@@ -32832,23 +32900,40 @@ async fn list_audit_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AuditLog>>, AppError> {
-    authorize_request(&state, &headers, Permission::AuditRead, "audit_logs", None).await?;
-    Ok(Json(state.list_audit_logs(None).await?))
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::AuditRead, "audit_logs").await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_audit_logs(None)
+            .await?
+            .into_iter()
+            .filter(|log| {
+                log.session_id
+                    .map(|session_id| visible_session_ids.contains(&session_id))
+                    .unwrap_or_else(|| principal.roles.contains(&Role::Admin))
+            })
+            .collect(),
+    ))
 }
 
 async fn list_execution_jobs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<execution_queue::ExecutionJob>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "execution_jobs",
-        None,
-    )
-    .await?;
-    Ok(Json(state.execution_queue.list().await?))
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::SessionsRead, "execution_jobs")
+            .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .execution_queue
+            .list()
+            .await?
+            .into_iter()
+            .filter(|job| visible_session_ids.contains(&job.session_id))
+            .collect(),
+    ))
 }
 
 async fn assign_execution_job_remote_computer_lease(
@@ -39945,11 +40030,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         let job = request_json::<Vec<execution_queue::ExecutionJob>>(
@@ -41581,11 +41662,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         assert_eq!(approved.status, "approved");
@@ -45549,7 +45626,7 @@ not json
                         "team_id": team.id,
                         "provider": "archive-lifecycle-mock",
                         "model": "gpt-5.4-mini",
-                        "tools": ["file.read"]
+                        "tools": ["file.read", "file.write"]
                     })
                     .to_string(),
                 ))
@@ -50502,13 +50579,7 @@ not json
 
         let _approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .header("x-mandoforge-subject", "admin-1")
-                .header("x-mandoforge-roles", "admin")
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
 
@@ -50636,11 +50707,7 @@ not json
 
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         assert_eq!(approved.status, "approved");
@@ -50816,11 +50883,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         let jobs: Vec<execution_queue::ExecutionJob> = request_json(
@@ -50949,11 +51012,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
 
@@ -51098,11 +51157,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         let jobs: Vec<execution_queue::ExecutionJob> = request_json(
@@ -51312,11 +51367,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
 
@@ -51491,11 +51542,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
@@ -51727,11 +51774,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
@@ -54356,6 +54399,16 @@ not json
             .expect("valid request")
     }
 
+    fn approve_request(uri: String) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request")
+    }
+
     #[tokio::test]
     async fn generic_runtime_diagnostics_replay_api_flow() {
         let _env_guard = env_lock().lock().expect("env lock");
@@ -54507,11 +54560,7 @@ not json
 
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{}/approve", approval.id))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{}/approve", approval.id)),
         )
         .await;
         assert_eq!(approved.status, "approved");
@@ -54616,11 +54665,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
@@ -55202,7 +55247,7 @@ not json
                         "name": "Operator Denied Agent",
                         "description": "operators cannot create agents",
                         "model": "mock",
-                        "tools": ["file.read"]
+                        "tools": ["file.read", "file.write"]
                     })
                     .to_string(),
                 ))
@@ -55759,6 +55804,8 @@ not json
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/approvals/{}/expire", pending_approval.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
                 .body(Body::empty())
                 .expect("valid request"),
         )
@@ -55766,11 +55813,7 @@ not json
         assert_eq!(expired.status, "expired");
         let (status, approval_error) = request_value(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{}/approve", pending_approval.id))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{}/approve", pending_approval.id)),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -56785,7 +56828,7 @@ not json
     }
 
     #[tokio::test]
-    async fn approval_decision_enforces_rbac_role() {
+    async fn approval_decision_blocks_viewer_and_operator_self_approval() {
         let app = test_app().await;
         let agents: Vec<Agent> = request_json(
             app.clone(),
@@ -56840,6 +56883,25 @@ not json
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(
             error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not allowed")
+        );
+
+        let (operator_status, operator_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "demo-operator")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(operator_status, StatusCode::FORBIDDEN);
+        assert!(
+            operator_error["error"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("not allowed")
@@ -56972,13 +57034,7 @@ not json
             .expect("admin override approval id");
         let admin_approved: Approval = request_json(
             app,
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{admin_approval_id}/approve"))
-                .header("x-mandoforge-subject", "admin-1")
-                .header("x-mandoforge-roles", "admin")
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{admin_approval_id}/approve")),
         )
         .await;
         assert_eq!(admin_approved.status, "approved");
@@ -58194,7 +58250,7 @@ not json
                         "team_id": team.id,
                         "provider": "openai-compatible",
                         "model": "gpt-5.4-mini",
-                        "tools": ["file.read"]
+                        "tools": ["file.read", "file.write"]
                     })
                     .to_string(),
                 ))
@@ -58990,7 +59046,7 @@ not json
                         "team_id": team.id,
                         "provider": "access-lifecycle-mock",
                         "model": "gpt-5.4-mini",
-                        "tools": ["file.read"]
+                        "tools": ["file.read", "file.write"]
                     })
                     .to_string(),
                 ))
@@ -59854,7 +59910,7 @@ not json
                         "project_id": project.id,
                         "provider": "openai-compatible",
                         "model": "gpt-5.4-mini",
-                        "tools": ["file.read"]
+                        "tools": ["file.read", "file.write"]
                     })
                     .to_string(),
                 ))
@@ -59880,7 +59936,7 @@ not json
                         "project_id": sibling_project.id,
                         "provider": "openai-compatible",
                         "model": "gpt-5.4-mini",
-                        "tools": ["file.read"]
+                        "tools": ["file.read", "file.write"]
                     })
                     .to_string(),
                 ))
@@ -59914,6 +59970,43 @@ not json
                 .header("x-mandoforge-roles", "admin")
                 .body(Body::from(
                     json!({"agent_id": sibling_agent.id, "title": "sibling session"}).to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+
+        let _scoped_approval: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/file.write/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": scoped_session.id,
+                        "args": {"path": "scoped.md", "content": "visible"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let _sibling_approval: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/file.write/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": sibling_session.id,
+                        "args": {"path": "sibling.md", "content": "hidden"}
+                    })
+                    .to_string(),
                 ))
                 .expect("valid request"),
         )
@@ -60045,6 +60138,46 @@ not json
             !project_viewer_sessions
                 .iter()
                 .any(|session| session.id == sibling_session.id)
+        );
+
+        let project_viewer_tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/tool-calls")
+                .header("x-mandoforge-subject", "project-viewer-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            project_viewer_tool_calls
+                .iter()
+                .any(|call| call.session_id == scoped_session.id)
+        );
+        assert!(
+            !project_viewer_tool_calls
+                .iter()
+                .any(|call| call.session_id == sibling_session.id)
+        );
+
+        let project_viewer_approvals: Vec<Approval> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals")
+                .header("x-mandoforge-subject", "project-viewer-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            project_viewer_approvals
+                .iter()
+                .any(|approval| approval.session_id == scoped_session.id)
+        );
+        assert!(
+            !project_viewer_approvals
+                .iter()
+                .any(|approval| approval.session_id == sibling_session.id)
         );
 
         let projects: Vec<Project> = request_json(
@@ -61280,11 +61413,7 @@ not json
 
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         assert_eq!(approved.status, "approved");
@@ -61523,11 +61652,7 @@ not json
 
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         assert_eq!(approved.status, "approved");
@@ -62196,11 +62321,7 @@ not json
 
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
 
@@ -62355,11 +62476,7 @@ not json
             .expect("approval id");
         let approved: Approval = request_json(
             app.clone(),
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/approvals/{approval_id}/approve"))
-                .body(Body::empty())
-                .expect("valid request"),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
         )
         .await;
         let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(

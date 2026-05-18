@@ -84,6 +84,7 @@ app_patterns=(
   "agentRuntimeProfiles"
   "agentRuntimeProfileReleaseGates"
   "renderManagedAgentConsole"
+  "confirmDestructiveAction"
   "/api/agent-runtime-profiles"
   "/api/agent-runtime-profile-release-gates"
   "/api/stage2/readiness"
@@ -105,5 +106,35 @@ if grep -q "window.prompt" "$APP_FILE"; then
   echo "static UI must use explicit forms instead of window.prompt" >&2
   exit 1
 fi
+
+destructive_confirm_patterns=(
+  "confirmDestructiveAction(\"Delete membership?\""
+  "confirmDestructiveAction(\"Archive organization?\""
+  "confirmDestructiveAction(\"Delete organization?\""
+  "confirmDestructiveAction(\"Archive team?\""
+  "confirmDestructiveAction(\"Delete team?\""
+  "confirmDestructiveAction(\"Archive project?\""
+  "confirmDestructiveAction(\"Delete project?\""
+  "confirmDestructiveAction(\"Archive approval notification policy?\""
+  "confirmDestructiveAction(\"Archive provider access?\""
+  "confirmDestructiveAction(\"Rollback agent release?\""
+  "confirmDestructiveAction(\"Rollback provider production rollout?\""
+  "confirmDestructiveAction(\"Cancel staged policy rollout?\""
+  "confirmDestructiveAction(\"Rollback active policy?\""
+  "confirmDestructiveAction(\"Apply MCP rollout?\""
+  "confirmDestructiveAction(\"Rollback MCP rollout?\""
+  "confirmDestructiveAction(\"Cancel execution job?\""
+  "confirmDestructiveAction(\"Mutate remote runner?\""
+  "confirmDestructiveAction(\"Release remote attachment?\""
+  "confirmDestructiveAction(\`Set remote lease to"
+  "confirmDestructiveAction(\"Reclaim stale remote computers?\""
+  "confirmDestructiveAction(\"Release remote state lock?\""
+  "confirmDestructiveAction(\`Set MCP server status to"
+  "confirmDestructiveAction(\`Set provider status to"
+)
+
+for pattern in "${destructive_confirm_patterns[@]}"; do
+  require_text "$APP_FILE" "$pattern"
+done
 
 echo "static UI asset verification ok"

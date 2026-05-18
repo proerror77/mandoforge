@@ -437,7 +437,7 @@ pub(crate) fn approval_group_from_row(row: PgRow) -> Result<ApprovalGroup, AppEr
     Ok(ApprovalGroup {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
-        subjects: serde_json::from_value(subjects).unwrap_or_default(),
+        subjects: json_array_from_row(subjects, "approval_groups.subjects")?,
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })
@@ -575,7 +575,7 @@ pub(crate) fn provider_access_from_row(row: PgRow) -> Result<ProviderAccess, App
         id: row.try_get("id")?,
         team_id: row.try_get("team_id")?,
         provider_name: row.try_get("provider_name")?,
-        model_allowlist: serde_json::from_value(model_allowlist).unwrap_or_default(),
+        model_allowlist: json_array_from_row(model_allowlist, "provider_access.model_allowlist")?,
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })
@@ -602,7 +602,7 @@ pub(crate) fn mcp_server_from_row(row: PgRow) -> Result<McpServerRecord, AppErro
         name: row.try_get("name")?,
         transport: row.try_get("transport")?,
         config: row.try_get("config")?,
-        tool_allowlist: serde_json::from_value(tool_allowlist).unwrap_or_default(),
+        tool_allowlist: json_array_from_row(tool_allowlist, "mcp_servers.tool_allowlist")?,
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })
@@ -661,4 +661,24 @@ pub(crate) fn cost_alert_route_from_row(row: PgRow) -> Result<CostAlertRoute, Ap
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::json_array_from_row;
+
+    #[test]
+    fn json_array_from_row_rejects_invalid_array_shape() {
+        let error =
+            json_array_from_row::<String>(json!({"admin": true}), "approval_groups.subjects")
+                .expect_err("object JSON must not be silently coerced to an empty array");
+
+        assert!(
+            error
+                .message
+                .contains("invalid approval_groups.subjects JSON array")
+        );
+    }
 }

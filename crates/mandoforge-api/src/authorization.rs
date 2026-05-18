@@ -98,7 +98,6 @@ fn role_allows_permission(role: Role, permission: Permission) -> bool {
                 | Permission::SessionsRun
                 | Permission::SessionsWrite
                 | Permission::ToolsExecute
-                | Permission::ApprovalsDecide
                 | Permission::ExecutionJobsRun
                 | Permission::AuditRead
         ),
@@ -128,7 +127,7 @@ mod tests {
     #[test]
     fn role_permissions_are_explicit() {
         assert!(role_allows_permission(Role::Admin, Permission::Admin));
-        assert!(role_allows_permission(
+        assert!(!role_allows_permission(
             Role::Operator,
             Permission::ApprovalsDecide
         ));

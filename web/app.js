@@ -379,6 +379,20 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+async function apiSettledEntries(entries) {
+  const results = await Promise.all(
+    entries.map(async ([key, path]) => {
+      try {
+        return [key, await api(path)];
+      } catch (error) {
+        console.error(`Failed to refresh ${key} from ${path}`, error);
+        return null;
+      }
+    }),
+  );
+  return Object.fromEntries(results.filter(Boolean));
+}
+
 function adminHeaders(extra = {}) {
   const headers = {
     "content-type": "application/json",
@@ -896,6 +910,7 @@ async function runProviderProductionRollout() {
 }
 
 async function rollbackProviderProductionRollout() {
+  if (!confirmDestructiveAction("Rollback provider production rollout?", "providers")) return;
   state.providerProductionRollbackRun = await api("/api/providers/production-rollout/rollback", {
     method: "POST",
     body: JSON.stringify({
@@ -982,6 +997,7 @@ async function activatePolicyRevision(id) {
 }
 
 async function cancelPolicyRollout() {
+  if (!confirmDestructiveAction("Cancel staged policy rollout?", "policy")) return;
   state.policyRuntime = await api("/api/policy/rollout/cancel", { method: "POST" });
   renderPolicy();
 }
@@ -995,6 +1011,7 @@ async function runDuePolicyRollouts() {
 }
 
 async function rollbackPolicyRollout() {
+  if (!confirmDestructiveAction("Rollback active policy?", "policy")) return;
   state.policyRollback = await api("/api/policy/rollout/rollback", { method: "POST" });
   state.policyRuntime = await api("/api/policy/runtime");
   state.policyRolloutOrchestrationReadiness = await api("/api/policy/rollout/orchestration/readiness");
@@ -1210,6 +1227,7 @@ async function rejectAgentRelease(agentId, releaseId) {
 }
 
 async function rollbackAgentRelease(agentId, releaseId) {
+  if (!confirmDestructiveAction("Rollback agent release?", releaseId)) return;
   state.agentReleaseRollback = await api(`/api/agents/${agentId}/releases/${releaseId}/rollback`, {
     method: "POST",
   });
@@ -1741,6 +1759,7 @@ async function requestMcpRollout(serverId) {
 
 async function applyMcpRollout(serverId, rolloutId) {
   if (!state.mcpTeamId) return;
+  if (!confirmDestructiveAction("Apply MCP rollout?", rolloutId)) return;
   await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/rollouts/${rolloutId}/apply`, {
     method: "POST",
   });
@@ -1749,6 +1768,7 @@ async function applyMcpRollout(serverId, rolloutId) {
 
 async function rollbackMcpRollout(serverId, rolloutId) {
   if (!state.mcpTeamId) return;
+  if (!confirmDestructiveAction("Rollback MCP rollout?", rolloutId)) return;
   state.mcpRollback = await api(`/api/teams/${state.mcpTeamId}/mcp-servers/${serverId}/rollouts/${rolloutId}/rollback`, {
     method: "POST",
   });
@@ -1786,6 +1806,7 @@ async function runExecutionJob(jobId) {
 }
 
 async function cancelExecutionJob(jobId) {
+  if (!confirmDestructiveAction("Cancel execution job?", jobId)) return;
   await api(`/api/execution-jobs/${jobId}/cancel`, { method: "POST" });
   await refreshExecutionJobs();
   await refreshApprovals();
@@ -1841,143 +1862,61 @@ async function runDemo() {
 }
 
 async function refreshOps() {
-  const [
-    providers,
-    providerSummary,
-    providerPolicyGate,
-    providerPolicyGateRuns,
-    vaultReadiness,
-    secretRecords,
-    policy,
-    policyRuntime,
-    policyRolloutOrchestrationReadiness,
-    policyRevisions,
-    agentRuntimeProfiles,
-    agentRuntimeProfileReleaseGates,
-    evalJudgeProfiles,
-    evalDatasets,
-    evalRuns,
-    usage,
-    usageTrend,
-    usageFinanceSummary,
-    usageFinanceOperations,
-    observability,
-    observabilityCollectorReadiness,
-    observabilityRemediationPlan,
-    schedulerSummary,
-    schedulerDuePlan,
-    usageRollups,
-    costAlertRoutes,
-    stage2Readiness,
-    tenantIsolationReadiness,
-    organizations,
-    executionJobs,
-    workerReadiness,
-    remoteComputerReadiness,
-    remoteComputerRunnerReadiness,
-    remoteComputers,
-    remoteComputerLeases,
-    remoteComputerAttachments,
-    remoteComputerJobAssignments,
-    remoteComputerStateLocks,
-    remoteComputerSidecarHeartbeats,
-    approvalGroups,
-    approvalEscalationRules,
-    approvalNotificationChannelPolicies,
-    approvalNotificationRouting,
-    approvalNotificationRuns,
-  ] =
-    await Promise.all([
-      api("/api/providers"),
-      api("/api/providers/summary"),
-      api("/api/providers/policy-gate"),
-      api("/api/providers/policy-gate/runs"),
-      api("/api/vault/readiness"),
-      api("/api/vault/secrets"),
-      api("/api/policy"),
-      api("/api/policy/runtime"),
-      api("/api/policy/rollout/orchestration/readiness"),
-      api("/api/policy/revisions"),
-      api("/api/agent-runtime-profiles"),
-      api("/api/agent-runtime-profile-release-gates"),
-      api("/api/eval/judge-profiles"),
-      api("/api/eval/datasets"),
-      api("/api/eval/runs"),
-      api("/api/usage"),
-      api("/api/usage/trends"),
-      api("/api/usage/finance-summary"),
-      api("/api/usage/finance-operations/summary"),
-      api("/api/observability"),
-      api("/api/observability/collector-readiness"),
-      api("/api/observability/remediation/plan"),
-      api("/api/scheduler/summary"),
-      api("/api/scheduler/due-plan"),
-      api("/api/usage/rollups"),
-      api("/api/usage/alert-routes"),
-      api("/api/stage2/readiness"),
-      api("/api/tenant-isolation/readiness"),
-      api("/api/organizations"),
-      api("/api/execution-jobs"),
-      api("/api/execution-jobs/worker-readiness"),
-      api("/api/remote-computers/readiness"),
-      api("/api/remote-computers/runner/readiness"),
-      api("/api/remote-computers"),
-      api("/api/remote-computer-leases"),
-      api("/api/remote-computer-attachments"),
-      api("/api/remote-computer-job-assignments"),
-      api("/api/remote-computers/state-locks"),
-      api("/api/remote-computers/sidecars/heartbeats"),
-      api("/api/approval-groups"),
-      api("/api/approval-escalation-rules"),
-      api("/api/approvals/notification-channel-policies"),
-      api("/api/approvals/notification-routing/summary"),
-      api("/api/approvals/notifications/runs"),
-    ]);
-  state.providers = providers;
-  state.providerSummary = providerSummary;
-  state.providerPolicyGate = providerPolicyGate;
-  state.providerPolicyGateRuns = providerPolicyGateRuns;
-  state.vaultReadiness = vaultReadiness;
-  state.secretRecords = secretRecords;
-  state.policy = policy;
-  state.policyRuntime = policyRuntime;
-  state.policyRolloutOrchestrationReadiness = policyRolloutOrchestrationReadiness;
-  state.policyRevisions = policyRevisions;
-  state.agentRuntimeProfiles = agentRuntimeProfiles;
-  state.agentRuntimeProfileReleaseGates = agentRuntimeProfileReleaseGates;
-  state.evalJudgeProfiles = evalJudgeProfiles;
-  state.evalDatasets = evalDatasets;
-  state.evalRuns = evalRuns;
-  state.usage = usage;
-  state.usageTrend = usageTrend;
-  state.usageFinanceSummary = usageFinanceSummary;
-  state.usageFinanceOperations = usageFinanceOperations;
-  state.observability = observability;
-  state.observabilityCollectorReadiness = observabilityCollectorReadiness;
-  state.observabilityRemediationPlan = observabilityRemediationPlan;
-  state.schedulerSummary = schedulerSummary;
-  state.schedulerDuePlan = schedulerDuePlan;
-  state.usageRollups = usageRollups;
-  state.costAlertRoutes = costAlertRoutes;
-  state.stage2Readiness = stage2Readiness;
-  state.tenantIsolationReadiness = tenantIsolationReadiness;
-  state.organizations = organizations;
-  state.executionJobs = executionJobs;
-  state.workerReadiness = workerReadiness;
-  state.remoteComputerReadiness = remoteComputerReadiness;
-  state.remoteComputerRunnerReadiness = remoteComputerRunnerReadiness;
-  state.remoteComputers = remoteComputers;
-  state.remoteComputerLeases = remoteComputerLeases;
-  state.remoteComputerAttachments = remoteComputerAttachments;
-  state.remoteComputerJobAssignments = remoteComputerJobAssignments;
-  state.remoteComputerStateLocks = remoteComputerStateLocks;
-  state.remoteComputerSidecarHeartbeats = remoteComputerSidecarHeartbeats;
-  state.approvalGroups = approvalGroups;
-  state.approvalEscalationRules = approvalEscalationRules;
-  state.approvalNotificationChannelPolicies = approvalNotificationChannelPolicies;
-  state.approvalNotificationRouting = approvalNotificationRouting;
-  state.approvalNotificationRuns = approvalNotificationRuns;
-  await refreshAgentReleases(false);
+  Object.assign(
+    state,
+    await apiSettledEntries([
+      ["providers", "/api/providers"],
+      ["providerSummary", "/api/providers/summary"],
+      ["providerPolicyGate", "/api/providers/policy-gate"],
+      ["providerPolicyGateRuns", "/api/providers/policy-gate/runs"],
+      ["vaultReadiness", "/api/vault/readiness"],
+      ["secretRecords", "/api/vault/secrets"],
+      ["policy", "/api/policy"],
+      ["policyRuntime", "/api/policy/runtime"],
+      ["policyRolloutOrchestrationReadiness", "/api/policy/rollout/orchestration/readiness"],
+      ["policyRevisions", "/api/policy/revisions"],
+      ["agentRuntimeProfiles", "/api/agent-runtime-profiles"],
+      ["agentRuntimeProfileReleaseGates", "/api/agent-runtime-profile-release-gates"],
+      ["evalJudgeProfiles", "/api/eval/judge-profiles"],
+      ["evalDatasets", "/api/eval/datasets"],
+      ["evalRuns", "/api/eval/runs"],
+      ["usage", "/api/usage"],
+      ["usageTrend", "/api/usage/trends"],
+      ["usageFinanceSummary", "/api/usage/finance-summary"],
+      ["usageFinanceOperations", "/api/usage/finance-operations/summary"],
+      ["observability", "/api/observability"],
+      ["observabilityCollectorReadiness", "/api/observability/collector-readiness"],
+      ["observabilityRemediationPlan", "/api/observability/remediation/plan"],
+      ["schedulerSummary", "/api/scheduler/summary"],
+      ["schedulerDuePlan", "/api/scheduler/due-plan"],
+      ["usageRollups", "/api/usage/rollups"],
+      ["costAlertRoutes", "/api/usage/alert-routes"],
+      ["stage2Readiness", "/api/stage2/readiness"],
+      ["tenantIsolationReadiness", "/api/tenant-isolation/readiness"],
+      ["organizations", "/api/organizations"],
+      ["executionJobs", "/api/execution-jobs"],
+      ["workerReadiness", "/api/execution-jobs/worker-readiness"],
+      ["remoteComputerReadiness", "/api/remote-computers/readiness"],
+      ["remoteComputerRunnerReadiness", "/api/remote-computers/runner/readiness"],
+      ["remoteComputers", "/api/remote-computers"],
+      ["remoteComputerLeases", "/api/remote-computer-leases"],
+      ["remoteComputerAttachments", "/api/remote-computer-attachments"],
+      ["remoteComputerJobAssignments", "/api/remote-computer-job-assignments"],
+      ["remoteComputerStateLocks", "/api/remote-computers/state-locks"],
+      ["remoteComputerSidecarHeartbeats", "/api/remote-computers/sidecars/heartbeats"],
+      ["approvalGroups", "/api/approval-groups"],
+      ["approvalEscalationRules", "/api/approval-escalation-rules"],
+      ["approvalNotificationChannelPolicies", "/api/approvals/notification-channel-policies"],
+      ["approvalNotificationRouting", "/api/approvals/notification-routing/summary"],
+      ["approvalNotificationRuns", "/api/approvals/notifications/runs"],
+    ]),
+  );
+  try {
+    await refreshAgentReleases(false);
+  } catch (error) {
+    console.error("Failed to refresh agent releases", error);
+  }
+  const organizations = state.organizations ?? [];
   if (
     state.selectedOrganizationId &&
     !organizations.some((organization) => organization.id === state.selectedOrganizationId)
@@ -1989,14 +1928,15 @@ async function refreshOps() {
     setOrganizationId(organizations[0].id);
   }
   if (state.selectedOrganizationId) {
-    const [teams, memberships, tenantInvitations] = await Promise.all([
-      api(`/api/organizations/${state.selectedOrganizationId}/teams`),
-      api(`/api/organizations/${state.selectedOrganizationId}/memberships`),
-      api(`/api/organizations/${state.selectedOrganizationId}/invitations`),
-    ]);
-    state.teams = teams;
-    state.memberships = memberships;
-    state.tenantInvitations = tenantInvitations;
+    Object.assign(
+      state,
+      await apiSettledEntries([
+        ["teams", `/api/organizations/${state.selectedOrganizationId}/teams`],
+        ["memberships", `/api/organizations/${state.selectedOrganizationId}/memberships`],
+        ["tenantInvitations", `/api/organizations/${state.selectedOrganizationId}/invitations`],
+      ]),
+    );
+    const teams = state.teams ?? [];
     if (state.selectedTeamId && !teams.some((team) => team.id === state.selectedTeamId)) {
       state.selectedTeamId = "";
     }
@@ -2010,12 +1950,13 @@ async function refreshOps() {
     state.selectedTeamId = "";
   }
   if (state.selectedTeamId) {
-    const [projects, providerAccess] = await Promise.all([
-      api(`/api/teams/${state.selectedTeamId}/projects`),
-      api(`/api/teams/${state.selectedTeamId}/provider-access`),
-    ]);
-    state.projects = projects;
-    state.providerAccess = providerAccess;
+    Object.assign(
+      state,
+      await apiSettledEntries([
+        ["projects", `/api/teams/${state.selectedTeamId}/projects`],
+        ["providerAccess", `/api/teams/${state.selectedTeamId}/provider-access`],
+      ]),
+    );
   } else {
     state.projects = [];
     state.providerAccess = [];
@@ -3084,6 +3025,7 @@ async function dryRunRemoteRunner() {
 }
 
 async function mutateRemoteRunner() {
+  if (!confirmDestructiveAction("Mutate remote runner?", "remote-computer-runner")) return;
   state.remoteComputerRunnerMutation = await api("/api/remote-computers/runner/mutate", {
     method: "POST",
     body: JSON.stringify(remoteRunnerPayload()),
@@ -3153,6 +3095,7 @@ async function attachRemoteComputerLease(event) {
 }
 
 async function releaseRemoteComputerAttachment(attachmentId) {
+  if (!confirmDestructiveAction("Release remote attachment?", attachmentId)) return;
   await api(`/api/remote-computer-attachments/${attachmentId}/release`, {
     method: "POST",
     body: JSON.stringify({
@@ -3171,6 +3114,12 @@ async function heartbeatRemoteComputerLease(leaseId) {
 }
 
 async function updateRemoteComputerLease(leaseId, action) {
+  if (
+    ["release", "fail"].includes(action) &&
+    !confirmDestructiveAction(`Set remote lease to ${action}?`, leaseId)
+  ) {
+    return;
+  }
   await api(`/api/remote-computer-leases/${leaseId}/${action}`, {
     method: "POST",
     body: JSON.stringify({
@@ -3185,6 +3134,7 @@ async function updateRemoteComputerLease(leaseId, action) {
 }
 
 async function reclaimStaleRemoteComputers() {
+  if (!confirmDestructiveAction("Reclaim stale remote computers?", "remote-computers")) return;
   state.remoteComputerReclaimRun = await api("/api/remote-computers/reclaim-stale", {
     method: "POST",
   });
@@ -3253,6 +3203,7 @@ async function acquireRemoteStateLock(event) {
 }
 
 async function releaseRemoteStateLock(lockId) {
+  if (!confirmDestructiveAction("Release remote state lock?", lockId)) return;
   await api(`/api/remote-computers/state-locks/${lockId}/release`, {
     method: "POST",
     body: JSON.stringify({ reason: "released-from-static-admin-console" }),
