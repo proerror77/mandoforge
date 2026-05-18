@@ -298,7 +298,7 @@ Current repo slice:
 
 ## Stage 5: Full Semantic Layer / Context OS
 
-Status: implemented through governed memory writeback. Trust gates, ontology expansion, and optional retrieval backends remain later Stage 5 work.
+Status: implemented through governed memory writeback and high-risk semantic context gates. Ontology expansion and optional retrieval backends remain later Stage 5 work.
 
 Stage 5 expands the minimal semantic kernel into a full Context OS:
 
@@ -326,6 +326,7 @@ Current repo slice:
 - `memory_writeback_candidates` captures proposed memory from completed sessions, artifacts, completed handoff reviews, and human approval decisions without writing durable memory by default.
 - `/api/sessions/{id}/memory-writeback-candidates` generates and lists pending candidates; `/api/memory-writeback-candidates/{id}/approve|reject` is the human gate.
 - Approved candidates create `semantic_objects` with `object_type=memory`, `trust_level=human_verified`, source URI back to the candidate, and timeline/audit evidence; rejected candidates remain reviewed records without durable memory objects.
+- High-risk tool execution now evaluates active semantic objects that match the Managed Agent's semantic scopes before approval or execution. Matching objects must be `freshness=current` and must not be `trust_level=unverified`; otherwise MandoForge records `semantic_context.gate_failed`, denies the tool call, and avoids creating an approval request from stale or untrusted context.
 
 The target object model:
 
@@ -334,8 +335,8 @@ semantic_object:
   type: decision | runbook | code_module | workflow | policy | memory | artifact
   source: github | repo_docs | feishu | mcp | session | upload
   uri: ...
-  trust_level: high | medium | low
-  freshness: current | stale | unknown
+  trust_level: unverified | source_attested | human_verified | system_verified
+  freshness: unknown | current | stale | expired
   related_to:
     - agent_id
     - project_id
@@ -362,7 +363,7 @@ task
 Outcome:
 
 ```text
-Agents no longer start from random file reads or chat-only context. MandoForge generates governed, source-attributed, freshness-aware context packets and writes durable organizational memory after execution.
+Agents no longer start from random file reads or chat-only context. MandoForge generates governed, source-attributed, freshness-aware context packets, blocks high-risk action from stale or untrusted matching context, and writes durable organizational memory after execution.
 ```
 
 ## Workflow Packs / Domain Packs

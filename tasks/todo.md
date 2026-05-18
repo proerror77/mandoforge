@@ -258,5 +258,5 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [x] Stage 5.2: Add context packet replay in the Session Timeline so it is clear what context an agent saw before acting.
 - [x] Stage 5.3: Add memory writeback candidates from completed sessions, artifacts, handoff reviews, and human approvals.
 - [x] Stage 5.3: Add human approval / rejection flow before writeback candidates become durable organizational memory.
-- [ ] Stage 5.4: Add freshness and trust gates for high-risk tasks so stale or untrusted context cannot silently drive execution.
+- [x] Stage 5.4: Add freshness and trust gates for high-risk tasks so stale or untrusted context cannot silently drive execution.
 - [ ] Stage 5.5: Add optional retrieval backends after the object/link/context packet model is stable; do not make vector search the first semantic layer dependency.

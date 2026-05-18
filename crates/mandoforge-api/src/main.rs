@@ -12644,6 +12644,69 @@ fn semantic_object_rank(object: &ContextPacketSemanticObject) -> i32 {
     freshness_score + trust_score
 }
 
+async fn evaluate_semantic_context_gate(
+    state: &AppState,
+    agent: &Agent,
+    risk_level: &str,
+    decision: &str,
+) -> Result<Option<Value>, AppError> {
+    if risk_level != "high" || decision == "denied" {
+        return Ok(None);
+    }
+
+    let mut evaluated_object_count = 0usize;
+    let mut blockers = Vec::new();
+    for object in state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| object.status == "active")
+        .filter(|object| semantic_object_matches_agent_scope(object, agent))
+    {
+        evaluated_object_count += 1;
+        let stale = object.freshness != "current";
+        let untrusted = object.trust_level == "unverified";
+        if stale || untrusted {
+            let mut reasons = Vec::new();
+            if stale {
+                reasons.push("freshness_not_current");
+            }
+            if untrusted {
+                reasons.push("trust_unverified");
+            }
+            blockers.push(json!({
+                "id": object.id,
+                "object_type": object.object_type,
+                "object_key": object.object_key,
+                "title": object.title,
+                "trust_level": object.trust_level,
+                "freshness": object.freshness,
+                "reasons": reasons,
+            }));
+        }
+    }
+
+    Ok(Some(json!({
+        "status": if blockers.is_empty() { "passed" } else { "blocked" },
+        "risk_level": risk_level,
+        "evaluated_object_count": evaluated_object_count,
+        "blocked_object_count": blockers.len(),
+        "required_freshness": "current",
+        "blocked_trust_levels": ["unverified"],
+        "blockers": blockers,
+    })))
+}
+
+fn semantic_context_gate_block_reason(gate: &Value) -> String {
+    let count = gate
+        .get("blocked_object_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    format!(
+        "high-risk tool blocked by semantic context gate: {count} stale or untrusted semantic object(s)"
+    )
+}
+
 fn context_packet_replay_details(packet: &ContextPacket) -> Value {
     json!({
         "context_packet_id": packet.id,
@@ -13232,6 +13295,29 @@ async fn execute_tool_invocation(
     let agent_version = state.agent_version_for_session(input.session_id).await?;
     let policy = state.policy_for_session(input.session_id).await;
     let policy_decision = policy.evaluate_tool_for_agent_version(name, &agent_version);
+    let session = state.get_session(input.session_id).await?;
+    let agent = state.get_agent(session.agent_id).await?;
+    let semantic_context_gate = evaluate_semantic_context_gate(
+        state,
+        &agent,
+        &policy_decision.risk_level,
+        policy_decision.decision,
+    )
+    .await?;
+    let semantic_context_gate_blocked = semantic_context_gate
+        .as_ref()
+        .and_then(|gate| gate.get("status"))
+        .and_then(Value::as_str)
+        == Some("blocked");
+    let mut policy_decision_payload = json!({
+        "decision": policy_decision.decision,
+        "reason": policy_decision.reason.clone(),
+        "agent_version_id": agent_version.id,
+        "agent_version": agent_version.version,
+    });
+    if let Some(gate) = semantic_context_gate.clone() {
+        policy_decision_payload["semantic_context_gate"] = gate;
+    }
     let call_event = state
         .append_event(
             "tool",
@@ -13248,23 +13334,22 @@ async fn execute_tool_invocation(
             event_id: Some(call_event.id),
             tool_name: name.to_string(),
             args: input.args.clone(),
-            status: (match policy_decision.decision {
-                "allowed" => "running",
-                "requires_approval" => "waiting_approval",
-                "denied" => "denied",
-                _ => "denied",
-            })
+            status: if semantic_context_gate_blocked {
+                "denied"
+            } else {
+                match policy_decision.decision {
+                    "allowed" => "running",
+                    "requires_approval" => "waiting_approval",
+                    "denied" => "denied",
+                    _ => "denied",
+                }
+            }
             .to_string(),
             risk_level: policy_decision.risk_level.clone(),
-            policy_decision: json!({
-                "decision": policy_decision.decision,
-                "reason": policy_decision.reason.clone(),
-                "agent_version_id": agent_version.id,
-                "agent_version": agent_version.version,
-            }),
+            policy_decision: policy_decision_payload,
             result: None,
             error: None,
-            started_at: if policy_decision.decision == "allowed" {
+            started_at: if policy_decision.decision == "allowed" && !semantic_context_gate_blocked {
                 Some(Utc::now())
             } else {
                 None
@@ -13273,6 +13358,47 @@ async fn execute_tool_invocation(
             created_at: Utc::now(),
         })
         .await?;
+
+    if let Some(gate) = semantic_context_gate
+        .as_ref()
+        .filter(|gate| gate.get("status").and_then(Value::as_str) == Some("blocked"))
+    {
+        let reason = semantic_context_gate_block_reason(gate);
+        let result = json!({
+            "status": "denied",
+            "reason": reason,
+            "semantic_context_gate": gate,
+        });
+        state
+            .append_event(
+                "system",
+                Some(tool_call.id),
+                input.session_id,
+                "semantic_context.gate_failed",
+                json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "denied", Some(result.clone()), None)
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "system",
+                Some(tool_call.id),
+                "semantic_context.gate_failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({
+                    "tool": name,
+                    "risk_level": policy_decision.risk_level.clone(),
+                    "status": "denied",
+                    "semantic_context_gate": gate,
+                }),
+            ))
+            .await?;
+        return Err(AppError::forbidden(reason));
+    }
 
     if policy_decision.decision == "denied" {
         let result = json!({"status": "denied", "reason": policy_decision.reason.clone()});
@@ -53858,6 +53984,204 @@ not json
             call.tool_name == "secret.read"
                 && call.status == "denied"
                 && call.policy_decision["decision"] == "denied"
+        }));
+    }
+
+    #[tokio::test]
+    async fn high_risk_tools_fail_closed_on_stale_or_untrusted_semantic_context() {
+        let app = test_app().await;
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "repo_doc",
+                    "source_uri": "repo://docs/legacy-runbook.md",
+                    "display_name": "Legacy Runbook",
+                    "freshness": {"state": "stale"}
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let stale_object: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "runbook",
+                    "object_key": "runbook:semantic-gate:stale",
+                    "title": "Stale deployment runbook",
+                    "summary": "This runbook matches the agent scope but is stale and unverified.",
+                    "content": {"step": "legacy shell execution"},
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "semantic-gate",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "trust_level": "unverified",
+                    "freshness": "stale"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Semantic Gate Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Execute only with trusted semantic context.",
+                    "tools": ["file.read", "shell.exec"],
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "semantic-gate",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "release_state": "active"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "semantic context gate",
+                    "message": "Run a high-risk command only if context is trusted."
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        let low_risk_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.read/execute",
+                json!({"session_id": session.id, "args": {"path": "README.md"}}),
+            ),
+        )
+        .await;
+        assert!(low_risk_result.get("files").is_some());
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/shell.exec/execute",
+                json!({"session_id": session.id, "args": {"command": "pwd"}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("semantic context gate")
+        );
+
+        let approvals: Vec<Approval> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/approvals")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(!approvals.iter().any(|approval| {
+            approval.session_id == session.id
+                && approval.action == "shell.exec"
+                && approval.status == "pending"
+        }));
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "semantic_context.gate_failed"
+                && event.payload["content"]["semantic_context_gate"]["blockers"][0]["id"]
+                    == json!(stale_object.id)
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "semantic_context.gate_failed"
+                && log.details["semantic_context_gate"]["blocked_object_count"] == json!(1)
+        }));
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let shell_call = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "shell.exec")
+            .expect("shell call recorded");
+        assert_eq!(shell_call.status, "denied");
+        assert_eq!(
+            shell_call.policy_decision["semantic_context_gate"]["status"],
+            "blocked"
+        );
+        assert_eq!(
+            shell_call.policy_decision["semantic_context_gate"]["blockers"][0]["reasons"],
+            json!(["freshness_not_current", "trust_unverified"])
+        );
+        assert!(tool_calls.iter().any(|call| {
+            call.tool_name == "file.read"
+                && call.status == "completed"
+                && call.policy_decision.get("semantic_context_gate").is_none()
         }));
     }
 
