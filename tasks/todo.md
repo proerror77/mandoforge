@@ -251,9 +251,9 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 
 ## Stage 5 / Semantic Layer + Context OS
 
-- [ ] Stage 5.1: Add `semantic_sources` for repo docs, session history, artifacts, Workflow Packs, MCP sources, Feishu/Lark, GitHub, and uploads.
-- [ ] Stage 5.1: Add `semantic_objects` for decisions, runbooks, code modules, workflows, policies, memories, and artifacts with provenance, trust, freshness, and source URI metadata.
-- [ ] Stage 5.1: Add `semantic_links` so agents, projects, repos, services, workflows, policies, packs, and memories can be related explicitly.
+- [x] Stage 5.1: Add `semantic_sources` for repo docs, session history, artifacts, Workflow Packs, MCP sources, Feishu/Lark, GitHub, and uploads.
+- [x] Stage 5.1: Add `semantic_objects` for decisions, runbooks, code modules, workflows, policies, memories, and artifacts with provenance, trust, freshness, and source URI metadata.
+- [x] Stage 5.1: Add `semantic_links` so agents, projects, repos, services, workflows, policies, packs, and memories can be related explicitly.
 - [ ] Stage 5.2: Add versioned `context_packets` generated from task intent, Managed Agent config, semantic scopes, retrieved objects, policy reminders, and freshness warnings.
 - [ ] Stage 5.2: Add context packet replay in the Session Timeline so it is clear what context an agent saw before acting.
 - [ ] Stage 5.3: Add memory writeback candidates from completed sessions, artifacts, handoff reviews, and human approvals.

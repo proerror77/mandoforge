@@ -7,8 +7,9 @@ use crate::{
     AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
     ApprovalNotificationChannelPolicy, Artifact, AuditLog, CostAlertRoute, EvalCase, EvalDataset,
     EvalRun, ManagerAgentPlan, McpServerRecord, Membership, Organization, PolicyRevision, Project,
-    ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent, Team, TenantInvitation,
-    ToolCall, UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    ProviderAccess, ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource,
+    Session, SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
+    WorkflowPackProfileAsset,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -88,6 +89,64 @@ pub(crate) fn agent_runtime_profile_from_row(row: PgRow) -> Result<AgentRuntimeP
         env: row.try_get("env")?,
         timeout_seconds: row.try_get("timeout_seconds")?,
         remote_computer_required: row.try_get("remote_computer_required")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn semantic_source_from_row(row: PgRow) -> Result<SemanticSource, AppError> {
+    Ok(SemanticSource {
+        id: row.try_get("id")?,
+        source_type: row.try_get("source_type")?,
+        source_uri: row.try_get("source_uri")?,
+        display_name: row.try_get("display_name")?,
+        owner_type: row.try_get("owner_type")?,
+        owner_id: row.try_get("owner_id")?,
+        metadata: row.try_get("metadata")?,
+        provenance: row.try_get("provenance")?,
+        freshness: row.try_get("freshness")?,
+        status: row.try_get("status")?,
+        last_ingested_at: row.try_get("last_ingested_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn semantic_object_from_row(row: PgRow) -> Result<SemanticObject, AppError> {
+    Ok(SemanticObject {
+        id: row.try_get("id")?,
+        source_id: row.try_get("source_id")?,
+        object_type: row.try_get("object_type")?,
+        object_key: row.try_get("object_key")?,
+        title: row.try_get("title")?,
+        summary: row.try_get("summary")?,
+        content: row.try_get("content")?,
+        semantic_scopes: row.try_get("semantic_scopes")?,
+        source_uri: row.try_get("source_uri")?,
+        provenance: row.try_get("provenance")?,
+        trust_level: row.try_get("trust_level")?,
+        freshness: row.try_get("freshness")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn semantic_link_from_row(row: PgRow) -> Result<SemanticLink, AppError> {
+    Ok(SemanticLink {
+        id: row.try_get("id")?,
+        from_entity_type: row.try_get("from_entity_type")?,
+        from_entity_id: row.try_get("from_entity_id")?,
+        relation_type: row.try_get("relation_type")?,
+        to_entity_type: row.try_get("to_entity_type")?,
+        to_entity_id: row.try_get("to_entity_id")?,
+        metadata: row.try_get("metadata")?,
+        provenance: row.try_get("provenance")?,
+        confidence: row.try_get("confidence")?,
         status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,

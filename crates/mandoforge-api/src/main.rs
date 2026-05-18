@@ -68,6 +68,7 @@ mod store_rows;
 mod store_runtime_profiles;
 mod store_secret_records;
 mod store_seed;
+mod store_semantic_kernel;
 mod store_tool_calls;
 mod store_usage_rollups;
 mod store_workflow_packs;
@@ -865,6 +866,177 @@ struct WorkflowPackProfileAsset {
     status: String,
     created_at: DateTime<Utc>,
     archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticSource {
+    id: Uuid,
+    source_type: String,
+    source_uri: String,
+    display_name: String,
+    owner_type: Option<String>,
+    owner_id: Option<Uuid>,
+    metadata: Value,
+    provenance: Value,
+    freshness: Value,
+    status: String,
+    last_ingested_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSemanticSource {
+    source_type: String,
+    source_uri: String,
+    display_name: String,
+    #[serde(default)]
+    owner_type: Option<String>,
+    #[serde(default)]
+    owner_id: Option<Uuid>,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+    #[serde(default = "empty_json_object")]
+    provenance: Value,
+    #[serde(default = "empty_json_object")]
+    freshness: Value,
+    #[serde(default = "default_semantic_source_status")]
+    status: String,
+    #[serde(default)]
+    last_ingested_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateSemanticSource {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    owner_type: Option<Option<String>>,
+    #[serde(default)]
+    owner_id: Option<Option<Uuid>>,
+    #[serde(default)]
+    metadata: Option<Value>,
+    #[serde(default)]
+    provenance: Option<Value>,
+    #[serde(default)]
+    freshness: Option<Value>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    last_ingested_at: Option<Option<DateTime<Utc>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticObject {
+    id: Uuid,
+    source_id: Option<Uuid>,
+    object_type: String,
+    object_key: String,
+    title: String,
+    summary: String,
+    content: Value,
+    semantic_scopes: Value,
+    source_uri: Option<String>,
+    provenance: Value,
+    trust_level: String,
+    freshness: String,
+    status: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSemanticObject {
+    #[serde(default)]
+    source_id: Option<Uuid>,
+    object_type: String,
+    object_key: String,
+    title: String,
+    summary: String,
+    #[serde(default = "empty_json_object")]
+    content: Value,
+    #[serde(default = "empty_json_object")]
+    semantic_scopes: Value,
+    #[serde(default)]
+    source_uri: Option<String>,
+    #[serde(default = "empty_json_object")]
+    provenance: Value,
+    #[serde(default = "default_semantic_trust_level")]
+    trust_level: String,
+    #[serde(default = "default_semantic_freshness")]
+    freshness: String,
+    #[serde(default = "default_semantic_record_status")]
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateSemanticObject {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    content: Option<Value>,
+    #[serde(default)]
+    semantic_scopes: Option<Value>,
+    #[serde(default)]
+    source_uri: Option<Option<String>>,
+    #[serde(default)]
+    provenance: Option<Value>,
+    #[serde(default)]
+    trust_level: Option<String>,
+    #[serde(default)]
+    freshness: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticLink {
+    id: Uuid,
+    from_entity_type: String,
+    from_entity_id: String,
+    relation_type: String,
+    to_entity_type: String,
+    to_entity_id: String,
+    metadata: Value,
+    provenance: Value,
+    confidence: f64,
+    status: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSemanticLink {
+    from_entity_type: String,
+    from_entity_id: String,
+    relation_type: String,
+    to_entity_type: String,
+    to_entity_id: String,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+    #[serde(default = "empty_json_object")]
+    provenance: Value,
+    #[serde(default = "default_semantic_confidence")]
+    confidence: f64,
+    #[serde(default = "default_semantic_record_status")]
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateSemanticLink {
+    #[serde(default)]
+    metadata: Option<Value>,
+    #[serde(default)]
+    provenance: Option<Value>,
+    #[serde(default)]
+    confidence: Option<f64>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4362,6 +4534,40 @@ fn build_router(state: AppState) -> Router {
                 .patch(update_agent_runtime_profile)
                 .delete(archive_agent_runtime_profile),
         )
+        .route(
+            "/api/semantic-sources",
+            get(list_semantic_sources).post(create_semantic_source),
+        )
+        .route(
+            "/api/semantic-sources/{id}",
+            get(get_semantic_source)
+                .patch(update_semantic_source)
+                .delete(archive_semantic_source),
+        )
+        .route(
+            "/api/semantic-sources/{id}/objects",
+            get(list_semantic_source_objects),
+        )
+        .route(
+            "/api/semantic-objects",
+            get(list_semantic_objects).post(create_semantic_object),
+        )
+        .route(
+            "/api/semantic-objects/{id}",
+            get(get_semantic_object)
+                .patch(update_semantic_object)
+                .delete(archive_semantic_object),
+        )
+        .route(
+            "/api/semantic-links",
+            get(list_semantic_links).post(create_semantic_link),
+        )
+        .route(
+            "/api/semantic-links/{id}",
+            get(get_semantic_link)
+                .patch(update_semantic_link)
+                .delete(archive_semantic_link),
+        )
         .route("/api/agents/{id}/versions", get(list_agent_versions))
         .route(
             "/api/agents/releases/summary",
@@ -6160,6 +6366,378 @@ async fn archive_agent_runtime_profile(
         ))
         .await?;
     Ok(Json(profile))
+}
+
+async fn list_semantic_sources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SemanticSource>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_sources",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_semantic_sources().await?))
+}
+
+async fn create_semantic_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSemanticSource>,
+) -> Result<Json<SemanticSource>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_sources",
+        None,
+    )
+    .await?;
+    let source = state.create_semantic_source(input).await?;
+    record_semantic_source_audit(&state, &headers, &source, "semantic_source.created").await?;
+    Ok(Json(source))
+}
+
+async fn get_semantic_source(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SemanticSource>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_source",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.get_semantic_source(id).await?))
+}
+
+async fn update_semantic_source(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateSemanticSource>,
+) -> Result<Json<SemanticSource>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_source",
+        Some(id),
+    )
+    .await?;
+    let source = state.update_semantic_source(id, input).await?;
+    record_semantic_source_audit(&state, &headers, &source, "semantic_source.updated").await?;
+    Ok(Json(source))
+}
+
+async fn archive_semantic_source(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SemanticSource>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_source",
+        Some(id),
+    )
+    .await?;
+    let source = state.archive_semantic_source(id).await?;
+    record_semantic_source_audit(&state, &headers, &source, "semantic_source.archived").await?;
+    Ok(Json(source))
+}
+
+async fn list_semantic_source_objects(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SemanticObject>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_source",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_semantic_objects_for_source(id).await?))
+}
+
+async fn list_semantic_objects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SemanticObject>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_objects",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_semantic_objects().await?))
+}
+
+async fn create_semantic_object(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSemanticObject>,
+) -> Result<Json<SemanticObject>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_objects",
+        None,
+    )
+    .await?;
+    let object = state.create_semantic_object(input).await?;
+    record_semantic_object_audit(&state, &headers, &object, "semantic_object.created").await?;
+    Ok(Json(object))
+}
+
+async fn get_semantic_object(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SemanticObject>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_object",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.get_semantic_object(id).await?))
+}
+
+async fn update_semantic_object(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateSemanticObject>,
+) -> Result<Json<SemanticObject>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_object",
+        Some(id),
+    )
+    .await?;
+    let object = state.update_semantic_object(id, input).await?;
+    record_semantic_object_audit(&state, &headers, &object, "semantic_object.updated").await?;
+    Ok(Json(object))
+}
+
+async fn archive_semantic_object(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SemanticObject>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_object",
+        Some(id),
+    )
+    .await?;
+    let object = state.archive_semantic_object(id).await?;
+    record_semantic_object_audit(&state, &headers, &object, "semantic_object.archived").await?;
+    Ok(Json(object))
+}
+
+async fn list_semantic_links(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SemanticLink>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_links",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_semantic_links().await?))
+}
+
+async fn create_semantic_link(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSemanticLink>,
+) -> Result<Json<SemanticLink>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_links",
+        None,
+    )
+    .await?;
+    let link = state.create_semantic_link(input).await?;
+    record_semantic_link_audit(&state, &headers, &link, "semantic_link.created").await?;
+    Ok(Json(link))
+}
+
+async fn get_semantic_link(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SemanticLink>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_link",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.get_semantic_link(id).await?))
+}
+
+async fn update_semantic_link(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateSemanticLink>,
+) -> Result<Json<SemanticLink>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_link",
+        Some(id),
+    )
+    .await?;
+    let link = state.update_semantic_link(id, input).await?;
+    record_semantic_link_audit(&state, &headers, &link, "semantic_link.updated").await?;
+    Ok(Json(link))
+}
+
+async fn archive_semantic_link(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SemanticLink>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_link",
+        Some(id),
+    )
+    .await?;
+    let link = state.archive_semantic_link(id).await?;
+    record_semantic_link_audit(&state, &headers, &link, "semantic_link.archived").await?;
+    Ok(Json(link))
+}
+
+async fn record_semantic_source_audit(
+    state: &AppState,
+    headers: &HeaderMap,
+    source: &SemanticSource,
+    action: &str,
+) -> Result<(), AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            action,
+            "semantic_source",
+            Some(source.id),
+            json!({
+                "subject": principal.subject_id,
+                "source_type": source.source_type,
+                "source_uri": source.source_uri,
+                "display_name": source.display_name,
+                "owner_type": source.owner_type,
+                "owner_id": source.owner_id,
+                "status": source.status,
+                "last_ingested_at": source.last_ingested_at,
+                "metadata": source.metadata,
+                "provenance": source.provenance,
+                "freshness": source.freshness,
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn record_semantic_object_audit(
+    state: &AppState,
+    headers: &HeaderMap,
+    object: &SemanticObject,
+    action: &str,
+) -> Result<(), AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            action,
+            "semantic_object",
+            Some(object.id),
+            json!({
+                "subject": principal.subject_id,
+                "source_id": object.source_id,
+                "object_type": object.object_type,
+                "object_key": object.object_key,
+                "title": object.title,
+                "source_uri": object.source_uri,
+                "trust_level": object.trust_level,
+                "freshness": object.freshness,
+                "status": object.status,
+                "semantic_scopes": object.semantic_scopes,
+                "provenance": object.provenance,
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn record_semantic_link_audit(
+    state: &AppState,
+    headers: &HeaderMap,
+    link: &SemanticLink,
+    action: &str,
+) -> Result<(), AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            action,
+            "semantic_link",
+            Some(link.id),
+            json!({
+                "subject": principal.subject_id,
+                "from_entity_type": link.from_entity_type,
+                "from_entity_id": link.from_entity_id,
+                "relation_type": link.relation_type,
+                "to_entity_type": link.to_entity_type,
+                "to_entity_id": link.to_entity_id,
+                "confidence": link.confidence,
+                "status": link.status,
+                "metadata": link.metadata,
+                "provenance": link.provenance,
+            }),
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn list_agent_versions(
@@ -12586,6 +13164,9 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "cost_alert_routes",
         "codex_app_server_runs",
         "approval_notification_channel_policies",
+        "semantic_sources",
+        "semantic_objects",
+        "semantic_links",
     ]
 }
 
@@ -34487,6 +35068,26 @@ fn default_enabled_status() -> String {
     "enabled".to_string()
 }
 
+fn default_semantic_source_status() -> String {
+    "active".to_string()
+}
+
+fn default_semantic_record_status() -> String {
+    "active".to_string()
+}
+
+fn default_semantic_trust_level() -> String {
+    "unverified".to_string()
+}
+
+fn default_semantic_freshness() -> String {
+    "unknown".to_string()
+}
+
+fn default_semantic_confidence() -> f64 {
+    1.0
+}
+
 fn default_mcp_transport() -> String {
     "http".to_string()
 }
@@ -39638,6 +40239,154 @@ not json
     }
 
     #[tokio::test]
+    async fn semantic_kernel_persists_sources_objects_links_and_audit() {
+        let app = test_app().await;
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "repo_doc",
+                    "source_uri": "repo://docs/mandoforge-roadmap-v2.md",
+                    "display_name": "MandoForge Roadmap v2",
+                    "owner_type": "repo",
+                    "metadata": {"path": "docs/mandoforge-roadmap-v2.md"},
+                    "provenance": {"ingested_by": "stage-5.1-test"},
+                    "freshness": {"state": "workspace_current"}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(source.source_type, "repo_doc");
+        assert_eq!(source.status, "active");
+        assert_eq!(source.metadata["path"], "docs/mandoforge-roadmap-v2.md");
+
+        let object: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "decision",
+                    "object_key": "decision:agent-os-first",
+                    "title": "Agent OS before domain packs",
+                    "summary": "MandoForge builds the Agent OS substrate before Legal/Coding/Sales workflow packs.",
+                    "content": {
+                        "decision": "workflow packs run on the Agent OS and are not the OS itself"
+                    },
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "agent-os",
+                        "workflow_scope": "roadmap",
+                        "policy_scope": "governed-runtime",
+                        "memory_scope": "strategy"
+                    },
+                    "provenance": {"source_ref": "docs/mandoforge-roadmap-v2.md"},
+                    "trust_level": "human_verified",
+                    "freshness": "current"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(object.source_id, Some(source.id));
+        assert_eq!(object.object_type, "decision");
+        assert_eq!(object.trust_level, "human_verified");
+        assert_eq!(
+            object.source_uri.as_deref(),
+            Some("repo://docs/mandoforge-roadmap-v2.md")
+        );
+        assert_eq!(object.semantic_scopes["workflow_scope"], json!("roadmap"));
+
+        let link: SemanticLink = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-links",
+                json!({
+                    "from_entity_type": "semantic_object",
+                    "from_entity_id": object.id.to_string(),
+                    "relation_type": "defines_scope_for",
+                    "to_entity_type": "workflow",
+                    "to_entity_id": "workflow-packs",
+                    "metadata": {"stage": "5.1"},
+                    "provenance": {"source_id": source.id},
+                    "confidence": 0.9
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(link.from_entity_type, "semantic_object");
+        assert_eq!(link.relation_type, "defines_scope_for");
+        assert_eq!(link.confidence, 0.9);
+
+        let source_objects: Vec<SemanticObject> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/semantic-sources/{}/objects", source.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(source_objects.len(), 1);
+        assert_eq!(source_objects[0].id, object.id);
+
+        let updated_object: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/semantic-objects/{}", object.id),
+                json!({
+                    "freshness": "stale",
+                    "content": {
+                        "decision": "workflow packs run on the Agent OS and are not the OS itself",
+                        "review": "needs periodic roadmap refresh"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(updated_object.freshness, "stale");
+        assert_eq!(
+            updated_object.content["review"],
+            "needs periodic roadmap refresh"
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "semantic_source.created",
+            "semantic_object.created",
+            "semantic_link.created",
+            "semantic_object.updated",
+        ] {
+            assert!(
+                audit_logs.iter().any(|log| log.action == expected),
+                "missing audit action {expected}"
+            );
+        }
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "semantic_object.created"
+                && log.resource_id == Some(object.id)
+                && log.details["trust_level"] == "human_verified"
+                && log.details["semantic_scopes"]["project_scope"] == "mandoforge"
+        }));
+    }
+
+    #[tokio::test]
     async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
         let app = test_app().await;
         let manifest_path = ai_governance_manifest_path_string();
@@ -40514,6 +41263,7 @@ not json
         assert!(names.contains(&"0032_manager_agent_plans.sql"));
         assert!(names.contains(&"0033_agent_handoff_assignment_fields.sql"));
         assert!(names.contains(&"0034_agent_handoff_assignments.sql"));
+        assert!(names.contains(&"0035_semantic_kernel.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -40523,7 +41273,7 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
@@ -40532,7 +41282,8 @@ not json
             include_str!("../../../db/migrations/0029_workflow_pack_profile_assets.sql"),
             include_str!("../../../db/migrations/0030_agent_runtime_profiles.sql"),
             include_str!("../../../db/migrations/0032_manager_agent_plans.sql"),
-            include_str!("../../../db/migrations/0034_agent_handoff_assignments.sql")
+            include_str!("../../../db/migrations/0034_agent_handoff_assignments.sql"),
+            include_str!("../../../db/migrations/0035_semantic_kernel.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));

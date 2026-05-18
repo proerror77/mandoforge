@@ -314,6 +314,14 @@ Stage 5 expands the minimal semantic kernel into a full Context OS:
 - ontology
 - retrieval and ranking
 
+Current repo slice:
+
+- `semantic_sources` is a tenant-scoped registry for repo docs, session history, artifacts, Workflow Packs, MCP sources, Feishu/Lark, GitHub, uploads, external sources, and memory inputs.
+- `semantic_objects` stores durable decisions, runbooks, code modules, workflows, policies, memories, artifacts, projects, repos, services, and packs with source URI, provenance, trust, freshness, status, and minimal semantic scopes.
+- `semantic_links` relates agents, projects, repos, services, workflows, policies, packs, memories, artifacts, sessions, Manager Agent plans, runtime profiles, semantic sources, and semantic objects.
+- All three resources have RLS-backed Postgres tables, in-memory store support, CRUD-style API surfaces, and audit records for create/update/archive.
+- This is still the registry layer, not retrieval/ranking. Context Packet generation remains Stage 5.2.
+
 The target object model:
 
 ```yaml

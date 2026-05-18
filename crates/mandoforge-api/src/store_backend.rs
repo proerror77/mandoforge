@@ -11,9 +11,9 @@ use crate::{
     EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership, Organization,
     PolicyRevision, Project, ProviderAccess, ProviderRecord, RemoteComputer,
     RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
-    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord, Session, SessionEvent,
-    Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
-    WorkflowPackProfileAsset,
+    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord, SemanticLink,
+    SemanticObject, SemanticSource, Session, SessionEvent, Team, TenantInvitation, ToolCall,
+    UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
 #[derive(Default)]
@@ -59,6 +59,9 @@ pub(crate) struct MemoryStore {
     pub(crate) manager_agent_plans: HashMap<Uuid, ManagerAgentPlan>,
     pub(crate) workflow_pack_installations: HashMap<Uuid, WorkflowPackInstallation>,
     pub(crate) workflow_pack_profile_assets: HashMap<Uuid, WorkflowPackProfileAsset>,
+    pub(crate) semantic_sources: HashMap<Uuid, SemanticSource>,
+    pub(crate) semantic_objects: HashMap<Uuid, SemanticObject>,
+    pub(crate) semantic_links: HashMap<Uuid, SemanticLink>,
 }
 
 #[derive(Clone)]
