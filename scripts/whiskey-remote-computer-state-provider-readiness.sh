@@ -204,6 +204,7 @@ jq \
       + (if .runner.live_mutation_enabled != true then ["set MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED=true"] else [] end)
       + (if .readiness.execution_transport.execution_enabled != true then ["set MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes and MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED=true"] else [] end)
       + (if .env.sidecar_replacement_enabled != "true" then ["enable MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED=true only after live runner mutation is validated"] else [] end)
+      + ["apply the rendered provider and runtime bundle with scripts/whiskey-remote-computer-k3s-cluster-stage.sh --juicefs-profile <rendered-yaml> --runtime-env-file <rendered-env> --apply-manifests --run-evidence"]
       + ["rerun scripts/whiskey-remote-computer-k3s-cluster-stage.sh --apply-manifests --run-evidence after the state provider and runner gates are configured"]
     )
   ' "$json_file" >"$json_file.tmp"

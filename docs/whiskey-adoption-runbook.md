@@ -431,3 +431,13 @@ scripts/render-whiskey-remote-computer-unblock-bundle.sh \
   deploy/whiskey/remote-computer-runtime.env.example \
   .mandoforge/remote-adoption/whiskey/remote-computer-unblock-bundle
 ```
+
+After those rendered files are reviewed and replaced with real values, apply them through the same repo-native cluster stage path:
+
+```bash
+scripts/whiskey-remote-computer-k3s-cluster-stage.sh \
+  --juicefs-profile .mandoforge/remote-adoption/whiskey/remote-computer-unblock-bundle/remote-computer-state-juicefs-profile.rendered.yaml \
+  --runtime-env-file .mandoforge/remote-adoption/whiskey/remote-computer-unblock-bundle/whiskey-remote-computer-runtime.rendered.env \
+  --apply-manifests \
+  --run-evidence
+```
