@@ -416,3 +416,9 @@ If the audit still reports placeholder JuiceFS values, render a real Secret/PV m
 ```bash
 scripts/render-remote-computer-juicefs-profile.sh deploy/k8s/remote-computer-state-juicefs.env.example
 ```
+
+If the audit still reports runner mode `reserved` or disabled mutation/exec gates, render the Whiskey runtime env overrides with:
+
+```bash
+scripts/render-remote-computer-runtime-env.sh deploy/whiskey/remote-computer-runtime.env.example
+```
