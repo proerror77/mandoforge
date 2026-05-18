@@ -768,6 +768,53 @@ struct WorkflowPackProfileAsset {
     archived_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextPacket {
+    id: Uuid,
+    session_id: Uuid,
+    agent_id: Uuid,
+    agent_version_id: Option<Uuid>,
+    generated_at: DateTime<Utc>,
+    task: Value,
+    agent: ContextPacketAgent,
+    runtime_profile: Option<ContextPacketRuntimeProfile>,
+    semantic_scopes: Value,
+    tool_policy: Value,
+    policy_reminders: Vec<String>,
+    freshness_warnings: Vec<String>,
+    source_refs: Vec<ContextPacketSourceRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextPacketAgent {
+    id: Uuid,
+    name: String,
+    kind: String,
+    agent_role: String,
+    release_state: String,
+    tools: Vec<String>,
+    mcp_server_ids: Vec<Uuid>,
+    skill_ids: Vec<String>,
+    workflow_pack_ids: Vec<String>,
+    remote_computer_profile: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextPacketRuntimeProfile {
+    id: Uuid,
+    name: String,
+    runtime_type: String,
+    remote_computer_required: bool,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextPacketSourceRef {
+    source_type: String,
+    source_id: String,
+    freshness: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ValidateWorkflowPack {
     manifest_path: String,
@@ -4266,6 +4313,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/sessions/{id}/messages", post(add_message))
         .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/events", get(list_events))
+        .route(
+            "/api/sessions/{id}/context-packet",
+            get(get_session_context_packet),
+        )
         .route(
             "/api/sessions/{id}/agent-handoffs",
             get(list_session_agent_handoff_events).post(create_agent_handoff_event),
@@ -10069,6 +10120,326 @@ async fn list_events(
     )
     .await?;
     Ok(Json(state.list_events(id).await?))
+}
+
+async fn get_session_context_packet(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ContextPacket>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    let packet = build_context_packet(&state, id).await?;
+    state
+        .append_event(
+            "system",
+            Some(packet.id),
+            id,
+            "context_packet.generated",
+            json!({
+                "context_packet_id": packet.id,
+                "agent_id": packet.agent_id,
+                "agent_version_id": packet.agent_version_id,
+                "runtime_profile_id": packet.runtime_profile.as_ref().map(|profile| profile.id),
+                "semantic_scope_keys": semantic_scope_keys(&packet.semantic_scopes),
+                "policy_reminder_count": packet.policy_reminders.len(),
+                "freshness_warning_count": packet.freshness_warnings.len(),
+                "source_refs": packet.source_refs,
+            }),
+        )
+        .await?;
+    Ok(Json(packet))
+}
+
+async fn build_context_packet(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<ContextPacket, AppError> {
+    let session = state.get_session(session_id).await?;
+    let agent = state.get_agent(session.agent_id).await?;
+    let agent_version = state.agent_version_for_session(session_id).await?;
+    let events = state.list_events(session_id).await?;
+    let policy = state.policy_for_session(session_id).await;
+    let runtime_profile_lookup = match agent.runtime_profile_id {
+        Some(profile_id) => Some((
+            profile_id,
+            state.get_agent_runtime_profile(profile_id).await,
+        )),
+        None => None,
+    };
+    let runtime_profile = runtime_profile_lookup
+        .as_ref()
+        .and_then(|(_, result)| result.as_ref().ok())
+        .map(context_packet_runtime_profile);
+    let runtime_profile_error = runtime_profile_lookup
+        .as_ref()
+        .and_then(|(profile_id, result)| result.as_ref().err().map(|error| (*profile_id, error)));
+    let source_refs = build_context_packet_source_refs(
+        &session,
+        &agent,
+        &agent_version,
+        runtime_profile.as_ref(),
+        runtime_profile_error.map(|(profile_id, _)| profile_id),
+        events.len(),
+    );
+    let last_user_message = events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == "user.message")
+        .and_then(|event| event.payload.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let freshness_warnings = build_context_freshness_warnings(
+        &agent,
+        runtime_profile_lookup.as_ref(),
+        last_user_message.as_deref(),
+    );
+
+    Ok(ContextPacket {
+        id: Uuid::new_v4(),
+        session_id,
+        agent_id: agent.id,
+        agent_version_id: session.agent_version_id.or(Some(agent_version.id)),
+        generated_at: Utc::now(),
+        task: json!({
+            "title": session.title,
+            "status": session.status.as_str(),
+            "last_user_message": last_user_message,
+            "event_count": events.len(),
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+        }),
+        agent: ContextPacketAgent {
+            id: agent.id,
+            name: agent.name.clone(),
+            kind: agent.kind.clone(),
+            agent_role: agent.agent_role.clone(),
+            release_state: agent.release_state.clone(),
+            tools: agent.tools.clone(),
+            mcp_server_ids: agent.mcp_server_ids.clone(),
+            skill_ids: agent.skill_ids.clone(),
+            workflow_pack_ids: agent.workflow_pack_ids.clone(),
+            remote_computer_profile: agent.remote_computer_profile.clone(),
+        },
+        runtime_profile,
+        semantic_scopes: agent.semantic_scopes.clone(),
+        tool_policy: agent.tool_policy.clone(),
+        policy_reminders: build_context_policy_reminders(&policy, &agent_version),
+        freshness_warnings,
+        source_refs,
+    })
+}
+
+fn context_packet_runtime_profile(profile: &AgentRuntimeProfile) -> ContextPacketRuntimeProfile {
+    ContextPacketRuntimeProfile {
+        id: profile.id,
+        name: profile.name.clone(),
+        runtime_type: profile.runtime_type.clone(),
+        remote_computer_required: profile.remote_computer_required,
+        status: profile.status.clone(),
+    }
+}
+
+fn build_context_policy_reminders(
+    policy: &PolicyConfig,
+    agent_version: &AgentVersion,
+) -> Vec<String> {
+    let tools = agent_version
+        .tools
+        .iter()
+        .chain(agent_version.tool_names.iter())
+        .filter(|tool| !tool.trim().is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if tools.is_empty() {
+        return vec![format!(
+            "agent version {} has no enabled tools; runtime actions should stay unavailable",
+            agent_version.version
+        )];
+    }
+    tools
+        .into_iter()
+        .map(|tool| {
+            let decision = policy.evaluate_tool_for_agent_version(&tool, agent_version);
+            format!(
+                "{}: {} ({}) - {}",
+                tool, decision.decision, decision.risk_level, decision.reason
+            )
+        })
+        .collect()
+}
+
+fn build_context_freshness_warnings(
+    agent: &Agent,
+    runtime_profile_lookup: Option<&(Uuid, Result<AgentRuntimeProfile, AppError>)>,
+    last_user_message: Option<&str>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let missing_scopes = missing_semantic_scope_keys(&agent.semantic_scopes);
+    if !missing_scopes.is_empty() {
+        warnings.push(format!(
+            "semantic_scopes missing required keys: {}",
+            missing_scopes.join(", ")
+        ));
+    }
+    if value_is_empty_object(&agent.tool_policy) {
+        warnings.push(
+            "tool_policy is empty; runtime policy reminders are the only tool governance context"
+                .to_string(),
+        );
+    }
+    if agent.workflow_pack_ids.is_empty() {
+        warnings
+            .push("no workflow_pack_ids are bound; domain workflow context is generic".to_string());
+    }
+    if agent.runtime_profile_id.is_none() {
+        warnings.push(
+            "no runtime_profile_id is bound; execution may rely on provider or environment fallback"
+                .to_string(),
+        );
+    }
+    if let Some((profile_id, result)) = runtime_profile_lookup {
+        match result {
+            Ok(profile) if profile.status != "enabled" => warnings.push(format!(
+                "runtime profile {} is {}; execution should fail closed until enabled",
+                profile.name, profile.status
+            )),
+            Err(error) => warnings.push(format!(
+                "runtime profile {profile_id} is unavailable: {}",
+                error.message
+            )),
+            _ => {}
+        }
+    }
+    if agent.release_state != "active" {
+        warnings.push(format!(
+            "agent release_state is {}; treat packet as non-production unless promoted",
+            agent.release_state
+        ));
+    }
+    if last_user_message.is_none() {
+        warnings.push(
+            "session has no user.message event; task context is based on the session title only"
+                .to_string(),
+        );
+    }
+    warnings
+}
+
+fn build_context_packet_source_refs(
+    session: &Session,
+    agent: &Agent,
+    agent_version: &AgentVersion,
+    runtime_profile: Option<&ContextPacketRuntimeProfile>,
+    missing_runtime_profile_id: Option<Uuid>,
+    event_count: usize,
+) -> Vec<ContextPacketSourceRef> {
+    let mut source_refs = vec![
+        context_source_ref("session", session.id, "current"),
+        context_source_ref(
+            "agent",
+            agent.id,
+            &format!("release_state:{}", agent.release_state),
+        ),
+        context_source_ref(
+            "agent_version",
+            agent_version.id,
+            &format!("version:{}", agent_version.version),
+        ),
+        ContextPacketSourceRef {
+            source_type: "session_events".to_string(),
+            source_id: format!("{}:{event_count}", session.id),
+            freshness: "current_snapshot".to_string(),
+        },
+        ContextPacketSourceRef {
+            source_type: "policy".to_string(),
+            source_id: "runtime_policy".to_string(),
+            freshness: "current".to_string(),
+        },
+    ];
+    if let Some(profile) = runtime_profile {
+        source_refs.push(context_source_ref(
+            "agent_runtime_profile",
+            profile.id,
+            &format!("status:{}", profile.status),
+        ));
+    }
+    if let Some(profile_id) = missing_runtime_profile_id {
+        source_refs.push(context_source_ref(
+            "agent_runtime_profile",
+            profile_id,
+            "unavailable",
+        ));
+    }
+    for path in [
+        "AGENTS.md",
+        "README.md",
+        "docs/mandoforge-roadmap-v2.md",
+        "tasks/todo.md",
+    ] {
+        if project_file_path(path).is_some() {
+            source_refs.push(ContextPacketSourceRef {
+                source_type: "repo_doc".to_string(),
+                source_id: path.to_string(),
+                freshness: "workspace_current".to_string(),
+            });
+        }
+    }
+    source_refs
+}
+
+fn context_source_ref(
+    source_type: &str,
+    source_id: Uuid,
+    freshness: &str,
+) -> ContextPacketSourceRef {
+    ContextPacketSourceRef {
+        source_type: source_type.to_string(),
+        source_id: source_id.to_string(),
+        freshness: freshness.to_string(),
+    }
+}
+
+fn semantic_scope_keys(scopes: &Value) -> Vec<String> {
+    scopes
+        .as_object()
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn missing_semantic_scope_keys(scopes: &Value) -> Vec<String> {
+    const REQUIRED: [&str; 6] = [
+        "project_scope",
+        "repo_scope",
+        "service_scope",
+        "workflow_scope",
+        "policy_scope",
+        "memory_scope",
+    ];
+    REQUIRED
+        .into_iter()
+        .filter(|key| {
+            scopes
+                .get(key)
+                .and_then(Value::as_str)
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn value_is_empty_object(value: &Value) -> bool {
+    match value.as_object() {
+        Some(object) => object.is_empty(),
+        None => true,
+    }
 }
 
 async fn stream_events(
@@ -46665,6 +47036,150 @@ not json
         assert_eq!(listed.agent_role, "specialist");
         assert_eq!(listed.runtime_profile_id, Some(runtime_profile.id));
         assert_eq!(listed.semantic_scopes["workflow_scope"], "stage-4");
+    }
+
+    #[tokio::test]
+    async fn context_packet_includes_managed_agent_scope_runtime_and_policy() {
+        let app = test_app().await;
+        let runtime_profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "context-coder-runtime",
+                    "runtime_type": "agent_cli",
+                    "command": "codex",
+                    "default_args": ["exec", "--json"],
+                    "remote_computer_required": true
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Context Backend Coder",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "runtime_profile_id": runtime_profile.id,
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Implement backend work with governed context.",
+                    "tools": ["agent_cli.exec", "file.read", "secret.read"],
+                    "tool_policy": {"risk": "approval_required", "write_gate": "human_review"},
+                    "skill_ids": ["backend-coding"],
+                    "workflow_pack_ids": ["coding-pack"],
+                    "remote_computer_profile": {"required": true, "profile": "whiskey-k3s"},
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "stage-4",
+                        "policy_scope": "approval-required"
+                    },
+                    "release_state": "draft"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "build context packet",
+                    "message": "Prepare a scoped backend coding task."
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        let packet: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/context-packet", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(packet.session_id, session.id);
+        assert_eq!(packet.agent_id, agent.id);
+        assert_eq!(packet.agent.agent_role, "specialist");
+        assert_eq!(packet.agent.skill_ids, vec!["backend-coding".to_string()]);
+        assert_eq!(
+            packet.agent.workflow_pack_ids,
+            vec!["coding-pack".to_string()]
+        );
+        assert_eq!(packet.semantic_scopes["service_scope"], "mandoforge-api");
+        assert_eq!(packet.tool_policy["write_gate"], "human_review");
+        assert_eq!(
+            packet.task["last_user_message"],
+            "Prepare a scoped backend coding task."
+        );
+        let packet_profile = packet.runtime_profile.as_ref().expect("runtime profile");
+        assert_eq!(packet_profile.id, runtime_profile.id);
+        assert!(packet_profile.remote_computer_required);
+        assert_eq!(packet_profile.status, "enabled");
+        assert!(packet.policy_reminders.iter().any(|reminder| {
+            reminder.contains("agent_cli.exec: requires_approval")
+                && reminder.contains("requires approval")
+        }));
+        assert!(packet.policy_reminders.iter().any(|reminder| {
+            reminder.contains("secret.read: denied") && reminder.contains("blocked")
+        }));
+        assert!(packet.freshness_warnings.iter().any(|warning| {
+            warning.contains("semantic_scopes missing required keys: memory_scope")
+        }));
+        assert!(
+            packet
+                .freshness_warnings
+                .iter()
+                .any(|warning| { warning.contains("release_state is draft") })
+        );
+        assert!(packet.source_refs.iter().any(|source| {
+            source.source_type == "agent_runtime_profile"
+                && source.source_id == runtime_profile.id.to_string()
+        }));
+        assert!(packet.source_refs.iter().any(|source| {
+            source.source_type == "repo_doc" && source.source_id == "docs/mandoforge-roadmap-v2.md"
+        }));
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "context_packet.generated"
+                && event.payload["context_packet_id"] == json!(packet.id)
+                && event.payload["policy_reminder_count"] == json!(packet.policy_reminders.len())
+        }));
     }
 
     #[tokio::test]

@@ -217,6 +217,13 @@ semantic_scopes:
 
 This prevents Agent Registry from becoming only a runtime/tool table. The Manager Agent must use scopes when selecting specialists and assembling the first context packet.
 
+Current repo slice:
+
+- Managed Agent registry now stores the minimal semantic scope fields on each agent.
+- `GET /api/sessions/{id}/context-packet` generates a source-attributed context packet from the session, agent registry entry, agent version, runtime profile, runtime policy, session events, and key repo docs.
+- Context packet generation writes a `context_packet.generated` timeline event so operators can replay when governed context was assembled.
+- This is an on-demand Stage 4 context packet builder. Stage 5 still owns durable `semantic_sources`, `semantic_objects`, `semantic_links`, versioned `context_packets`, retrieval backends, and memory writeback.
+
 ### Stage 4.4 Manager Agent Planner
 
 The Manager Agent is the task-control brain:

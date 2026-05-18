@@ -241,8 +241,8 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [ ] Stage 4.1: Extend runtime profile release gates and fail-closed allowlist semantics to Codex App Server, Claude Code, Gemini, OpenCode, Aider, and future hosted runtimes.
 - [x] Stage 4.2: Add Managed Agent Registry fields for manager/specialist kind, runtime profile binding, tool policy, MCP servers, skills, Workflow Pack memberships, Remote Computer profile, semantic scopes, and release state.
 - [ ] Stage 4.2: Add Agent Builder / Console surfaces for runtime profile, tools, skills, MCP, Remote Computer profile, and semantic scope selection.
-- [ ] Stage 4.3: Add Minimal Semantic Kernel scope fields for project, repo, service, workflow, policy, and memory scope.
-- [ ] Stage 4.3: Add a minimal context packet builder that can assemble task, agent, scopes, policy reminders, relevant repo docs, and known freshness warnings without requiring the full Stage 5 semantic layer.
+- [x] Stage 4.3: Add Minimal Semantic Kernel scope fields for project, repo, service, workflow, policy, and memory scope.
+- [x] Stage 4.3: Add a minimal context packet builder that can assemble task, agent, scopes, policy reminders, relevant repo doc references, and known freshness warnings without requiring the full Stage 5 semantic layer.
 - [ ] Stage 4.4: Add Manager Agent planner records for task intake, decomposition, specialist selection, risk classification, and result review.
 - [ ] Stage 4.5: Extend typed agent handoff / assignment records with semantic scopes, runtime profile, Remote Computer requirement, review status, and human escalation status.
 - [ ] Stage 4.5: Add Manager Agent -> Specialist Agent handoff execution path that preserves policy, approval, audit, timeline, and Remote Computer assignment.
