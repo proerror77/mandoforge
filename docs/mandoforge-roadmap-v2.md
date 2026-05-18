@@ -264,8 +264,10 @@ Current repo slice:
 
 - Agent handoff records now carry `manager_plan_id`, semantic scopes, runtime profile, Remote Computer requirement, review status, and human escalation status.
 - Handoff creation derives default scopes and runtime profile from the target specialist agent, while validating an optional Manager Agent plan link.
-- Timeline and audit events include the assignment metadata so Manager Agent -> Specialist Agent delegation can be replayed before the execution path is automated.
-- The execution path from accepted handoff into governed worker/Remote Computer assignment remains the next Stage 4.5 slice.
+- `agent_handoff_assignments` records the accepted Manager Agent -> Specialist Agent assignment, including source session, specialist session, manager plan, semantic scopes, runtime profile, Remote Computer requirement, optional Remote Computer job assignment link, status, audit trace, and metadata.
+- `POST /api/agent-handoffs/{id}/assignment` creates or binds the specialist execution entry only after the handoff is accepted and the Manager Agent plan is reviewed or approved.
+- Assignment creation writes `agent_handoff.assigned` on the Manager Agent timeline, `agent_handoff.assignment_received` on the Specialist Agent timeline, and an audit record so the delegation can be replayed across both sessions.
+- Remote Computer-required handoffs remain `waiting_remote_computer` until a Remote Computer job assignment is attached; this keeps the path fail-closed instead of silently falling back to local execution.
 
 ### Stage 4.6 First Demo: backend-coder
 

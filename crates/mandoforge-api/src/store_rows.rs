@@ -3,12 +3,12 @@ use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
 use crate::{
-    Agent, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile, AgentVersion, AppError, Approval,
-    ApprovalEscalationRule, ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog,
-    CostAlertRoute, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership,
-    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session,
-    SessionEvent, Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
-    WorkflowPackProfileAsset,
+    Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
+    AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
+    ApprovalNotificationChannelPolicy, Artifact, AuditLog, CostAlertRoute, EvalCase, EvalDataset,
+    EvalRun, ManagerAgentPlan, McpServerRecord, Membership, Organization, PolicyRevision, Project,
+    ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent, Team, TenantInvitation,
+    ToolCall, UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
@@ -185,6 +185,30 @@ pub(crate) fn agent_handoff_event_from_row(row: PgRow) -> Result<AgentHandoffEve
         review_status: row.try_get("review_status")?,
         human_escalation_status: row.try_get("human_escalation_status")?,
         status: row.try_get("status")?,
+        audit_trace_id: row.try_get("audit_trace_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn agent_handoff_assignment_from_row(
+    row: PgRow,
+) -> Result<AgentHandoffAssignment, AppError> {
+    Ok(AgentHandoffAssignment {
+        id: row.try_get("id")?,
+        agent_handoff_event_id: row.try_get("agent_handoff_event_id")?,
+        manager_plan_id: row.try_get("manager_plan_id")?,
+        source_session_id: row.try_get("source_session_id")?,
+        specialist_session_id: row.try_get("specialist_session_id")?,
+        source_agent_id: row.try_get("source_agent_id")?,
+        target_agent_id: row.try_get("target_agent_id")?,
+        semantic_scopes: row.try_get("semantic_scopes")?,
+        runtime_profile_id: row.try_get("runtime_profile_id")?,
+        remote_computer_required: row.try_get("remote_computer_required")?,
+        remote_computer_job_assignment_id: row.try_get("remote_computer_job_assignment_id")?,
+        status: row.try_get("status")?,
+        assigned_by: row.try_get("assigned_by")?,
+        metadata: row.try_get("metadata")?,
         audit_trace_id: row.try_get("audit_trace_id")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
