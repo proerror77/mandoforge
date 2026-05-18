@@ -1324,7 +1324,12 @@ async fn execute_approved_remote_computer_agent_cli(
         .pod_name
         .clone()
         .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
-    let command = remote_agent_cli_exec_command(&request)?;
+    let profile_config = agent_cli_profile_config(state, &profile).await?;
+    let profile_source = match profile_config.source {
+        AgentCliProfileConfigSource::Managed => "managed",
+        AgentCliProfileConfigSource::Environment => "environment",
+    };
+    let command = remote_agent_cli_exec_command(&request, &profile_config)?;
     let config = RemoteComputerRunnerConfig::from_env();
     let runner = remote_computer_runner_for_config(&config);
     state
@@ -1335,6 +1340,7 @@ async fn execute_approved_remote_computer_agent_cli(
             "agent_cli.task.started",
             json!({
                 "profile": profile,
+                "profile_source": profile_source,
                 "task": &request.task,
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": remote_computer.id,
@@ -1354,7 +1360,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 session_id: Some(approval.session_id),
                 pod_name: Some(pod_name.clone()),
                 metadata: Some(
-                    json!({"command": command, "tool_call_id": tool_call.id, "profile": profile}),
+                    json!({"command": command, "tool_call_id": tool_call.id, "profile": profile, "profile_source": profile_source}),
                 ),
             },
         )
@@ -1404,6 +1410,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "pod_name": pod_name,
                 "tool": tool_call.tool_name,
                 "profile": profile,
+                "profile_source": profile_source,
                 "stdout_bytes": stdout.original_bytes,
                 "stderr_bytes": stderr.original_bytes,
                 "status": status,
@@ -1419,6 +1426,7 @@ async fn execute_approved_remote_computer_agent_cli(
             event_type,
             json!({
                 "profile": profile,
+                "profile_source": profile_source,
                 "status": status,
                 "stdout": stdout.text,
                 "stdout_bytes": stdout.original_bytes,
@@ -1739,8 +1747,34 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn remote_agent_cli_exec_command(request: &AgentCliRequest) -> Result<String, AppError> {
+fn remote_agent_cli_exec_command(
+    request: &AgentCliRequest,
+    config: &AgentCliProfileConfig,
+) -> Result<String, AppError> {
     let profile = normalize_agent_cli_profile(&request.profile)?;
+    if config.source == AgentCliProfileConfigSource::Managed {
+        let mut command = String::new();
+        command.push_str("set -eu\ncd /workspace\n");
+        for (key, value) in &config.env {
+            command.push_str(&format!("export {}={}\n", key, shell_single_quote(value)));
+        }
+        command.push_str("set --\n");
+        for arg in &config.args {
+            command.push_str(&format!("set -- \"$@\" {}\n", shell_single_quote(arg)));
+        }
+        for arg in &request.args {
+            command.push_str(&format!("set -- \"$@\" {}\n", shell_single_quote(arg)));
+        }
+        command.push_str(&format!(
+            "MANDOFORGE_AGENT_CLI_PROFILE={} MANDOFORGE_AGENT_TASK={} {} \"$@\" {}\n",
+            shell_single_quote(&profile),
+            shell_single_quote(&request.task),
+            shell_single_quote(&config.command),
+            shell_single_quote(&request.task)
+        ));
+        return Ok(command);
+    }
+
     let mut command = String::new();
     command.push_str("set -eu\ncd /workspace\nagent_cli_profile=");
     command.push_str(&shell_single_quote(&profile));
@@ -2095,7 +2129,12 @@ async fn run_agent_cli(
     request: AgentCliRequest,
 ) -> Result<Value, AppError> {
     let profile = normalize_agent_cli_profile(&request.profile)?;
-    let config = agent_cli_profile_config(&profile)?;
+    let config = agent_cli_profile_config(state, &profile).await?;
+    if config.remote_computer_required {
+        return Err(AppError::bad_request(format!(
+            "agent runtime profile requires Remote Computer execution: {profile}"
+        )));
+    }
     let workspace = state.workspace_root.join(session_id.to_string());
     tokio::fs::create_dir_all(&workspace).await?;
 
@@ -2125,6 +2164,9 @@ async fn run_agent_cli(
     command.arg(&request.task);
     command.env("MANDOFORGE_AGENT_CLI_PROFILE", &profile);
     command.env("MANDOFORGE_AGENT_TASK", &request.task);
+    for (key, value) in config.env {
+        command.env(key, value);
+    }
 
     let timeout_seconds = request
         .timeout_seconds
@@ -2140,6 +2182,10 @@ async fn run_agent_cli(
     let limit = execution_output_limit_bytes();
     let stdout = truncate_output(&stdout_full, limit);
     let stderr = truncate_output(&stderr_full, limit);
+    let profile_source = match config.source {
+        AgentCliProfileConfigSource::Managed => "managed",
+        AgentCliProfileConfigSource::Environment => "environment",
+    };
     let event_type = if output.status.success() {
         "agent_cli.task.completed"
     } else {
@@ -2153,6 +2199,7 @@ async fn run_agent_cli(
             event_type,
             json!({
                 "profile": profile,
+                "profile_source": profile_source,
                 "exit_code": output.status.code(),
                 "stdout": stdout.text,
                 "stdout_bytes": stdout.original_bytes,
@@ -2168,6 +2215,7 @@ async fn run_agent_cli(
     Ok(json!({
         "runner": "agent-cli",
         "profile": profile,
+        "profile_source": profile_source,
         "status": output.status.code(),
         "stdout": stdout.text,
         "stdout_bytes": stdout.original_bytes,
@@ -2178,10 +2226,19 @@ async fn run_agent_cli(
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentCliProfileConfigSource {
+    Managed,
+    Environment,
+}
+
 struct AgentCliProfileConfig {
     command: String,
     args: Vec<String>,
+    env: Vec<(String, String)>,
     timeout_seconds: Option<u64>,
+    remote_computer_required: bool,
+    source: AgentCliProfileConfigSource,
 }
 
 fn normalize_agent_cli_profile(profile: &str) -> Result<String, AppError> {
@@ -2198,7 +2255,45 @@ fn normalize_agent_cli_profile(profile: &str) -> Result<String, AppError> {
     Ok(normalized)
 }
 
-fn agent_cli_profile_config(profile: &str) -> Result<AgentCliProfileConfig, AppError> {
+async fn agent_cli_profile_config(
+    state: &AppState,
+    profile: &str,
+) -> Result<AgentCliProfileConfig, AppError> {
+    if let Some(managed_profile) = state.get_agent_runtime_profile_by_name(profile).await? {
+        if managed_profile.status != "enabled" {
+            return Err(AppError::bad_request(format!(
+                "agent runtime profile is not enabled: {profile}"
+            )));
+        }
+        if managed_profile.runtime_type != "agent_cli" {
+            return Err(AppError::bad_request(format!(
+                "agent runtime profile {profile} is not an agent_cli runtime"
+            )));
+        }
+        let env = managed_profile
+            .env
+            .as_object()
+            .map(|object| {
+                object
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|value| (key.clone(), value.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        return Ok(AgentCliProfileConfig {
+            command: managed_profile.command,
+            args: managed_profile.default_args,
+            env,
+            timeout_seconds: managed_profile
+                .timeout_seconds
+                .and_then(|value| u64::try_from(value).ok()),
+            remote_computer_required: managed_profile.remote_computer_required,
+            source: AgentCliProfileConfigSource::Managed,
+        });
+    }
+
     let allowed = std::env::var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES").unwrap_or_default();
     let allowed_profiles: HashSet<String> = allowed
         .split(',')
@@ -2244,7 +2339,10 @@ fn agent_cli_profile_config(profile: &str) -> Result<AgentCliProfileConfig, AppE
     Ok(AgentCliProfileConfig {
         command,
         args,
+        env: Vec::new(),
         timeout_seconds,
+        remote_computer_required: false,
+        source: AgentCliProfileConfigSource::Environment,
     })
 }
 

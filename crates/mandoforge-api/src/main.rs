@@ -64,6 +64,7 @@ mod store_policy_revisions;
 mod store_releases;
 mod store_remote_computers;
 mod store_rows;
+mod store_runtime_profiles;
 mod store_secret_records;
 mod store_seed;
 mod store_tool_calls;
@@ -286,6 +287,40 @@ struct AgentVersion {
     runtime_config: Value,
     approval_policy: Value,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentRuntimeProfile {
+    id: Uuid,
+    name: String,
+    runtime_type: String,
+    command: String,
+    default_args: Vec<String>,
+    env: Value,
+    timeout_seconds: Option<i64>,
+    remote_computer_required: bool,
+    status: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAgentRuntimeProfile {
+    name: String,
+    #[serde(default = "default_agent_runtime_type")]
+    runtime_type: String,
+    command: String,
+    #[serde(default)]
+    default_args: Vec<String>,
+    #[serde(default = "empty_json_object")]
+    env: Value,
+    #[serde(default)]
+    timeout_seconds: Option<i64>,
+    #[serde(default)]
+    remote_computer_required: bool,
+    #[serde(default = "default_enabled_status")]
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4128,6 +4163,14 @@ fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/api/stage2/readiness", get(get_stage2_readiness))
         .route("/api/agents", get(list_agents).post(create_agent))
+        .route(
+            "/api/agent-runtime-profiles",
+            get(list_agent_runtime_profiles).post(create_agent_runtime_profile),
+        )
+        .route(
+            "/api/agent-runtime-profiles/{id}",
+            get(get_agent_runtime_profile),
+        )
         .route("/api/agents/{id}/versions", get(list_agent_versions))
         .route(
             "/api/agents/releases/summary",
@@ -5740,6 +5783,72 @@ async fn create_agent(
 ) -> Result<Json<Agent>, AppError> {
     authorize_request(&state, &headers, Permission::AgentsWrite, "agents", None).await?;
     Ok(Json(state.create_agent(input).await?))
+}
+
+async fn list_agent_runtime_profiles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AgentRuntimeProfile>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "agent_runtime_profiles",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_agent_runtime_profiles().await?))
+}
+
+async fn create_agent_runtime_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateAgentRuntimeProfile>,
+) -> Result<Json<AgentRuntimeProfile>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "agent_runtime_profiles",
+        None,
+    )
+    .await?;
+    let profile = state.create_agent_runtime_profile(input).await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "agent_runtime_profile.created",
+            "agent_runtime_profile",
+            Some(profile.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": profile.name,
+                "runtime_type": profile.runtime_type,
+                "remote_computer_required": profile.remote_computer_required,
+                "status": profile.status
+            }),
+        ))
+        .await?;
+    Ok(Json(profile))
+}
+
+async fn get_agent_runtime_profile(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<AgentRuntimeProfile>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "agent_runtime_profile",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.get_agent_runtime_profile(id).await?))
 }
 
 async fn list_agent_versions(
@@ -11099,6 +11208,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "agent_handoff_events",
         "workflow_pack_installations",
         "workflow_pack_profile_assets",
+        "agent_runtime_profiles",
         "mcp_servers",
         "eval_datasets",
         "eval_cases",
@@ -32996,6 +33106,14 @@ fn default_provider() -> String {
     "openai-compatible".to_string()
 }
 
+fn default_agent_runtime_type() -> String {
+    "agent_cli".to_string()
+}
+
+fn default_enabled_status() -> String {
+    "enabled".to_string()
+}
+
 fn default_mcp_transport() -> String {
     "http".to_string()
 }
@@ -37783,6 +37901,7 @@ not json
         assert!(names.contains(&"0027_agent_handoff_events.sql"));
         assert!(names.contains(&"0028_workflow_pack_installations.sql"));
         assert!(names.contains(&"0029_workflow_pack_profile_assets.sql"));
+        assert!(names.contains(&"0030_agent_runtime_profiles.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -37792,13 +37911,14 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
             include_str!("../../../db/migrations/0027_agent_handoff_events.sql"),
             include_str!("../../../db/migrations/0028_workflow_pack_installations.sql"),
-            include_str!("../../../db/migrations/0029_workflow_pack_profile_assets.sql")
+            include_str!("../../../db/migrations/0029_workflow_pack_profile_assets.sql"),
+            include_str!("../../../db/migrations/0030_agent_runtime_profiles.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
@@ -45884,6 +46004,167 @@ not json
             std::env::remove_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_COMMAND");
             std::env::remove_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_ARGS");
         }
+    }
+
+    #[tokio::test]
+    async fn managed_agent_runtime_profile_can_drive_agent_cli_worker() {
+        let shim_dir = test_workspace_root().join("agent-cli-shims");
+        fs::create_dir_all(&shim_dir).expect("create shim dir");
+        let shim_path = shim_dir.join(format!("managed-agent-cli-{}.sh", Uuid::new_v4()));
+        fs::write(
+            &shim_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"task=$MANDOFORGE_AGENT_TASK\"\necho \"managed=$MANDOFORGE_MANAGED_PROFILE\"\necho \"argv=$*\"\n",
+        )
+        .expect("write managed fake agent CLI");
+        #[cfg(unix)]
+        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod managed fake agent CLI");
+
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "managed-coder",
+                    "runtime_type": "agent_cli",
+                    "command": shim_path.to_string_lossy(),
+                    "default_args": ["--mode", "worker"],
+                    "env": {"MANDOFORGE_MANAGED_PROFILE": "yes"},
+                    "timeout_seconds": 30,
+                    "remote_computer_required": false
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(profile.name, "managed-coder");
+        assert_eq!(profile.runtime_type, "agent_cli");
+
+        let profiles: Vec<AgentRuntimeProfile> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agent-runtime-profiles")
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(profiles.iter().any(|listed| listed.id == profile.id));
+
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agents[0].id, "title": "managed agent CLI worker"}),
+            ),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/agent_cli.exec/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "profile": "managed-coder",
+                        "task": "Inspect workspace as managed coding worker",
+                        "args": ["--json"]
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(approval_required["status"], "approval_required");
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id && job.tool_name == "agent_cli.exec")
+        .expect("agent CLI execution job queued")
+        .id;
+
+        let completed: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "managed-agent-cli-worker-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent_cli_call = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "agent_cli.exec")
+            .expect("agent CLI tool call");
+        let result = agent_cli_call.result.as_ref().expect("agent CLI result");
+        assert_eq!(result["profile"], "managed-coder");
+        assert_eq!(result["profile_source"], "managed");
+        assert!(result["stdout"].as_str().unwrap().contains("managed=yes"));
+        assert!(
+            result["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("argv=--mode worker --json Inspect workspace as managed coding worker")
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent_runtime_profile.created" && log.resource_id == Some(profile.id)
+        }));
     }
 
     #[tokio::test]

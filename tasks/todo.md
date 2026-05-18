@@ -236,7 +236,7 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 
 ## Stage 4 / Managed Agent Control Plane + Manager Agent
 
-- [ ] Stage 4.1: Add first-class Agent Runtime Profile storage and APIs so `agent_cli.exec` can resolve governed runtime profiles instead of environment-only profile configuration.
+- [x] Stage 4.1: Add first-class Agent Runtime Profile storage and APIs so `agent_cli.exec` can resolve governed runtime profiles instead of environment-only profile configuration.
 - [ ] Stage 4.1: Add runtime profile release/audit events and fail-closed profile allowlist semantics for Codex, Claude Code, Gemini, OpenCode, Aider, and future hosted runtimes.
 - [ ] Stage 4.2: Add Managed Agent Registry fields for manager/specialist kind, runtime profile binding, tool policy, MCP servers, skills, Workflow Pack memberships, Remote Computer profile, semantic scopes, and release state.
 - [ ] Stage 4.2: Add Agent Builder / Console surfaces for runtime profile, tools, skills, MCP, Remote Computer profile, and semantic scope selection.

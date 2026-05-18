@@ -155,6 +155,13 @@ Stage 4 is the main correction back to the original Agent OS plan. It must not s
 
 Move runtime backend configuration out of environment-only settings and into managed runtime profiles.
 
+Current repo slice:
+
+- `agent_runtime_profiles` is now a tenant-scoped Agent OS resource.
+- `GET/POST /api/agent-runtime-profiles` and `GET /api/agent-runtime-profiles/{id}` expose the first control-plane API.
+- `agent_cli.exec` resolves an enabled managed `agent_cli` profile before falling back to legacy environment allowlist configuration.
+- profiles with `remote_computer_required: true` fail closed on local execution and must use the Remote Computer path.
+
 Examples:
 
 ```yaml

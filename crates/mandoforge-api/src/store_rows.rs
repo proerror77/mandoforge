@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
 use crate::{
-    Agent, AgentHandoffEvent, AgentRelease, AgentVersion, AppError, Approval,
+    Agent, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile, AgentVersion, AppError, Approval,
     ApprovalEscalationRule, ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog,
     CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
     PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, Session, SessionEvent,
@@ -54,6 +54,24 @@ pub(crate) fn agent_version_from_row(row: PgRow) -> Result<AgentVersion, AppErro
         runtime_config: row.try_get("runtime_config")?,
         approval_policy: row.try_get("approval_policy")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn agent_runtime_profile_from_row(row: PgRow) -> Result<AgentRuntimeProfile, AppError> {
+    let default_args: Value = row.try_get("default_args")?;
+    Ok(AgentRuntimeProfile {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        runtime_type: row.try_get("runtime_type")?,
+        command: row.try_get("command")?,
+        default_args: serde_json::from_value(default_args).unwrap_or_default(),
+        env: row.try_get("env")?,
+        timeout_seconds: row.try_get("timeout_seconds")?,
+        remote_computer_required: row.try_get("remote_computer_required")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
     })
 }
 

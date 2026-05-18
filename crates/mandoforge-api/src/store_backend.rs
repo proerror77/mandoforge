@@ -5,10 +5,10 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
-    Agent, AgentHandoffEvent, AgentRelease, AgentVersion, Approval, ApprovalEscalationRule,
-    ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun,
-    CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership, Organization,
-    PolicyRevision, Project, ProviderAccess, ProviderRecord, RemoteComputer,
+    Agent, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile, AgentVersion, Approval,
+    ApprovalEscalationRule, ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog,
+    CodexAppServerRun, CostAlertRoute, EvalCase, EvalDataset, EvalRun, McpServerRecord, Membership,
+    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, RemoteComputer,
     RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
     RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord, Session, SessionEvent,
     Team, TenantInvitation, ToolCall, UsageRollup, WorkflowPackInstallation,
@@ -18,6 +18,7 @@ use crate::{
 #[derive(Default)]
 pub(crate) struct MemoryStore {
     pub(crate) agents: HashMap<Uuid, Agent>,
+    pub(crate) agent_runtime_profiles: HashMap<Uuid, AgentRuntimeProfile>,
     pub(crate) agent_releases: HashMap<Uuid, AgentRelease>,
     pub(crate) policy_revisions: HashMap<Uuid, PolicyRevision>,
     pub(crate) secret_records: HashMap<Uuid, SecretRecord>,
