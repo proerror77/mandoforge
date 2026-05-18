@@ -213,7 +213,7 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [ ] Run tenant routing evidence against a broader real multi-tenant deployment with RLS enabled, forced, and tenant context configured beyond the current Whiskey tenant-routed pilot.
 - [ ] Run policy rollout orchestration against a real production policy controller target instead of the current Whiskey pilot controller.
 - [ ] Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend instead of the current Whiskey pilot KMS/Vault boundary.
-- [ ] Promote the `whiskey-docs` connector from authenticated private GitHub repo contents to a broader Lark docs/wiki or other enterprise knowledge target.
+- [x] Promote the `whiskey-docs` connector from authenticated private GitHub repo contents to a broader Lark docs/wiki or other enterprise knowledge target.
 - [ ] Promote finance export from Feishu Drive artifact delivery to a true accounting-system or ERP target.
 
 ## Workflow Pack / Domain Pack Adaptation

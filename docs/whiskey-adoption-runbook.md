@@ -12,7 +12,7 @@ For the fastest operator handoff from the latest local artifacts, run:
 scripts/whiskey-adoption-next-actions.sh
 ```
 
-That helper reads the latest synced Whiskey artifacts and prints the exact next repo-native command for the two real remaining unblock paths: the constrained `k3s` Remote Computer pilot and the Lark docs/wiki scope upgrade.
+That helper reads the latest synced Whiskey artifacts and prints the exact next repo-native command for the current remaining unblock paths. Once the latest full archive already proves Lark docs adoption, it leaves only the constrained `k3s` Remote Computer pilot as actionable work.
 
 ## Host Contract
 
@@ -64,6 +64,7 @@ The script:
 - runs `scripts/worker-evidence-gate.sh`;
 - runs `scripts/remote-computer-evidence-gate.sh` with sidecar recovery capture enabled so the archive records the audited no-op or replacement plan while preserving the state-sync production blocker;
 - runs `scripts/whiskey-remote-computer-k3s-host-inventory.sh` locally and syncs the timestamped plus `-latest` k3s preflight, verify, and consolidated host-inventory artifacts into `/opt/mandoforge-adoption/evidence/remote-computer` and strict `stage2-production/remote-computer-k3s/`;
+- syncs post-install `scripts/whiskey-remote-computer-k3s-cluster-stage.sh` artifacts when present, including the timestamped plus `-latest` cluster-stage plan and remote `kubectl kustomize` render output, into the same Remote Computer evidence folders so the approved apply path is archived repo-side;
 - seeds a Whiskey eval/release request, runs `scripts/eval-release-evidence-gate.sh`, and captures rollout, orchestration, deployment, and rollback evidence;
 - seeds a diagnostics approval path for observability remediation, runs `scripts/observability-collector-evidence-gate.sh`, and captures deployment, rollout, remediation, plus `otel-collector` service and live-signal log evidence;
 - seeds or refreshes the Whiskey provider rollout target, preferring the real DeepSeek-backed provider when `DEEPSEEK_API_KEY` is available on Whiskey and falling back to `whiskey-mock-provider` otherwise, then runs `scripts/provider-governance-evidence-gate.sh`;
@@ -175,7 +176,7 @@ WHISKEY_WORKFLOW_PACK_MCP_QUERY=README
 
 In that mode, `whiskey-docs` reads authenticated file contents from the private `proerror77/Goodchance` repository and returns path-level hits such as `clients/ios-app/README.md`. This validates the real MandoForge MCP gateway HTTP boundary and rollout controller hooks while exercising a credentialed internal repository knowledge target rather than a chat transcript.
 
-The same controller also supports `WHISKEY_MCP_UPSTREAM_MODE=lark_chat_messages` and `WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search`. `lark_docs_search` uses `lark-cli docs +search` against the current user's Docs/Wiki search scope; it is the next repo-native path for turning `whiskey-docs` into a broader Lark knowledge-space target, but it requires the Whiskey `lark-cli` login to have `search:docs:read`.
+The same controller also supports `WHISKEY_MCP_UPSTREAM_MODE=lark_chat_messages` and `WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search`. `lark_docs_search` uses `lark-cli docs +search` against the current user's Docs/Wiki search scope. This path is now verified on Whiskey by the `20260518T012511Z` full and strict archives, which show `connector_quality_live_source=lark-docs-search-authenticated` with a live Feishu doc hit for `07 — Six Systems Client Brief · Operation Forge`. It still depends on the Whiskey `lark-cli` login holding `search:docs:read`, so the helper commands below remain the repo-native way to check or recover the scope if the session expires.
 
 Use the repo-native helper below to check or start that scope upgrade:
 
@@ -186,11 +187,13 @@ scripts/whiskey-mcp-lark-docs-scope.sh --start-login
 scripts/whiskey-mcp-lark-docs-adopt.sh
 ```
 
-Once `search:docs:read` is granted, the direct repo-native apply step is:
+When the scope needs to be re-established or refreshed, the direct repo-native apply step remains:
 
 ```bash
 scripts/whiskey-mcp-lark-docs-adopt.sh --apply --query README
 ```
+
+If `MANDOFORGE_IMAGE_TAG` is unset, that helper now reuses the currently running Whiskey API image tag instead of assuming `latest`.
 
 ## Eval/Release Lane
 
@@ -386,6 +389,8 @@ Once `scripts/whiskey-remote-computer-k3s-verify.sh` reports `status=ready`, the
 ```bash
 scripts/whiskey-remote-computer-k3s-cluster-stage.sh --apply-manifests --run-evidence
 ```
+
+That stage command now keeps all of its own artifacts under `.mandoforge/remote-adoption/whiskey/` (or the supplied `--sync-dir`): the timestamped plan, the `-latest` plan aliases, and the remote `kubectl kustomize` render output. When `--run-evidence` is included, `scripts/whiskey-adoption-evidence.sh` syncs those cluster-stage artifacts into both `/opt/mandoforge-adoption/evidence/remote-computer/` and strict `stage2-production/remote-computer-k3s/`, so the approved manifest-apply step leaves archiveable repo-native evidence instead of only terminal output.
 
 Before approval, the current Whiskey host returns `status=not_installed` with no reserved port collisions and no kubeconfig or Ready nodes, which is the expected baseline.
 
