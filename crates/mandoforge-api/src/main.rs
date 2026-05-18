@@ -1127,6 +1127,29 @@ struct ContextPacketSemanticObject {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticRetrievalBackendRegistry {
+    selected_backend: String,
+    effective_backend: String,
+    fail_closed: bool,
+    object_model_required: bool,
+    backends: Vec<SemanticRetrievalBackendStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticRetrievalBackendStatus {
+    backend: String,
+    backend_type: String,
+    status: String,
+    selected: bool,
+    effective: bool,
+    configured: bool,
+    required_env_vars: Vec<String>,
+    missing_env_vars: Vec<String>,
+    object_link_context_packet_required: bool,
+    blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MemoryWritebackCandidate {
     id: Uuid,
     session_id: Uuid,
@@ -4727,6 +4750,10 @@ fn build_router(state: AppState) -> Router {
                 .post(create_session_memory_writeback_candidates),
         )
         .route("/api/context-packets/{id}", get(get_context_packet))
+        .route(
+            "/api/semantic-retrieval/backends",
+            get(get_semantic_retrieval_backends),
+        )
         .route(
             "/api/memory-writeback-candidates",
             get(list_memory_writeback_candidates),
@@ -11884,6 +11911,21 @@ async fn get_context_packet(
     Ok(Json(packet))
 }
 
+async fn get_semantic_retrieval_backends(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SemanticRetrievalBackendRegistry>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_retrieval_backends",
+        None,
+    )
+    .await?;
+    Ok(Json(semantic_retrieval_backend_registry_from_env()))
+}
+
 async fn list_session_memory_writeback_candidates(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -12754,6 +12796,13 @@ async fn retrieve_context_packet_semantic_objects(
     state: &AppState,
     agent: &Agent,
 ) -> Result<Vec<ContextPacketSemanticObject>, AppError> {
+    let registry = semantic_retrieval_backend_registry_from_env();
+    if registry.effective_backend != "scope_rank" {
+        return Err(AppError::bad_request(format!(
+            "semantic retrieval backend {} is not executable; object/link/context packet scope_rank remains required",
+            registry.effective_backend
+        )));
+    }
     let mut objects = state
         .list_semantic_objects()
         .await?
@@ -12781,6 +12830,128 @@ async fn retrieve_context_packet_semantic_objects(
     });
     objects.truncate(12);
     Ok(objects)
+}
+
+fn semantic_retrieval_backend_registry_from_env() -> SemanticRetrievalBackendRegistry {
+    semantic_retrieval_backend_registry_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn semantic_retrieval_backend_registry_from_lookup<F>(lookup: F) -> SemanticRetrievalBackendRegistry
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let selected_backend = lookup("MANDOFORGE_SEMANTIC_RETRIEVAL_BACKEND")
+        .map(|backend| backend.trim().to_ascii_lowercase())
+        .filter(|backend| !backend.is_empty())
+        .unwrap_or_else(|| "scope_rank".to_string());
+    let specs = [
+        (
+            "scope_rank",
+            "object_link_context_packet",
+            Vec::<&str>::new(),
+            "active",
+        ),
+        (
+            "pgvector",
+            "vector",
+            vec!["MANDOFORGE_PGVECTOR_DSN"],
+            "reserved",
+        ),
+        (
+            "qdrant",
+            "vector",
+            vec!["MANDOFORGE_QDRANT_URL"],
+            "reserved",
+        ),
+        (
+            "weaviate",
+            "vector",
+            vec!["MANDOFORGE_WEAVIATE_URL"],
+            "reserved",
+        ),
+    ];
+    let known_backends = specs
+        .iter()
+        .map(|(backend, _, _, _)| *backend)
+        .collect::<BTreeSet<_>>();
+    let mut fail_closed = !known_backends.contains(selected_backend.as_str());
+    let mut backends = specs
+        .iter()
+        .map(|(backend, backend_type, required_env_vars, base_status)| {
+            let missing_env_vars = required_env_vars
+                .iter()
+                .filter(|key| lookup(key).is_none())
+                .map(|key| (*key).to_string())
+                .collect::<Vec<_>>();
+            let configured = missing_env_vars.is_empty();
+            let selected = selected_backend == *backend;
+            let effective = *backend == "scope_rank";
+            let mut blocking_reasons = Vec::new();
+            if *backend != "scope_rank" {
+                blocking_reasons.push(
+                    "optional retrieval backend is reserved; scope_rank remains the executable semantic layer".to_string(),
+                );
+                if !configured {
+                    blocking_reasons.push(format!(
+                        "missing required env vars: {}",
+                        missing_env_vars.join(", ")
+                    ));
+                }
+            }
+            if selected && *backend != "scope_rank" {
+                fail_closed = true;
+                blocking_reasons.push(
+                    "selected backend is not enabled for context packet execution".to_string(),
+                );
+            }
+            let status = if *backend == "scope_rank" {
+                "active"
+            } else if configured {
+                "configured_reserved"
+            } else {
+                base_status
+            };
+            SemanticRetrievalBackendStatus {
+                backend: (*backend).to_string(),
+                backend_type: (*backend_type).to_string(),
+                status: status.to_string(),
+                selected,
+                effective,
+                configured,
+                required_env_vars: required_env_vars
+                    .iter()
+                    .map(|key| (*key).to_string())
+                    .collect(),
+                missing_env_vars,
+                object_link_context_packet_required: true,
+                blocking_reasons,
+            }
+        })
+        .collect::<Vec<_>>();
+    if !known_backends.contains(selected_backend.as_str()) {
+        backends.push(SemanticRetrievalBackendStatus {
+            backend: selected_backend.clone(),
+            backend_type: "unknown".to_string(),
+            status: "blocked".to_string(),
+            selected: true,
+            effective: false,
+            configured: false,
+            required_env_vars: Vec::new(),
+            missing_env_vars: Vec::new(),
+            object_link_context_packet_required: true,
+            blocking_reasons: vec![
+                "unknown semantic retrieval backend selection; falling back to scope_rank"
+                    .to_string(),
+            ],
+        });
+    }
+    SemanticRetrievalBackendRegistry {
+        selected_backend,
+        effective_backend: "scope_rank".to_string(),
+        fail_closed,
+        object_model_required: true,
+        backends,
+    }
 }
 
 fn semantic_object_matches_agent_scope(object: &SemanticObject, agent: &Agent) -> bool {
@@ -51553,6 +51724,59 @@ not json
                 && log.details["version"] == json!(1)
                 && log.details["retrieved_object_count"] == json!(1)
         }));
+    }
+
+    #[tokio::test]
+    async fn semantic_retrieval_backends_keep_scope_rank_as_default_execution_path() {
+        let registry = semantic_retrieval_backend_registry_from_lookup(|key| match key {
+            "MANDOFORGE_SEMANTIC_RETRIEVAL_BACKEND" => Some("qdrant".to_string()),
+            "MANDOFORGE_QDRANT_URL" => Some("http://127.0.0.1:6333".to_string()),
+            _ => None,
+        });
+        assert_eq!(registry.selected_backend, "qdrant");
+        assert_eq!(registry.effective_backend, "scope_rank");
+        assert!(registry.fail_closed);
+        assert!(registry.object_model_required);
+        let scope_rank = registry
+            .backends
+            .iter()
+            .find(|backend| backend.backend == "scope_rank")
+            .expect("scope rank backend");
+        assert!(scope_rank.effective);
+        assert_eq!(scope_rank.status, "active");
+        let qdrant = registry
+            .backends
+            .iter()
+            .find(|backend| backend.backend == "qdrant")
+            .expect("qdrant backend");
+        assert!(qdrant.selected);
+        assert!(qdrant.configured);
+        assert_eq!(qdrant.status, "configured_reserved");
+        assert!(qdrant.object_link_context_packet_required);
+        assert!(
+            qdrant
+                .blocking_reasons
+                .iter()
+                .any(|reason| { reason.contains("reserved") && reason.contains("scope_rank") })
+        );
+
+        let app = test_app().await;
+        let api_registry: SemanticRetrievalBackendRegistry = request_json(
+            app,
+            Request::builder()
+                .uri("/api/semantic-retrieval/backends")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(api_registry.effective_backend, "scope_rank");
+        assert!(api_registry.object_model_required);
+        assert!(api_registry
+            .backends
+            .iter()
+            .any(|backend| backend.backend == "pgvector" && backend.status.contains("reserved")));
     }
 
     #[tokio::test]
