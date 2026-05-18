@@ -48,16 +48,27 @@ Move from writing Stage 3 direction to exercising Stage 2 and Stage 3 capabiliti
 
 These are not documentation gaps; they are real environment or product gaps that should remain visible.
 
+### Current Objective Blocker
+
 | Blocker | Why it is still blocked | Required next step |
 | --- | --- | --- |
-| Remote Computer cluster/state adoption | Whiskey has no approved k3s/cluster and no real distributed state filesystem or lock-aware state sync. Sidecar recovery is audited inventory/no-op evidence, not pod replacement proof. The latest k3s preflight says only a constrained single-node pilot is feasible, and only after loading `br_netfilter`, enabling bridge iptables, and accepting the current memory/swap pressure. | Choose a real cluster path, or explicitly approve a constrained k3s pilot, then configure distributed state and rerun Remote Computer evidence. |
-| External enterprise targets | Whiskey controllers validate live MandoForge boundaries, approval notifications now hit a real Feishu/Lark inbox, provider rollout now targets a real DeepSeek OpenAI-compatible endpoint through a Vault-backed secret ref, WorkflowPack connector quality now reads from authenticated private `Goodchance` repository content, finance export now lands in a real Feishu Drive file, and observability now reaches a real single-node OTel collector service, but several other lanes still use local pilot targets rather than real enterprise Vault/HSM, ERP, broader SaaS knowledge targets, or retained multi-node telemetry infrastructure. | Replace the remaining pilot controllers with real environment targets lane by lane and archive fresh evidence. |
+| Remote Computer cluster/state adoption | Whiskey has no approved k3s/cluster and no real distributed state filesystem or lock-aware state sync. Sidecar recovery is audited inventory/no-op evidence, not pod replacement proof. The latest k3s preflight says only a constrained single-node pilot is feasible, and only after loading `br_netfilter`, enabling bridge iptables, and accepting the current memory/swap pressure. | Approve the constrained `k3s` pilot, run `scripts/whiskey-remote-computer-k3s-constrained-pilot.sh --apply-host-prereqs --install-k3s`, then once verify is `ready` run `scripts/whiskey-remote-computer-k3s-cluster-stage.sh --apply-manifests --run-evidence`. |
+
+### Post-Pilot Enterprise Promotions
+
+These remain worthwhile, but they are not the current Whiskey production-like pilot blocker:
+
+- run tenant routing evidence against a broader real multi-tenant deployment beyond the current Whiskey tenant-routed pilot;
+- run policy rollout orchestration against a real production policy controller instead of the Whiskey pilot controller;
+- run Vault/KMS/HSM rotation and recovery against a real secret backend instead of the Whiskey pilot boundary;
+- promote `whiskey-docs` from authenticated private GitHub repo contents to a broader Lark docs/wiki or other enterprise knowledge target;
+- promote finance export from Feishu Drive artifact delivery to a downstream accounting system or ERP.
 
 ## Completion Decision
 
-The Whiskey production-like pilot is repeatable, archived, locally synced, GHCR-backed, and broadly evidenced. Tenant routing/RLS plus WorkflowPack install defaults, immutable version updates, persisted onboarding profile assets, onboarding assessment, connector-quality checks, real MCP server binding to authenticated private repository content, a real single-node OTel collector service, real Feishu/Lark approval notification delivery, a real DeepSeek provider target with Vault-backed credential reference, and a real Feishu Drive finance export target now pass for the Whiskey tenant-routed pilot. The objective should not be marked fully complete because the requested adoption plan includes Worker / Remote Computer cluster-state completion, and Remote Computer still has explicit production blockers.
+The Whiskey production-like pilot is repeatable, archived, locally synced, GHCR-backed, and broadly evidenced. Tenant routing/RLS plus WorkflowPack install defaults, immutable version updates, persisted onboarding profile assets, onboarding assessment, connector-quality checks, real MCP server binding to authenticated private repository content, a real single-node OTel collector service, real Feishu/Lark approval notification delivery, a real DeepSeek provider target with Vault-backed credential reference, and a real Feishu Drive finance export target now pass for the Whiskey tenant-routed pilot. The current objective should not be marked fully complete because the requested adoption plan still includes Worker / Remote Computer cluster-state completion, and Remote Computer remains the only active blocker for that Whiskey pilot objective.
 
 The next concrete work should be one of:
 
 - approve/configure a real cluster path for Remote Computer state/sidecar evidence; or
-- continue Stage 3 credentialed enterprise connector-target adoption while keeping the Remote Computer and external enterprise target blockers visible.
+- continue one of the post-pilot enterprise promotions without confusing it for the current blocker.

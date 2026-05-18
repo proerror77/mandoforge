@@ -196,6 +196,12 @@
 
 ## External Production Adoption Backlog
 
+Current Whiskey production-like pilot blocker:
+
+- [ ] Run isolated worker-pool validation and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem.
+
+Post-pilot enterprise promotions that should stay visible but are not the current Whiskey pilot blocker:
+
 - [x] Run Codex App Server deployment and ops evidence against a real App Server target on Whiskey.
 - [x] Run worker load validation evidence against the Whiskey single-host queue worker target.
 - [x] Run MCP connector deployment, rollout, and rollback evidence against a real `whiskey-docs` team connector target.
@@ -207,7 +213,6 @@
 - [ ] Run tenant routing evidence against a broader real multi-tenant deployment with RLS enabled, forced, and tenant context configured beyond the current Whiskey tenant-routed pilot.
 - [ ] Run policy rollout orchestration against a real production policy controller target instead of the current Whiskey pilot controller.
 - [ ] Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend instead of the current Whiskey pilot KMS/Vault boundary.
-- [ ] Run isolated worker-pool validation and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem.
 - [ ] Promote the `whiskey-docs` connector from authenticated private GitHub repo contents to a broader Lark docs/wiki or other enterprise knowledge target.
 - [ ] Promote finance export from Feishu Drive artifact delivery to a true accounting-system or ERP target.
 
