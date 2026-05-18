@@ -194,6 +194,11 @@ Managed Agents should bind together:
 - semantic scopes
 - version and release state
 
+Current repo slice:
+
+- `agents` now stores `agent_role`, `runtime_profile_id`, `tool_policy`, `mcp_server_ids`, `skill_ids`, `workflow_pack_ids`, `remote_computer_profile`, `semantic_scopes`, and `release_state`.
+- Existing Agent APIs remain backward-compatible while allowing Manager/Specialist registry metadata to be created and listed.
+
 ### Stage 4.3 Minimal Semantic Kernel
 
 Stage 4 needs a minimal semantic kernel before the full Stage 5 semantic layer exists.

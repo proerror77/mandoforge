@@ -13,16 +13,36 @@ use crate::{
 
 pub(crate) fn agent_from_row(row: PgRow) -> Result<Agent, AppError> {
     let tools: Value = row.try_get("tools")?;
+    let mcp_server_ids: Value = row.try_get("mcp_server_ids").unwrap_or_else(|_| json!([]));
+    let skill_ids: Value = row.try_get("skill_ids").unwrap_or_else(|_| json!([]));
+    let workflow_pack_ids: Value = row
+        .try_get("workflow_pack_ids")
+        .unwrap_or_else(|_| json!([]));
     Ok(Agent {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         kind: row.try_get("kind")?,
         team_id: row.try_get("team_id").unwrap_or(None),
         project_id: row.try_get("project_id").unwrap_or(None),
+        runtime_profile_id: row.try_get("runtime_profile_id").unwrap_or(None),
+        agent_role: row
+            .try_get("agent_role")
+            .unwrap_or_else(|_| "specialist".to_string()),
         provider: row.try_get("provider")?,
         model: row.try_get("model")?,
         system_prompt: row.try_get("system_prompt")?,
         tools: serde_json::from_value(tools).unwrap_or_default(),
+        tool_policy: row.try_get("tool_policy").unwrap_or_else(|_| json!({})),
+        mcp_server_ids: serde_json::from_value(mcp_server_ids).unwrap_or_default(),
+        skill_ids: serde_json::from_value(skill_ids).unwrap_or_default(),
+        workflow_pack_ids: serde_json::from_value(workflow_pack_ids).unwrap_or_default(),
+        remote_computer_profile: row
+            .try_get("remote_computer_profile")
+            .unwrap_or_else(|_| json!({})),
+        semantic_scopes: row.try_get("semantic_scopes").unwrap_or_else(|_| json!({})),
+        release_state: row
+            .try_get("release_state")
+            .unwrap_or_else(|_| "draft".to_string()),
         created_at: row.try_get("created_at")?,
     })
 }

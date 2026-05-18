@@ -10,6 +10,26 @@ use crate::{
     SessionStatus,
 };
 
+fn normalize_agent_role(role: &str) -> Result<String, AppError> {
+    let normalized = role.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "manager" | "specialist" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "agent_role must be manager or specialist",
+        )),
+    }
+}
+
+fn normalize_agent_release_state(state: &str) -> Result<String, AppError> {
+    let normalized = state.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "draft" | "staged" | "active" | "disabled" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "release_state must be draft, staged, active, or disabled",
+        )),
+    }
+}
+
 impl AppState {
     pub(crate) async fn list_agents(&self) -> Result<Vec<Agent>, AppError> {
         match &self.store {
@@ -18,8 +38,10 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, name, kind, provider, model, system_prompt, tools, created_at
-                            , team_id, project_id
+                    "SELECT id, name, kind, provider, model, system_prompt, tools, created_at,
+                            team_id, project_id, runtime_profile_id, agent_role, tool_policy,
+                            mcp_server_ids, skill_ids, workflow_pack_ids, remote_computer_profile,
+                            semantic_scopes, release_state
                      FROM agents
                      WHERE tenant_id = $1 AND archived_at IS NULL
                      ORDER BY created_at DESC",
@@ -74,7 +96,10 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("agent not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, name, kind, provider, model, system_prompt, tools, created_at, team_id, project_id
+                    "SELECT id, name, kind, provider, model, system_prompt, tools, created_at,
+                            team_id, project_id, runtime_profile_id, agent_role, tool_policy,
+                            mcp_server_ids, skill_ids, workflow_pack_ids, remote_computer_profile,
+                            semantic_scopes, release_state
                      FROM agents
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL",
                 )
@@ -95,10 +120,19 @@ impl AppState {
             kind: input.kind,
             team_id: input.team_id,
             project_id: input.project_id,
+            runtime_profile_id: input.runtime_profile_id,
+            agent_role: normalize_agent_role(&input.agent_role)?,
             provider: input.provider,
             model: input.model,
             system_prompt: input.system_prompt,
             tools: input.tools,
+            tool_policy: input.tool_policy,
+            mcp_server_ids: input.mcp_server_ids,
+            skill_ids: input.skill_ids,
+            workflow_pack_ids: input.workflow_pack_ids,
+            remote_computer_profile: input.remote_computer_profile,
+            semantic_scopes: input.semantic_scopes,
+            release_state: normalize_agent_release_state(&input.release_state)?,
             created_at: Utc::now(),
         };
         if let Some(team_id) = agent.team_id {
@@ -113,14 +147,18 @@ impl AppState {
                 "project_id requires a matching team_id on scoped agents",
             ));
         }
+        if let Some(runtime_profile_id) = agent.runtime_profile_id {
+            self.get_agent_runtime_profile(runtime_profile_id).await?;
+        }
         match &self.store {
             StoreBackend::Memory(inner) => {
                 inner.write().await.agents.insert(agent.id, agent.clone());
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO agents (id, tenant_id, name, kind, team_id, project_id, provider, model, system_prompt, tools, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                    "INSERT INTO agents
+                        (id, tenant_id, name, kind, team_id, project_id, runtime_profile_id, agent_role, provider, model, system_prompt, tools, tool_policy, mcp_server_ids, skill_ids, workflow_pack_ids, remote_computer_profile, semantic_scopes, release_state, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
                 )
                 .bind(agent.id)
                 .bind(self.current_tenant_id())
@@ -128,10 +166,19 @@ impl AppState {
                 .bind(&agent.kind)
                 .bind(agent.team_id)
                 .bind(agent.project_id)
+                .bind(agent.runtime_profile_id)
+                .bind(&agent.agent_role)
                 .bind(&agent.provider)
                 .bind(&agent.model)
                 .bind(&agent.system_prompt)
                 .bind(json!(agent.tools))
+                .bind(&agent.tool_policy)
+                .bind(json!(agent.mcp_server_ids))
+                .bind(json!(agent.skill_ids))
+                .bind(json!(agent.workflow_pack_ids))
+                .bind(&agent.remote_computer_profile)
+                .bind(&agent.semantic_scopes)
+                .bind(&agent.release_state)
                 .bind(agent.created_at)
                 .execute(pool)
                 .await?;

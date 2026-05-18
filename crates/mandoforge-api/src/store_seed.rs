@@ -14,6 +14,8 @@ impl AppState {
             kind: "orchestrator".to_string(),
             team_id: None,
             project_id: None,
+            runtime_profile_id: None,
+            agent_role: "manager".to_string(),
             provider: "openai-compatible".to_string(),
             model: "gpt-5.4-mini".to_string(),
             system_prompt: "You are a general-purpose orchestrator. Use tools through the runtime only, request approval before risky actions, and preserve an auditable timeline.".to_string(),
@@ -29,6 +31,13 @@ impl AppState {
                 "artifact.create".to_string(),
                 "mcp.call".to_string(),
             ],
+            tool_policy: json!({}),
+            mcp_server_ids: Vec::new(),
+            skill_ids: Vec::new(),
+            workflow_pack_ids: Vec::new(),
+            remote_computer_profile: json!({}),
+            semantic_scopes: json!({}),
+            release_state: "active".to_string(),
             created_at: Utc::now(),
         };
 
@@ -38,8 +47,9 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO agents (id, tenant_id, name, kind, provider, model, system_prompt, tools, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    "INSERT INTO agents
+                        (id, tenant_id, name, kind, provider, model, system_prompt, tools, runtime_profile_id, agent_role, tool_policy, mcp_server_ids, skill_ids, workflow_pack_ids, remote_computer_profile, semantic_scopes, release_state, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                      ON CONFLICT (id) DO NOTHING",
                 )
                 .bind(agent.id)
@@ -50,6 +60,15 @@ impl AppState {
                 .bind(&agent.model)
                 .bind(&agent.system_prompt)
                 .bind(json!(agent.tools))
+                .bind(agent.runtime_profile_id)
+                .bind(&agent.agent_role)
+                .bind(&agent.tool_policy)
+                .bind(json!(agent.mcp_server_ids))
+                .bind(json!(agent.skill_ids))
+                .bind(json!(agent.workflow_pack_ids))
+                .bind(&agent.remote_computer_profile)
+                .bind(&agent.semantic_scopes)
+                .bind(&agent.release_state)
                 .bind(agent.created_at)
                 .execute(pool)
                 .await?;

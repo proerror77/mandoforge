@@ -268,10 +268,19 @@ struct Agent {
     kind: String,
     team_id: Option<Uuid>,
     project_id: Option<Uuid>,
+    runtime_profile_id: Option<Uuid>,
+    agent_role: String,
     provider: String,
     model: String,
     system_prompt: String,
     tools: Vec<String>,
+    tool_policy: Value,
+    mcp_server_ids: Vec<Uuid>,
+    skill_ids: Vec<String>,
+    workflow_pack_ids: Vec<String>,
+    remote_computer_profile: Value,
+    semantic_scopes: Value,
+    release_state: String,
     created_at: DateTime<Utc>,
 }
 
@@ -353,11 +362,29 @@ struct CreateAgent {
     #[serde(default)]
     project_id: Option<Uuid>,
     #[serde(default)]
+    runtime_profile_id: Option<Uuid>,
+    #[serde(default = "default_agent_role")]
+    agent_role: String,
+    #[serde(default)]
     system_prompt: String,
     #[serde(default = "empty_json_object")]
     runtime_config: Value,
     #[serde(default)]
     tools: Vec<String>,
+    #[serde(default = "empty_json_object")]
+    tool_policy: Value,
+    #[serde(default)]
+    mcp_server_ids: Vec<Uuid>,
+    #[serde(default)]
+    skill_ids: Vec<String>,
+    #[serde(default)]
+    workflow_pack_ids: Vec<String>,
+    #[serde(default = "empty_json_object")]
+    remote_computer_profile: Value,
+    #[serde(default = "empty_json_object")]
+    semantic_scopes: Value,
+    #[serde(default = "default_agent_release_state")]
+    release_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33214,6 +33241,14 @@ fn default_agent_runtime_type() -> String {
     "agent_cli".to_string()
 }
 
+fn default_agent_role() -> String {
+    "specialist".to_string()
+}
+
+fn default_agent_release_state() -> String {
+    "draft".to_string()
+}
+
 fn default_enabled_status() -> String {
     "enabled".to_string()
 }
@@ -38006,6 +38041,7 @@ not json
         assert!(names.contains(&"0028_workflow_pack_installations.sql"));
         assert!(names.contains(&"0029_workflow_pack_profile_assets.sql"));
         assert!(names.contains(&"0030_agent_runtime_profiles.sql"));
+        assert!(names.contains(&"0031_managed_agent_registry_fields.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -46546,6 +46582,92 @@ not json
     }
 
     #[tokio::test]
+    async fn managed_agent_registry_persists_runtime_profile_and_semantic_scope() {
+        let app = test_app().await;
+        let runtime_profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "registry-coder-runtime",
+                    "runtime_type": "agent_cli",
+                    "command": "codex",
+                    "default_args": ["exec"],
+                    "remote_computer_required": true
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Backend Coder Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "runtime_profile_id": runtime_profile.id,
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Implement backend tasks through governed runtime profiles.",
+                    "tools": ["agent_cli.exec", "file.read", "file.write"],
+                    "tool_policy": {"risk": "approval_required"},
+                    "mcp_server_ids": [],
+                    "skill_ids": ["backend-coding"],
+                    "workflow_pack_ids": ["coding-pack"],
+                    "remote_computer_profile": {"required": true, "profile": "whiskey-k3s"},
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "stage-4",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "release_state": "draft"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(agent.agent_role, "specialist");
+        assert_eq!(agent.runtime_profile_id, Some(runtime_profile.id));
+        assert_eq!(agent.skill_ids, vec!["backend-coding".to_string()]);
+        assert_eq!(agent.workflow_pack_ids, vec!["coding-pack".to_string()]);
+        assert_eq!(agent.semantic_scopes["service_scope"], "mandoforge-api");
+        assert_eq!(agent.remote_computer_profile["required"], true);
+        assert_eq!(agent.release_state, "draft");
+
+        let agents: Vec<Agent> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/agents")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let listed = agents
+            .iter()
+            .find(|listed| listed.id == agent.id)
+            .expect("managed agent is listed");
+        assert_eq!(listed.agent_role, "specialist");
+        assert_eq!(listed.runtime_profile_id, Some(runtime_profile.id));
+        assert_eq!(listed.semantic_scopes["workflow_scope"], "stage-4");
+    }
+
+    #[tokio::test]
     async fn cost_alert_delivery_posts_budget_alerts_to_webhook() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -47087,9 +47209,18 @@ not json
                 model: "gpt-5.4-mini".to_string(),
                 team_id: Some(team.id),
                 project_id: None,
+                runtime_profile_id: None,
+                agent_role: "specialist".to_string(),
                 system_prompt: "Use governed MCP tools.".to_string(),
                 runtime_config: json!({}),
                 tools: vec!["mcp.call".to_string()],
+                tool_policy: json!({}),
+                mcp_server_ids: vec![],
+                skill_ids: vec![],
+                workflow_pack_ids: vec![],
+                remote_computer_profile: json!({}),
+                semantic_scopes: json!({}),
+                release_state: "draft".to_string(),
             })
             .await
             .expect("create scoped agent");
