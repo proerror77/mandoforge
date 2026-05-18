@@ -95,6 +95,7 @@ remote_computer_install_status="unknown"
 remote_computer_verify_status="unknown"
 remote_computer_next_command="scripts/whiskey-remote-computer-k3s-constrained-pilot.sh"
 remote_computer_stage_command="scripts/whiskey-remote-computer-k3s-cluster-stage.sh --apply-manifests --run-evidence"
+remote_computer_state_provider_command="scripts/whiskey-remote-computer-state-provider-readiness.sh"
 remote_computer_note="generate or refresh the constrained pilot plan before approval"
 
 if [[ -n "${latest_k3s_plan:-}" && -f "$latest_k3s_plan" ]]; then
@@ -105,7 +106,7 @@ if [[ -n "${latest_k3s_plan:-}" && -f "$latest_k3s_plan" ]]; then
   remote_computer_verify_status="$(jq -r '.verify.status // "unknown"' "$latest_k3s_plan")"
 
   if [[ "$remote_computer_verify_status" == "ready" && "$remote_computer_state_sync_status" == "blocked" ]]; then
-    remote_computer_next_command="none"
+    remote_computer_next_command="$remote_computer_state_provider_command"
     remote_computer_note="k3s and manifests are in place; remaining blocker is real distributed state storage plus live runner/state-sync hardening"
   elif [[ "$remote_computer_verify_status" == "ready" ]]; then
     remote_computer_next_command="$remote_computer_stage_command"
@@ -162,6 +163,7 @@ if [[ "$OUTPUT_MODE" == "json" ]]; then
     --arg remote_computer_archive_status "$remote_computer_archive_status" \
     --arg remote_computer_state_sync_status "$remote_computer_state_sync_status" \
     --arg remote_computer_runner_status "$remote_computer_runner_status" \
+    --arg remote_computer_state_provider_command "$remote_computer_state_provider_command" \
     --arg remote_computer_next_command "$remote_computer_next_command" \
     --arg remote_computer_stage_command "$remote_computer_stage_command" \
     --arg remote_computer_note "$remote_computer_note" \
@@ -188,6 +190,7 @@ if [[ "$OUTPUT_MODE" == "json" ]]; then
         archive_status: (if $remote_computer_archive_status == "" then null else $remote_computer_archive_status end),
         state_sync_status: (if $remote_computer_state_sync_status == "" then null else $remote_computer_state_sync_status end),
         runner_status: (if $remote_computer_runner_status == "" then null else $remote_computer_runner_status end),
+        state_provider_command: $remote_computer_state_provider_command,
         next_command: $remote_computer_next_command,
         post_install_stage_command: $remote_computer_stage_command,
         note: $remote_computer_note

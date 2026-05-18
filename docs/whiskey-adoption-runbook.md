@@ -405,4 +405,8 @@ Current Whiskey capacity snapshot from the adoption check:
 - Existing public services already use ports `5432`, `8080`, `3000`, and `9377`; MandoForge remains loopback-only on `18787` and `15432`.
 - `br_netfilter` is loaded and `net.bridge.bridge-nf-call-iptables=1`.
 
-Current blocker after the constrained pilot is no longer Kubernetes bootstrap. It is the real production state layer and live execution gate: the latest `remote-computer/summary.txt` still reports `production_state_sync_status=blocked`, `runner_status=reserved`, and blocking reasons for missing distributed state storage plus missing lock-aware shared-write coordination. The next work is to configure a real `MANDOFORGE_REMOTE_COMPUTER_STATE_PROVIDER`, supply non-placeholder storage credentials/profile, and validate live runner mutation before claiming Remote Computer adoption complete.
+Current blocker after the constrained pilot is no longer Kubernetes bootstrap. It is the real production state layer and live execution gate: the latest `remote-computer/summary.txt` still reports `production_state_sync_status=blocked`, `runner_status=reserved`, and blocking reasons for missing distributed state storage plus missing lock-aware shared-write coordination. Use the repo-native audit helper below to inspect the current provider, placeholder-secret state, runner mutation gates, and the exact next actions before claiming Remote Computer adoption complete:
+
+```bash
+scripts/whiskey-remote-computer-state-provider-readiness.sh
+```
