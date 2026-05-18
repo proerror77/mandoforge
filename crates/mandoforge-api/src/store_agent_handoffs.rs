@@ -31,7 +31,7 @@ impl AppState {
                 let rows = match source_session_id {
                     Some(session_id) => {
                         sqlx::query(
-                            "SELECT id, source_session_id, source_agent_id, target_agent_id, intent, payload, schema_version, risk_level, approval_required, status, audit_trace_id, created_at, updated_at
+                            "SELECT id, source_session_id, source_agent_id, target_agent_id, manager_plan_id, intent, payload, schema_version, risk_level, approval_required, semantic_scopes, runtime_profile_id, remote_computer_required, review_status, human_escalation_status, status, audit_trace_id, created_at, updated_at
                              FROM agent_handoff_events
                              WHERE tenant_id = $1 AND source_session_id = $2
                              ORDER BY created_at ASC",
@@ -43,7 +43,7 @@ impl AppState {
                     }
                     None => {
                         sqlx::query(
-                            "SELECT id, source_session_id, source_agent_id, target_agent_id, intent, payload, schema_version, risk_level, approval_required, status, audit_trace_id, created_at, updated_at
+                            "SELECT id, source_session_id, source_agent_id, target_agent_id, manager_plan_id, intent, payload, schema_version, risk_level, approval_required, semantic_scopes, runtime_profile_id, remote_computer_required, review_status, human_escalation_status, status, audit_trace_id, created_at, updated_at
                              FROM agent_handoff_events
                              WHERE tenant_id = $1
                              ORDER BY created_at ASC",
@@ -72,7 +72,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("agent handoff event not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, source_session_id, source_agent_id, target_agent_id, intent, payload, schema_version, risk_level, approval_required, status, audit_trace_id, created_at, updated_at
+                    "SELECT id, source_session_id, source_agent_id, target_agent_id, manager_plan_id, intent, payload, schema_version, risk_level, approval_required, semantic_scopes, runtime_profile_id, remote_computer_required, review_status, human_escalation_status, status, audit_trace_id, created_at, updated_at
                      FROM agent_handoff_events
                      WHERE tenant_id = $1 AND id = $2",
                 )
@@ -102,20 +102,26 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "INSERT INTO agent_handoff_events
-                        (id, tenant_id, source_session_id, source_agent_id, target_agent_id, intent, payload, schema_version, risk_level, approval_required, status, audit_trace_id, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                     RETURNING id, source_session_id, source_agent_id, target_agent_id, intent, payload, schema_version, risk_level, approval_required, status, audit_trace_id, created_at, updated_at",
+                        (id, tenant_id, source_session_id, source_agent_id, target_agent_id, manager_plan_id, intent, payload, schema_version, risk_level, approval_required, semantic_scopes, runtime_profile_id, remote_computer_required, review_status, human_escalation_status, status, audit_trace_id, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                     RETURNING id, source_session_id, source_agent_id, target_agent_id, manager_plan_id, intent, payload, schema_version, risk_level, approval_required, semantic_scopes, runtime_profile_id, remote_computer_required, review_status, human_escalation_status, status, audit_trace_id, created_at, updated_at",
                 )
                 .bind(event.id)
                 .bind(self.current_tenant_id())
                 .bind(event.source_session_id)
                 .bind(event.source_agent_id)
                 .bind(event.target_agent_id)
+                .bind(event.manager_plan_id)
                 .bind(&event.intent)
                 .bind(&event.payload)
                 .bind(&event.schema_version)
                 .bind(&event.risk_level)
                 .bind(event.approval_required)
+                .bind(&event.semantic_scopes)
+                .bind(event.runtime_profile_id)
+                .bind(event.remote_computer_required)
+                .bind(&event.review_status)
+                .bind(&event.human_escalation_status)
                 .bind(&event.status)
                 .bind(event.audit_trace_id)
                 .bind(event.created_at)
@@ -143,15 +149,35 @@ impl AppState {
                     .ok_or_else(|| AppError::not_found("agent handoff event not found"))?;
                 event.status = status.to_string();
                 event.audit_trace_id = audit_trace_id;
+                if status == "accepted" {
+                    event.review_status = "approved".to_string();
+                }
+                if status == "rejected" {
+                    event.review_status = "rejected".to_string();
+                }
+                if status == "failed" && event.human_escalation_status == "required" {
+                    event.human_escalation_status = "requested".to_string();
+                }
                 event.updated_at = updated_at;
                 Ok(event.clone())
             }
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "UPDATE agent_handoff_events
-                     SET status = $3, audit_trace_id = $4, updated_at = $5
+                     SET status = $3,
+                         audit_trace_id = $4,
+                         review_status = CASE
+                            WHEN $3 = 'accepted' THEN 'approved'
+                            WHEN $3 = 'rejected' THEN 'rejected'
+                            ELSE review_status
+                         END,
+                         human_escalation_status = CASE
+                            WHEN $3 = 'failed' AND human_escalation_status = 'required' THEN 'requested'
+                            ELSE human_escalation_status
+                         END,
+                         updated_at = $5
                      WHERE tenant_id = $1 AND id = $2
-                     RETURNING id, source_session_id, source_agent_id, target_agent_id, intent, payload, schema_version, risk_level, approval_required, status, audit_trace_id, created_at, updated_at",
+                     RETURNING id, source_session_id, source_agent_id, target_agent_id, manager_plan_id, intent, payload, schema_version, risk_level, approval_required, semantic_scopes, runtime_profile_id, remote_computer_required, review_status, human_escalation_status, status, audit_trace_id, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(id)

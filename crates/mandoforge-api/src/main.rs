@@ -709,11 +709,17 @@ struct AgentHandoffEvent {
     source_session_id: Uuid,
     source_agent_id: Uuid,
     target_agent_id: Uuid,
+    manager_plan_id: Option<Uuid>,
     intent: String,
     payload: Value,
     schema_version: String,
     risk_level: String,
     approval_required: bool,
+    semantic_scopes: Value,
+    runtime_profile_id: Option<Uuid>,
+    remote_computer_required: bool,
+    review_status: String,
+    human_escalation_status: String,
     status: String,
     audit_trace_id: Option<Uuid>,
     created_at: DateTime<Utc>,
@@ -759,12 +765,24 @@ struct ReviewManagerAgentPlan {
 #[derive(Debug, Deserialize)]
 struct CreateAgentHandoffEvent {
     target_agent_id: Uuid,
+    #[serde(default)]
+    manager_plan_id: Option<Uuid>,
     intent: String,
     payload: Value,
     schema_version: String,
     risk_level: String,
     #[serde(default)]
     approval_required: bool,
+    #[serde(default)]
+    semantic_scopes: Option<Value>,
+    #[serde(default)]
+    runtime_profile_id: Option<Uuid>,
+    #[serde(default)]
+    remote_computer_required: Option<bool>,
+    #[serde(default)]
+    review_status: Option<String>,
+    #[serde(default)]
+    human_escalation_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8258,7 +8276,36 @@ async fn create_agent_handoff_event(
     .await?;
     let session = state.get_session(session_id).await?;
     let source_version = state.agent_version_for_session(session_id).await?;
-    let _target_agent = state.get_agent(input.target_agent_id).await?;
+    let target_agent = state.get_agent(input.target_agent_id).await?;
+    if target_agent.agent_role != "specialist" {
+        return Err(AppError::bad_request(
+            "agent handoff target must be a specialist agent",
+        ));
+    }
+    let manager_plan = match input.manager_plan_id {
+        Some(plan_id) => {
+            let plan = state.get_manager_agent_plan(plan_id).await?;
+            if plan.session_id != session_id {
+                return Err(AppError::bad_request(
+                    "manager_plan_id must belong to the source session",
+                ));
+            }
+            if plan.manager_agent_id != session.agent_id {
+                return Err(AppError::bad_request(
+                    "manager_plan_id must belong to the source manager agent",
+                ));
+            }
+            if let Some(planned_specialist_id) = plan.specialist_agent_id
+                && planned_specialist_id != input.target_agent_id
+            {
+                return Err(AppError::bad_request(
+                    "manager_plan_id specialist does not match target_agent_id",
+                ));
+            }
+            Some(plan)
+        }
+        None => None,
+    };
     let intent = validate_handoff_token("intent", &input.intent)?;
     let schema_version = validate_handoff_schema_version(&input.schema_version)?;
     let risk_level = normalize_handoff_risk_level(&input.risk_level)?;
@@ -8281,6 +8328,28 @@ async fn create_agent_handoff_event(
         input.approval_required,
     )?;
     validate_handoff_payload_schema(&input.payload, rule.get("payload_schema"))?;
+    let semantic_scopes = normalize_handoff_semantic_scopes(
+        input
+            .semantic_scopes
+            .unwrap_or_else(|| target_agent.semantic_scopes.clone()),
+    )?;
+    let runtime_profile_id = input.runtime_profile_id.or(target_agent.runtime_profile_id);
+    let runtime_profile = match runtime_profile_id {
+        Some(profile_id) => Some(state.get_agent_runtime_profile(profile_id).await?),
+        None => None,
+    };
+    let remote_computer_required = input.remote_computer_required.unwrap_or_else(|| {
+        handoff_remote_computer_required(&target_agent, runtime_profile.as_ref())
+    });
+    let review_status = normalize_handoff_review_status(
+        input
+            .review_status
+            .as_deref()
+            .unwrap_or_else(|| default_handoff_review_status(manager_plan.as_ref())),
+    )?;
+    let human_escalation_status = normalize_handoff_human_escalation_status(
+        input.human_escalation_status.as_deref().unwrap_or("none"),
+    )?;
 
     let now = Utc::now();
     let event = state
@@ -8289,11 +8358,17 @@ async fn create_agent_handoff_event(
             source_session_id: session_id,
             source_agent_id: session.agent_id,
             target_agent_id: input.target_agent_id,
+            manager_plan_id: input.manager_plan_id,
             intent,
             payload: input.payload,
             schema_version,
             risk_level,
             approval_required: input.approval_required,
+            semantic_scopes,
+            runtime_profile_id,
+            remote_computer_required,
+            review_status,
+            human_escalation_status,
             status: "requested".to_string(),
             audit_trace_id: None,
             created_at: now,
@@ -8389,10 +8464,16 @@ async fn record_agent_handoff_audit_and_event(
         "source_session_id": handoff.source_session_id,
         "source_agent_id": handoff.source_agent_id,
         "target_agent_id": handoff.target_agent_id,
+        "manager_plan_id": handoff.manager_plan_id,
         "intent": handoff.intent,
         "schema_version": handoff.schema_version,
         "risk_level": handoff.risk_level,
         "approval_required": handoff.approval_required,
+        "semantic_scopes": handoff.semantic_scopes,
+        "runtime_profile_id": handoff.runtime_profile_id,
+        "remote_computer_required": handoff.remote_computer_required,
+        "review_status": handoff.review_status,
+        "human_escalation_status": handoff.human_escalation_status,
         "status": handoff.status,
         "reason": reason,
     });
@@ -8492,6 +8573,60 @@ fn ensure_agent_handoff_transition(current: &str, next: &str) -> Result<(), AppE
         Err(AppError::bad_request(format!(
             "cannot transition agent handoff from {current} to {next}"
         )))
+    }
+}
+
+fn normalize_handoff_semantic_scopes(value: Value) -> Result<Value, AppError> {
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(AppError::bad_request(
+            "handoff semantic_scopes must be a JSON object",
+        ))
+    }
+}
+
+fn handoff_remote_computer_required(
+    agent: &Agent,
+    runtime_profile: Option<&AgentRuntimeProfile>,
+) -> bool {
+    agent
+        .remote_computer_profile
+        .get("required")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || runtime_profile.is_some_and(|profile| profile.remote_computer_required)
+}
+
+fn default_handoff_review_status(plan: Option<&ManagerAgentPlan>) -> &'static str {
+    if plan.is_some_and(|plan| plan.status == "approved" || plan.status == "reviewed") {
+        "manager_reviewed"
+    } else {
+        "pending_review"
+    }
+}
+
+fn normalize_handoff_review_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "pending_review"
+        | "manager_reviewed"
+        | "human_review_required"
+        | "approved"
+        | "rejected" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "review_status must be pending_review, manager_reviewed, human_review_required, approved, or rejected",
+        )),
+    }
+}
+
+fn normalize_handoff_human_escalation_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "none" | "required" | "requested" | "resolved" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "human_escalation_status must be none, required, requested, or resolved",
+        )),
     }
 }
 
@@ -38092,6 +38227,197 @@ not json
     }
 
     #[tokio::test]
+    async fn agent_handoff_records_manager_assignment_context() {
+        let app = test_app().await;
+        let runtime_profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "handoff-coder-runtime",
+                    "runtime_type": "agent_cli",
+                    "command": "codex",
+                    "default_args": ["exec"],
+                    "remote_computer_required": true
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let specialist: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Assignment Backend Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "runtime_profile_id": runtime_profile.id,
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["agent_cli.exec", "file.read"],
+                    "remote_computer_profile": {"required": true, "profile": "whiskey-k3s"},
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "stage-4-assignment",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Assignment Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": specialist.id,
+                                "intents": ["implement_backend_slice"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["medium"],
+                                "approval_required": false
+                            }]
+                        }
+                    },
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "agent-os",
+                        "workflow_scope": "manager-assignment",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": manager.id,
+                    "title": "manager assignment context",
+                    "message": "Assign a backend implementation slice."
+                }),
+            ),
+        )
+        .await;
+        let plan: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/manager-plans", session.id),
+                json!({
+                    "specialist_agent_id": specialist.id,
+                    "task_intake": {"goal": "Implement assignment metadata"},
+                    "decomposition": {"steps": ["extend handoff record", "verify audit"]},
+                    "specialist_selection": {"selected_agent_id": specialist.id},
+                    "risk_classification": "medium",
+                    "review": {"status": "pending"}
+                }),
+            ),
+        )
+        .await;
+        let reviewed: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/manager-plans/{}/review", plan.id),
+                json!({
+                    "status": "approved",
+                    "review": {"status": "approved", "summary": "Ready for handoff"}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(reviewed.status, "approved");
+
+        let handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": specialist.id,
+                    "manager_plan_id": reviewed.id,
+                    "intent": "implement_backend_slice",
+                    "payload": {"slice": "assignment metadata"},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "medium",
+                    "human_escalation_status": "required"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(handoff.manager_plan_id, Some(reviewed.id));
+        assert_eq!(handoff.semantic_scopes["service_scope"], "mandoforge-api");
+        assert_eq!(handoff.runtime_profile_id, Some(runtime_profile.id));
+        assert!(handoff.remote_computer_required);
+        assert_eq!(handoff.review_status, "manager_reviewed");
+        assert_eq!(handoff.human_escalation_status, "required");
+
+        let handoffs: Vec<AgentHandoffEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/agent-handoffs", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].manager_plan_id, Some(reviewed.id));
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "agent_handoff.requested"
+                && event.payload["manager_plan_id"] == json!(reviewed.id)
+                && event.payload["runtime_profile_id"] == json!(runtime_profile.id)
+                && event.payload["review_status"] == "manager_reviewed"
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent_handoff.requested"
+                && log.resource_id == Some(handoff.id)
+                && log.details["manager_plan_id"] == json!(reviewed.id)
+                && log.details["remote_computer_required"] == true
+        }));
+    }
+
+    #[tokio::test]
     async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
         let app = test_app().await;
         let manifest_path = ai_governance_manifest_path_string();
@@ -38966,6 +39292,7 @@ not json
         assert!(names.contains(&"0030_agent_runtime_profiles.sql"));
         assert!(names.contains(&"0031_managed_agent_registry_fields.sql"));
         assert!(names.contains(&"0032_manager_agent_plans.sql"));
+        assert!(names.contains(&"0033_agent_handoff_assignment_fields.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"

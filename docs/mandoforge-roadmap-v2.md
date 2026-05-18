@@ -260,6 +260,13 @@ Handoff must become the product surface for Manager Agent -> Specialist Agent de
 - result and review status
 - audit trace
 
+Current repo slice:
+
+- Agent handoff records now carry `manager_plan_id`, semantic scopes, runtime profile, Remote Computer requirement, review status, and human escalation status.
+- Handoff creation derives default scopes and runtime profile from the target specialist agent, while validating an optional Manager Agent plan link.
+- Timeline and audit events include the assignment metadata so Manager Agent -> Specialist Agent delegation can be replayed before the execution path is automated.
+- The execution path from accepted handoff into governed worker/Remote Computer assignment remains the next Stage 4.5 slice.
+
 ### Stage 4.6 First Demo: backend-coder
 
 `backend-coder` is the first demonstration Managed Agent, not the product endpoint.
