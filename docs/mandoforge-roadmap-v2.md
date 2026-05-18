@@ -200,6 +200,7 @@ Current repo slice:
 
 - `agents` now stores `agent_role`, `runtime_profile_id`, `tool_policy`, `mcp_server_ids`, `skill_ids`, `workflow_pack_ids`, `remote_computer_profile`, `semantic_scopes`, and `release_state`.
 - Existing Agent APIs remain backward-compatible while allowing Manager/Specialist registry metadata to be created and listed.
+- The static Agent Builder now exposes runtime profile, release state, tools, tool policy, skills, Workflow Pack IDs, MCP server IDs, Remote Computer profile, and semantic scopes; the Managed Agent Console renders each agent's runtime profile binding and release gate state beside those scoped controls.
 
 ### Stage 4.3 Minimal Semantic Kernel
 

@@ -41,6 +41,8 @@ const state = {
   agentReleaseSummary: null,
   agentReleaseAutomationRuns: null,
   agentReleaseAutomationRun: null,
+  agentRuntimeProfiles: [],
+  agentRuntimeProfileReleaseGates: [],
   mcpServers: [],
   mcpTeamId: "",
   mcpHealth: {},
@@ -162,6 +164,8 @@ const evalRunRoot = document.querySelector("#eval-runs");
 const evalJudgeProfileRoot = document.querySelector("#eval-judge-profiles");
 const evalSuiteBootstrapRoot = document.querySelector("#eval-suite-bootstrap");
 const agentReleaseRoot = document.querySelector("#agent-releases");
+const managedAgentConsoleRoot = document.querySelector("#managed-agent-console");
+const agentRuntimeProfileRoot = document.querySelector("#agent-runtime-profiles");
 const runDueAgentReleasesButton = document.querySelector("#run-due-agent-releases");
 const validateAgentReleaseDeploymentButton = document.querySelector("#validate-agent-release-deployment");
 const validateAgentReleaseOrchestrationButton = document.querySelector("#validate-agent-release-orchestration");
@@ -398,12 +402,23 @@ async function createAgent(event) {
     method: "POST",
     body: JSON.stringify({
       name: form.get("name"),
+      kind: form.get("kind"),
+      provider: form.get("provider"),
       model: form.get("model"),
+      runtime_profile_id: optionalString(form.get("runtime_profile_id")),
+      agent_role: form.get("agent_role"),
       system_prompt: form.get("system_prompt"),
-      tools: String(form.get("tools") || "")
-        .split(",")
-        .map((tool) => tool.trim())
-        .filter(Boolean),
+      tools: csvList(form.get("tools")),
+      tool_policy: parseJsonField(form.get("tool_policy"), "Tool policy JSON"),
+      mcp_server_ids: csvList(form.get("mcp_server_ids")),
+      skill_ids: csvList(form.get("skill_ids")),
+      workflow_pack_ids: csvList(form.get("workflow_pack_ids")),
+      remote_computer_profile: parseJsonField(
+        form.get("remote_computer_profile"),
+        "Remote Computer profile JSON",
+      ),
+      semantic_scopes: parseJsonField(form.get("semantic_scopes"), "Semantic scopes JSON"),
+      release_state: form.get("release_state"),
     }),
   });
   state.agents = [agent, ...state.agents.filter((existing) => existing.id !== agent.id)];
@@ -1815,6 +1830,8 @@ async function refreshOps() {
     policyRuntime,
     policyRolloutOrchestrationReadiness,
     policyRevisions,
+    agentRuntimeProfiles,
+    agentRuntimeProfileReleaseGates,
     evalJudgeProfiles,
     evalDatasets,
     evalRuns,
@@ -1859,6 +1876,8 @@ async function refreshOps() {
       api("/api/policy/runtime"),
       api("/api/policy/rollout/orchestration/readiness"),
       api("/api/policy/revisions"),
+      api("/api/agent-runtime-profiles"),
+      api("/api/agent-runtime-profile-release-gates"),
       api("/api/eval/judge-profiles"),
       api("/api/eval/datasets"),
       api("/api/eval/runs"),
@@ -1902,6 +1921,8 @@ async function refreshOps() {
   state.policyRuntime = policyRuntime;
   state.policyRolloutOrchestrationReadiness = policyRolloutOrchestrationReadiness;
   state.policyRevisions = policyRevisions;
+  state.agentRuntimeProfiles = agentRuntimeProfiles;
+  state.agentRuntimeProfileReleaseGates = agentRuntimeProfileReleaseGates;
   state.evalJudgeProfiles = evalJudgeProfiles;
   state.evalDatasets = evalDatasets;
   state.evalRuns = evalRuns;
@@ -2113,6 +2134,7 @@ async function validateApprovalNotificationOps() {
 }
 
 function renderOps() {
+  renderAgents();
   renderUsage();
   renderObservability();
   renderTenantGovernance();
@@ -2129,6 +2151,7 @@ function renderOps() {
   renderEvalCases();
   renderEvalRuns();
   renderAgentReleases();
+  renderManagedAgentConsole();
   renderMcpServers();
   renderWorkerReadiness();
   renderRemoteComputerReadiness();
@@ -5753,6 +5776,69 @@ function renderAgentReleases() {
   });
 }
 
+function renderManagedAgentConsole() {
+  const profileById = Object.fromEntries(
+    state.agentRuntimeProfiles.map((profile) => [profile.id, profile]),
+  );
+  const gateByProfileId = Object.fromEntries(
+    state.agentRuntimeProfileReleaseGates.map((gate) => [gate.profile_id, gate]),
+  );
+  managedAgentConsoleRoot.innerHTML = state.agents.length
+    ? state.agents
+        .map((agent) => {
+          const profile = agent.runtime_profile_id ? profileById[agent.runtime_profile_id] : null;
+          const gate = agent.runtime_profile_id ? gateByProfileId[agent.runtime_profile_id] : null;
+          return `
+            <div class="item">
+              <strong>${escapeHtml(agent.name)}</strong>
+              <div class="muted">${escapeHtml(agent.kind)} · ${escapeHtml(agent.agent_role)} · ${escapeHtml(agent.release_state)}</div>
+              <div class="muted">Runtime Profile: ${escapeHtml(profile ? `${profile.name} (${profile.runtime_type})` : agent.runtime_profile_id || "none")}</div>
+              <div class="muted">Release Gate: ${escapeHtml(gate ? gate.release_state : "not evaluated")} · fail closed ${gate?.fail_closed ? "yes" : "no"}</div>
+              <div class="muted">Tools: ${escapeHtml((agent.tools || []).join(", ") || "none")}</div>
+              <div class="muted">Skill IDs: ${escapeHtml((agent.skill_ids || []).join(", ") || "none")}</div>
+              <div class="muted">Workflow Pack IDs: ${escapeHtml((agent.workflow_pack_ids || []).join(", ") || "none")}</div>
+              <div class="muted">MCP Server IDs: ${escapeHtml((agent.mcp_server_ids || []).join(", ") || "none")}</div>
+              <details>
+                <summary>Remote Computer Profile</summary>
+                <pre>${escapeHtml(JSON.stringify(agent.remote_computer_profile || {}, null, 2))}</pre>
+              </details>
+              <details>
+                <summary>Semantic Scopes</summary>
+                <pre>${escapeHtml(JSON.stringify(agent.semantic_scopes || {}, null, 2))}</pre>
+              </details>
+              <details>
+                <summary>Tool Policy</summary>
+                <pre>${escapeHtml(JSON.stringify(agent.tool_policy || {}, null, 2))}</pre>
+              </details>
+            </div>
+          `;
+        })
+        .join("")
+    : `<div class="muted">No managed agents configured</div>`;
+
+  agentRuntimeProfileRoot.innerHTML = state.agentRuntimeProfiles.length
+    ? state.agentRuntimeProfiles
+        .map((profile) => {
+          const gate = gateByProfileId[profile.id];
+          return `
+            <div class="item">
+              <strong>${escapeHtml(profile.name)}</strong>
+              <div class="muted">${escapeHtml(profile.runtime_type)} · ${escapeHtml(profile.status)} · ${escapeHtml(profile.command)}</div>
+              <div class="muted">Release Gate: ${escapeHtml(gate ? gate.release_state : "not evaluated")} · managed ${gate?.requires_managed_profile ? "yes" : "no"} · command allowlisted ${gate?.command_allowlisted ? "yes" : "no"}</div>
+              <div class="muted">Remote Computer required: ${profile.remote_computer_required ? "yes" : "no"} · timeout ${escapeHtml(profile.timeout_seconds ?? "default")}</div>
+              <div class="muted">Allowed commands: ${escapeHtml((gate?.allowed_commands || []).join(", ") || "none")}</div>
+              ${
+                gate?.blocking_reasons?.length
+                  ? `<div class="muted">Blocking reasons: ${escapeHtml(gate.blocking_reasons.join("; "))}</div>`
+                  : `<div class="muted">Blocking reasons: none</div>`
+              }
+            </div>
+          `;
+        })
+        .join("")
+    : `<div class="muted">No runtime profiles configured</div>`;
+}
+
 function renderAgentReleaseAutomationRuns(runs) {
   if (!runs) {
     return `<div class="muted">Release automation runs are not loaded.</div>`;
@@ -5962,6 +6048,18 @@ function parseJsonField(value, label) {
   } catch (error) {
     throw new Error(`${label} is not valid JSON: ${error.message}`);
   }
+}
+
+function csvList(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function optionalString(value) {
+  const trimmed = String(value || "").trim();
+  return trimmed || null;
 }
 
 function renderMcpServers() {
@@ -6195,14 +6293,25 @@ function renderMcpLatestRollouts(items) {
 
 function renderAgents() {
   agentRoot.innerHTML = state.agents
-    .map(
-      (agent) => `
+    .map((agent) => {
+      const profile = state.agentRuntimeProfiles.find(
+        (runtimeProfile) => runtimeProfile.id === agent.runtime_profile_id,
+      );
+      const gate = state.agentRuntimeProfileReleaseGates.find(
+        (runtimeGate) => runtimeGate.profile_id === agent.runtime_profile_id,
+      );
+      return `
         <div class="item">
           <strong>${escapeHtml(agent.name)}</strong>
-          <div class="muted">${escapeHtml(agent.kind)} · ${escapeHtml(agent.provider)} · ${escapeHtml(agent.model)}</div>
+          <div class="muted">${escapeHtml(agent.kind)} · ${escapeHtml(agent.agent_role)} · ${escapeHtml(agent.provider)} · ${escapeHtml(agent.model)}</div>
+          <div class="muted">Release State: ${escapeHtml(agent.release_state)}</div>
+          <div class="muted">Runtime Profile: ${escapeHtml(profile ? profile.name : agent.runtime_profile_id || "none")} · Gate ${escapeHtml(gate?.release_state || "not evaluated")}</div>
+          <div class="muted">Tools: ${escapeHtml((agent.tools || []).join(", ") || "none")}</div>
+          <div class="muted">Skills: ${escapeHtml((agent.skill_ids || []).join(", ") || "none")}</div>
+          <div class="muted">MCP: ${escapeHtml((agent.mcp_server_ids || []).join(", ") || "none")}</div>
         </div>
-      `,
-    )
+      `;
+    })
     .join("");
 }
 

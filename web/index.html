@@ -23,12 +23,56 @@
               <input name="name" required value="Operations Review Agent" />
             </label>
             <label>
+              Kind
+              <input name="kind" required value="specialist" />
+            </label>
+            <label>
+              Agent Role
+              <input name="agent_role" required value="specialist" />
+            </label>
+            <label>
+              Provider
+              <input name="provider" required value="openai-compatible" />
+            </label>
+            <label>
               Model
               <input name="model" required value="gpt-5.4-mini" />
             </label>
             <label>
+              Runtime Profile ID
+              <input name="runtime_profile_id" placeholder="Optional runtime profile UUID" />
+            </label>
+            <label>
+              Release State
+              <input name="release_state" value="draft" />
+            </label>
+            <label>
               Tools
               <input name="tools" value="file.read,sql.get_schema,sql.query,shell.exec,file.write" />
+            </label>
+            <label>
+              Skill IDs
+              <input name="skill_ids" value="backend-coding" />
+            </label>
+            <label>
+              Workflow Pack IDs
+              <input name="workflow_pack_ids" value="coding-pack" />
+            </label>
+            <label>
+              MCP Server IDs
+              <input name="mcp_server_ids" placeholder="Optional MCP server UUIDs" />
+            </label>
+            <label>
+              Tool Policy JSON
+              <textarea name="tool_policy" rows="4">{"allowed_tools":["file.read","sql.get_schema","sql.query"],"approval_required":["shell.exec","file.write"]}</textarea>
+            </label>
+            <label>
+              Remote Computer Profile JSON
+              <textarea name="remote_computer_profile" rows="3">{"required":false}</textarea>
+            </label>
+            <label>
+              Semantic Scopes JSON
+              <textarea name="semantic_scopes" rows="5">{"project":"kernel-pilot","repo":"mandoforge","service":"agent-os-kernel","workflow":"managed-agent-runtime","policy":"stage-4-managed-agent","memory_scope":"team"}</textarea>
             </label>
             <label>
               Instructions
@@ -692,6 +736,10 @@
               <button type="button" class="secondary form-inline-action" id="validate-agent-release-deployment">Validate Release Deployment</button>
               <button type="button" class="secondary form-inline-action" id="validate-agent-release-orchestration">Validate Orchestration</button>
               <div id="agent-releases" class="list"></div>
+              <h4>Managed Agent Console</h4>
+              <div id="managed-agent-console" class="list"></div>
+              <h4>Runtime Profiles</h4>
+              <div id="agent-runtime-profiles" class="list"></div>
             </div>
             <div>
               <h3>MCP Servers</h3>
