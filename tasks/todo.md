@@ -226,3 +226,36 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [x] Add connector manifest policy fields for provenance, tenant scope, write gating, and prompt-injection boundary.
 - [x] Build the first AI Governance Pack slice: AI use-case triage, AI impact assessment, vendor AI review, and policy monitor.
 - [x] Add pack-level eval fixtures and release gates so workflow pack behavior cannot regress silently.
+
+## Roadmap V2 / Original Agent OS Alignment
+
+- [x] Record the Roadmap v2 framing: runtime-first implementation of the original Enterprise Agent OS plan.
+- [x] Clarify that Workflow Packs / Domain Packs run on top of Agent OS and are not the OS itself.
+- [x] Reframe Stage 4 as Managed Agent Control Plane + Manager Agent + Minimal Semantic Kernel.
+- [x] Reframe Stage 5 as Full Semantic Layer / Context OS.
+
+## Stage 4 / Managed Agent Control Plane + Manager Agent
+
+- [ ] Stage 4.1: Add first-class Agent Runtime Profile storage and APIs so `agent_cli.exec` can resolve governed runtime profiles instead of environment-only profile configuration.
+- [ ] Stage 4.1: Add runtime profile release/audit events and fail-closed profile allowlist semantics for Codex, Claude Code, Gemini, OpenCode, Aider, and future hosted runtimes.
+- [ ] Stage 4.2: Add Managed Agent Registry fields for manager/specialist kind, runtime profile binding, tool policy, MCP servers, skills, Workflow Pack memberships, Remote Computer profile, semantic scopes, and release state.
+- [ ] Stage 4.2: Add Agent Builder / Console surfaces for runtime profile, tools, skills, MCP, Remote Computer profile, and semantic scope selection.
+- [ ] Stage 4.3: Add Minimal Semantic Kernel scope fields for project, repo, service, workflow, policy, and memory scope.
+- [ ] Stage 4.3: Add a minimal context packet builder that can assemble task, agent, scopes, policy reminders, relevant repo docs, and known freshness warnings without requiring the full Stage 5 semantic layer.
+- [ ] Stage 4.4: Add Manager Agent planner records for task intake, decomposition, specialist selection, risk classification, and result review.
+- [ ] Stage 4.5: Extend typed agent handoff / assignment records with semantic scopes, runtime profile, Remote Computer requirement, review status, and human escalation status.
+- [ ] Stage 4.5: Add Manager Agent -> Specialist Agent handoff execution path that preserves policy, approval, audit, timeline, and Remote Computer assignment.
+- [ ] Stage 4.6: Add `backend-coder` as the first Managed Agent demo proving runtime profile, minimal semantic scopes, Manager Agent assignment, Remote Computer execution, artifacts, audit, and replay.
+- [ ] Stage 4.6: Document that `backend-coder` is a validation demo, not the MandoForge product endpoint.
+
+## Stage 5 / Semantic Layer + Context OS
+
+- [ ] Stage 5.1: Add `semantic_sources` for repo docs, session history, artifacts, Workflow Packs, MCP sources, Feishu/Lark, GitHub, and uploads.
+- [ ] Stage 5.1: Add `semantic_objects` for decisions, runbooks, code modules, workflows, policies, memories, and artifacts with provenance, trust, freshness, and source URI metadata.
+- [ ] Stage 5.1: Add `semantic_links` so agents, projects, repos, services, workflows, policies, packs, and memories can be related explicitly.
+- [ ] Stage 5.2: Add versioned `context_packets` generated from task intent, Managed Agent config, semantic scopes, retrieved objects, policy reminders, and freshness warnings.
+- [ ] Stage 5.2: Add context packet replay in the Session Timeline so it is clear what context an agent saw before acting.
+- [ ] Stage 5.3: Add memory writeback candidates from completed sessions, artifacts, handoff reviews, and human approvals.
+- [ ] Stage 5.3: Add human approval / rejection flow before writeback candidates become durable organizational memory.
+- [ ] Stage 5.4: Add freshness and trust gates for high-risk tasks so stale or untrusted context cannot silently drive execution.
+- [ ] Stage 5.5: Add optional retrieval backends after the object/link/context packet model is stable; do not make vector search the first semantic layer dependency.
