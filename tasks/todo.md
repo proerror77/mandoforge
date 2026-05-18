@@ -196,17 +196,20 @@
 
 ## External Production Adoption Backlog
 
-- [ ] Run tenant routing evidence against a real multi-tenant deployment with RLS enabled, forced, and tenant context configured.
-- [ ] Run policy rollout orchestration against a real production policy controller target.
-- [ ] Run provider gate, rollout, and rollback evidence against real provider deployment targets.
-- [ ] Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend.
-- [ ] Run worker load validation, isolated worker-pool validation, and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem.
-- [ ] Run approval notification delivery evidence against real webhook, Slack, or email provider targets.
-- [ ] Run MCP connector deployment, rollout, and rollback evidence against a real team connector target.
-- [ ] Run Codex App Server deployment and ops evidence against a real App Server target.
-- [ ] Run eval/release rollout, orchestration, deployment, and rollback evidence against a real production release target.
-- [ ] Run OTel collector deployment, cluster rollout, and remediation evidence against a real collector deployment.
-- [ ] Run finance close, export delivery, and reconciliation evidence against a real accounting-system target.
+- [x] Run Codex App Server deployment and ops evidence against a real App Server target on Whiskey.
+- [x] Run worker load validation evidence against the Whiskey single-host queue worker target.
+- [x] Run MCP connector deployment, rollout, and rollback evidence against a real `whiskey-docs` team connector target.
+- [x] Run eval/release rollout, orchestration, deployment, and rollback evidence against the Whiskey production-like release target.
+- [x] Run OTel collector deployment, cluster rollout, and remediation evidence against the Whiskey single-node collector target.
+- [x] Run provider gate, rollout, and rollback evidence against the real DeepSeek provider deployment target on Whiskey.
+- [x] Run approval notification delivery evidence against a real Feishu/Lark IM target.
+- [x] Run finance close, export delivery, and reconciliation evidence against a real Feishu Drive export target.
+- [ ] Run tenant routing evidence against a broader real multi-tenant deployment with RLS enabled, forced, and tenant context configured beyond the current Whiskey tenant-routed pilot.
+- [ ] Run policy rollout orchestration against a real production policy controller target instead of the current Whiskey pilot controller.
+- [ ] Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend instead of the current Whiskey pilot KMS/Vault boundary.
+- [ ] Run isolated worker-pool validation and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem.
+- [ ] Promote the `whiskey-docs` connector from authenticated private GitHub repo contents to a broader Lark docs/wiki or other enterprise knowledge target.
+- [ ] Promote finance export from Feishu Drive artifact delivery to a true accounting-system or ERP target.
 
 ## Workflow Pack / Domain Pack Adaptation
 
