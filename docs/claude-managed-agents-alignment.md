@@ -237,6 +237,16 @@ Implementation baseline, 2026-05-20:
 - The web console now exposes a Managed Session Workspace that puts Agent,
   Environment, Event Stream, Blocking Actions, Artifacts, and Threads before
   raw worker / Remote Computer / provider infrastructure panels.
+- Managed CLI runtimes now have a first runtime-adapter event ingestion slice:
+  `codex_cli` JSONL and `claude_code` stream-json output from governed
+  `agent_cli.exec` profiles is parsed into `runtime_adapter.event` session
+  events with basic secret-key redaction and event-count limits, while the
+  legacy tool result payload remains available for compatibility.
+- New Codex CLI releases reinforce this direction: features such as richer turn
+  results and `codex exec resume --output-schema` mean the adapter contract
+  should capture structured turn metadata, usage/timing, resumable run handles,
+  and schema-constrained final output instead of treating CLI stdout as the only
+  source of truth.
 
 Remaining alignment work:
 
@@ -246,6 +256,8 @@ Remaining alignment work:
 | User, approval, and custom tool result events are the durable input contract. | `/api/sessions/:id/events` persists events and wakes the loop, but the provider context is still rebuilt mostly from whole-session history and reduced fields. | Add an event cursor or processed sequence range so each session-loop job consumes the intended unprocessed event window, including custom tool results and approval resolution payloads. |
 | Session loop continuation is the single orchestration path. | Initial user events use `session_loop_jobs`; approval continuation and execution-job completion still have direct provider-resume paths. | Route approval/tool-result continuation back through `session_loop_jobs` so retry, lease, metrics, audit, and tracing stay on one path. |
 | Environment owns placement for session work. | Environment records and Remote Computer policies exist; workers still globally poll session-loop and execution-job endpoints. | Promote worker queue binding into the session-loop claim path, or introduce an environment work queue above low-level execution jobs. |
+| CLI-backed runtimes are Environment runtime adapters, not opaque tools. | `agent_cli.exec` can run managed `codex_cli` and `claude_code` runtime profiles and now ingests their JSON/stream events into `runtime_adapter.event`, but profile ownership still flows mainly through agent/handoff binding rather than `Environment.runtime_profile_id`. | Make `Environment.runtime_profile_id` the canonical adapter binding for managed sessions, keep `agent_cli.exec` as a compatibility facade, and route `codex_cli`, `claude_code`, and App Server output through one runtime-adapter event taxonomy. |
+| Runtime adapters preserve structured turn state. | CLI JSON/stream events are now ingested, but Codex resume handles, structured output schema, timing, usage, and collected turn items are not yet normalized into a runtime turn record. | Add runtime turn metadata capture so Codex CLI `resume --output-schema` and richer turn-result fields can map to resumable sessions, artifacts, usage, and final-output validation. |
 | Streaming is live progress. | `/api/sessions/:id/stream` exposes session events through SSE, but the production-grade live tail/reconnect contract still needs hardening. | Back streaming with a live broadcaster, DB tail, or poll-and-push contract with cursor/reconnect semantics. |
 | Thread APIs show each participating session's thread view. | Primary and specialist thread rows are durable, and lifecycle events are emitted. | Ensure specialist sessions can enumerate their own child thread membership, not only receive thread lifecycle events. |
 | Production readiness proves restart/resume behavior. | Stage 2 evidence gates cover many external controllers and readiness endpoints. | Add managed-session runtime evidence: enqueue events, drain jobs, restart API/worker, prove resumed session state, thread lineage, and lease-fenced finalization. |
@@ -263,9 +275,11 @@ Remaining alignment work:
 5. Make every continuation path enqueue `session_loop_jobs`.
 6. Promote Environment queue binding or add an environment work queue above
    low-level execution jobs.
-7. Harden live event streaming and thread membership views.
-8. Add production evidence gates for managed-session restart and recovery.
-9. Then expand Workflow Packs, scheduler, Codex traces, and production Remote
+7. Promote managed CLI execution from the `agent_cli.exec` compatibility facade
+   into Environment-owned runtime adapters.
+8. Harden live event streaming and thread membership views.
+9. Add production evidence gates for managed-session restart and recovery.
+10. Then expand Workflow Packs, scheduler, Codex traces, and production Remote
    Computer execution on top of the managed-session runtime.
 
 ## Non-Goals

@@ -240,11 +240,16 @@ curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
 
 把其中一个 profile 绑定到 specialist agent 或 handoff assignment 后，再用
 `agent_cli.exec` 传入匹配的 `profile` 和 `task`。批准后的 execution job 由
-`mandoforge-worker` 消费，结果会记录 `profile`、`runtime_type`、`stdout`、
-`stderr`、截断标记、退出状态、timeline events 和 audit records。这样 Codex
-CLI、Claude Code CLI、Gemini、OpenCode、Aider 都仍然在 Tool Router、Policy
-Engine、Approval Engine、worker lease、Remote Computer、event log、audit path
-之内，而不是让 worker 直接调用不可观测的黑盒 subprocess。
+`mandoforge-worker` 消费，结果会为了兼容旧路径继续记录 `profile`、
+`runtime_type`、`stdout`、`stderr`、截断标记和退出状态。受管 `codex_cli`、
+`claude_code`、Gemini、OpenCode、Aider profile 会被当作 runtime adapter：
+它们的 JSONL 或 stream-json 输出会被写成 `runtime_adapter.event` session
+events，并带基础 secret-key redaction 和 event-count limits。这样 CLI-backed
+agents 仍然在 Tool Router、Policy Engine、Approval Engine、worker lease、
+Remote Computer、event log、audit path 之内，同时产品语义会往
+Environment-owned runtime adapter 推进。`agent_cli.exec` 仍然是兼容 facade；
+目标 Managed Agents 模型是 `Agent -> Environment -> Session -> runtime
+adapter -> Events`。
 
 ## Docker
 

@@ -53205,7 +53205,7 @@ not json
         let shim_path = shim_dir.join("claude");
         fs::write(
             &shim_path,
-            "#!/usr/bin/env bash\nset -euo pipefail\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"task=$MANDOFORGE_AGENT_TASK\"\necho \"argv=$*\"\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\necho '{\"type\":\"system\",\"token\":\"secret\"}'\necho '{\"type\":\"assistant\",\"message\":{\"content\":\"done\"}}'\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"task=$MANDOFORGE_AGENT_TASK\"\necho \"argv=$*\"\n",
         )
         .expect("write fake claude CLI");
         #[cfg(unix)]
@@ -53330,6 +53330,7 @@ not json
         assert_eq!(result["profile"], "claude-code-worker");
         assert_eq!(result["profile_source"], "managed");
         assert_eq!(result["runtime_type"], "claude_code");
+        assert_eq!(result["runtime_adapter_event_count"], 2);
         assert!(
             result["stdout"]
                 .as_str()
@@ -53354,6 +53355,190 @@ not json
         assert!(events.iter().any(|event| {
             event.event_type == "agent_cli.task.completed"
                 && event.payload["runtime_type"] == "claude_code"
+        }));
+        let runtime_events = events
+            .iter()
+            .filter(|event| event.event_type == "runtime_adapter.event")
+            .collect::<Vec<_>>();
+        assert_eq!(runtime_events.len(), 2);
+        assert!(runtime_events.iter().any(|event| {
+            event.payload["runtime_type"] == "claude_code"
+                && event.payload["log_mode"] == "claude_stream_json"
+                && event.payload["adapter_event_type"] == "system"
+                && event.payload["event"]["token"] == "[REDACTED]"
+        }));
+        assert!(runtime_events.iter().any(|event| {
+            event.payload["adapter_event_type"] == "assistant"
+                && event.payload["event"]["message"]["content"] == "done"
+        }));
+    }
+
+    #[tokio::test]
+    async fn managed_codex_cli_runtime_profile_ingests_jsonl_into_session_events() {
+        let shim_dir = test_workspace_root()
+            .join("agent-cli-shims")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&shim_dir).expect("create shim dir");
+        let shim_path = shim_dir.join("codex");
+        fs::write(
+            &shim_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho '{\"type\":\"turn.started\",\"api_key\":\"secret\"}'\necho '{\"msg\":\"tool.completed\",\"tool\":\"shell.exec\"}'\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"argv=$*\"\n",
+        )
+        .expect("write fake codex CLI");
+        #[cfg(unix)]
+        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake codex CLI");
+
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "codex-cli-worker",
+                    "runtime_type": "codex_cli",
+                    "command": shim_path.to_string_lossy(),
+                    "default_args": ["exec", "--json"],
+                    "timeout_seconds": 30,
+                    "remote_computer_required": false
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(profile.runtime_type, "codex_cli");
+
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Codex CLI Runtime Agent",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_profile_id": profile.id,
+                    "tools": ["agent_cli.exec"]
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "codex CLI runtime worker"}),
+            ),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/agent_cli.exec/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "profile": "codex-cli-worker",
+                        "task": "Inspect workspace with Codex CLI",
+                        "args": ["--sandbox", "workspace-write"]
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
+        )
+        .await;
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id && job.tool_name == "agent_cli.exec")
+        .expect("agent CLI execution job queued")
+        .id;
+
+        let completed: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header(
+                    "x-mandoforge-worker-id",
+                    "managed-codex-cli-runtime-worker-1",
+                )
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let result = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "agent_cli.exec")
+            .and_then(|call| call.result.as_ref())
+            .expect("agent CLI result");
+        assert_eq!(result["profile"], "codex-cli-worker");
+        assert_eq!(result["runtime_type"], "codex_cli");
+        assert_eq!(result["runtime_adapter_event_count"], 2);
+        assert!(
+            result["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("profile=codex-cli-worker")
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let runtime_events = events
+            .iter()
+            .filter(|event| event.event_type == "runtime_adapter.event")
+            .collect::<Vec<_>>();
+        assert_eq!(runtime_events.len(), 2);
+        assert!(runtime_events.iter().any(|event| {
+            event.payload["runtime_type"] == "codex_cli"
+                && event.payload["log_mode"] == "codex_jsonl"
+                && event.payload["adapter_event_type"] == "turn.started"
+                && event.payload["event"]["api_key"] == "[REDACTED]"
+        }));
+        assert!(runtime_events.iter().any(|event| {
+            event.payload["adapter_event_type"] == "tool.completed"
+                && event.payload["event"]["tool"] == "shell.exec"
         }));
     }
 

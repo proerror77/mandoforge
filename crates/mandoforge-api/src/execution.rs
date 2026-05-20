@@ -27,6 +27,8 @@ use crate::{
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const MAX_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
+const DEFAULT_RUNTIME_ADAPTER_EVENT_LIMIT: usize = 200;
+const MAX_RUNTIME_ADAPTER_EVENT_LIMIT: usize = 2_000;
 const REMOTE_CODEX_FINAL_BEGIN: &str = "__MANDOFORGE_CODEX_FINAL_BEGIN__";
 const REMOTE_CODEX_FINAL_END: &str = "__MANDOFORGE_CODEX_FINAL_END__";
 
@@ -1913,6 +1915,20 @@ async fn execute_approved_remote_computer_agent_cli(
             .unwrap_or_default(),
         limit,
     );
+    let stdout_full = exec_result
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let adapter_events = parse_runtime_adapter_events(&runtime_type, stdout_full);
+    record_runtime_adapter_events(
+        state,
+        approval.session_id,
+        &profile,
+        &profile_config,
+        &adapter_events,
+        Some(tool_call.id),
+    )
+    .await?;
     let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
     let event_type = if kubernetes_exec_status_succeeded(&status) {
         "agent_cli.task.completed"
@@ -1937,6 +1953,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "runtime_type": runtime_type,
                 "stdout_bytes": stdout.original_bytes,
                 "stderr_bytes": stderr.original_bytes,
+                "runtime_adapter_event_count": adapter_events.len(),
                 "status": status,
                 "execution_enabled": true,
             }),
@@ -1965,6 +1982,7 @@ async fn execute_approved_remote_computer_agent_cli(
                     .get("stderr_truncated")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                "runtime_adapter_event_count": adapter_events.len(),
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": remote_computer.id,
                 "assignment_id": assignment.id,
@@ -1995,6 +2013,7 @@ async fn execute_approved_remote_computer_agent_cli(
             .get("stderr_truncated")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        "runtime_adapter_event_count": adapter_events.len(),
     });
     state
         .append_event(
@@ -2687,7 +2706,7 @@ async fn run_agent_cli(
 
     let mut command = Command::new(&config.command);
     command.current_dir(&workspace);
-    for arg in config.args {
+    for arg in &config.args {
         command.arg(arg);
     }
     for arg in request.args {
@@ -2696,7 +2715,7 @@ async fn run_agent_cli(
     command.arg(&request.task);
     command.env("MANDOFORGE_AGENT_CLI_PROFILE", &profile);
     command.env("MANDOFORGE_AGENT_TASK", &request.task);
-    for (key, value) in config.env {
+    for (key, value) in &config.env {
         command.env(key, value);
     }
 
@@ -2711,6 +2730,9 @@ async fn run_agent_cli(
 
     let stdout_full = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_full = String::from_utf8_lossy(&output.stderr).to_string();
+    let adapter_events = parse_runtime_adapter_events(&runtime_type, &stdout_full);
+    record_runtime_adapter_events(state, session_id, &profile, &config, &adapter_events, None)
+        .await?;
     let limit = execution_output_limit_bytes();
     let stdout = truncate_output(&stdout_full, limit);
     let stderr = truncate_output(&stderr_full, limit);
@@ -2740,6 +2762,7 @@ async fn run_agent_cli(
                 "stderr": stderr.text,
                 "stderr_bytes": stderr.original_bytes,
                 "stderr_truncated": stderr.truncated,
+                "runtime_adapter_event_count": adapter_events.len(),
                 "runner": "agent-cli"
             }),
         )
@@ -2762,7 +2785,8 @@ async fn run_agent_cli(
         "stdout_truncated": stdout.truncated,
         "stderr": stderr.text,
         "stderr_bytes": stderr.original_bytes,
-        "stderr_truncated": stderr.truncated
+        "stderr_truncated": stderr.truncated,
+        "runtime_adapter_event_count": adapter_events.len()
     }))
 }
 
@@ -2944,6 +2968,170 @@ fn agent_runtime_profile_is_cli_executable(runtime_type: &str) -> bool {
         runtime_type,
         "agent_cli" | "codex_cli" | "claude_code" | "gemini" | "opencode" | "aider"
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeAdapterLogMode {
+    CodexJsonl,
+    ClaudeStreamJson,
+    GenericJsonl,
+    Stdout,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeAdapterEvent {
+    index: usize,
+    adapter_event_type: String,
+    event: Value,
+}
+
+fn runtime_adapter_log_mode(runtime_type: &str) -> RuntimeAdapterLogMode {
+    match runtime_type {
+        "codex_cli" => RuntimeAdapterLogMode::CodexJsonl,
+        "claude_code" => RuntimeAdapterLogMode::ClaudeStreamJson,
+        "gemini" | "opencode" | "aider" => RuntimeAdapterLogMode::GenericJsonl,
+        _ => RuntimeAdapterLogMode::Stdout,
+    }
+}
+
+fn runtime_adapter_log_mode_name(mode: RuntimeAdapterLogMode) -> &'static str {
+    match mode {
+        RuntimeAdapterLogMode::CodexJsonl => "codex_jsonl",
+        RuntimeAdapterLogMode::ClaudeStreamJson => "claude_stream_json",
+        RuntimeAdapterLogMode::GenericJsonl => "generic_jsonl",
+        RuntimeAdapterLogMode::Stdout => "stdout",
+    }
+}
+
+fn parse_runtime_adapter_events(runtime_type: &str, stdout: &str) -> Vec<RuntimeAdapterEvent> {
+    let mode = runtime_adapter_log_mode(runtime_type);
+    if mode == RuntimeAdapterLogMode::Stdout {
+        return Vec::new();
+    }
+    let parse_limit = runtime_adapter_event_limit().saturating_add(1);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<Value>(line).ok()
+        })
+        .take(parse_limit)
+        .enumerate()
+        .map(|(index, event)| {
+            let event = redact_runtime_adapter_event(event);
+            RuntimeAdapterEvent {
+                index,
+                adapter_event_type: runtime_adapter_event_type(&event),
+                event,
+            }
+        })
+        .collect()
+}
+
+fn runtime_adapter_event_type(event: &Value) -> String {
+    event
+        .get("type")
+        .or_else(|| event.get("event"))
+        .or_else(|| event.get("event_type"))
+        .or_else(|| event.get("subtype"))
+        .or_else(|| event.get("msg"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn redact_runtime_adapter_event(value: Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| {
+                    let lower = key.to_ascii_lowercase();
+                    if lower.contains("token")
+                        || lower.contains("secret")
+                        || lower.contains("password")
+                        || lower.contains("api_key")
+                        || lower.contains("apikey")
+                        || lower.contains("auth")
+                        || lower.contains("credential")
+                    {
+                        (key, Value::String("[REDACTED]".to_string()))
+                    } else {
+                        (key, redact_runtime_adapter_event(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(redact_runtime_adapter_event)
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+async fn record_runtime_adapter_events(
+    state: &AppState,
+    session_id: Uuid,
+    profile: &str,
+    config: &AgentCliProfileConfig,
+    events: &[RuntimeAdapterEvent],
+    actor_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mode = runtime_adapter_log_mode(config.runtime_type.as_str());
+    let limit = runtime_adapter_event_limit();
+    for event in events.iter().take(limit) {
+        state
+            .append_event(
+                "runtime_adapter",
+                actor_id,
+                session_id,
+                "runtime_adapter.event",
+                json!({
+                    "profile": profile,
+                    "runtime_type": &config.runtime_type,
+                    "log_mode": runtime_adapter_log_mode_name(mode),
+                    "adapter_event_type": &event.adapter_event_type,
+                    "event_index": event.index,
+                    "event": &event.event,
+                }),
+            )
+            .await?;
+    }
+    if events.len() > limit {
+        state
+            .append_event(
+                "runtime_adapter",
+                actor_id,
+                session_id,
+                "runtime_adapter.events_truncated",
+                json!({
+                    "profile": profile,
+                    "runtime_type": &config.runtime_type,
+                    "log_mode": runtime_adapter_log_mode_name(mode),
+                    "event_count": events.len(),
+                    "recorded_event_count": limit,
+                }),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+fn runtime_adapter_event_limit() -> usize {
+    std::env::var("MANDOFORGE_RUNTIME_ADAPTER_EVENT_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, MAX_RUNTIME_ADAPTER_EVENT_LIMIT))
+        .unwrap_or(DEFAULT_RUNTIME_ADAPTER_EVENT_LIMIT)
 }
 
 #[allow(dead_code)]
@@ -3169,6 +3357,32 @@ mod tests {
         assert_eq!(output.jsonl_stdout, "{\"type\":\"session.started\"}");
         assert_eq!(output.final_message, "# Report\n\nDone");
         assert_eq!(parse_codex_jsonl(&output.jsonl_stdout).len(), 1);
+    }
+
+    #[test]
+    fn runtime_adapter_parses_codex_jsonl_events() {
+        let events = parse_runtime_adapter_events(
+            "codex_cli",
+            "{\"type\":\"turn.started\",\"token\":\"secret\"}\nnot-json\n{\"msg\":\"tool.completed\"}",
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].adapter_event_type, "turn.started");
+        assert_eq!(events[0].event["token"], "[REDACTED]");
+        assert_eq!(events[1].adapter_event_type, "tool.completed");
+    }
+
+    #[test]
+    fn runtime_adapter_parses_claude_stream_json_events() {
+        let events = parse_runtime_adapter_events(
+            "claude_code",
+            "{\"type\":\"system\",\"credential\":\"secret\"}\n{\"type\":\"assistant\",\"message\":{\"content\":\"ok\"}}",
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].adapter_event_type, "system");
+        assert_eq!(events[0].event["credential"], "[REDACTED]");
+        assert_eq!(events[1].adapter_event_type, "assistant");
     }
 
     #[test]

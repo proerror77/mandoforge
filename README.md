@@ -271,12 +271,17 @@ curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
 
 Bind one profile to a specialist agent or handoff assignment, then call
 `agent_cli.exec` with the matching `profile` and `task`. The approved execution
-job is drained by `mandoforge-worker`, and the result records `profile`,
-`runtime_type`, `stdout`, `stderr`, truncation flags, exit status, timeline
-events, and audit records. This keeps Codex CLI, Claude Code CLI, Gemini,
-OpenCode, and Aider inside the same Tool Router, Policy Engine, Approval Engine,
-worker lease, Remote Computer, event log, and audit path instead of letting a
-worker invoke opaque subprocesses directly.
+job is drained by `mandoforge-worker`, and the result records legacy
+`profile`, `runtime_type`, `stdout`, `stderr`, truncation flags, and exit
+status fields for compatibility. Managed `codex_cli`, `claude_code`, Gemini,
+OpenCode, and Aider profiles are treated as runtime adapters: their JSONL or
+stream-json output is ingested into `runtime_adapter.event` session events with
+basic secret-key redaction and event-count limits. This keeps CLI-backed agents
+inside the same Tool Router, Policy Engine, Approval Engine, worker lease,
+Remote Computer, event log, and audit path while moving the product semantics
+toward Environment-owned runtime adapters. `agent_cli.exec` remains the
+compatibility facade; the target Managed Agents model is
+`Agent -> Environment -> Session -> runtime adapter -> Events`.
 
 Codex App Server adapter:
 
