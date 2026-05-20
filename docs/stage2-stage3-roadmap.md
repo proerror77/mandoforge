@@ -7,6 +7,35 @@ This roadmap separates two different kinds of work:
 
 Do not treat Stage 2 production adoption as a reason to reopen the repo-controlled Stage 2 completion decision. The Stage 2 pilot is complete in this repository. Production adoption is environment-specific evidence work.
 
+## Claude Managed Agents Alignment Update
+
+Reference: [Claude Managed Agents Alignment](claude-managed-agents-alignment.md).
+
+The Stage 3 plan is revised around the managed-agent product model:
+
+```text
+Agent -> Environment -> Session -> Events -> Threads
+```
+
+The prior roadmap correctly identified Remote Computer, worker queues, traces,
+workflow packs, and typed handoffs as important. The correction is ordering and
+abstraction:
+
+- Remote Computer is not the top-level product object. It is an Environment
+  substrate for isolated or self-hosted execution.
+- The Orchestrator should not be a permanently running LLM daemon. It should be
+  a versioned coordinator agent whose session loop is claimed from a queue when
+  user events arrive.
+- `POST /api/sessions/:id/run` is a demo-era convenience. The product API should
+  be event-driven: create a session, append user events, stream session events,
+  pause for approvals or custom tool results, then resume.
+- Typed handoffs should become session threads with parent/child lineage,
+  isolated conversation history, shared or isolated environments, and streamable
+  thread events.
+- The UI should start with sessions, events, blocking actions, artifacts, and
+  threads. Infrastructure panels remain available, but they should not be the
+  operator's first mental model.
+
 ## Stage 2 Production Adoption
 
 ### Goal
@@ -125,7 +154,74 @@ scripts/verify-stage2-evidence-archive.sh <archive>
 
 ### Goal
 
-Build the product layer above the governed runtime: scheduled operations, operator-grade traces, real execution substrates, portable workflow packs, and native multi-agent handoffs.
+Build the product layer above the governed runtime: first-class managed
+environments, event-driven sessions, streamable session loops, environment
+workers, session threads, operator-grade traces, portable workflow packs, and
+governed execution substrates.
+
+### Workstream S3-0: Managed Session Resource Model
+
+Primary owner: integration owner.
+
+Scope:
+
+- Add first-class Environment as the product abstraction above runtime profiles,
+  Remote Computer, Codex App Server, and future hosted runtimes.
+- Define the canonical resource chain: Agent Version -> Environment -> Session
+  -> Events -> Threads.
+- Map existing Agent Runtime Profiles and Remote Computer profiles into
+  Environment versions without breaking current APIs.
+- Record release gates, policy snapshots, vault reachability, MCP reachability,
+  state mounts, and worker queue bindings on the Environment contract.
+
+Acceptance criteria:
+
+- Operators can see which Agent and Environment a Session is running under.
+- The product UI no longer presents Remote Computer as the primary entrypoint.
+- Existing runtime profile and Remote Computer readiness remains visible through
+  the Environment view.
+
+### Workstream S3-1: Event-Driven Session Lifecycle
+
+Primary lanes: Lane A and Lane C.
+
+Scope:
+
+- Promote `POST /api/sessions/:id/events` as the main session driver.
+- Make `/api/sessions/:id/run` a compatibility wrapper that appends a user event
+  and enqueues the session loop.
+- Add explicit event names for session status, model request spans, tool use,
+  tool result, custom tool use, approval wait, and completion.
+- Stream existing and new events through `/api/sessions/:id/stream` so the UI can
+  render live progress without polling raw admin panels.
+
+Acceptance criteria:
+
+- Creating a session does not imply work starts until a user event is appended.
+- A session can move through running, idle, waiting approval, rescheduling, and
+  terminated states through durable events.
+- The UI can explain what happened from the event stream alone.
+
+### Workstream S3-2: Orchestrator Worker Loop And Environment Queue
+
+Primary lanes: Lane C and Lane D.
+
+Scope:
+
+- Add an environment work queue above low-level execution jobs.
+- Let orchestrator workers claim session-loop work when user events arrive.
+- Keep the LLM/provider call outside the API request path.
+- Preserve Tool Router, Policy Engine, Approval Engine, event log, artifact, and
+  audit paths as authoritative.
+- Keep lower-level execution jobs for actual file, shell, Codex, MCP, and
+  artifact-sync work.
+
+Acceptance criteria:
+
+- The Orchestrator feels always available without being a permanently running
+  LLM daemon.
+- The API can enqueue work and return promptly.
+- Worker progress is visible as session events, not only queue rows.
 
 ### Workstream S3-A: External Scheduler Integration
 
@@ -166,6 +262,8 @@ Primary lane: Lane D.
 
 Scope:
 
+- Productize Remote Computer as `Environment(type=remote_computer)`, the
+  self-hosted sandbox substrate behind managed sessions.
 - Productize the assigned-Pod execution transport that Stage 2 keeps behind explicit gates.
 - Keep Tool Router, Policy Engine, Approval Engine, event log, and audit paths authoritative.
 - Support cancellation through assigned Pod deletion or command interruption.
@@ -200,7 +298,9 @@ Primary lanes: Lane A, Lane B, and Lane C.
 
 Scope:
 
-- Add typed `agent_handoff_events`.
+- Add `session_threads` as the primary multiagent execution surface.
+- Migrate typed `agent_handoff_events` into thread lifecycle events where the
+  handoff is the request and the thread is the durable execution object.
 - Enforce allowlisted source agent, target agent, intent enum, schema version, risk level, and approval requirement.
 - Persist request, accept, reject, fail, and complete transitions in timeline and audit logs.
 - Support Reader / Analyzer / Writer role boundaries for untrusted input workflows.
@@ -208,8 +308,30 @@ Scope:
 Acceptance criteria:
 
 - Agent-to-agent routing is not free-form natural language.
+- Child agent work is visible as a thread under the parent session.
 - High-risk handoffs require approval before downstream work starts.
 - Handoff chains are replayable and visible in the operator console.
+
+### Workstream S3-G: Session-First UI
+
+Primary lanes: Lane A and Lane C.
+
+Scope:
+
+- Rebuild the first screen around Session intake, Agent selection, Environment
+  selection, current stream, blocking actions, artifacts, and child threads.
+- Move raw infrastructure panels behind an Infrastructure tab.
+- Show "what runs where" explicitly: API harness, orchestrator worker,
+  environment worker, Remote Computer, Codex App Server, or MCP.
+- Expose approvals and custom tool requests as resumable session blockers.
+
+Acceptance criteria:
+
+- A new operator can explain the flow without reading infra logs.
+- The UI distinguishes demo harness mode from queue-backed environment-worker
+  mode.
+- The UI makes it obvious whether the session is waiting for an approval, a
+  worker, a tool result, or the model.
 
 ### Workstream S3-F: Product Hardening
 
@@ -229,11 +351,16 @@ Acceptance criteria:
 
 ## Recommended Execution Order
 
-1. Create the Stage 2 production adoption runbook and controller matrix.
-2. Start Stage 3 with the WorkflowPack manifest contract because it is mostly additive and clarifies product direction.
-3. In parallel, prototype typed handoff events because WorkflowPack worker roles depend on them.
-4. Move Remote Computer execution after the handoff/event model is stable enough to preserve audit semantics.
-5. Expand Codex traces and scheduler integration as the operational layer over the execution substrate.
+1. Keep Stage 2 production adoption evidence work separate from product roadmap work.
+2. Add the Managed Session Resource Model: Agent Version, Environment, Session,
+   Events, Threads.
+3. Promote event-driven sessions and make `/run` a compatibility wrapper.
+4. Add the Orchestrator worker loop and environment work queue.
+5. Reframe Remote Computer as `Environment(type=remote_computer)`.
+6. Add session threads for multiagent work and migrate typed handoffs into that model.
+7. Rebuild the UI around sessions/events/threads before expanding more admin panels.
+8. Then expand WorkflowPack, scheduler, Codex traces, and production Remote
+   Computer execution on top of the managed-session runtime.
 
 ## Non-Goals
 
@@ -241,4 +368,6 @@ Acceptance criteria:
 - Do not allow Workflow Packs to bypass tenant scope, policy, approval, or audit.
 - Do not let Remote Computer execution become a side channel around the Tool Router.
 - Do not add free-form agent handoff messages as the primary routing contract.
+- Do not expose worker queue internals as the primary product model.
+- Do not model the Orchestrator as an always-running LLM daemon.
 - Do not mix Stage 2 production adoption evidence changes with unrelated Stage 3 product work in one commit.

@@ -4,7 +4,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
-use crate::{Agent, AppError, AppState};
+use crate::{Agent, AppError, AppState, Environment};
 
 impl AppState {
     pub(crate) async fn seed_demo_agent(&self) -> Result<(), AppError> {
@@ -76,6 +76,69 @@ impl AppState {
         }
         self.insert_agent_version(&agent, 1, serde_json::json!({}))
             .await?;
+        self.seed_default_environment().await?;
+        Ok(())
+    }
+
+    async fn seed_default_environment(&self) -> Result<(), AppError> {
+        let now = Utc::now();
+        let environment = Environment {
+            id: Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("valid uuid"),
+            name: "Local Worker".to_string(),
+            environment_type: "local".to_string(),
+            runtime_profile_id: None,
+            remote_computer_profile: json!({}),
+            codex_app_server_profile: json!({}),
+            worker_queue_binding: json!({"queue": "managed-agent"}),
+            state_mounts: json!({}),
+            network_policy: json!({}),
+            vault_requirements: json!({}),
+            mcp_requirements: json!({}),
+            release_state: "active".to_string(),
+            status: "enabled".to_string(),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
+
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .environments
+                    .insert(environment.id, environment);
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO environments
+                        (id, tenant_id, name, environment_type, runtime_profile_id,
+                         remote_computer_profile, codex_app_server_profile, worker_queue_binding,
+                         state_mounts, network_policy, vault_requirements, mcp_requirements,
+                         release_state, status, created_at, updated_at, archived_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NULL)
+                     ON CONFLICT (id) DO NOTHING",
+                )
+                .bind(environment.id)
+                .bind(self.current_tenant_id())
+                .bind(&environment.name)
+                .bind(&environment.environment_type)
+                .bind(environment.runtime_profile_id)
+                .bind(&environment.remote_computer_profile)
+                .bind(&environment.codex_app_server_profile)
+                .bind(&environment.worker_queue_binding)
+                .bind(&environment.state_mounts)
+                .bind(&environment.network_policy)
+                .bind(&environment.vault_requirements)
+                .bind(&environment.mcp_requirements)
+                .bind(&environment.release_state)
+                .bind(&environment.status)
+                .bind(environment.created_at)
+                .bind(environment.updated_at)
+                .execute(pool)
+                .await?;
+            }
+        }
         Ok(())
     }
 }

@@ -5,10 +5,11 @@ use sqlx::{Row, postgres::PgRow};
 use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
     AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
-    ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket, CostAlertRoute, EvalCase,
-    EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership, MemoryWritebackCandidate,
-    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord,
-    SemanticLink, SemanticObject, SemanticSource, Session, SessionEvent, Team, TenantInvitation,
+    ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket, CostAlertRoute,
+    Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership,
+    MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
+    ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
+    SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Team, TenantInvitation,
     ToolCall, UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
@@ -62,8 +63,69 @@ pub(crate) fn session_from_row(row: PgRow) -> Result<Session, AppError> {
         id: row.try_get("id")?,
         agent_id: row.try_get("agent_id")?,
         agent_version_id: row.try_get("agent_version_id")?,
+        environment_id: row.try_get("environment_id").unwrap_or(None),
         title: row.try_get("title")?,
         status: status.into(),
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn session_loop_job_from_row(row: PgRow) -> Result<SessionLoopJob, AppError> {
+    let status: String = row.try_get("status")?;
+    Ok(SessionLoopJob {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        environment_id: row.try_get("environment_id")?,
+        status: SessionLoopJobStatus::from(status),
+        trigger_event_id: row.try_get("trigger_event_id")?,
+        reason: row.try_get("reason")?,
+        enqueued_at: row.try_get("enqueued_at")?,
+        started_at: row.try_get("started_at")?,
+        completed_at: row.try_get("completed_at")?,
+        worker_id: row.try_get("worker_id")?,
+        lease_expires_at: row.try_get("lease_expires_at")?,
+        attempt_count: row.try_get("attempt_count")?,
+        max_attempts: row.try_get("max_attempts")?,
+        last_error: row.try_get("last_error")?,
+    })
+}
+
+pub(crate) fn environment_from_row(row: PgRow) -> Result<Environment, AppError> {
+    Ok(Environment {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        environment_type: row.try_get("environment_type")?,
+        runtime_profile_id: row.try_get("runtime_profile_id")?,
+        remote_computer_profile: row.try_get("remote_computer_profile")?,
+        codex_app_server_profile: row.try_get("codex_app_server_profile")?,
+        worker_queue_binding: row.try_get("worker_queue_binding")?,
+        state_mounts: row.try_get("state_mounts")?,
+        network_policy: row.try_get("network_policy")?,
+        vault_requirements: row.try_get("vault_requirements")?,
+        mcp_requirements: row.try_get("mcp_requirements")?,
+        release_state: row.try_get("release_state")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn session_thread_from_row(row: PgRow) -> Result<SessionThread, AppError> {
+    Ok(SessionThread {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        parent_thread_id: row.try_get("parent_thread_id")?,
+        thread_kind: row.try_get("thread_kind")?,
+        agent_id: row.try_get("agent_id")?,
+        agent_version_id: row.try_get("agent_version_id")?,
+        environment_id: row.try_get("environment_id")?,
+        source_handoff_id: row.try_get("source_handoff_id")?,
+        specialist_session_id: row.try_get("specialist_session_id")?,
+        status: row.try_get("status")?,
+        title: row.try_get("title")?,
+        context: row.try_get("context")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

@@ -96,23 +96,46 @@ Stage 2 is complete for the repo-controlled pilot. The strict audit and the rema
 
 ## Main Design Direction
 
-The next important direction is not another vertical demo. It is hardening the Agent middleware foundation.
-
-The most important near-term slice is **Remote Computer**:
+The next important direction is not another vertical demo. It is making the
+Agent middleware foundation match the managed-agent product model:
 
 ```text
-Let an agent session attach to a leaseable, isolated, auditable remote execution environment.
+Agent -> Environment -> Session -> Events -> Threads
 ```
 
-The immediate slice is session attach state:
+The most important near-term slice is **Managed Session Runtime**:
 
-- Attach a session to a selected Remote Computer lease.
-- Persist attach and release status.
-- Detect stale attachments.
-- Keep `shell.exec` and `codex.exec` on the existing approved worker path for now.
-- Prove that attach state does not bypass the Tool Router, Policy Engine, or Approval Engine.
+```text
+Create or resume a session, send user events, run the orchestrator loop through a governed environment queue, and stream model/tool/session events back to the UI.
+```
 
-The longer-term direction is to make Remote Computer the main sandbox substrate: agents execute approved work inside isolated Pods or workspaces, sync artifacts and timeline events back to MandoForge, and preserve the full audit chain.
+This is a correction to the earlier Remote Computer-first framing. Remote
+Computer remains critical, but it should be modeled as one Environment
+implementation, not as the top-level product object.
+
+The immediate slice is event-driven session state:
+
+- Add first-class Environment resources above runtime profiles and Remote Computer profiles.
+- Make `POST /api/sessions/:id/events` the primary way to drive work.
+- Treat `POST /api/sessions/:id/run` as a compatibility wrapper over user events.
+- Move orchestrator execution out of the API request path and into a queue-claimed session loop.
+- Stream session status, model spans, tool use, approvals, artifacts, and child threads back to the UI.
+
+Implemented baseline:
+
+- `GET/POST /api/environments` and `GET/PATCH/DELETE /api/environments/:id` manage first-class Environment records.
+- `POST /api/sessions` accepts `environment_id` and records `session.environment_bound` in the session event log.
+- `POST /api/sessions/:id/events` enqueues a lease-claimed `session_loop_job`; `mandoforge-worker` claims it and runs the orchestrator loop outside the API request path.
+- Session execution emits managed-agent style `session.status_*`, `span.model_request_*`, `agent.tool_use`, `agent.tool_result`, and `thread.*` timeline events.
+- `GET /api/sessions/:id/threads` exposes durable `session_threads`; typed manager-to-specialist handoffs create child specialist threads linked to the parent session.
+- `Environment(type=remote_computer)` now owns automatic Remote Computer assignment: approved execution jobs only auto-claim leases or warm-pool resources that match the session environment contract, and remote environments fail closed when the Remote Computer execution transport is not enabled.
+- The UI start form loads environments and binds new sessions to the selected environment.
+- The UI run view is organized around the managed-session objects first: Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads. Raw worker, Remote Computer, provider, Vault, MCP, and tenant infrastructure remain in system and advanced panels.
+
+The remaining production hardening work is cluster evidence: the
+`Environment(type=remote_computer)` contract is enforced by the runtime, while
+real Kubernetes Pod execution still depends on the configured Remote Computer
+transport and the external state-sync / sidecar / worker-pool evidence gates.
 
 ## Run Locally
 
@@ -187,9 +210,17 @@ cargo run -p mandoforge-api
 Queue-backed execution worker:
 
 ```bash
-MANDOFORGE_EXECUTION_WORKER=queue cargo run -p mandoforge-api
-BASE_URL=http://127.0.0.1:8787 cargo run -p mandoforge-api --bin mandoforge-worker
+MANDOFORGE_EXECUTION_WORKER=queue \
+MANDOFORGE_DEV_ADMIN_TOKEN=local-worker-token \
+cargo run -p mandoforge-api
+
+BASE_URL=http://127.0.0.1:8787 \
+MANDOFORGE_WORKER_TOKEN=local-worker-token \
+cargo run -p mandoforge-api --bin mandoforge-worker
 ```
+
+The same worker drains both session-loop jobs and approved execution jobs. It is
+the local entrypoint for the always-on orchestrator loop.
 
 Codex App Server adapter:
 
@@ -251,7 +282,8 @@ Runtime:
 - `GET /api/agents`
 - `GET /api/agents/:id/versions`
 - `POST /api/sessions`
-- `POST /api/sessions/:id/run`
+- `POST /api/sessions/:id/events`
+- `POST /api/sessions/:id/run` (compatibility wrapper for the demo-era run flow)
 - `GET /api/sessions/:id/events`
 - `GET /api/sessions/:id/stream`
 - `GET /api/sessions/:id/tool-calls`

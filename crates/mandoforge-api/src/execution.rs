@@ -13,7 +13,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnResponse};
-use crate::execution_queue::{ExecutionJob, ExecutionJobRequest};
+use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
 use crate::remote_computer_runner::{
     RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
     remote_computer_runner_for_config,
@@ -21,8 +21,8 @@ use crate::remote_computer_runner::{
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
     AppError, AppState, Approval, Artifact, CreateRemoteComputerJobAssignment,
-    CreateRemoteComputerLease, ToolCall, new_audit_log,
-    record_remote_computer_job_assignment_event,
+    CreateRemoteComputerLease, Environment, RemoteComputer, RemoteComputerJobAssignment,
+    RemoteComputerLease, ToolCall, new_audit_log, record_remote_computer_job_assignment_event,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -155,59 +155,216 @@ pub(crate) async fn run_execution_job(
     worker_id: &str,
 ) -> Result<ExecutionJob, AppError> {
     let job = state.execution_queue.start(job_id, worker_id).await?;
-    let remote_computer_assignment =
-        match active_remote_computer_assignment_for_job(state, &job).await? {
-            Some(assignment) => Some(assignment),
-            None => auto_assign_remote_computer_for_job(state, &job, worker_id).await?,
+    let remote_environment_contract =
+        match remote_computer_environment_contract_for_job(state, &job).await {
+            Ok(contract) => contract,
+            Err(error) => {
+                let error_message = error.message.clone();
+                state
+                    .append_event(
+                        "worker",
+                        Some(job.id),
+                        job.session_id,
+                        "environment.remote_computer_contract_invalid",
+                        json!({
+                            "execution_job_id": job.id,
+                            "approval_id": job.approval_id,
+                            "tool_call_id": job.tool_call_id,
+                            "tool": job.tool_name,
+                            "error": error_message
+                        }),
+                    )
+                    .await?;
+                return retry_or_fail_started_execution_job(
+                    state,
+                    &job,
+                    None,
+                    error,
+                    json!({"stage": "environment_contract"}),
+                )
+                .await;
+            }
         };
-    if let Some(assignment) = remote_computer_assignment.as_ref() {
-        let execution_enabled = remote_computer_pod_execution_requested();
-        let handoff_mode = if execution_enabled {
-            "assigned-pod-execution"
-        } else {
-            "control-plane-only"
-        };
-        let details = json!({
-            "assignment_id": assignment.id,
-            "execution_job_id": job.id,
-            "approval_id": job.approval_id,
-            "tool_call_id": job.tool_call_id,
-            "tool": job.tool_name,
-            "remote_computer_id": assignment.remote_computer_id,
-            "lease_id": assignment.lease_id,
-            "worker_id": worker_id,
-            "execution_enabled": execution_enabled,
-            "handoff_mode": handoff_mode
-        });
-        state
-            .append_event(
-                "worker",
-                Some(job.id),
-                job.session_id,
-                "remote_computer.execution_handoff_acknowledged",
-                details.clone(),
+    let approval = match state.get_approval(job.approval_id).await {
+        Ok(approval) => approval,
+        Err(error) => {
+            return retry_or_fail_started_execution_job(
+                state,
+                &job,
+                None,
+                error,
+                json!({"stage": "approval_load"}),
             )
-            .await?;
-        state
-            .append_audit_log(new_audit_log(
-                Some(job.session_id),
-                "worker",
-                Some(job.id),
-                "remote_computer.execution_handoff_acknowledged",
-                "remote_computer_job_assignment",
-                Some(assignment.id),
-                details,
-            ))
-            .await?;
-        append_remote_computer_execution_transport_plan(state, &job, worker_id, assignment).await?;
-    }
-    let approval = state.get_approval(job.approval_id).await?;
+            .await;
+        }
+    };
     if approval.status != "approved" {
-        return Err(AppError::bad_request(
-            "execution job approval is not approved",
-        ));
+        return retry_or_fail_started_execution_job(
+            state,
+            &job,
+            None,
+            AppError::bad_request("execution job approval is not approved"),
+            json!({"stage": "approval_status", "approval_status": approval.status}),
+        )
+        .await;
     }
-    let tool_call = state.get_tool_call(job.tool_call_id).await?;
+    let tool_call = match state.get_tool_call(job.tool_call_id).await {
+        Ok(tool_call) => tool_call,
+        Err(error) => {
+            return retry_or_fail_started_execution_job(
+                state,
+                &job,
+                None,
+                error,
+                json!({"stage": "tool_call_load"}),
+            )
+            .await;
+        }
+    };
+    let active_assignment = match active_remote_computer_assignment_for_job(state, &job).await {
+        Ok(assignment) => assignment,
+        Err(error) => {
+            return retry_or_fail_started_execution_job(
+                state,
+                &job,
+                None,
+                error,
+                json!({"stage": "remote_computer_assignment_load"}),
+            )
+            .await;
+        }
+    };
+    let remote_computer_assignment = match active_assignment {
+        Some(assignment) => {
+            if let Err(error) = validate_active_remote_computer_assignment_for_job(
+                state,
+                &job,
+                &assignment,
+                remote_environment_contract.as_ref(),
+            )
+            .await
+            {
+                return retry_or_fail_started_execution_job(
+                    state,
+                    &job,
+                    Some(&assignment),
+                    error,
+                    json!({
+                        "stage": "remote_computer_assignment_validation",
+                        "environment_id": remote_environment_contract
+                            .as_ref()
+                            .map(|contract| contract.environment_id),
+                        "environment_contract": remote_environment_contract
+                            .as_ref()
+                            .map(RemoteComputerEnvironmentContract::evidence)
+                    }),
+                )
+                .await;
+            }
+            Some(assignment)
+        }
+        None => {
+            match auto_assign_remote_computer_for_job(
+                state,
+                &job,
+                worker_id,
+                remote_environment_contract.as_ref(),
+            )
+            .await
+            {
+                Ok(assignment) => assignment,
+                Err(error) => {
+                    return retry_or_fail_started_execution_job(
+                        state,
+                        &job,
+                        None,
+                        error,
+                        json!({
+                            "stage": "remote_computer_auto_assignment",
+                            "environment_id": remote_environment_contract
+                                .as_ref()
+                                .map(|contract| contract.environment_id),
+                            "environment_contract": remote_environment_contract
+                                .as_ref()
+                                .map(RemoteComputerEnvironmentContract::evidence)
+                        }),
+                    )
+                    .await;
+                }
+            }
+        }
+    };
+    if remote_environment_contract.is_some() && remote_computer_assignment.is_none() {
+        let error = AppError::bad_request(
+            "remote_computer environment has no claimable Remote Computer lease or warm-pool resource",
+        );
+        return retry_or_fail_started_execution_job(
+            state,
+            &job,
+            None,
+            error,
+            json!({
+                "stage": "remote_computer_assignment_missing",
+                "environment_id": remote_environment_contract
+                    .as_ref()
+                    .map(|contract| contract.environment_id),
+                "environment_contract": remote_environment_contract
+                    .as_ref()
+                    .map(RemoteComputerEnvironmentContract::evidence)
+            }),
+        )
+        .await;
+    }
+    if let Some(assignment) = remote_computer_assignment.as_ref() {
+        if let Err(error) = record_remote_computer_execution_handoff_acknowledged(
+            state, &job, worker_id, assignment,
+        )
+        .await
+        {
+            return retry_or_fail_started_execution_job(
+                state,
+                &job,
+                Some(assignment),
+                error,
+                json!({"stage": "remote_computer_handoff_acknowledge"}),
+            )
+            .await;
+        }
+        if let Err(error) =
+            append_remote_computer_execution_transport_plan(state, &job, worker_id, assignment)
+                .await
+        {
+            return retry_or_fail_started_execution_job(
+                state,
+                &job,
+                Some(assignment),
+                error,
+                json!({"stage": "remote_computer_execution_transport_plan"}),
+            )
+            .await;
+        }
+    }
+    if remote_environment_contract.is_some() && !remote_computer_pod_execution_requested() {
+        let error = AppError::bad_request(
+            "remote_computer environment requires enabled Remote Computer execution transport",
+        );
+        return retry_or_fail_started_execution_job(
+            state,
+            &job,
+            remote_computer_assignment.as_ref(),
+            error,
+            json!({
+                "stage": "remote_computer_execution_transport_disabled",
+                "environment_id": remote_environment_contract
+                    .as_ref()
+                    .map(|contract| contract.environment_id),
+                "environment_contract": remote_environment_contract
+                    .as_ref()
+                    .map(RemoteComputerEnvironmentContract::evidence)
+            }),
+        )
+        .await;
+    }
     let result = match tool_call.tool_name.as_str() {
         "file.write"
             if remote_computer_assignment.is_some()
@@ -294,64 +451,137 @@ pub(crate) async fn run_execution_job(
         state.execution_queue.complete(job.id).await
     } else {
         let error = result.expect_err("checked error");
-        let updated = state
-            .execution_queue
-            .retry_or_fail(job.id, &error.message)
-            .await?;
-        let assignment_status =
-            if updated.status == crate::execution_queue::ExecutionJobStatus::Queued {
-                "released"
-            } else {
-                "failed"
-            };
-        let assignment_event =
-            if updated.status == crate::execution_queue::ExecutionJobStatus::Queued {
-                "remote_computer.execution_handoff_released"
-            } else {
-                "remote_computer.execution_handoff_failed"
-            };
-        finalize_remote_computer_assignment_for_job(
+        retry_or_fail_started_execution_job(
             state,
             &job,
             remote_computer_assignment.as_ref(),
-            assignment_status,
-            assignment_event,
+            error,
+            json!({"stage": "tool_execution"}),
+        )
+        .await
+    }
+}
+
+async fn retry_or_fail_started_execution_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    assignment: Option<&RemoteComputerJobAssignment>,
+    error: AppError,
+    details: Value,
+) -> Result<ExecutionJob, AppError> {
+    let error_message = error.message.clone();
+    let updated = state
+        .execution_queue
+        .retry_or_fail(job.id, &error_message)
+        .await?;
+    let queued = updated.status == ExecutionJobStatus::Queued;
+    let assignment_status = if queued { "released" } else { "failed" };
+    let assignment_event = if queued {
+        "remote_computer.execution_handoff_released"
+    } else {
+        "remote_computer.execution_handoff_failed"
+    };
+    finalize_remote_computer_assignment_for_job(
+        state,
+        job,
+        assignment,
+        assignment_status,
+        assignment_event,
+        merge_json_object(
             json!({
-                "execution_job_status": updated.status,
+                "execution_job_status": updated.status.clone(),
                 "attempt_count": updated.attempt_count,
                 "max_attempts": updated.max_attempts,
-                "last_error": updated.last_error,
+                "last_error": updated.last_error.clone(),
             }),
-        )
-        .await?;
-        let event_type = if updated.status == crate::execution_queue::ExecutionJobStatus::Queued {
-            "execution.retry_queued"
-        } else {
-            "execution.failed"
-        };
-        state
-            .append_event(
-                "worker",
-                Some(job.id),
-                job.session_id,
-                event_type,
+            details.clone(),
+        ),
+    )
+    .await?;
+    state
+        .append_event(
+            "worker",
+            Some(job.id),
+            job.session_id,
+            if queued {
+                "execution.retry_queued"
+            } else {
+                "execution.failed"
+            },
+            merge_json_object(
                 json!({
                     "execution_job_id": job.id,
                     "approval_id": job.approval_id,
                     "tool_call_id": job.tool_call_id,
                     "tool": job.tool_name,
+                    "assignment_id": assignment.map(|assignment| assignment.id),
+                    "remote_computer_id": assignment.map(|assignment| assignment.remote_computer_id),
+                    "lease_id": assignment.map(|assignment| assignment.lease_id),
                     "attempt_count": updated.attempt_count,
                     "max_attempts": updated.max_attempts,
-                    "last_error": updated.last_error,
+                    "last_error": updated.last_error.clone(),
                 }),
-            )
-            .await?;
-        if updated.status == crate::execution_queue::ExecutionJobStatus::Queued {
-            Ok(updated)
-        } else {
-            Err(error)
+                details,
+            ),
+        )
+        .await?;
+    if queued { Ok(updated) } else { Err(error) }
+}
+
+fn merge_json_object(mut base: Value, extra: Value) -> Value {
+    if let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            base.insert(key.clone(), value.clone());
         }
     }
+    base
+}
+
+async fn record_remote_computer_execution_handoff_acknowledged(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+    assignment: &RemoteComputerJobAssignment,
+) -> Result<(), AppError> {
+    let execution_enabled = remote_computer_pod_execution_requested();
+    let handoff_mode = if execution_enabled {
+        "assigned-pod-execution"
+    } else {
+        "control-plane-only"
+    };
+    let details = json!({
+        "assignment_id": assignment.id,
+        "execution_job_id": job.id,
+        "approval_id": job.approval_id,
+        "tool_call_id": job.tool_call_id,
+        "tool": job.tool_name,
+        "remote_computer_id": assignment.remote_computer_id,
+        "lease_id": assignment.lease_id,
+        "worker_id": worker_id,
+        "execution_enabled": execution_enabled,
+        "handoff_mode": handoff_mode
+    });
+    state
+        .append_event(
+            "worker",
+            Some(job.id),
+            job.session_id,
+            "remote_computer.execution_handoff_acknowledged",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(job.session_id),
+            "worker",
+            Some(job.id),
+            "remote_computer.execution_handoff_acknowledged",
+            "remote_computer_job_assignment",
+            Some(assignment.id),
+            details,
+        ))
+        .await?;
+    Ok(())
 }
 
 fn remote_computer_pod_execution_requested() -> bool {
@@ -445,7 +675,7 @@ async fn append_remote_computer_execution_transport_plan(
 async fn active_remote_computer_assignment_for_job(
     state: &AppState,
     job: &ExecutionJob,
-) -> Result<Option<crate::RemoteComputerJobAssignment>, AppError> {
+) -> Result<Option<RemoteComputerJobAssignment>, AppError> {
     Ok(state
         .list_remote_computer_job_assignments()
         .await?
@@ -455,11 +685,88 @@ async fn active_remote_computer_assignment_for_job(
         }))
 }
 
+async fn validate_active_remote_computer_assignment_for_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    assignment: &RemoteComputerJobAssignment,
+    environment_contract: Option<&RemoteComputerEnvironmentContract>,
+) -> Result<(), AppError> {
+    let Some(contract) = environment_contract else {
+        return Ok(());
+    };
+    if assignment.execution_job_id != job.id {
+        return Err(AppError::bad_request(
+            "active Remote Computer assignment does not belong to the execution job",
+        ));
+    }
+    if assignment.session_id != job.session_id {
+        return Err(AppError::bad_request(
+            "active Remote Computer assignment session does not match the execution job",
+        ));
+    }
+    let lease = state
+        .list_remote_computer_leases()
+        .await?
+        .into_iter()
+        .find(|lease| lease.id == assignment.lease_id)
+        .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+    if lease.remote_computer_id != assignment.remote_computer_id {
+        return Err(AppError::bad_request(
+            "active Remote Computer assignment lease does not match the assigned computer",
+        ));
+    }
+    if lease.status != "leased" {
+        return Err(AppError::bad_request(
+            "active Remote Computer assignment lease is not leased",
+        ));
+    }
+    if lease
+        .lease_expires_at
+        .as_ref()
+        .is_some_and(|lease_expires_at| lease_expires_at <= &Utc::now())
+    {
+        return Err(AppError::bad_request(
+            "active Remote Computer assignment lease has expired",
+        ));
+    }
+    if lease
+        .session_id
+        .as_ref()
+        .is_some_and(|session_id| *session_id != job.session_id)
+    {
+        return Err(AppError::bad_request(
+            "active Remote Computer assignment lease session does not match the execution job",
+        ));
+    }
+    if !contract.matches_lease(&lease) {
+        return Err(AppError::bad_request(
+            "active Remote Computer assignment lease does not match the remote_computer environment contract",
+        ));
+    }
+    let computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == assignment.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    if !contract.matches_computer(&computer) {
+        return Err(AppError::bad_request(
+            "active Remote Computer assignment does not match the remote_computer environment contract",
+        ));
+    }
+    Ok(())
+}
+
 async fn auto_assign_remote_computer_for_job(
     state: &AppState,
     job: &ExecutionJob,
     worker_id: &str,
-) -> Result<Option<crate::RemoteComputerJobAssignment>, AppError> {
+    environment_contract: Option<&RemoteComputerEnvironmentContract>,
+) -> Result<Option<RemoteComputerJobAssignment>, AppError> {
+    if environment_contract.is_none() {
+        return Ok(None);
+    }
+    let contract = environment_contract.expect("checked remote computer contract");
     let assigned_lease_ids: HashSet<_> = state
         .list_remote_computer_job_assignments()
         .await?
@@ -467,6 +774,7 @@ async fn auto_assign_remote_computer_for_job(
         .filter(|assignment| assignment.status == "assigned")
         .map(|assignment| assignment.lease_id)
         .collect();
+    let computers = state.list_remote_computers().await?;
     let lease = if let Some(lease) = state
         .list_remote_computer_leases()
         .await?
@@ -480,6 +788,11 @@ async fn auto_assign_remote_computer_for_job(
                 && lease
                     .session_id
                     .is_none_or(|session_id| session_id == job.session_id)
+                && computers
+                    .iter()
+                    .find(|computer| computer.id == lease.remote_computer_id)
+                    .is_some_and(|computer| contract.matches_computer(computer))
+                && contract.matches_lease(lease)
         })
         .max_by_key(|lease| {
             (
@@ -489,7 +802,8 @@ async fn auto_assign_remote_computer_for_job(
         }) {
         lease
     } else {
-        match claim_remote_computer_warm_pool_lease_for_job(state, job, worker_id).await? {
+        match claim_remote_computer_warm_pool_lease_for_job(state, job, worker_id, contract).await?
+        {
             Some(lease) => lease,
             None => return Ok(None),
         }
@@ -502,8 +816,9 @@ async fn auto_assign_remote_computer_for_job(
                 lease_id: lease.id,
                 assigned_by: Some(worker_id.to_string()),
                 metadata: Some(json!({
-                    "handoff_mode": "auto-worker-lease",
-                    "source": "run_execution_job"
+                    "handoff_mode": "environment-worker-lease",
+                    "source": "run_execution_job",
+                    "environment_contract": contract.evidence()
                 })),
             },
         )
@@ -522,6 +837,7 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
     state: &AppState,
     job: &ExecutionJob,
     worker_id: &str,
+    contract: &RemoteComputerEnvironmentContract,
 ) -> Result<Option<crate::RemoteComputerLease>, AppError> {
     let leased_remote_computer_ids: HashSet<_> = state
         .list_remote_computer_leases()
@@ -537,6 +853,7 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
         .filter(|computer| {
             computer.status == "available"
                 && !leased_remote_computer_ids.contains(&computer.id)
+                && contract.matches_computer(computer)
                 && computer
                     .metadata
                     .get("warm_pool")
@@ -555,10 +872,11 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
                 worker_id: Some(worker_id.to_string()),
                 lease_seconds: Some(900),
                 metadata: Some(json!({
-                    "handoff_mode": "auto-warm-pool-lease",
+                    "handoff_mode": "environment-warm-pool-lease",
                     "source": "run_execution_job",
                     "execution_job_id": job.id,
                     "tool_call_id": job.tool_call_id,
+                    "environment_contract": contract.evidence()
                 })),
             },
         )
@@ -571,6 +889,7 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
         "status": lease.status,
         "lease_expires_at": lease.lease_expires_at,
         "source": "auto-warm-pool-lease",
+        "environment_contract": contract.evidence(),
         "execution_job_id": job.id,
         "tool_call_id": job.tool_call_id,
     });
@@ -612,6 +931,147 @@ async fn finalize_remote_computer_assignment_for_job(
         .update_remote_computer_job_assignment_status(assignment.id, status, metadata)
         .await?;
     record_remote_computer_job_assignment_event(state, &updated, job, event_type).await
+}
+
+#[derive(Debug, Clone)]
+struct RemoteComputerEnvironmentContract {
+    environment_id: Uuid,
+    environment_name: String,
+    pool: Option<String>,
+    profile: Option<String>,
+    namespace: Option<String>,
+    remote_computer_id: Option<Uuid>,
+    metadata_selector: Vec<(String, String)>,
+}
+
+async fn remote_computer_environment_contract_for_job(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<Option<RemoteComputerEnvironmentContract>, AppError> {
+    let session = state.get_session(job.session_id).await?;
+    let Some(environment_id) = session.environment_id else {
+        return Ok(None);
+    };
+    let environment = state.get_environment(environment_id).await?;
+    if environment.environment_type != "remote_computer" {
+        return Ok(None);
+    }
+    RemoteComputerEnvironmentContract::from_environment(&environment).map(Some)
+}
+
+impl RemoteComputerEnvironmentContract {
+    fn from_environment(environment: &Environment) -> Result<Self, AppError> {
+        if environment.status != "enabled" || environment.release_state != "active" {
+            return Err(AppError::bad_request(format!(
+                "remote_computer environment {} is not active and enabled",
+                environment.id
+            )));
+        }
+        let profile = &environment.remote_computer_profile;
+        let remote_computer_id = optional_uuid_from_json(profile, "remote_computer_id")?;
+        let metadata_selector = profile
+            .get("metadata_selector")
+            .and_then(Value::as_object)
+            .map(|object| {
+                object
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|value| (key.clone(), value.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(Self {
+            environment_id: environment.id,
+            environment_name: environment.name.clone(),
+            pool: optional_string_from_json(profile, "pool"),
+            profile: optional_string_from_json(profile, "profile"),
+            namespace: optional_string_from_json(profile, "namespace"),
+            remote_computer_id,
+            metadata_selector,
+        })
+    }
+
+    fn matches_computer(&self, computer: &RemoteComputer) -> bool {
+        if self
+            .remote_computer_id
+            .is_some_and(|remote_computer_id| computer.id != remote_computer_id)
+        {
+            return false;
+        }
+        if self
+            .profile
+            .as_deref()
+            .is_some_and(|profile| computer.profile != profile)
+        {
+            return false;
+        }
+        if self
+            .namespace
+            .as_deref()
+            .is_some_and(|namespace| computer.namespace != namespace)
+        {
+            return false;
+        }
+        if self.pool.as_deref().is_some_and(|pool| {
+            computer
+                .metadata
+                .get("pool")
+                .and_then(Value::as_str)
+                .map(|value| value != pool)
+                .unwrap_or(true)
+        }) {
+            return false;
+        }
+        self.metadata_selector.iter().all(|(key, expected)| {
+            computer
+                .metadata
+                .get(key)
+                .and_then(Value::as_str)
+                .map(|value| value == expected)
+                .unwrap_or(false)
+        })
+    }
+
+    fn matches_lease(&self, lease: &RemoteComputerLease) -> bool {
+        lease
+            .metadata
+            .get("environment_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_none_or(|environment_id| environment_id == self.environment_id)
+    }
+
+    fn evidence(&self) -> Value {
+        json!({
+            "environment_id": self.environment_id,
+            "environment_name": self.environment_name,
+            "environment_type": "remote_computer",
+            "pool": self.pool,
+            "profile": self.profile,
+            "namespace": self.namespace,
+            "remote_computer_id": self.remote_computer_id,
+            "metadata_selector": self.metadata_selector.iter().map(|(key, value)| json!({"key": key, "value": value})).collect::<Vec<_>>()
+        })
+    }
+}
+
+fn optional_string_from_json(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn optional_uuid_from_json(value: &Value, key: &str) -> Result<Option<Uuid>, AppError> {
+    let Some(raw) = optional_string_from_json(value, key) else {
+        return Ok(None);
+    };
+    Uuid::parse_str(&raw)
+        .map(Some)
+        .map_err(|_| AppError::bad_request(format!("{key} must be a valid UUID")))
 }
 
 fn env_flag(name: &str) -> bool {

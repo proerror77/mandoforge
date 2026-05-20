@@ -234,6 +234,17 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [x] Reframe Stage 4 as Managed Agent Control Plane + Manager Agent + Minimal Semantic Kernel.
 - [x] Reframe Stage 5 as Full Semantic Layer / Context OS.
 
+## Roadmap V3 / Claude Managed Agents Alignment
+
+- [x] Record the Claude Managed Agents research and product-model correction: Agent -> Environment -> Session -> Events -> Threads.
+- [x] Add first-class Environment resources above runtime profiles, Remote Computer profiles, Codex App Server profiles, and future hosted runtimes.
+- [x] Make `POST /api/sessions/:id/events` the primary session driver and keep `/run` as a compatibility wrapper.
+- [x] Add explicit session/model/tool/custom-tool/thread event names aligned with managed-agent execution.
+- [x] Add a queue-claimed Orchestrator session loop outside the API request path.
+- [x] Reframe Remote Computer as `Environment(type=remote_computer)` and move Pod execution under the Environment worker contract.
+- [x] Add `session_threads` as the durable multiagent execution object and migrate typed handoffs into thread lifecycle.
+- [x] Rebuild the web UI around Sessions, Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads before exposing raw infrastructure panels.
+
 ## Stage 4 / Managed Agent Control Plane + Manager Agent
 
 - [x] Stage 4.1: Add first-class Agent Runtime Profile storage and APIs so `agent_cli.exec` can resolve governed runtime profiles instead of environment-only profile configuration.

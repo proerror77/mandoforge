@@ -3,6 +3,7 @@ set -euo pipefail
 
 INDEX_FILE="${INDEX_FILE:-web/index.html}"
 APP_FILE="${APP_FILE:-web/app.js}"
+STYLE_FILE="${STYLE_FILE:-web/styles.css}"
 
 require_file() {
   if [[ ! -s "$1" ]]; then
@@ -29,10 +30,30 @@ done
 
 require_file "$INDEX_FILE"
 require_file "$APP_FILE"
+require_file "$STYLE_FILE"
 
 node --check "$APP_FILE" >/dev/null
 
 index_patterns=(
+  "demo-overview"
+  "Primary Agent OS navigation"
+  "开始一个任务"
+  "查看运行记录"
+  "Session Threads"
+  "managed-session-workspace"
+  "Managed Session Workspace"
+  "Blocking Actions"
+  "Event Stream"
+  "检查系统状态"
+  "orchestrator-form"
+  "workspace-tabs"
+  "开始任务"
+  "系统状态"
+  "运行记录"
+  "高级设置"
+  "检查 Whiskey runtime 状态"
+  "agent-builder-section"
+  "panel-advanced"
   "Tenant Governance"
   "Providers"
   "Vault"
@@ -51,6 +72,7 @@ index_patterns=(
   "Remote Computer Profile JSON"
   "Semantic Scopes JSON"
   "Managed Agent Console"
+  "Environments"
   "Runtime Profiles"
   "Register Remote Computer"
   "Create Remote Lease"
@@ -63,6 +85,18 @@ index_patterns=(
 )
 
 app_patterns=(
+  "renderDemoOverview"
+  "renderInfraOverview"
+  "runOrchestrator"
+  "renderSessionThreads"
+  "renderManagedSessionWorkspace"
+  "/api/sessions/\${state.session.id}/threads"
+  "Blocking Actions"
+  "Event Stream"
+  "applyTaskTemplate"
+  "setWorkspaceTab"
+  "Whiskey Demo Entry"
+  "不是聊天框"
   "stage2Readiness"
   "evidence_requirements"
   "evidence_scripts"
@@ -83,6 +117,8 @@ app_patterns=(
   "releaseRemoteComputerAttachment"
   "agentRuntimeProfiles"
   "agentRuntimeProfileReleaseGates"
+  "environments"
+  "/api/environments"
   "renderManagedAgentConsole"
   "confirmDestructiveAction"
   "/api/agent-runtime-profiles"
@@ -94,12 +130,45 @@ app_patterns=(
   "/api/execution-jobs/"
 )
 
+style_patterns=(
+  "overflow-wrap: anywhere"
+  ".demo-overview"
+  ".thread-list"
+  ".thread-card"
+  ".managed-session-workspace"
+  ".managed-session-grid"
+  ".managed-session-card"
+  ".managed-session-columns"
+  ".side-nav"
+  ".entry-map"
+  ".current-run"
+  ".workspace-tabs"
+  ".orchestrator-form"
+  ".run-guide"
+  ".task-examples"
+  ".run-aftercare"
+  ".workspace-panel.is-hidden"
+  ".demo-status-grid"
+  ".demo-flow"
+  ".agent-builder-section"
+  ".workspace-panel.is-hidden"
+  ".compact-agent"
+  ".compact-approval"
+  "details"
+  "overflow-x: auto"
+  "grid-template-columns: 1fr"
+)
+
 for pattern in "${index_patterns[@]}"; do
   require_text "$INDEX_FILE" "$pattern"
 done
 
 for pattern in "${app_patterns[@]}"; do
   require_text "$APP_FILE" "$pattern"
+done
+
+for pattern in "${style_patterns[@]}"; do
+  require_text "$STYLE_FILE" "$pattern"
 done
 
 if grep -q "window.prompt" "$APP_FILE"; then

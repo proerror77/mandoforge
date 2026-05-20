@@ -400,7 +400,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, agent_id, agent_version_id, title, status, created_at, updated_at
+                    "SELECT id, agent_id, agent_version_id, environment_id, title, status, created_at, updated_at
                      FROM sessions
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
@@ -449,12 +449,16 @@ impl AppState {
         if !self.agent_exists(input.agent_id).await? {
             return Err(AppError::not_found("agent not found"));
         }
+        if let Some(environment_id) = input.environment_id {
+            self.get_environment(environment_id).await?;
+        }
         let agent_version = self.current_agent_version(input.agent_id).await?;
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4(),
             agent_id: input.agent_id,
             agent_version_id: Some(agent_version.id),
+            environment_id: input.environment_id,
             title: input.title,
             status: SessionStatus::Created,
             created_at: now,
@@ -470,13 +474,14 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO sessions (id, tenant_id, agent_id, agent_version_id, title, status, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    "INSERT INTO sessions (id, tenant_id, agent_id, agent_version_id, environment_id, title, status, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 )
                 .bind(session.id)
                 .bind(self.current_tenant_id())
                 .bind(session.agent_id)
                 .bind(session.agent_version_id)
+                .bind(session.environment_id)
                 .bind(&session.title)
                 .bind(session.status.as_str())
                 .bind(session.created_at)
@@ -484,6 +489,16 @@ impl AppState {
                 .execute(pool)
                 .await?;
             }
+        }
+        if let Some(environment_id) = session.environment_id {
+            self.append_event(
+                "system",
+                None,
+                session.id,
+                "session.environment_bound",
+                json!({ "environment_id": environment_id }),
+            )
+            .await?;
         }
         if let Some(message) = input.message {
             self.append_event(
@@ -525,7 +540,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("session not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, agent_id, agent_version_id, title, status, created_at, updated_at
+                    "SELECT id, agent_id, agent_version_id, environment_id, title, status, created_at, updated_at
                      FROM sessions
                      WHERE tenant_id = $1 AND id = $2",
                 )
@@ -560,7 +575,7 @@ impl AppState {
                     "UPDATE sessions
                      SET status = $1, updated_at = now()
                      WHERE tenant_id = $2 AND id = $3
-                     RETURNING id, agent_id, agent_version_id, title, status, created_at, updated_at",
+                     RETURNING id, agent_id, agent_version_id, environment_id, title, status, created_at, updated_at",
                 )
                 .bind(status.as_str())
                 .bind(self.current_tenant_id())

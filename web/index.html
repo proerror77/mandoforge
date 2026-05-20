@@ -12,10 +12,15 @@
       <aside class="sidebar">
         <div>
           <p class="eyebrow">MandoForge</p>
-          <h1>Agent OS Kernel</h1>
+          <h1>Agents Runtime</h1>
         </div>
-        <button id="new-session">Run Diagnostics Demo</button>
-        <section>
+        <nav class="side-nav" aria-label="Primary Agent OS navigation">
+          <button type="button" class="selected" data-workspace-tab="orchestrator">开始一个任务</button>
+          <button type="button" data-workspace-tab="logs">查看运行记录</button>
+          <button type="button" data-workspace-tab="infra">检查系统状态</button>
+        </nav>
+        <button id="new-session" class="secondary demo-run-button">生成一条示范运行</button>
+        <section class="agent-builder-section">
           <h2>Agent Builder</h2>
           <form id="agent-form" class="stack-form">
             <label>
@@ -82,11 +87,11 @@
           </form>
         </section>
         <section>
-          <h2>Agents</h2>
+          <h2>可用 Agent</h2>
           <div id="agents" class="list"></div>
         </section>
         <section>
-          <h2>Approvals</h2>
+          <h2>待审批动作</h2>
           <div id="approvals" class="list"></div>
         </section>
       </aside>
@@ -94,28 +99,99 @@
       <section class="conversation">
         <header>
           <div>
-            <p class="eyebrow">Session Console</p>
-            <h2 id="session-title">No session selected</h2>
+            <p class="eyebrow">Agent OS Console</p>
+            <h2 id="session-title">告诉主 Agent 你要完成什么</h2>
           </div>
           <span id="session-status" class="status">idle</span>
         </header>
-        <div id="final-report" class="report"></div>
-        <section class="detail-section">
+        <nav class="workspace-tabs" aria-label="Agent OS sections">
+          <button type="button" class="selected" data-workspace-tab="orchestrator">开始任务</button>
+          <button type="button" data-workspace-tab="infra">系统状态</button>
+          <button type="button" data-workspace-tab="logs">运行记录</button>
+          <button type="button" data-workspace-tab="advanced">高级设置</button>
+        </nav>
+        <section class="demo-overview workspace-panel panel-orchestrator" id="demo-overview"></section>
+        <section class="orchestrator-launch workspace-panel panel-orchestrator">
+          <div class="run-guide">
+            <div>
+              <span>1</span>
+              <strong>写下目标</strong>
+              <small>像给同事派任务一样描述结果，不用写命令。</small>
+            </div>
+            <div>
+              <span>2</span>
+              <strong>选择执行位置</strong>
+              <small>默认用安全 worker；需要远程桌面或 Codex 时再切换。</small>
+            </div>
+            <div>
+              <span>3</span>
+              <strong>审查高风险动作</strong>
+              <small>写文件、shell、部署会进入审批和 audit log。</small>
+            </div>
+          </div>
+          <div class="task-examples" aria-label="Example tasks">
+            <button type="button" data-task-template="runtime">检查 Whiskey runtime 状态</button>
+            <button type="button" data-task-template="release">生成一次发布前检查报告</button>
+            <button type="button" data-task-template="incident">排查 worker / remote computer 异常</button>
+          </div>
+          <form id="orchestrator-form" class="orchestrator-form">
+            <label>
+              由哪个 Agent 负责
+              <select name="agent_id" id="orchestrator-agent"></select>
+            </label>
+            <label>
+              你想让它完成什么
+              <textarea name="message" rows="5">检查 Whiskey runtime 当前状态，说明哪些部分 ready、哪些部分 blocked，并生成一份 operator 可以直接看的报告。</textarea>
+            </label>
+            <label>
+              任务跑在哪里
+              <select name="environment_id" id="orchestrator-environment"></select>
+            </label>
+            <label>
+              执行方式
+              <select name="execution_target">
+                <option value="policy_worker">安全 worker：适合普通检查和报告</option>
+                <option value="remote_computer">远程计算机：需要隔离环境或远程文件时使用</option>
+                <option value="codex_app_server">Codex App Server：需要代码代理长任务时使用</option>
+              </select>
+            </label>
+            <button type="submit">开始运行，按策略检查风险</button>
+          </form>
+          <div class="run-aftercare">运行后会自动跳到“运行记录”，在那里看 timeline、tool calls、approval 和 audit log。</div>
+        </section>
+        <section class="infra-overview workspace-panel panel-infra is-hidden" id="infra-overview"></section>
+        <section class="managed-session-workspace workspace-panel panel-logs is-hidden" id="managed-session-workspace">
+          <h2>Managed Session Workspace</h2>
+          <div class="managed-session-grid" aria-label="Managed session objects">
+            <article class="managed-session-card"><span>Agent</span></article>
+            <article class="managed-session-card"><span>Environment</span></article>
+            <article class="managed-session-card"><span>Event Stream</span></article>
+            <article class="managed-session-card"><span>Blocking Actions</span></article>
+            <article class="managed-session-card"><span>Artifacts</span></article>
+            <article class="managed-session-card"><span>Threads</span></article>
+          </div>
+        </section>
+        <div id="final-report" class="report workspace-panel panel-orchestrator"></div>
+        <section class="detail-section workspace-panel panel-orchestrator">
           <h2>Artifacts</h2>
           <div id="artifacts" class="list"></div>
           <div id="artifact-detail" class="detail-panel"></div>
         </section>
-        <section class="detail-section">
+        <section class="detail-section workspace-panel panel-logs is-hidden">
           <h2>Tool Calls</h2>
           <div id="tool-calls" class="list"></div>
           <div id="tool-detail" class="detail-panel"></div>
         </section>
-        <section class="detail-section">
+        <section class="detail-section workspace-panel panel-logs is-hidden">
+          <h2>Session Threads</h2>
+          <div id="session-threads" class="thread-list"></div>
+        </section>
+        <section class="detail-section workspace-panel panel-logs is-hidden">
           <h2>Audit Log</h2>
           <div id="audit-logs" class="list"></div>
           <div id="audit-detail" class="detail-panel"></div>
         </section>
-        <section class="detail-section">
+        <section class="detail-section workspace-panel panel-advanced is-hidden">
           <h2>Admin Console</h2>
           <div class="ops-grid">
             <div>
@@ -738,6 +814,8 @@
               <div id="agent-releases" class="list"></div>
               <h4>Managed Agent Console</h4>
               <div id="managed-agent-console" class="list"></div>
+              <h4>Environments</h4>
+              <div id="environments" class="list"></div>
               <h4>Runtime Profiles</h4>
               <div id="agent-runtime-profiles" class="list"></div>
             </div>
@@ -1065,7 +1143,7 @@
         </section>
       </section>
 
-      <section class="timeline">
+      <section class="timeline workspace-panel panel-logs is-hidden">
         <header>
           <p class="eyebrow">Append-only Timeline</p>
           <h2>Events</h2>

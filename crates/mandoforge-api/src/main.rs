@@ -58,6 +58,7 @@ mod store_codex_app_server;
 mod store_context_packets;
 mod store_cost_alert_routes;
 mod store_entities;
+mod store_environments;
 mod store_eval;
 mod store_events;
 mod store_governance;
@@ -71,6 +72,8 @@ mod store_runtime_profiles;
 mod store_secret_records;
 mod store_seed;
 mod store_semantic_kernel;
+mod store_session_loop_jobs;
+mod store_session_threads;
 mod store_tool_calls;
 mod store_usage_rollups;
 mod store_workflow_packs;
@@ -319,6 +322,26 @@ struct AgentRuntimeProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct Environment {
+    id: Uuid,
+    name: String,
+    environment_type: String,
+    runtime_profile_id: Option<Uuid>,
+    remote_computer_profile: Value,
+    codex_app_server_profile: Value,
+    worker_queue_binding: Value,
+    state_mounts: Value,
+    network_policy: Value,
+    vault_requirements: Value,
+    mcp_requirements: Value,
+    release_state: String,
+    status: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentRuntimeProfileReleaseGate {
     profile_id: Uuid,
     name: String,
@@ -366,6 +389,61 @@ struct UpdateAgentRuntimeProfile {
     timeout_seconds: Option<Option<i64>>,
     #[serde(default)]
     remote_computer_required: Option<bool>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateEnvironment {
+    name: String,
+    #[serde(default = "default_environment_type")]
+    environment_type: String,
+    #[serde(default)]
+    runtime_profile_id: Option<Uuid>,
+    #[serde(default = "empty_json_object")]
+    remote_computer_profile: Value,
+    #[serde(default = "empty_json_object")]
+    codex_app_server_profile: Value,
+    #[serde(default = "empty_json_object")]
+    worker_queue_binding: Value,
+    #[serde(default = "empty_json_object")]
+    state_mounts: Value,
+    #[serde(default = "empty_json_object")]
+    network_policy: Value,
+    #[serde(default = "empty_json_object")]
+    vault_requirements: Value,
+    #[serde(default = "empty_json_object")]
+    mcp_requirements: Value,
+    #[serde(default = "default_agent_release_state")]
+    release_state: String,
+    #[serde(default = "default_enabled_status")]
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateEnvironment {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    environment_type: Option<String>,
+    #[serde(default)]
+    runtime_profile_id: Option<Option<Uuid>>,
+    #[serde(default)]
+    remote_computer_profile: Option<Value>,
+    #[serde(default)]
+    codex_app_server_profile: Option<Value>,
+    #[serde(default)]
+    worker_queue_binding: Option<Value>,
+    #[serde(default)]
+    state_mounts: Option<Value>,
+    #[serde(default)]
+    network_policy: Option<Value>,
+    #[serde(default)]
+    vault_requirements: Option<Value>,
+    #[serde(default)]
+    mcp_requirements: Option<Value>,
+    #[serde(default)]
+    release_state: Option<String>,
     #[serde(default)]
     status: Option<String>,
 }
@@ -651,6 +729,7 @@ struct Session {
     id: Uuid,
     agent_id: Uuid,
     agent_version_id: Option<Uuid>,
+    environment_id: Option<Uuid>,
     title: String,
     status: SessionStatus,
     created_at: DateTime<Utc>,
@@ -694,6 +773,8 @@ impl From<String> for SessionStatus {
 #[derive(Debug, Deserialize)]
 struct CreateSession {
     agent_id: Uuid,
+    #[serde(default)]
+    environment_id: Option<Uuid>,
     #[serde(default = "default_session_title")]
     title: String,
     message: Option<String>,
@@ -702,6 +783,20 @@ struct CreateSession {
 #[derive(Debug, Deserialize)]
 struct AddMessage {
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendSessionEvents {
+    #[serde(default)]
+    events: Vec<IncomingSessionEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IncomingSessionEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default = "empty_json_object")]
+    payload: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -722,6 +817,73 @@ struct SessionEvent {
     event_type: String,
     payload: Value,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SessionLoopJobStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl SessionLoopJobStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl From<String> for SessionLoopJobStatus {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            _ => Self::Queued,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionLoopJob {
+    id: Uuid,
+    session_id: Uuid,
+    environment_id: Option<Uuid>,
+    status: SessionLoopJobStatus,
+    trigger_event_id: Option<Uuid>,
+    reason: String,
+    enqueued_at: DateTime<Utc>,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    worker_id: Option<String>,
+    lease_expires_at: Option<DateTime<Utc>>,
+    attempt_count: i32,
+    max_attempts: i32,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionThread {
+    id: Uuid,
+    session_id: Uuid,
+    parent_thread_id: Option<Uuid>,
+    thread_kind: String,
+    agent_id: Uuid,
+    agent_version_id: Option<Uuid>,
+    environment_id: Option<Uuid>,
+    source_handoff_id: Option<Uuid>,
+    specialist_session_id: Option<Uuid>,
+    status: String,
+    title: String,
+    context: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4653,6 +4815,16 @@ fn build_router(state: AppState) -> Router {
             get(get_agent_runtime_profile_release_gate),
         )
         .route(
+            "/api/environments",
+            get(list_environments).post(create_environment),
+        )
+        .route(
+            "/api/environments/{id}",
+            get(get_environment)
+                .patch(update_environment)
+                .delete(archive_environment),
+        )
+        .route(
             "/api/semantic-sources",
             get(list_semantic_sources).post(create_semantic_source),
         )
@@ -4735,7 +4907,11 @@ fn build_router(state: AppState) -> Router {
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/messages", post(add_message))
         .route("/api/sessions/{id}/run", post(run_session))
-        .route("/api/sessions/{id}/events", get(list_events))
+        .route(
+            "/api/sessions/{id}/events",
+            get(list_events).post(send_session_events),
+        )
+        .route("/api/sessions/{id}/threads", get(list_session_threads))
         .route(
             "/api/sessions/{id}/context-packet",
             get(get_session_context_packet).post(create_session_context_packet),
@@ -5232,6 +5408,13 @@ fn build_router(state: AppState) -> Router {
             get(list_approval_escalation_rules).post(create_approval_escalation_rule),
         )
         .route("/api/execution-jobs", get(list_execution_jobs))
+        .route("/api/session-loop-jobs", get(list_session_loop_jobs))
+        .route(
+            "/api/session-loop-jobs/{id}/run",
+            post(run_session_loop_job_route),
+        )
+        .route("/api/session-threads", get(list_session_threads_collection))
+        .route("/api/session-threads/{id}", get(get_session_thread))
         .route(
             "/api/execution-jobs/{id}/cancel",
             post(cancel_execution_job_route),
@@ -6560,6 +6743,158 @@ async fn archive_agent_runtime_profile(
         ))
         .await?;
     Ok(Json(profile))
+}
+
+async fn list_environments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Environment>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "environments",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_environments().await?))
+}
+
+async fn create_environment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateEnvironment>,
+) -> Result<Json<Environment>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "environments",
+        None,
+    )
+    .await?;
+    let environment = state.create_environment(input).await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "environment.created",
+            "environment",
+            Some(environment.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": environment.name,
+                "environment_type": environment.environment_type,
+                "runtime_profile_id": environment.runtime_profile_id,
+                "release_state": environment.release_state,
+                "status": environment.status
+            }),
+        ))
+        .await?;
+    Ok(Json(environment))
+}
+
+async fn get_environment(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Environment>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "environment",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.get_environment(id).await?))
+}
+
+async fn update_environment(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateEnvironment>,
+) -> Result<Json<Environment>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "environment",
+        Some(id),
+    )
+    .await?;
+    let before = state.get_environment(id).await?;
+    let environment = state.update_environment(id, input).await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "environment.updated",
+            "environment",
+            Some(environment.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": environment.name,
+                "environment_type": environment.environment_type,
+                "before": {
+                    "name": before.name,
+                    "environment_type": before.environment_type,
+                    "runtime_profile_id": before.runtime_profile_id,
+                    "release_state": before.release_state,
+                    "status": before.status
+                },
+                "after": {
+                    "name": environment.name,
+                    "environment_type": environment.environment_type,
+                    "runtime_profile_id": environment.runtime_profile_id,
+                    "release_state": environment.release_state,
+                    "status": environment.status
+                }
+            }),
+        ))
+        .await?;
+    Ok(Json(environment))
+}
+
+async fn archive_environment(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Environment>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "environment",
+        Some(id),
+    )
+    .await?;
+    let environment = state.archive_environment(id).await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "environment.archived",
+            "environment",
+            Some(environment.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": environment.name,
+                "environment_type": environment.environment_type,
+                "release_state": environment.release_state,
+                "status": environment.status,
+                "archived_at": environment.archived_at
+            }),
+        ))
+        .await?;
+    Ok(Json(environment))
 }
 
 pub(crate) fn evaluate_agent_runtime_profile_release_gate(
@@ -8921,6 +9256,62 @@ async fn list_sessions(
     Ok(Json(state.list_sessions_visible_to(&principal).await?))
 }
 
+async fn list_session_threads_collection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SessionThread>>, AppError> {
+    let principal = authorize_collection_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session_threads",
+    )
+    .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_session_threads(None)
+            .await?
+            .into_iter()
+            .filter(|thread| visible_session_ids.contains(&thread.session_id))
+            .collect(),
+    ))
+}
+
+async fn list_session_threads(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SessionThread>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    state.get_session(id).await?;
+    Ok(Json(state.list_session_threads(Some(id)).await?))
+}
+
+async fn get_session_thread(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SessionThread>, AppError> {
+    let thread = state.get_session_thread(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(thread.session_id),
+    )
+    .await?;
+    Ok(Json(thread))
+}
+
 async fn create_session(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -8934,7 +9325,23 @@ async fn create_session(
         None,
     )
     .await?;
-    Ok(Json(state.create_session(input).await?))
+    let has_initial_message = input
+        .message
+        .as_ref()
+        .is_some_and(|message| !message.trim().is_empty());
+    let session = state.create_session(input).await?;
+    ensure_primary_session_thread(&state, session.id).await?;
+    if has_initial_message {
+        let trigger_event_id = state
+            .list_events(session.id)
+            .await?
+            .into_iter()
+            .rev()
+            .find(|event| event.event_type == "user.message")
+            .map(|event| event.id);
+        enqueue_session_loop(&state, session.id, trigger_event_id, "user.message").await?;
+    }
+    Ok(Json(session))
 }
 
 async fn get_session(
@@ -8967,17 +9374,256 @@ async fn add_message(
         Some(id),
     )
     .await?;
-    Ok(Json(
+    let event = append_user_message_event(&state, id, input.message).await?;
+    enqueue_session_loop(&state, id, Some(event.id), "user.message").await?;
+    Ok(Json(event))
+}
+
+async fn send_session_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<SendSessionEvents>,
+) -> Result<Json<Vec<SessionEvent>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsWrite,
+        "session",
+        Some(id),
+    )
+    .await?;
+    let mut stored_events = Vec::new();
+    let mut session_loop_trigger_event_id = None;
+    let mut session_loop_reason = None;
+    for event in input.events {
+        let stored = append_incoming_session_event(&state, id, event).await?;
+        if stored.event_type == "user.message" || stored.event_type == "user.custom_tool_result" {
+            session_loop_trigger_event_id = Some(stored.id);
+            session_loop_reason = Some(stored.event_type.clone());
+        }
+        stored_events.push(stored);
+    }
+    if session_loop_trigger_event_id.is_some() {
+        enqueue_session_loop(
+            &state,
+            id,
+            session_loop_trigger_event_id,
+            session_loop_reason.as_deref().unwrap_or("user.message"),
+        )
+        .await?;
+    }
+    Ok(Json(stored_events))
+}
+
+async fn append_incoming_session_event(
+    state: &AppState,
+    session_id: Uuid,
+    event: IncomingSessionEvent,
+) -> Result<SessionEvent, AppError> {
+    match event.event_type.as_str() {
+        "user.message" => {
+            let message = event
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AppError::bad_request("user.message event requires payload.message")
+                })?
+                .to_string();
+            append_user_message_event(state, session_id, message).await
+        }
+        "user.custom_tool_result" => {
+            let stored = state
+                .append_event("user", None, session_id, &event.event_type, event.payload)
+                .await?;
+            state
+                .append_event(
+                    "agent",
+                    Some(stored.id),
+                    session_id,
+                    "agent.custom_tool_result",
+                    json!({
+                        "source_event_id": stored.id,
+                        "content": stored.payload
+                    }),
+                )
+                .await?;
+            Ok(stored)
+        }
+        "user.interrupt" => {
+            let stored = state
+                .append_event("user", None, session_id, &event.event_type, event.payload)
+                .await?;
+            set_managed_session_status(state, session_id, SessionStatus::Failed, "user interrupt")
+                .await?;
+            state
+                .append_event(
+                    "system",
+                    Some(stored.id),
+                    session_id,
+                    "session.interrupted",
+                    json!({
+                        "source_event_id": stored.id,
+                        "reason": "user interrupt"
+                    }),
+                )
+                .await?;
+            Ok(stored)
+        }
+        other => Err(AppError::bad_request(format!(
+            "unsupported session event type {other}"
+        ))),
+    }
+}
+
+async fn append_user_message_event(
+    state: &AppState,
+    session_id: Uuid,
+    message: String,
+) -> Result<SessionEvent, AppError> {
+    state
+        .append_event(
+            "user",
+            None,
+            session_id,
+            "user.message",
+            json!({ "message": message }),
+        )
+        .await
+}
+
+async fn ensure_primary_session_thread(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<SessionThread, AppError> {
+    if let Some(thread) = state.primary_session_thread(session_id).await? {
+        return Ok(thread);
+    }
+    let session = state.get_session(session_id).await?;
+    let now = Utc::now();
+    let thread = state
+        .create_session_thread(SessionThread {
+            id: Uuid::new_v4(),
+            session_id,
+            parent_thread_id: None,
+            thread_kind: "primary".to_string(),
+            agent_id: session.agent_id,
+            agent_version_id: session.agent_version_id,
+            environment_id: session.environment_id,
+            source_handoff_id: None,
+            specialist_session_id: None,
+            status: managed_thread_status_for_session(&session.status).to_string(),
+            title: session.title.clone(),
+            context: json!({
+                "origin": "session",
+                "session_id": session.id,
+                "agent_id": session.agent_id,
+                "environment_id": session.environment_id
+            }),
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(thread.id),
+            session_id,
+            "thread.created",
+            session_thread_event_payload(&thread),
+        )
+        .await?;
+    Ok(thread)
+}
+
+async fn set_primary_session_thread_status(
+    state: &AppState,
+    session_id: Uuid,
+    status: &str,
+) -> Result<(), AppError> {
+    let thread = ensure_primary_session_thread(state, session_id).await?;
+    if thread.status != status {
+        let updated = state
+            .update_session_thread_status(thread.id, status)
+            .await?;
         state
             .append_event(
-                "user",
-                None,
-                id,
-                "user.message",
-                json!({ "message": input.message }),
+                "system",
+                Some(updated.id),
+                session_id,
+                "thread.status_changed",
+                session_thread_event_payload(&updated),
             )
-            .await?,
-    ))
+            .await?;
+    }
+    Ok(())
+}
+
+fn managed_thread_status_for_session(status: &SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::Created => "idle",
+        SessionStatus::Running => "running",
+        SessionStatus::WaitingApproval => "requires_action",
+        SessionStatus::Completed => "terminated",
+        SessionStatus::Failed => "failed",
+    }
+}
+
+fn managed_session_status_event(status: &SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::Created => "session.status_idle",
+        SessionStatus::Running => "session.status_running",
+        SessionStatus::WaitingApproval => "session.status_requires_action",
+        SessionStatus::Completed => "session.status_terminated",
+        SessionStatus::Failed => "session.status_failed",
+    }
+}
+
+async fn set_managed_session_status(
+    state: &AppState,
+    session_id: Uuid,
+    status: SessionStatus,
+    reason: &str,
+) -> Result<Session, AppError> {
+    let session = state.set_session_status(session_id, status).await?;
+    set_primary_session_thread_status(
+        state,
+        session_id,
+        managed_thread_status_for_session(&session.status),
+    )
+    .await?;
+    state
+        .append_event(
+            "system",
+            None,
+            session_id,
+            managed_session_status_event(&session.status),
+            json!({
+                "status": session.status,
+                "reason": reason,
+                "environment_id": session.environment_id
+            }),
+        )
+        .await?;
+    Ok(session)
+}
+
+fn session_thread_event_payload(thread: &SessionThread) -> Value {
+    json!({
+        "thread_id": thread.id,
+        "session_id": thread.session_id,
+        "parent_thread_id": thread.parent_thread_id,
+        "thread_kind": thread.thread_kind,
+        "agent_id": thread.agent_id,
+        "agent_version_id": thread.agent_version_id,
+        "environment_id": thread.environment_id,
+        "source_handoff_id": thread.source_handoff_id,
+        "specialist_session_id": thread.specialist_session_id,
+        "status": thread.status,
+        "title": thread.title,
+        "context": thread.context
+    })
 }
 
 fn new_audit_log(
@@ -9538,6 +10184,8 @@ async fn assign_agent_handoff_event(
             ));
         }
     }
+    let source_session = state.get_session(handoff.source_session_id).await?;
+    let parent_thread = ensure_primary_session_thread(&state, source_session.id).await?;
 
     let specialist_session = match input.specialist_session_id {
         Some(session_id) => {
@@ -9560,6 +10208,7 @@ async fn assign_agent_handoff_event(
             state
                 .create_session(CreateSession {
                     agent_id: handoff.target_agent_id,
+                    environment_id: source_session.environment_id,
                     title: input.title.unwrap_or_else(|| {
                         format!("Handoff {} for {}", handoff.intent, target_agent.name)
                     }),
@@ -9568,6 +10217,7 @@ async fn assign_agent_handoff_event(
                 .await?
         }
     };
+    ensure_primary_session_thread(&state, specialist_session.id).await?;
     let now = Utc::now();
     let assignment = state
         .create_agent_handoff_assignment(AgentHandoffAssignment {
@@ -9600,6 +10250,32 @@ async fn assign_agent_handoff_event(
         record_agent_handoff_assignment_audit_and_events(&state, &assignment, &handoff).await?;
     let assignment = state
         .update_agent_handoff_assignment_audit_trace(assignment.id, audit.id)
+        .await?;
+    let child_thread = create_handoff_session_thread(
+        &state,
+        &assignment,
+        &handoff,
+        &specialist_session,
+        Some(parent_thread.id),
+    )
+    .await?;
+    state
+        .append_event(
+            "system",
+            Some(child_thread.id),
+            handoff.source_session_id,
+            "thread.started",
+            session_thread_event_payload(&child_thread),
+        )
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(child_thread.id),
+            specialist_session.id,
+            "thread.started",
+            session_thread_event_payload(&child_thread),
+        )
         .await?;
     Ok(Json(assignment))
 }
@@ -9649,6 +10325,32 @@ async fn attach_agent_handoff_remote_computer_assignment(
         .await?;
     record_agent_handoff_assignment_remote_computer_event(&state, &updated, &remote_assignment)
         .await?;
+    if let Some(thread) = state
+        .session_thread_for_handoff(updated.agent_handoff_event_id)
+        .await?
+    {
+        let thread = state
+            .update_session_thread_status(thread.id, "running")
+            .await?;
+        state
+            .append_event(
+                "system",
+                Some(thread.id),
+                updated.source_session_id,
+                "thread.status_changed",
+                session_thread_event_payload(&thread),
+            )
+            .await?;
+        state
+            .append_event(
+                "system",
+                Some(thread.id),
+                updated.specialist_session_id,
+                "thread.status_changed",
+                session_thread_event_payload(&thread),
+            )
+            .await?;
+    }
     Ok(Json(updated))
 }
 
@@ -9682,6 +10384,38 @@ async fn transition_agent_handoff_event(
     let updated = state
         .update_agent_handoff_event_status(current.id, next_status, Some(audit.id))
         .await?;
+    if matches!(next_status, "completed" | "failed")
+        && let Some(thread) = state.session_thread_for_handoff(current.id).await?
+    {
+        let status = if next_status == "completed" {
+            "terminated"
+        } else {
+            "failed"
+        };
+        let thread = state
+            .update_session_thread_status(thread.id, status)
+            .await?;
+        state
+            .append_event(
+                "system",
+                Some(thread.id),
+                current.source_session_id,
+                "thread.status_changed",
+                session_thread_event_payload(&thread),
+            )
+            .await?;
+        if let Some(specialist_session_id) = thread.specialist_session_id {
+            state
+                .append_event(
+                    "system",
+                    Some(thread.id),
+                    specialist_session_id,
+                    "thread.status_changed",
+                    session_thread_event_payload(&thread),
+                )
+                .await?;
+        }
+    }
     Ok(Json(updated))
 }
 
@@ -9834,6 +10568,52 @@ async fn record_agent_handoff_assignment_remote_computer_event(
         ))
         .await?;
     Ok(())
+}
+
+async fn create_handoff_session_thread(
+    state: &AppState,
+    assignment: &AgentHandoffAssignment,
+    handoff: &AgentHandoffEvent,
+    specialist_session: &Session,
+    parent_thread_id: Option<Uuid>,
+) -> Result<SessionThread, AppError> {
+    if let Some(existing) = state.session_thread_for_handoff(handoff.id).await? {
+        return Ok(existing);
+    }
+    let now = Utc::now();
+    state
+        .create_session_thread(SessionThread {
+            id: Uuid::new_v4(),
+            session_id: handoff.source_session_id,
+            parent_thread_id,
+            thread_kind: "specialist".to_string(),
+            agent_id: assignment.target_agent_id,
+            agent_version_id: specialist_session.agent_version_id,
+            environment_id: specialist_session.environment_id,
+            source_handoff_id: Some(handoff.id),
+            specialist_session_id: Some(specialist_session.id),
+            status: if assignment.status == "waiting_remote_computer" {
+                "waiting_environment".to_string()
+            } else {
+                "running".to_string()
+            },
+            title: specialist_session.title.clone(),
+            context: json!({
+                "origin": "agent_handoff",
+                "agent_handoff_assignment_id": assignment.id,
+                "agent_handoff_event_id": handoff.id,
+                "manager_plan_id": assignment.manager_plan_id,
+                "intent": handoff.intent,
+                "risk_level": handoff.risk_level,
+                "approval_required": handoff.approval_required,
+                "semantic_scopes": assignment.semantic_scopes,
+                "remote_computer_required": assignment.remote_computer_required,
+                "remote_computer_job_assignment_id": assignment.remote_computer_job_assignment_id
+            }),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
 }
 
 async fn record_manager_agent_plan_audit_and_event(
@@ -11435,23 +12215,54 @@ async fn run_provider_harness(
     provider_label: &str,
 ) -> Result<ProviderResponse, AppError> {
     let context = build_harness_context(state, session_id).await?;
+    let span_id = Uuid::new_v4();
     state
         .append_event(
             "agent",
-            None,
+            Some(span_id),
+            session_id,
+            "span.model_request_start",
+            json!({
+                "span_id": span_id,
+                "provider": provider_label,
+                "client": provider.name(),
+                "context": context
+            }),
+        )
+        .await?;
+    state
+        .append_event(
+            "agent",
+            Some(span_id),
             session_id,
             "llm.request",
-            json!({"provider": provider_label, "client": provider.name(), "context": context}),
+            json!({"span_id": span_id, "provider": provider_label, "client": provider.name(), "context": context}),
         )
         .await?;
     let response = provider.complete(context).await?;
     state
         .append_event(
             "agent",
-            None,
+            Some(span_id),
             session_id,
             "llm.response",
-            json!({"provider": provider_label, "client": provider.name(), "tool_calls": &response.tool_calls, "final_message": &response.final_message, "usage": &response.usage}),
+            json!({"span_id": span_id, "provider": provider_label, "client": provider.name(), "tool_calls": &response.tool_calls, "final_message": &response.final_message, "usage": &response.usage}),
+        )
+        .await?;
+    state
+        .append_event(
+            "agent",
+            Some(span_id),
+            session_id,
+            "span.model_request_end",
+            json!({
+                "span_id": span_id,
+                "provider": provider_label,
+                "client": provider.name(),
+                "tool_call_count": response.tool_calls.len(),
+                "final_message_present": response.final_message.is_some(),
+                "usage": response.usage
+            }),
         )
         .await?;
     Ok(response)
@@ -11655,7 +12466,45 @@ async fn run_session(
     headers: HeaderMap,
 ) -> Result<Json<Session>, AppError> {
     authorize_session_run(&state, &headers, id).await?;
-    state.set_session_status(id, SessionStatus::Running).await?;
+    let event = append_user_message_event(
+        &state,
+        id,
+        "Compatibility run request from POST /api/sessions/:id/run".to_string(),
+    )
+    .await?;
+    enqueue_session_loop(&state, id, Some(event.id), "compat.run").await?;
+    Ok(Json(state.get_session(id).await?))
+}
+
+async fn enqueue_session_loop(
+    state: &AppState,
+    id: Uuid,
+    trigger_event_id: Option<Uuid>,
+    reason: &str,
+) -> Result<SessionLoopJob, AppError> {
+    let job = state
+        .enqueue_session_loop_job(id, trigger_event_id, reason)
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(job.id),
+            id,
+            "session.loop.queued",
+            json!({
+                "session_loop_job_id": job.id,
+                "environment_id": job.environment_id,
+                "reason": job.reason,
+                "status": job.status
+            }),
+        )
+        .await?;
+    Ok(job)
+}
+
+async fn run_session_loop(state: &AppState, id: Uuid) -> Result<Session, AppError> {
+    ensure_primary_session_thread(state, id).await?;
+    set_managed_session_status(state, id, SessionStatus::Running, "session loop started").await?;
     state
         .append_audit_log(new_audit_log(
             Some(id),
@@ -11758,13 +12607,21 @@ async fn run_session(
     .await?;
 
     let session = if waiting_for_approval {
-        state
-            .set_session_status(id, SessionStatus::WaitingApproval)
-            .await?
+        set_managed_session_status(
+            state,
+            id,
+            SessionStatus::WaitingApproval,
+            "tool approval required",
+        )
+        .await?
     } else {
-        let session = state
-            .set_session_status(id, SessionStatus::Completed)
-            .await?;
+        let session = set_managed_session_status(
+            state,
+            id,
+            SessionStatus::Completed,
+            "provider tool loop completed",
+        )
+        .await?;
         state
             .append_event(
                 "system",
@@ -11776,7 +12633,7 @@ async fn run_session(
             .await?;
         session
     };
-    Ok(Json(session))
+    Ok(session)
 }
 
 async fn authorize_session_run(
@@ -13553,9 +14410,13 @@ impl ToolExecutor for ApprovalRequestTool {
                 json!({"action": approval.action, "risk_level": approval.risk_level, "expires_at": approval.expires_at}),
             ))
             .await?;
-        state
-            .set_session_status(input.session_id, SessionStatus::WaitingApproval)
-            .await?;
+        set_managed_session_status(
+            state,
+            input.session_id,
+            SessionStatus::WaitingApproval,
+            "tool approval requested",
+        )
+        .await?;
         Ok(json!({"status": "approval_requested", "approval_id": approval.id}))
     }
 }
@@ -13923,6 +14784,21 @@ async fn execute_tool_invocation(
             json!({"tool": name, "args": input.args.clone(), "agent_version_id": agent_version.id, "agent_version": agent_version.version}),
         )
         .await?;
+    state
+        .append_event(
+            "agent",
+            Some(call_event.id),
+            input.session_id,
+            "agent.tool_use",
+            json!({
+                "event_id": call_event.id,
+                "tool": name,
+                "args": input.args.clone(),
+                "agent_version_id": agent_version.id,
+                "agent_version": agent_version.version
+            }),
+        )
+        .await?;
     let tool_call = state
         .insert_tool_call(ToolCall {
             id: Uuid::new_v4(),
@@ -14091,9 +14967,13 @@ async fn execute_tool_invocation(
                 json!({"tool_call_id": approval.tool_call_id, "action": approval.action, "risk_level": approval.risk_level, "expires_at": approval.expires_at}),
             ))
             .await?;
-        state
-            .set_session_status(input.session_id, SessionStatus::WaitingApproval)
-            .await?;
+        set_managed_session_status(
+            state,
+            input.session_id,
+            SessionStatus::WaitingApproval,
+            "tool approval required",
+        )
+        .await?;
         return Ok(result);
     }
 
@@ -14186,6 +15066,15 @@ async fn execute_tool_invocation(
             input.session_id,
             event_type,
             json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+        )
+        .await?;
+    state
+        .append_event(
+            "agent",
+            Some(tool_call.id),
+            input.session_id,
+            "agent.tool_result",
+            json!({"tool_call_id": tool_call.id, "tool": name, "status": status, "content": result}),
         )
         .await?;
     state
@@ -14695,6 +15584,8 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "workspaces",
         "secret_records",
         "execution_jobs",
+        "session_loop_jobs",
+        "session_threads",
         "organizations",
         "teams",
         "projects",
@@ -14713,6 +15604,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "workflow_pack_installations",
         "workflow_pack_profile_assets",
         "agent_runtime_profiles",
+        "environments",
         "mcp_servers",
         "eval_datasets",
         "eval_cases",
@@ -32936,6 +33828,28 @@ async fn list_execution_jobs(
     ))
 }
 
+async fn list_session_loop_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SessionLoopJob>>, AppError> {
+    let principal = authorize_collection_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session_loop_jobs",
+    )
+    .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_session_loop_jobs()
+            .await?
+            .into_iter()
+            .filter(|job| visible_session_ids.contains(&job.session_id))
+            .collect(),
+    ))
+}
+
 async fn assign_execution_job_remote_computer_lease(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -36164,6 +37078,94 @@ async fn run_execution_job_route(
     Ok(Json(completed))
 }
 
+async fn run_session_loop_job_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SessionLoopJob>, AppError> {
+    authorize_session_loop_job_run(&state, &headers, id).await?;
+    let worker_id = headers
+        .get("x-mandoforge-worker-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("session-loop-worker");
+    let running = state.start_session_loop_job(id, worker_id).await?;
+    state
+        .append_event(
+            "worker",
+            Some(running.id),
+            running.session_id,
+            "session.loop.started",
+            json!({
+                "session_loop_job_id": running.id,
+                "environment_id": running.environment_id,
+                "worker_id": worker_id,
+                "attempt_count": running.attempt_count
+            }),
+        )
+        .await?;
+    match run_session_loop(&state, running.session_id).await {
+        Ok(session) => {
+            let completed = state.complete_session_loop_job(running.id).await?;
+            state
+                .append_event(
+                    "worker",
+                    Some(completed.id),
+                    completed.session_id,
+                    "session.loop.completed",
+                    json!({
+                        "session_loop_job_id": completed.id,
+                        "status": completed.status,
+                        "session_status": session.status,
+                        "worker_id": worker_id
+                    }),
+                )
+                .await?;
+            Ok(Json(completed))
+        }
+        Err(error) => {
+            let failed = state
+                .fail_session_loop_job(running.id, &error.message)
+                .await?;
+            set_managed_session_status(
+                &state,
+                failed.session_id,
+                SessionStatus::Failed,
+                "session loop failed",
+            )
+            .await?;
+            state
+                .append_event(
+                    "worker",
+                    Some(failed.id),
+                    failed.session_id,
+                    "session.loop.failed",
+                    json!({
+                        "session_loop_job_id": failed.id,
+                        "status": failed.status,
+                        "error": error.message,
+                        "worker_id": worker_id
+                    }),
+                )
+                .await?;
+            state
+                .append_event(
+                    "system",
+                    Some(failed.id),
+                    failed.session_id,
+                    "session.failed",
+                    json!({
+                        "session_loop_job_id": failed.id,
+                        "reason": "session loop failed",
+                        "error": error.message
+                    }),
+                )
+                .await?;
+            Err(error)
+        }
+    }
+}
+
 async fn cancel_execution_job_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -36329,6 +37331,23 @@ async fn authorize_execution_job_run(
     enforce_resource_scope(state, &principal, &session_request).await
 }
 
+async fn authorize_session_loop_job_run(
+    state: &AppState,
+    headers: &HeaderMap,
+    job_id: Uuid,
+) -> Result<(), AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    let job = state.get_session_loop_job(job_id).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::SessionsRun,
+        resource_type: "session".to_string(),
+        resource_id: Some(job.session_id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(state, &principal, &request).await
+}
+
 async fn list_session_audit_logs(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -36393,9 +37412,13 @@ async fn decide_approval(
                 resume_provider_after_approval(&state, updated.session_id).await?;
             }
             ExecutionWorkerOutcome::Queued => {
-                state
-                    .set_session_status(updated.session_id, SessionStatus::Running)
-                    .await?;
+                set_managed_session_status(
+                    &state,
+                    updated.session_id,
+                    SessionStatus::Running,
+                    "approved execution queued for worker",
+                )
+                .await?;
             }
         }
     }
@@ -36488,9 +37511,13 @@ async fn complete_session_after_approval(
     state: &AppState,
     session_id: Uuid,
 ) -> Result<(), AppError> {
-    state
-        .set_session_status(session_id, SessionStatus::Completed)
-        .await?;
+    set_managed_session_status(
+        state,
+        session_id,
+        SessionStatus::Completed,
+        "pending approval resolved",
+    )
+    .await?;
     state
         .append_event(
             "system",
@@ -36513,9 +37540,13 @@ async fn resume_provider_after_approval(
         return Ok(());
     }
 
-    state
-        .set_session_status(session_id, SessionStatus::Running)
-        .await?;
+    set_managed_session_status(
+        state,
+        session_id,
+        SessionStatus::Running,
+        "provider resumed after approval",
+    )
+    .await?;
     let (provider_label, provider) = provider_client_for_session(state, session_id).await?;
     let provider_response =
         run_provider_harness(state, session_id, provider.as_ref(), &provider_label).await?;
@@ -36645,6 +37676,10 @@ fn default_provider() -> String {
 
 fn default_agent_runtime_type() -> String {
     "agent_cli".to_string()
+}
+
+fn default_environment_type() -> String {
+    "local".to_string()
 }
 
 fn default_agent_role() -> String {
@@ -41383,6 +42418,44 @@ not json
             event.event_type == "agent_handoff.assignment_received"
                 && event.payload["agent_handoff_assignment_id"] == json!(assignment.id)
         }));
+        assert!(manager_events.iter().any(|event| {
+            event.event_type == "thread.started"
+                && event.payload["source_handoff_id"] == json!(handoff.id)
+                && event.payload["specialist_session_id"] == json!(assignment.specialist_session_id)
+        }));
+        let threads: Vec<SessionThread> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/threads", manager_session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(threads.iter().any(|thread| {
+            thread.thread_kind == "primary"
+                && thread.session_id == manager_session.id
+                && thread.specialist_session_id.is_none()
+        }));
+        let child_thread = threads
+            .iter()
+            .find(|thread| thread.source_handoff_id == Some(handoff.id))
+            .expect("handoff creates specialist session thread");
+        assert_eq!(child_thread.thread_kind, "specialist");
+        assert_eq!(
+            child_thread.specialist_session_id,
+            Some(assignment.specialist_session_id)
+        );
+        assert_eq!(child_thread.agent_id, specialist.id);
+        assert_eq!(child_thread.status, "waiting_environment");
+        let fetched_thread: SessionThread = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/session-threads/{}", child_thread.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(fetched_thread.id, child_thread.id);
 
         let session_assignments: Vec<AgentHandoffAssignment> = request_json(
             app.clone(),
@@ -42924,6 +43997,9 @@ not json
         assert!(names.contains(&"0035_semantic_kernel.sql"));
         assert!(names.contains(&"0036_context_packets.sql"));
         assert!(names.contains(&"0037_memory_writeback_candidates.sql"));
+        assert!(names.contains(&"0038_environments.sql"));
+        assert!(names.contains(&"0039_session_loop_jobs.sql"));
+        assert!(names.contains(&"0040_session_threads.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -42933,7 +44009,7 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
@@ -42945,7 +44021,10 @@ not json
             include_str!("../../../db/migrations/0034_agent_handoff_assignments.sql"),
             include_str!("../../../db/migrations/0035_semantic_kernel.sql"),
             include_str!("../../../db/migrations/0036_context_packets.sql"),
-            include_str!("../../../db/migrations/0037_memory_writeback_candidates.sql")
+            include_str!("../../../db/migrations/0037_memory_writeback_candidates.sql"),
+            include_str!("../../../db/migrations/0038_environments.sql"),
+            include_str!("../../../db/migrations/0039_session_loop_jobs.sql"),
+            include_str!("../../../db/migrations/0040_session_threads.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
@@ -44678,6 +45757,136 @@ not json
 
     async fn test_app() -> Router {
         test_app_with_worker(Arc::new(InlineExecutionWorker)).await
+    }
+
+    #[tokio::test]
+    async fn environment_resource_can_bind_session() {
+        let app = test_app().await;
+        let profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "codex-safe",
+                    "runtime_type": "agent_cli",
+                    "command": "codex",
+                    "default_args": ["exec", "--json"],
+                    "env": {},
+                    "timeout_seconds": 120,
+                    "remote_computer_required": false,
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        let environment: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Whiskey Remote",
+                    "environment_type": "remote_computer",
+                    "runtime_profile_id": profile.id,
+                    "remote_computer_profile": {"pool": "whiskey"},
+                    "worker_queue_binding": {"queue": "managed-agent"},
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(environment.environment_type, "remote_computer");
+        assert_eq!(environment.runtime_profile_id, Some(profile.id));
+
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agents[0].id,
+                    "environment_id": environment.id,
+                    "title": "environment bound run"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(session.environment_id, Some(environment.id));
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "session.environment_bound"
+                && event.payload["environment_id"] == json!(environment.id)
+        }));
+
+        let listed: Vec<Environment> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/environments")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(listed.iter().any(|item| item.id == environment.id));
+    }
+
+    #[tokio::test]
+    async fn session_rejects_unknown_environment() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let (status, error) = request_value(
+            app,
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agents[0].id,
+                    "environment_id": Uuid::new_v4(),
+                    "title": "missing environment"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("environment not found")
+        );
     }
 
     #[tokio::test]
@@ -50028,6 +51237,7 @@ not json
         let session = state
             .create_session(CreateSession {
                 agent_id: agent.id,
+                environment_id: None,
                 title: "telemetry".to_string(),
                 message: None,
             })
@@ -50151,6 +51361,7 @@ not json
         let session = state
             .create_session(CreateSession {
                 agent_id: agent.id,
+                environment_id: None,
                 title: "codex app server sync".to_string(),
                 message: None,
             })
@@ -53133,6 +54344,7 @@ not json
                 .expect("valid request"),
         )
         .await;
+        run_next_session_loop_job(app.clone(), session.id, "cost-alert-worker").await;
 
         let alerts: CostAlertSummary = request_json(
             app.clone(),
@@ -53581,6 +54793,7 @@ not json
         let scoped_session = state
             .create_session(CreateSession {
                 agent_id: scoped_agent.id,
+                environment_id: None,
                 title: "scoped mcp call".to_string(),
                 message: None,
             })
@@ -54409,6 +55622,80 @@ not json
             .expect("valid request")
     }
 
+    async fn session_loop_jobs_for_session(app: Router, session_id: Uuid) -> Vec<SessionLoopJob> {
+        request_json::<Vec<SessionLoopJob>>(
+            app,
+            Request::builder()
+                .uri("/api/session-loop-jobs")
+                .header("x-mandoforge-subject", "mandoforge-test-worker")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .filter(|job| job.session_id == session_id)
+        .collect()
+    }
+
+    async fn run_next_session_loop_job(
+        app: Router,
+        session_id: Uuid,
+        worker_id: &str,
+    ) -> SessionLoopJob {
+        let job = session_loop_jobs_for_session(app.clone(), session_id)
+            .await
+            .into_iter()
+            .find(|job| {
+                matches!(
+                    job.status,
+                    SessionLoopJobStatus::Queued | SessionLoopJobStatus::Running
+                )
+            })
+            .expect("session loop job queued");
+        request_json(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/session-loop-jobs/{}/run", job.id))
+                .header("x-mandoforge-worker-id", worker_id)
+                .header("x-mandoforge-subject", "mandoforge-test-worker")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+    }
+
+    async fn run_next_session_loop_job_value(
+        app: Router,
+        session_id: Uuid,
+        worker_id: &str,
+    ) -> (StatusCode, Value) {
+        let job = session_loop_jobs_for_session(app.clone(), session_id)
+            .await
+            .into_iter()
+            .find(|job| {
+                matches!(
+                    job.status,
+                    SessionLoopJobStatus::Queued | SessionLoopJobStatus::Running
+                )
+            })
+            .expect("session loop job queued");
+        request_value(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/session-loop-jobs/{}/run", job.id))
+                .header("x-mandoforge-worker-id", worker_id)
+                .header("x-mandoforge-subject", "mandoforge-test-worker")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn generic_runtime_diagnostics_replay_api_flow() {
         let _env_guard = env_lock().lock().expect("env lock");
@@ -54442,12 +55729,33 @@ not json
         )
         .await;
         assert!(matches!(session.status, SessionStatus::Created));
+        let initial_threads: Vec<SessionThread> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/threads", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(initial_threads.len(), 1);
+        assert_eq!(initial_threads[0].thread_kind, "primary");
+        assert_eq!(initial_threads[0].status, "idle");
 
+        let queued_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
+        assert!(
+            queued_jobs
+                .iter()
+                .any(|job| matches!(job.status, SessionLoopJobStatus::Queued)
+                    && job.reason == "user.message"),
+            "initial message should enqueue a session loop job: {queued_jobs:?}"
+        );
+        let completed_loop =
+            run_next_session_loop_job(app.clone(), session.id, "diagnostics-worker").await;
+        assert_eq!(completed_loop.status, SessionLoopJobStatus::Completed);
         let running: Session = request_json(
             app.clone(),
             Request::builder()
-                .method("POST")
-                .uri(format!("/api/sessions/{}/run", session.id))
+                .uri(format!("/api/sessions/{}", session.id))
                 .body(Body::empty())
                 .expect("valid request"),
         )
@@ -54477,6 +55785,14 @@ not json
             "approval.requested",
             "artifact.created",
             "llm.response",
+            "thread.created",
+            "thread.status_changed",
+            "session.status_running",
+            "session.status_requires_action",
+            "span.model_request_start",
+            "span.model_request_end",
+            "agent.tool_use",
+            "agent.tool_result",
         ] {
             assert!(
                 event_types.contains(&expected),
@@ -54588,6 +55904,8 @@ not json
             .map(|event| event.event_type.as_str())
             .collect();
         assert!(event_types_after_approval.contains(&"approval.approved"));
+        assert!(event_types_after_approval.contains(&"session.status_terminated"));
+        assert!(event_types_after_approval.contains(&"thread.status_changed"));
         assert!(
             event_types_after_approval
                 .iter()
@@ -54607,7 +55925,7 @@ not json
                     .is_some_and(|message| message.contains("Approved execution completed"))
         }));
         let tool_calls_after_approval: Vec<ToolCall> = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri(format!("/api/sessions/{}/tool-calls", session.id))
                 .body(Body::empty())
@@ -54627,6 +55945,376 @@ not json
                 .unwrap_or_default()
                 .contains(&session.id.to_string())
         );
+        let completed_threads: Vec<SessionThread> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/threads", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed_threads.len(), 1);
+        assert_eq!(completed_threads[0].status, "terminated");
+    }
+
+    #[tokio::test]
+    async fn session_events_user_message_drives_provider_loop() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let app = test_app().await;
+
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.name == "Generic Orchestrator Agent")
+            .expect("seeded generic orchestrator agent");
+
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "event-driven runtime diagnostics"
+                }),
+            ),
+        )
+        .await;
+        assert!(matches!(session.status, SessionStatus::Created));
+
+        let stored_events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "user.message",
+                        "payload": {
+                            "message": "Drive this session through the managed-agent event API."
+                        }
+                    }]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(stored_events.len(), 1);
+        assert_eq!(stored_events[0].event_type, "user.message");
+        let custom_tool_events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "user.custom_tool_result",
+                        "payload": {
+                            "custom_tool_call_id": "custom-1",
+                            "result": {"status": "ok"}
+                        }
+                    }]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(custom_tool_events.len(), 1);
+        assert_eq!(custom_tool_events[0].event_type, "user.custom_tool_result");
+        let queued_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
+        assert_eq!(queued_jobs.len(), 1);
+        assert_eq!(queued_jobs[0].reason, "user.message");
+        assert_eq!(queued_jobs[0].trigger_event_id, Some(stored_events[0].id));
+
+        let completed_loop =
+            run_next_session_loop_job(app.clone(), session.id, "event-session-worker").await;
+        assert_eq!(completed_loop.status, SessionLoopJobStatus::Completed);
+        let running: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(running.status, SessionStatus::WaitingApproval));
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let event_types: Vec<_> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        for expected in [
+            "user.message",
+            "llm.request",
+            "llm.response",
+            "agent.plan",
+            "tool.call",
+            "policy.requires_approval",
+            "approval.requested",
+            "artifact.created",
+            "agent.custom_tool_result",
+        ] {
+            assert!(
+                event_types.contains(&expected),
+                "missing event type {expected}: {event_types:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_events_custom_tool_result_without_existing_job_enqueues_session_loop() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.name == "Generic Orchestrator Agent")
+            .expect("seeded generic orchestrator agent");
+
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "custom tool result only"
+                }),
+            ),
+        )
+        .await;
+
+        let custom_tool_events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "user.custom_tool_result",
+                        "payload": {
+                            "custom_tool_call_id": "custom-only-1",
+                            "result": {"status": "ok"}
+                        }
+                    }]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(custom_tool_events.len(), 1);
+        assert_eq!(custom_tool_events[0].event_type, "user.custom_tool_result");
+
+        let queued_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
+        assert_eq!(queued_jobs.len(), 1);
+        assert_eq!(queued_jobs[0].status, SessionLoopJobStatus::Queued);
+        assert_eq!(queued_jobs[0].reason, "user.custom_tool_result");
+        assert_eq!(
+            queued_jobs[0].trigger_event_id,
+            Some(custom_tool_events[0].id)
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "agent.custom_tool_result"
+                && event.payload["source_event_id"] == json!(custom_tool_events[0].id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn session_loop_job_enqueue_preserves_queued_job_while_another_job_runs() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("list agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let session = state
+            .create_session(CreateSession {
+                agent_id: agent.id,
+                environment_id: None,
+                title: "session loop running plus queued".to_string(),
+                message: None,
+            })
+            .await
+            .expect("create session");
+
+        let first = state
+            .enqueue_session_loop_job(session.id, Some(Uuid::new_v4()), "user.message")
+            .await
+            .expect("enqueue first job");
+        let running = state
+            .start_session_loop_job(first.id, "loop-worker-a")
+            .await
+            .expect("start first job");
+        assert_eq!(running.status, SessionLoopJobStatus::Running);
+
+        let second_trigger = Uuid::new_v4();
+        let second = state
+            .enqueue_session_loop_job(session.id, Some(second_trigger), "user.custom_tool_result")
+            .await
+            .expect("enqueue second job while first is running");
+        assert_ne!(second.id, running.id);
+        assert_eq!(second.status, SessionLoopJobStatus::Queued);
+        assert_eq!(second.reason, "user.custom_tool_result");
+        assert_eq!(second.trigger_event_id, Some(second_trigger));
+
+        let jobs = state
+            .list_session_loop_jobs()
+            .await
+            .expect("list session loop jobs");
+        let session_jobs: Vec<_> = jobs
+            .into_iter()
+            .filter(|job| job.session_id == session.id)
+            .collect();
+        assert_eq!(session_jobs.len(), 2);
+        assert_eq!(
+            session_jobs
+                .iter()
+                .filter(|job| job.status == SessionLoopJobStatus::Running)
+                .count(),
+            1
+        );
+        assert_eq!(
+            session_jobs
+                .iter()
+                .filter(|job| job.status == SessionLoopJobStatus::Queued)
+                .count(),
+            1
+        );
+        let blocked_start = state
+            .start_session_loop_job(second.id, "loop-worker-b")
+            .await
+            .expect_err("queued job should not start while another job is running");
+        assert_eq!(blocked_start.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn legacy_message_and_run_routes_enqueue_session_loop_jobs() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.name == "Generic Orchestrator Agent")
+            .expect("seeded generic orchestrator agent");
+
+        let message_session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "legacy message route"}),
+            ),
+        )
+        .await;
+        let message_event: SessionEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/messages", message_session.id),
+                json!({"message": "Start via the legacy message endpoint."}),
+            ),
+        )
+        .await;
+        assert_eq!(message_event.event_type, "user.message");
+        let message_jobs = session_loop_jobs_for_session(app.clone(), message_session.id).await;
+        assert_eq!(message_jobs.len(), 1);
+        assert_eq!(message_jobs[0].reason, "user.message");
+        assert_eq!(message_jobs[0].trigger_event_id, Some(message_event.id));
+
+        let run_session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "compat run route"}),
+            ),
+        )
+        .await;
+        let compat_run: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/run", run_session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(compat_run.status, SessionStatus::Created));
+        let run_events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", run_session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let compat_event = run_events
+            .iter()
+            .find(|event| {
+                event.event_type == "user.message"
+                    && event
+                        .payload
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("Compatibility run request"))
+            })
+            .expect("compat run writes a user message event");
+        let run_jobs = session_loop_jobs_for_session(app.clone(), run_session.id).await;
+        assert_eq!(run_jobs.len(), 1);
+        assert_eq!(run_jobs[0].reason, "compat.run");
+        assert_eq!(run_jobs[0].trigger_event_id, Some(compat_event.id));
+
+        let completed =
+            run_next_session_loop_job(app.clone(), run_session.id, "compat-worker").await;
+        assert_eq!(completed.status, SessionLoopJobStatus::Completed);
+        let after_worker: Session = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}", run_session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(
+            after_worker.status,
+            SessionStatus::WaitingApproval
+        ));
     }
 
     #[tokio::test]
@@ -54759,11 +56447,20 @@ not json
             ),
         )
         .await;
-        let running: Session = request_json(
+        let _run: Session = request_json(
             app.clone(),
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/run", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        run_next_session_loop_job(app.clone(), session.id, "observability-worker").await;
+        let running: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session.id))
                 .body(Body::empty())
                 .expect("valid request"),
         )
@@ -57634,6 +59331,7 @@ not json
                 .expect("valid request"),
         )
         .await;
+        run_next_session_loop_job(app.clone(), alert_session.id, "scheduler-alert-worker").await;
         let _alert_route: CostAlertRoute = request_json(
             app.clone(),
             Request::builder()
@@ -59527,7 +61225,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        let (status, disabled_run_error) = request_value(
+        let _disabled_run: Session = request_json(
             app.clone(),
             Request::builder()
                 .method("POST")
@@ -59536,6 +61234,12 @@ not json
                 .header("x-mandoforge-roles", "admin")
                 .body(Body::empty())
                 .expect("valid request"),
+        )
+        .await;
+        let (status, disabled_run_error) = run_next_session_loop_job_value(
+            app.clone(),
+            disabled_status_session.id,
+            "disabled-provider-worker",
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -59583,7 +61287,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        let (status, cost_budget_error) = request_value(
+        let _cost_limited_run: Session = request_json(
             app.clone(),
             Request::builder()
                 .method("POST")
@@ -59592,6 +61296,12 @@ not json
                 .header("x-mandoforge-roles", "admin")
                 .body(Body::empty())
                 .expect("valid request"),
+        )
+        .await;
+        let (status, cost_budget_error) = run_next_session_loop_job_value(
+            app.clone(),
+            cost_limited_session.id,
+            "cost-limited-worker",
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -59640,11 +61350,22 @@ not json
                 .expect("valid request"),
         )
         .await;
-        let budget_run: Session = request_json(
+        let _budget_run: Session = request_json(
             app.clone(),
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/run", budget_session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        run_next_session_loop_job(app.clone(), budget_session.id, "budget-worker").await;
+        let budget_run: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", budget_session.id))
                 .header("x-mandoforge-subject", "admin-1")
                 .header("x-mandoforge-roles", "admin")
                 .body(Body::empty())
@@ -59668,7 +61389,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        let (status, budget_error) = request_value(
+        let _second_budget_run: Session = request_json(
             app.clone(),
             Request::builder()
                 .method("POST")
@@ -59677,6 +61398,12 @@ not json
                 .header("x-mandoforge-roles", "admin")
                 .body(Body::empty())
                 .expect("valid request"),
+        )
+        .await;
+        let (status, budget_error) = run_next_session_loop_job_value(
+            app.clone(),
+            second_budget_session.id,
+            "budget-limit-worker",
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -59881,11 +61608,27 @@ not json
                 .expect("valid request"),
         )
         .await;
-        let active_run: Session = request_json(
+        let _active_run: Session = request_json(
             app.clone(),
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/run", active_status_session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        run_next_session_loop_job(
+            app.clone(),
+            active_status_session.id,
+            "active-provider-worker",
+        )
+        .await;
+        let active_run: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}", active_status_session.id))
                 .header("x-mandoforge-subject", "admin-1")
                 .header("x-mandoforge-roles", "admin")
                 .body(Body::empty())
@@ -62277,6 +64020,361 @@ not json
     }
 
     #[tokio::test]
+    async fn queue_backed_worker_invalid_remote_computer_contract_does_not_leave_job_running() {
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let environment: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Disabled Remote Environment",
+                    "environment_type": "remote_computer",
+                    "remote_computer_profile": {"pool": "disabled", "profile": "workspace-write"},
+                    "worker_queue_binding": {"queue": "managed-agent"},
+                    "release_state": "active",
+                    "status": "disabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "environment_id": environment.id,
+                    "title": "invalid remote computer contract"
+                }),
+            ),
+        )
+        .await;
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {"path": "invalid-remote-contract.md", "content": "blocked"}
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
+        )
+        .await;
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id)
+        .expect("execution job queued")
+        .id;
+
+        let requeued: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "invalid-contract-worker")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(requeued.status, ExecutionJobStatus::Queued);
+        assert_eq!(requeued.attempt_count, 1);
+        assert!(
+            requeued
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not active and enabled")
+        );
+
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let persisted = jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .expect("persisted execution job");
+        assert_ne!(persisted.status, ExecutionJobStatus::Running);
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "environment.remote_computer_contract_invalid"
+                && event.payload["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("not active and enabled")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "execution.retry_queued"
+                && event.payload["stage"] == json!("environment_contract")
+                && event.payload["last_error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("not active and enabled")
+        }));
+    }
+
+    #[tokio::test]
+    async fn queue_backed_worker_rejects_mismatched_active_remote_computer_assignment() {
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let environment: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Strict Remote Pool",
+                    "environment_type": "remote_computer",
+                    "remote_computer_profile": {"pool": "strict", "profile": "workspace-write"},
+                    "worker_queue_binding": {"queue": "managed-agent"},
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "environment_id": environment.id,
+                    "title": "mismatched remote assignment"
+                }),
+            ),
+        )
+        .await;
+        let relative_path = format!("mismatched-remote-{}.md", Uuid::new_v4());
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {"path": relative_path, "content": "must not run"}
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
+        )
+        .await;
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id)
+        .expect("execution job queued")
+        .id;
+
+        let computer: RemoteComputer = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "name": "wrong-pool-remote-computer",
+                        "profile": "read-only",
+                        "pod_name": "wrong-pool-pod",
+                        "metadata": {"pool": "wrong"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let lease: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computers/{}/leases", computer.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "worker_id": "wrong-pool-worker",
+                        "lease_seconds": 900
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let assignment: RemoteComputerJobAssignment = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/execution-jobs/{job_id}/remote-computer-lease"
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "lease_id": lease.id,
+                        "assigned_by": "operator-1",
+                        "metadata": {"handoff_mode": "manual-test"}
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(assignment.status, "assigned");
+
+        let requeued: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "mismatch-worker")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(requeued.status, ExecutionJobStatus::Queued);
+        assert!(
+            requeued
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("does not match the remote_computer environment contract")
+        );
+
+        let jobs: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let persisted = jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .expect("persisted execution job");
+        assert_ne!(persisted.status, ExecutionJobStatus::Running);
+
+        let assignments: Vec<RemoteComputerJobAssignment> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computer-job-assignments")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let released_assignment = assignments
+            .iter()
+            .find(|listed| listed.id == assignment.id)
+            .expect("released assignment");
+        assert_eq!(released_assignment.status, "released");
+        assert_eq!(
+            released_assignment.metadata["stage"],
+            json!("remote_computer_assignment_validation")
+        );
+        assert_eq!(
+            released_assignment.metadata["execution_job_status"],
+            json!("queued")
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "remote_computer.execution_handoff_released"
+                && event.payload["assignment_id"] == json!(assignment.id)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "execution.retry_queued"
+                && event.payload["stage"] == json!("remote_computer_assignment_validation")
+                && event.payload["assignment_id"] == json!(assignment.id)
+        }));
+        assert!(!test_workspace_root().join(relative_path).exists());
+    }
+
+    #[tokio::test]
     async fn queue_backed_worker_auto_assigns_active_remote_computer_lease() {
         let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
         let agents: Vec<Agent> = request_json(
@@ -62288,12 +64386,39 @@ not json
         )
         .await;
         let agent = agents.first().expect("seeded agent");
+        let environment: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Whiskey Remote Pool",
+                    "environment_type": "remote_computer",
+                    "remote_computer_profile": {
+                        "pool": "whiskey",
+                        "profile": "workspace-write"
+                    },
+                    "worker_queue_binding": {"queue": "managed-agent"},
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
         let session: Session = request_json(
             app.clone(),
             json_request(
                 "POST",
                 "/api/sessions",
-                json!({"agent_id": agent.id, "title": "auto remote computer handoff"}),
+                json!({
+                    "agent_id": agent.id,
+                    "environment_id": environment.id,
+                    "title": "auto remote computer handoff"
+                }),
             ),
         )
         .await;
@@ -62350,7 +64475,8 @@ not json
                     json!({
                         "name": "auto-assign-remote-computer",
                         "profile": "workspace-write",
-                        "pod_name": "agent-remote-computer-auto"
+                        "pod_name": "agent-remote-computer-auto",
+                        "metadata": {"pool": "whiskey"}
                     })
                     .to_string(),
                 ))
@@ -62377,7 +64503,7 @@ not json
         )
         .await;
 
-        let completed: execution_queue::ExecutionJob = request_json(
+        let requeued: execution_queue::ExecutionJob = request_json(
             app.clone(),
             Request::builder()
                 .method("POST")
@@ -62387,7 +64513,13 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        assert_eq!(requeued.status, ExecutionJobStatus::Queued);
+        assert_eq!(
+            requeued.last_error.as_deref(),
+            Some(
+                "remote_computer environment requires enabled Remote Computer execution transport"
+            )
+        );
 
         let assignments: Vec<RemoteComputerJobAssignment> = request_json(
             app.clone(),
@@ -62404,10 +64536,17 @@ not json
             .find(|assignment| assignment.execution_job_id == job_id)
             .expect("auto remote computer assignment");
         assert_eq!(assignment.lease_id, lease.id);
-        assert_eq!(assignment.status, "completed");
+        assert_eq!(assignment.status, "released");
         assert_eq!(assignment.assigned_by.as_deref(), Some("remote-worker-1"));
-        assert_eq!(assignment.metadata["handoff_mode"], "auto-worker-lease");
-        assert_eq!(assignment.metadata["execution_job_status"], "completed");
+        assert_eq!(
+            assignment.metadata["handoff_mode"],
+            "environment-worker-lease"
+        );
+        assert_eq!(
+            assignment.metadata["environment_contract"]["environment_id"],
+            json!(environment.id)
+        );
+        assert_eq!(assignment.metadata["execution_job_status"], "queued");
 
         let events: Vec<SessionEvent> = request_json(
             app,
@@ -62432,9 +64571,17 @@ not json
                 && event.payload["execution_enabled"] == json!(false)
         }));
         assert!(events.iter().any(|event| {
-            event.event_type == "remote_computer.execution_handoff_completed"
+            event.event_type == "remote_computer.execution_handoff_released"
                 && event.payload["assignment_id"] == json!(assignment.id)
-                && event.payload["status"] == json!("completed")
+                && event.payload["status"] == json!("released")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "execution.retry_queued"
+                && event.payload["environment_id"] == json!(environment.id)
+                && event.payload["last_error"]
+                    == json!(
+                        "remote_computer environment requires enabled Remote Computer execution transport"
+                    )
         }));
     }
 
@@ -62450,12 +64597,39 @@ not json
         )
         .await;
         let agent = agents.first().expect("seeded agent");
+        let environment: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Warm Pool Remote Environment",
+                    "environment_type": "remote_computer",
+                    "remote_computer_profile": {
+                        "pool": "warm",
+                        "profile": "workspace-write"
+                    },
+                    "worker_queue_binding": {"queue": "managed-agent"},
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
         let session: Session = request_json(
             app.clone(),
             json_request(
                 "POST",
                 "/api/sessions",
-                json!({"agent_id": agent.id, "title": "warm pool claim"}),
+                json!({
+                    "agent_id": agent.id,
+                    "environment_id": environment.id,
+                    "title": "warm pool claim"
+                }),
             ),
         )
         .await;
@@ -62505,7 +64679,7 @@ not json
                         "name": "warm-pool-remote-computer",
                         "profile": "workspace-write",
                         "pod_name": "agent-remote-computer-warm",
-                        "metadata": {"warm_pool": true}
+                        "metadata": {"warm_pool": true, "pool": "warm"}
                     })
                     .to_string(),
                 ))
@@ -62514,7 +64688,7 @@ not json
         .await;
         assert_eq!(computer.status, "available");
 
-        let completed: execution_queue::ExecutionJob = request_json(
+        let requeued: execution_queue::ExecutionJob = request_json(
             app.clone(),
             Request::builder()
                 .method("POST")
@@ -62524,7 +64698,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        assert_eq!(requeued.status, ExecutionJobStatus::Queued);
 
         let leases: Vec<RemoteComputerLease> = request_json(
             app.clone(),
@@ -62542,7 +64716,14 @@ not json
             .expect("warm pool lease was claimed");
         assert_eq!(lease.session_id, Some(session.id));
         assert_eq!(lease.worker_id.as_deref(), Some("warm-pool-worker"));
-        assert_eq!(lease.metadata["handoff_mode"], "auto-warm-pool-lease");
+        assert_eq!(
+            lease.metadata["handoff_mode"],
+            "environment-warm-pool-lease"
+        );
+        assert_eq!(
+            lease.metadata["environment_contract"]["environment_id"],
+            json!(environment.id)
+        );
 
         let assignments: Vec<RemoteComputerJobAssignment> = request_json(
             app.clone(),
@@ -62559,7 +64740,7 @@ not json
             .find(|assignment| assignment.execution_job_id == job_id)
             .expect("warm pool job assignment");
         assert_eq!(assignment.lease_id, lease.id);
-        assert_eq!(assignment.status, "completed");
+        assert_eq!(assignment.status, "released");
 
         let events: Vec<SessionEvent> = request_json(
             app,
@@ -62572,6 +64753,7 @@ not json
         assert!(events.iter().any(|event| {
             event.event_type == "remote_computer.warm_pool_claimed"
                 && event.payload["remote_computer_id"] == json!(computer.id)
+                && event.payload["environment_contract"]["environment_id"] == json!(environment.id)
         }));
     }
 }

@@ -2,6 +2,24 @@
 
 This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a control-plane skeleton for this direction, not a production execution substrate. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, JuiceFS CSI example, warm-pool example, KEDA scaling example, deny-by-default NetworkPolicy, `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, fail-closed runner dry-run/mutate routes, persisted Remote Computer lease lifecycle APIs, and persisted session attachment state. It does not yet create a dedicated Kubernetes Pod per agent session or mount a real shared distributed state filesystem.
 
+## Managed Agents Alignment
+
+This plan is now subordinate to the managed-agent resource model in
+[Claude Managed Agents Alignment](claude-managed-agents-alignment.md).
+
+Remote Computer remains the target isolated execution substrate, but it should
+not be the top-level product object. The top-level chain is:
+
+```text
+Agent -> Environment -> Session -> Events -> Threads
+```
+
+Remote Computer should become `Environment(type=remote_computer)`: a
+self-hosted sandbox implementation claimed by an environment worker. The Remote
+Computer manager still owns Pod lease, state mount, artifact sync, heartbeat,
+and cleanup, but sessions should reach it through the Environment queue and
+session event stream rather than through a separate product path.
+
 ## Objective
 
 Add an Agent Remote Computer layer that gives each approved agent run a leaseable, isolated execution environment with:

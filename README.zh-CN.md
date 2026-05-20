@@ -102,23 +102,44 @@ Stage 2 的 repo-controlled pilot 已完成。严格审计和真实外部生产 
 
 ## 现在最重要的设计方向
 
-当前最重要的下一步不是做某个行业 demo，而是把 Agent 中台的运行底座继续打稳。
-
-近期重点是 **Remote Computer**：
+当前最重要的下一步不是做某个行业 demo，而是把 Agent 中台修正到 managed-agent 的产品模型：
 
 ```text
-让一次 Agent 作业可以绑定到一个可租用、可隔离、可审计的远程执行环境。
+Agent -> Environment -> Session -> Events -> Threads
 ```
 
-短期先做 session attach state：
+近期重点是 **Managed Session Runtime**：
 
-- 把 Session 绑定到一个 Remote Computer lease。
-- 持久化 attach / release 状态。
-- 检测 stale attachment。
-- 暂时不把工具执行搬进 Pod。
-- 保证不绕过 Tool Router、Policy Engine 和 Approval Engine。
+```text
+创建或恢复 Session，写入 user events，让 Orchestrator loop 通过受治理的 Environment queue 执行，并把 model/tool/session events 实时回流到 UI。
+```
 
-长期方向是让 Remote Computer 成为主要 sandbox substrate：Agent 可以在隔离 Pod / workspace 中执行任务，同步 artifact 和 timeline，保留完整审计链路。
+这是对之前 Remote Computer-first 叙述的修正。Remote Computer 仍然重要，
+但它应该是 Environment 的一种实现，而不是最高层产品对象。
+
+短期先做 event-driven session state：
+
+- 添加 first-class Environment 资源，放在 runtime profiles 和 Remote Computer profiles 之上。
+- 让 `POST /api/sessions/:id/events` 成为驱动任务的主入口。
+- 把 `POST /api/sessions/:id/run` 降级为向 session 写入 user event 的兼容 wrapper。
+- 把 Orchestrator 执行从 API request path 里移出来，交给 queue-claimed session loop。
+- 把 session status、model spans、tool use、approvals、artifacts、child threads 实时回流到 UI。
+
+已落地的 baseline：
+
+- `GET/POST /api/environments` 和 `GET/PATCH/DELETE /api/environments/:id` 管理第一等 Environment 资源。
+- `POST /api/sessions` 接受 `environment_id`，并在 session event log 写入 `session.environment_bound`。
+- `POST /api/sessions/:id/events` 会 enqueue 可被 worker lease claim 的 `session_loop_job`；`mandoforge-worker` 在 API request path 之外执行 orchestrator loop。
+- session 执行会写入 managed-agent 风格的 `session.status_*`、`span.model_request_*`、`agent.tool_use`、`agent.tool_result` 和 `thread.*` timeline events。
+- `GET /api/sessions/:id/threads` 暴露 durable `session_threads`；Manager 到 Specialist 的 typed handoff 会创建挂在 parent session 下的 child specialist thread。
+- `Environment(type=remote_computer)` 现在负责自动 Remote Computer 分配：approved execution jobs 只会自动 claim 与 session environment contract 匹配的 lease 或 warm-pool resource；绑定 remote environment 但未启用 Remote Computer execution transport 时会 fail closed，不会静默退回本地执行。
+- UI 的开始任务表单会加载 environments，并把新 session 绑定到选择的环境。
+- UI 的运行路径先围绕 managed-session 对象组织：Agent、Environment、Event Stream、Blocking Actions、Artifacts 和 Threads；worker、Remote Computer、provider、Vault、MCP、tenant 等底层设施保留在系统状态和高级面板里。
+
+剩余生产化工作是集群证据：runtime 已强制执行
+`Environment(type=remote_computer)` 合同，但真实 Kubernetes Pod execution
+仍依赖已配置的 Remote Computer transport，以及外部 state-sync / sidecar /
+worker-pool evidence gates。
 
 ## 本地运行
 
@@ -157,6 +178,22 @@ Docker Desktop 可用时：
 ```bash
 RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh
 ```
+
+常驻 worker / orchestrator loop：
+
+```bash
+MANDOFORGE_EXECUTION_WORKER=queue \
+MANDOFORGE_DEV_ADMIN_TOKEN=local-worker-token \
+cargo run -p mandoforge-api
+
+BASE_URL=http://127.0.0.1:8787 \
+MANDOFORGE_WORKER_TOKEN=local-worker-token \
+cargo run -p mandoforge-api --bin mandoforge-worker
+```
+
+这个 worker 会消费 session-loop jobs 和已批准的 execution jobs。用户从 UI
+或 `/api/sessions/:id/events` 写入任务后，session-loop job 由 worker claim，
+再进入 provider / tool / approval / execution queue 路径。
 
 ## Docker
 

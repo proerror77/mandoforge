@@ -38,6 +38,7 @@ services:
       MANDOFORGE_MIGRATIONS_DIR: /app/db/migrations
       DATABASE_URL: postgres://mandoforge:${MANDOFORGE_POSTGRES_PASSWORD:-mandoforge}@postgres:5432/mandoforge
       MANDOFORGE_EXECUTION_WORKER: ${MANDOFORGE_EXECUTION_WORKER:-queue}
+      MANDOFORGE_DEV_ADMIN_TOKEN: ${MANDOFORGE_WORKER_TOKEN:-whiskey-stage2-worker-token}
       MANDOFORGE_SCHEDULER_TOKEN: ${MANDOFORGE_SCHEDULER_TOKEN:-whiskey-stage2-scheduler-token}
       MANDOFORGE_PROVIDER_BASE_URL: ${MANDOFORGE_PROVIDER_BASE_URL:-}
       MANDOFORGE_PROVIDER_API_KEY: ${MANDOFORGE_PROVIDER_API_KEY:-}
@@ -177,6 +178,8 @@ services:
     environment:
       BASE_URL: http://api:8787
       WORKER_ID: ${MANDOFORGE_WORKER_ID:-whiskey-pilot-worker-1}
+      WORKER_SUBJECT: ${MANDOFORGE_WORKER_SUBJECT:-whiskey-pilot-worker}
+      MANDOFORGE_WORKER_TOKEN: ${MANDOFORGE_WORKER_TOKEN:-whiskey-stage2-worker-token}
       POLL_INTERVAL_SECONDS: ${MANDOFORGE_WORKER_POLL_INTERVAL_SECONDS:-2}
     depends_on:
       postgres:

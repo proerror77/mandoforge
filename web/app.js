@@ -2,6 +2,8 @@ const state = {
   agents: [],
   session: null,
   events: [],
+  sessionThreads: [],
+  approvals: [],
   artifacts: [],
   toolCalls: [],
   auditLogs: [],
@@ -43,6 +45,7 @@ const state = {
   agentReleaseAutomationRun: null,
   agentRuntimeProfiles: [],
   agentRuntimeProfileReleaseGates: [],
+  environments: [],
   mcpServers: [],
   mcpTeamId: "",
   mcpHealth: {},
@@ -128,7 +131,11 @@ const state = {
 const agentRoot = document.querySelector("#agents");
 const approvalRoot = document.querySelector("#approvals");
 const eventRoot = document.querySelector("#events");
+const threadRoot = document.querySelector("#session-threads");
 const reportRoot = document.querySelector("#final-report");
+const demoOverviewRoot = document.querySelector("#demo-overview");
+const infraOverviewRoot = document.querySelector("#infra-overview");
+const managedSessionWorkspaceRoot = document.querySelector("#managed-session-workspace");
 const titleRoot = document.querySelector("#session-title");
 const statusRoot = document.querySelector("#session-status");
 const artifactRoot = document.querySelector("#artifacts");
@@ -166,6 +173,7 @@ const evalSuiteBootstrapRoot = document.querySelector("#eval-suite-bootstrap");
 const agentReleaseRoot = document.querySelector("#agent-releases");
 const managedAgentConsoleRoot = document.querySelector("#managed-agent-console");
 const agentRuntimeProfileRoot = document.querySelector("#agent-runtime-profiles");
+const environmentRoot = document.querySelector("#environments");
 const runDueAgentReleasesButton = document.querySelector("#run-due-agent-releases");
 const validateAgentReleaseDeploymentButton = document.querySelector("#validate-agent-release-deployment");
 const validateAgentReleaseOrchestrationButton = document.querySelector("#validate-agent-release-orchestration");
@@ -271,8 +279,20 @@ const codexCommandForm = document.querySelector("#codex-command-form");
 const codexArtifactSyncForm = document.querySelector("#codex-artifact-sync-form");
 const interruptCodexTurnButton = document.querySelector("#interrupt-codex-turn");
 const codexAppServerRoot = document.querySelector("#codex-app-server");
+const workspaceTabButtons = document.querySelectorAll("[data-workspace-tab]");
+const workspacePanels = document.querySelectorAll(".workspace-panel");
+const orchestratorForm = document.querySelector("#orchestrator-form");
+const orchestratorAgentSelect = document.querySelector("#orchestrator-agent");
+const taskTemplateButtons = document.querySelectorAll("[data-task-template]");
 
 document.querySelector("#new-session").addEventListener("click", runDemo);
+orchestratorForm.addEventListener("submit", runOrchestrator);
+taskTemplateButtons.forEach((button) => {
+  button.addEventListener("click", () => applyTaskTemplate(button.dataset.taskTemplate));
+});
+workspaceTabButtons.forEach((button) => {
+  button.addEventListener("click", () => setWorkspaceTab(button.dataset.workspaceTab));
+});
 agentForm.addEventListener("submit", createAgent);
 organizationForm.addEventListener("submit", createOrganization);
 validateTenantRoutingButton.addEventListener("click", validateTenantRouting);
@@ -409,11 +429,62 @@ function confirmDestructiveAction(label, id) {
   return window.confirm(`${label}\n\n${id}`);
 }
 
+function setWorkspaceTab(tab) {
+  const selected = tab || "orchestrator";
+  workspaceTabButtons.forEach((button) => {
+    button.classList.toggle("selected", button.dataset.workspaceTab === selected);
+  });
+  workspacePanels.forEach((panel) => {
+    panel.classList.toggle("is-hidden", !panel.classList.contains(`panel-${selected}`));
+  });
+}
+
+function renderOrchestratorOptions() {
+  if (!orchestratorAgentSelect) {
+    return;
+  }
+  orchestratorAgentSelect.innerHTML = state.agents.length
+    ? state.agents
+        .map(
+          (agent) =>
+            `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)} · ${escapeHtml(agent.model)}</option>`,
+        )
+        .join("")
+    : `<option value="">No agents registered</option>`;
+  const environmentSelect = orchestratorForm?.elements.environment_id;
+  if (environmentSelect) {
+    environmentSelect.innerHTML = state.environments.length
+      ? state.environments
+          .map(
+            (environment) =>
+              `<option value="${escapeHtml(environment.id)}">${escapeHtml(environment.name)} · ${escapeHtml(environment.environment_type)}</option>`,
+          )
+          .join("")
+      : `<option value="">Default local worker</option>`;
+  }
+}
+
+function applyTaskTemplate(template) {
+  const field = orchestratorForm.elements.message;
+  const templates = {
+    runtime:
+      "检查 Whiskey runtime 当前状态，说明 Stage 2、tenant isolation、worker queue、remote computer、telemetry 哪些 ready、哪些需要处理，并生成一份 operator 报告。",
+    release:
+      "做一次发布前检查：读取当前 readiness、pending approvals、worker queue、recent audit logs，列出是否可以发布、不能发布的原因和下一步动作。",
+    incident:
+      "排查 worker / remote computer 异常：检查队列、lease、state lock、sidecar heartbeat、recent failed jobs，并给出恢复建议。",
+  };
+  field.value = templates[template] || templates.runtime;
+  field.focus();
+}
+
 async function boot() {
   state.agents = await api("/api/agents");
+  renderOrchestratorOptions();
   renderAgents();
   await refreshApprovals();
   await refreshOps();
+  setWorkspaceTab("orchestrator");
 }
 
 async function createAgent(event) {
@@ -1841,17 +1912,59 @@ async function assignExecutionJobRemoteLease(jobId, leaseId) {
 }
 
 async function runDemo() {
+  const defaultMessage =
+    "Read README and config, query demo platform_events, request approval before shell or file write, and generate diagnostics.md.";
+  await startAgentRun({
+    agentId: state.agents[0]?.id,
+    environmentId: state.environments[0]?.id || "",
+    title: "Generic runtime diagnostics",
+    message: defaultMessage,
+  });
+}
+
+async function runOrchestrator(event) {
+  event.preventDefault();
+  const form = new FormData(orchestratorForm);
+  const target = String(form.get("execution_target") || "policy_worker");
+  const environmentId = String(form.get("environment_id") || "");
+  const environment = state.environments.find((candidate) => candidate.id === environmentId);
+  await startAgentRun({
+    agentId: String(form.get("agent_id") || state.agents[0]?.id || ""),
+    environmentId,
+    title: `Orchestrator run · ${environment?.name || target}`,
+    message: `${String(form.get("message") || "").trim()}\n\nExecution target: ${target}. Environment: ${environment?.name || "default local worker"}. Preserve policy checks, approvals, artifacts, and audit evidence.`,
+  });
+}
+
+async function startAgentRun({ agentId, environmentId, title, message }) {
   const agent = state.agents[0];
+  const selectedAgent = state.agents.find((candidate) => candidate.id === agentId) || agent;
+  if (!selectedAgent) {
+    throw new Error("No agent is available for this runtime");
+  }
+  const sessionInput = {
+    agent_id: selectedAgent.id,
+    title,
+  };
+  if (environmentId) {
+    sessionInput.environment_id = environmentId;
+  }
   const session = await api("/api/sessions", {
     method: "POST",
+    body: JSON.stringify(sessionInput),
+  });
+  await api(`/api/sessions/${session.id}/events`, {
+    method: "POST",
     body: JSON.stringify({
-      agent_id: agent.id,
-      title: "Generic runtime diagnostics",
-      message:
-        "Read README and config, query demo platform_events, request approval before shell or file write, and generate diagnostics.md.",
+      events: [
+        {
+          type: "user.message",
+          payload: { message },
+        },
+      ],
     }),
   });
-  state.session = await api(`/api/sessions/${session.id}/run`, { method: "POST" });
+  state.session = await api(`/api/sessions/${session.id}`);
   setCodexSyncSessionId(state.session.id);
   state.selectedArtifactId = null;
   state.selectedToolCallId = null;
@@ -1859,6 +1972,7 @@ async function runDemo() {
   await refreshSession();
   await refreshApprovals();
   await refreshOps();
+  setWorkspaceTab("logs");
 }
 
 async function refreshOps() {
@@ -1877,6 +1991,7 @@ async function refreshOps() {
       ["policyRevisions", "/api/policy/revisions"],
       ["agentRuntimeProfiles", "/api/agent-runtime-profiles"],
       ["agentRuntimeProfileReleaseGates", "/api/agent-runtime-profile-release-gates"],
+      ["environments", "/api/environments"],
       ["evalJudgeProfiles", "/api/eval/judge-profiles"],
       ["evalDatasets", "/api/eval/datasets"],
       ["evalRuns", "/api/eval/runs"],
@@ -1985,6 +2100,7 @@ async function refreshSession() {
   state.session = await api(`/api/sessions/${state.session.id}`);
   setCodexSyncSessionId(state.session.id);
   state.events = await api(`/api/sessions/${state.session.id}/events`);
+  state.sessionThreads = await api(`/api/sessions/${state.session.id}/threads`);
   state.artifacts = await api(`/api/sessions/${state.session.id}/artifacts`);
   state.toolCalls = await api(`/api/sessions/${state.session.id}/tool-calls`);
   state.auditLogs = await api(`/api/sessions/${state.session.id}/audit-logs`);
@@ -1996,6 +2112,7 @@ async function refreshSession() {
 
 async function refreshApprovals() {
   const approvals = await api("/api/approvals");
+  state.approvals = approvals;
   approvalRoot.innerHTML = approvals.length
     ? approvals.map(renderApproval).join("")
     : `<div class="muted">No pending approvals</div>`;
@@ -2019,6 +2136,7 @@ async function refreshApprovals() {
   approvalRoot.querySelectorAll("[data-approval-modify]").forEach((form) => {
     form.addEventListener("submit", (event) => modifyApproval(event, form.dataset.approvalModify));
   });
+  renderManagedSessionWorkspace();
 }
 
 async function decide(id, decision) {
@@ -2097,7 +2215,10 @@ async function validateApprovalNotificationOps() {
 }
 
 function renderOps() {
+  renderOrchestratorOptions();
   renderAgents();
+  renderDemoOverview();
+  renderInfraOverview();
   renderUsage();
   renderObservability();
   renderTenantGovernance();
@@ -2192,6 +2313,179 @@ function renderOps() {
           </div>`
         : `<div class="muted">No Stage 2 evidence requirements reported.</div>`
     }
+  `;
+}
+
+function readinessLabel(report) {
+  return report?.status || report?.production_ops?.status || "loading";
+}
+
+function readinessScore(report) {
+  if (report?.readiness_score != null) {
+    return `${formatInteger(report.readiness_score)}%`;
+  }
+  if (report?.open_gap_count != null) {
+    return `${formatInteger(report.open_gap_count)} gaps`;
+  }
+  return "pending";
+}
+
+function renderDemoOverview() {
+  if (!demoOverviewRoot) {
+    return;
+  }
+  const stage2 = state.stage2Readiness || {};
+  const tenant = state.tenantIsolationReadiness || {};
+  const worker = state.workerReadiness || {};
+  const remote = state.remoteComputerReadiness || {};
+  const observability = state.observability || {};
+  const generatedAt =
+    stage2.generated_at || tenant.generated_at || worker.generated_at || remote.generated_at || "";
+  const backpressure = observability.backpressure || {};
+  const currentSession = state.session || {};
+  const runTitle = currentSession.title || "还没有运行任务";
+  const runStatus = currentSession.status || "idle";
+  const runEnvironment = currentSession.environment_id
+    ? state.environments.find((environment) => environment.id === currentSession.environment_id)
+    : null;
+  const runEvidence = currentSession.id
+    ? `${formatInteger(state.events.length)} events · ${formatInteger(state.toolCalls.length)} tool calls · ${formatInteger(state.artifacts.length)} artifacts`
+    : "先在下面写目标，再点击开始运行。";
+  demoOverviewRoot.innerHTML = `
+    <div class="demo-head">
+      <div>
+        <p class="eyebrow">Whiskey Demo Entry</p>
+        <h2>这里不是聊天框，而是启动和监管 Agent 工作的入口。</h2>
+      </div>
+      <span class="status">${escapeHtml(stage2.status || "loading")}</span>
+    </div>
+    <div class="demo-copy">
+      你从“开始任务”发起一个目标；MandoForge 会创建 session，选择 worker、remote computer 或 Codex App Server 执行；
+      写文件、shell、部署这类高风险动作会先进入审批；最后结果、证据、tool calls 和 audit log 都会留在“运行记录”里。
+    </div>
+    <div class="entry-map">
+      <div>
+        <strong>1. 开始任务</strong>
+        <span>写你要完成的目标，默认交给主 Agent 编排。</span>
+      </div>
+      <div>
+        <strong>2. 看运行记录</strong>
+        <span>查看 timeline、工具调用、产物和审计证据。</span>
+      </div>
+      <div>
+        <strong>3. 检查系统状态</strong>
+        <span>确认 worker、remote computer、tenant isolation、telemetry 是否健康。</span>
+      </div>
+    </div>
+    <div class="current-run">
+      <div>
+        <span>当前运行</span>
+        <strong>${escapeHtml(runTitle)}</strong>
+      </div>
+      <div>
+        <span>状态</span>
+        <strong>${escapeHtml(runStatus)}</strong>
+      </div>
+      <div>
+        <span>环境</span>
+        <strong>${escapeHtml(runEnvironment?.name || "default local worker")}</strong>
+      </div>
+      <div>
+        <span>证据</span>
+        <strong>${escapeHtml(runEvidence)}</strong>
+      </div>
+    </div>
+    <div class="demo-status-grid compact-overview">
+      <div class="demo-status">
+        <span>Stage 2 Gate</span>
+        <strong>${escapeHtml(readinessLabel(stage2))}</strong>
+        <small>${escapeHtml(readinessScore(stage2))}</small>
+      </div>
+      <div class="demo-status">
+        <span>Tenant Isolation</span>
+        <strong>${escapeHtml(readinessLabel(tenant))}</strong>
+        <small>${escapeHtml(readinessScore(tenant))}</small>
+      </div>
+      <div class="demo-status">
+        <span>Worker Queue</span>
+        <strong>${escapeHtml(readinessLabel(worker))}</strong>
+        <small>${escapeHtml(readinessScore(worker))}</small>
+      </div>
+      <div class="demo-status">
+        <span>Remote Computer</span>
+        <strong>${escapeHtml(readinessLabel(remote))}</strong>
+        <small>${escapeHtml(readinessScore(remote))}</small>
+      </div>
+    </div>
+    <div class="demo-foot">
+      <span>${escapeHtml(generatedAt ? `最近检查 ${generatedAt}` : "正在加载 Whiskey 实时证据")}</span>
+      <span>${escapeHtml(
+        backpressure.status
+          ? `Backpressure ${backpressure.status}`
+          : "高级控制台只在实际运维时展开",
+      )}</span>
+    </div>
+  `;
+}
+
+function renderInfraOverview() {
+  if (!infraOverviewRoot) {
+    return;
+  }
+  const observability = state.observability || {};
+  const worker = state.workerReadiness || {};
+  const remote = state.remoteComputerReadiness || {};
+  const tenant = state.tenantIsolationReadiness || {};
+  const scheduler = state.schedulerSummary || {};
+  const backpressure = observability.backpressure || {};
+  infraOverviewRoot.innerHTML = `
+    <div class="demo-head">
+      <div>
+        <p class="eyebrow">Infrastructure</p>
+        <h2>底层运行状态、日志和证据门禁。</h2>
+      </div>
+      <span class="status">${escapeHtml(observability.telemetry?.otlp_enabled ? "telemetry on" : "telemetry pending")}</span>
+    </div>
+    <div class="demo-copy">
+      这里不是给业务用户聊天的地方，而是给 operator 看 Agent Runtime 的基础设施：
+      worker queue、remote computer、tenant isolation、scheduler、telemetry、tool calls 和 audit trail。
+    </div>
+    <div class="demo-status-grid">
+      <div class="demo-status">
+        <span>Worker</span>
+        <strong>${escapeHtml(worker.status || "loading")}</strong>
+        <small>${escapeHtml(readinessScore(worker))}</small>
+      </div>
+      <div class="demo-status">
+        <span>Remote Computer</span>
+        <strong>${escapeHtml(remote.status || "loading")}</strong>
+        <small>${escapeHtml(readinessScore(remote))}</small>
+      </div>
+      <div class="demo-status">
+        <span>Tenant</span>
+        <strong>${escapeHtml(tenant.status || "loading")}</strong>
+        <small>${escapeHtml(tenant.runtime_tenant_mode || "tenant mode")}</small>
+      </div>
+      <div class="demo-status">
+        <span>Scheduler</span>
+        <strong>${escapeHtml(scheduler.deployment_readiness?.status || scheduler.status || "loading")}</strong>
+        <small>${escapeHtml(backpressure.status ? `backpressure ${backpressure.status}` : "due-run supervision")}</small>
+      </div>
+    </div>
+    <div class="demo-flow">
+      <div>
+        <strong>Runtime logs</strong>
+        <span>进入 Logs 页查看 event timeline、tool calls、audit logs。</span>
+      </div>
+      <div>
+        <strong>Execution substrate</strong>
+        <span>worker 和 remote computer 决定 Agent 任务实际在哪里运行。</span>
+      </div>
+      <div>
+        <strong>Advanced operations</strong>
+        <span>只有需要变更 provider、MCP、Vault、policy、tenant 时才进入 Advanced。</span>
+      </div>
+    </div>
   `;
 }
 
@@ -4388,6 +4682,10 @@ function formatInteger(value) {
   return Number(value || 0).toLocaleString("en-US", { maximumFractionDigits: 0 });
 }
 
+function shortId(value) {
+  return String(value || "").slice(0, 8);
+}
+
 function formatCounts(counts) {
   const entries = Object.entries(counts || {}).sort((left, right) => {
     const countDelta = Number(right[1] || 0) - Number(left[1] || 0);
@@ -5816,6 +6114,26 @@ function renderManagedAgentConsole() {
         })
         .join("")
     : `<div class="muted">No runtime profiles configured</div>`;
+
+  if (environmentRoot) {
+    environmentRoot.innerHTML = state.environments.length
+      ? state.environments
+          .map((environment) => {
+            const profile = environment.runtime_profile_id
+              ? profileById[environment.runtime_profile_id]
+              : null;
+            return `
+              <div class="item">
+                <strong>${escapeHtml(environment.name)}</strong>
+                <div class="muted">${escapeHtml(environment.environment_type)} · ${escapeHtml(environment.status)} · ${escapeHtml(environment.release_state)}</div>
+                <div class="muted">Runtime Profile: ${escapeHtml(profile ? `${profile.name} (${profile.runtime_type})` : "none")}</div>
+                <div class="muted">Worker Queue: ${escapeHtml(JSON.stringify(environment.worker_queue_binding || {}))}</div>
+              </div>
+            `;
+          })
+          .join("")
+      : `<div class="muted">No environments configured</div>`;
+  }
 }
 
 function renderAgentReleaseAutomationRuns(runs) {
@@ -6280,14 +6598,14 @@ function renderAgents() {
         (runtimeGate) => runtimeGate.profile_id === agent.runtime_profile_id,
       );
       return `
-        <div class="item">
+        <div class="item compact-agent">
           <strong>${escapeHtml(agent.name)}</strong>
-          <div class="muted">${escapeHtml(agent.kind)} · ${escapeHtml(agent.agent_role)} · ${escapeHtml(agent.provider)} · ${escapeHtml(agent.model)}</div>
-          <div class="muted">Release State: ${escapeHtml(agent.release_state)}</div>
-          <div class="muted">Runtime Profile: ${escapeHtml(profile ? profile.name : agent.runtime_profile_id || "none")} · Gate ${escapeHtml(gate?.release_state || "not evaluated")}</div>
-          <div class="muted">Tools: ${escapeHtml((agent.tools || []).join(", ") || "none")}</div>
-          <div class="muted">Skills: ${escapeHtml((agent.skill_ids || []).join(", ") || "none")}</div>
-          <div class="muted">MCP: ${escapeHtml((agent.mcp_server_ids || []).join(", ") || "none")}</div>
+          <div class="muted">${escapeHtml(agent.provider)} · ${escapeHtml(agent.model)}</div>
+          <div class="sidebar-meta">
+            <span>${escapeHtml(agent.kind)}</span>
+            <span>${escapeHtml(profile ? profile.name : "default runtime")}</span>
+            <span>${escapeHtml(gate?.release_state || "gate pending")}</span>
+          </div>
         </div>
       `;
     })
@@ -6298,11 +6616,15 @@ function renderSession() {
   titleRoot.textContent = state.session.title;
   statusRoot.textContent = state.session.status;
   eventRoot.innerHTML = state.events.map(renderEvent).join("");
+  renderManagedSessionWorkspace();
+  renderSessionThreads();
   renderArtifacts();
   renderToolCalls();
   renderAuditLogs();
-  const response = [...state.events].reverse().find((event) => event.event_type === "llm.response");
-  if (!response) {
+  const response = [...state.events]
+    .reverse()
+    .find((event) => event.event_type === "llm.response" && event.payload.final_report);
+  if (!response?.payload?.final_report) {
     reportRoot.textContent = "Run the demo to generate the runtime diagnostics report.";
     return;
   }
@@ -6318,6 +6640,160 @@ function renderSession() {
     "Next steps:",
     ...report.next_steps.map((step) => `- ${step}`),
   ].join("\n");
+}
+
+function renderManagedSessionWorkspace() {
+  if (!managedSessionWorkspaceRoot) return;
+  const session = state.session;
+  const agent = session
+    ? state.agents.find((candidate) => candidate.id === session.agent_id)
+    : null;
+  const environment = session?.environment_id
+    ? state.environments.find((candidate) => candidate.id === session.environment_id)
+    : null;
+  const pendingApprovals = (state.approvals || []).filter(
+    (approval) => approval.status === "pending" && (!session || approval.session_id === session.id),
+  );
+  const latestEvents = state.events.slice(-6).reverse();
+  const primaryThread = state.sessionThreads.find((thread) => thread.thread_kind === "primary");
+  const childThreads = state.sessionThreads.filter((thread) => thread.thread_kind !== "primary");
+  managedSessionWorkspaceRoot.innerHTML = `
+    <div class="managed-session-head">
+      <div>
+        <p class="eyebrow">Managed Session Workspace</p>
+        <h2>${escapeHtml(session?.title || "No active session")}</h2>
+      </div>
+      <span class="status">${escapeHtml(session?.status || "idle")}</span>
+    </div>
+    <div class="managed-session-grid">
+      <article class="managed-session-card">
+        <span>Agent</span>
+        <strong>${escapeHtml(agent?.name || "No agent selected")}</strong>
+        <small>${escapeHtml(agent ? `${agent.agent_role || agent.kind} · ${agent.model}` : "Start a task to bind an agent")}</small>
+      </article>
+      <article class="managed-session-card">
+        <span>Environment</span>
+        <strong>${escapeHtml(environment?.name || "Default local worker")}</strong>
+        <small>${escapeHtml(environment ? `${environment.environment_type} · ${environment.status} · ${environment.release_state}` : "No first-class environment bound")}</small>
+      </article>
+      <article class="managed-session-card">
+        <span>Event Stream</span>
+        <strong>${formatInteger(state.events.length)}</strong>
+        <small>${escapeHtml(latestEvents[0]?.event_type || "No events yet")}</small>
+      </article>
+      <article class="managed-session-card">
+        <span>Blocking Actions</span>
+        <strong>${formatInteger(pendingApprovals.length)}</strong>
+        <small>${escapeHtml(pendingApprovals[0]?.action || "No pending approvals")}</small>
+      </article>
+      <article class="managed-session-card">
+        <span>Artifacts</span>
+        <strong>${formatInteger(state.artifacts.length)}</strong>
+        <small>${escapeHtml(state.artifacts[0]?.name || "No artifacts yet")}</small>
+      </article>
+      <article class="managed-session-card">
+        <span>Threads</span>
+        <strong>${formatInteger(state.sessionThreads.length)}</strong>
+        <small>${escapeHtml(primaryThread ? `${primaryThread.status} primary · ${childThreads.length} child` : "Primary thread pending")}</small>
+      </article>
+    </div>
+    <div class="managed-session-columns">
+      <section>
+        <h3>Event Stream</h3>
+        ${
+          latestEvents.length
+            ? latestEvents
+                .map(
+                  (event) => `
+                    <div class="managed-session-row">
+                      <strong>#${escapeHtml(event.seq)} ${escapeHtml(event.event_type)}</strong>
+                      <span>${escapeHtml(event.created_at)}</span>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<div class="muted">No session events yet.</div>`
+        }
+      </section>
+      <section>
+        <h3>Blocking Actions</h3>
+        ${
+          pendingApprovals.length
+            ? pendingApprovals
+                .slice(0, 4)
+                .map(
+                  (approval) => `
+                    <div class="managed-session-row">
+                      <strong>${escapeHtml(approval.action)}</strong>
+                      <span>${escapeHtml(approval.risk_level)} · ${escapeHtml(approval.status)}</span>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<div class="muted">No pending blocking actions.</div>`
+        }
+      </section>
+      <section>
+        <h3>Artifacts</h3>
+        ${
+          state.artifacts.length
+            ? state.artifacts
+                .slice(0, 4)
+                .map(
+                  (artifact) => `
+                    <div class="managed-session-row">
+                      <strong>${escapeHtml(artifact.name)}</strong>
+                      <span>${escapeHtml(artifact.artifact_type)}</span>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<div class="muted">No artifacts yet.</div>`
+        }
+      </section>
+      <section>
+        <h3>Threads</h3>
+        ${
+          state.sessionThreads.length
+            ? state.sessionThreads
+                .slice(0, 4)
+                .map(
+                  (thread) => `
+                    <div class="managed-session-row">
+                      <strong>${escapeHtml(thread.title)}</strong>
+                      <span>${escapeHtml(thread.thread_kind)} · ${escapeHtml(thread.status)}</span>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<div class="muted">No session threads yet.</div>`
+        }
+      </section>
+    </div>
+  `;
+}
+
+function renderSessionThreads() {
+  if (!threadRoot) return;
+  threadRoot.innerHTML = state.sessionThreads.length
+    ? state.sessionThreads
+        .map((thread) => {
+          const linkedSession = thread.specialist_session_id
+            ? ` · specialist session ${shortId(thread.specialist_session_id)}`
+            : "";
+          const parent = thread.parent_thread_id ? ` · parent ${shortId(thread.parent_thread_id)}` : "";
+          return `
+            <article class="thread-card">
+              <div>
+                <strong>${escapeHtml(thread.title)}</strong>
+                <div class="muted">${escapeHtml(thread.thread_kind)} · ${escapeHtml(thread.status)}${escapeHtml(parent)}${escapeHtml(linkedSession)}</div>
+              </div>
+              <pre>${escapeHtml(JSON.stringify(thread.context ?? {}, null, 2))}</pre>
+            </article>
+          `;
+        })
+        .join("")
+    : `<div class="muted">No session threads yet</div>`;
 }
 
 function renderAuditLogs() {
@@ -6421,14 +6897,15 @@ function renderApproval(approval) {
     null;
   const delivery = state.approvalDeliveries[approval.id];
   return `
-    <div class="item">
+    <div class="item compact-approval">
       <strong>${escapeHtml(approval.action)}</strong>
-      <div class="muted">${escapeHtml(approval.risk_level)} · ${escapeHtml(approval.status)}</div>
-      <div class="muted">Expires: ${escapeHtml(approval.expires_at || "not set")}</div>
+      <div class="muted">${escapeHtml(approval.risk_level)} · ${escapeHtml(approval.status)} · expires ${escapeHtml(approval.expires_at || "not set")}</div>
       ${delegatedApprover ? `<div class="muted">Delegated approver: ${escapeHtml(delegatedApprover)}</div>` : ""}
       ${delegatedGroup ? `<div class="muted">Delegated group: ${escapeHtml(delegatedGroup)}</div>` : ""}
       <p>${escapeHtml(approval.reason)}</p>
-      <dl>
+      <details>
+        <summary>Review payload</summary>
+        <dl>
         <dt>Original args</dt>
         <dd><pre>${escapeHtml(JSON.stringify(originalArgs, null, 2))}</pre></dd>
         ${
@@ -6439,7 +6916,8 @@ function renderApproval(approval) {
         ${renderApprovalArgumentDiff(originalArgs, modifiedArgs)}
         <dt>Decision payload</dt>
         <dd><pre>${escapeHtml(JSON.stringify(approval.decision_payload ?? {}, null, 2))}</pre></dd>
-      </dl>
+        </dl>
+      </details>
       ${
         isPending
           ? `<form class="stack-form compact-form" data-approval-modify="${approval.id}">
