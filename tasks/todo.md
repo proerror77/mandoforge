@@ -250,6 +250,7 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [x] Stage 4.1: Add first-class Agent Runtime Profile storage and APIs so `agent_cli.exec` can resolve governed runtime profiles instead of environment-only profile configuration.
 - [x] Stage 4.1: Add runtime profile lifecycle audit events and fail-closed profile allowlist semantics for managed `agent_cli` profiles.
 - [x] Stage 4.1: Extend runtime profile release gates and fail-closed allowlist semantics to Codex App Server, Claude Code, Gemini, OpenCode, Aider, and future hosted runtimes.
+- [x] Stage 4.1: Allow `agent_cli.exec` workers to execute governed Codex CLI, Claude Code CLI, Gemini, OpenCode, and Aider runtime profiles with timeline/result/audit observability.
 - [x] Stage 4.2: Add Managed Agent Registry fields for manager/specialist kind, runtime profile binding, tool policy, MCP servers, skills, Workflow Pack memberships, Remote Computer profile, semantic scopes, and release state.
 - [x] Stage 4.2: Add Agent Builder / Console surfaces for runtime profile, tools, skills, MCP, Remote Computer profile, and semantic scope selection.
 - [x] Stage 4.3: Add Minimal Semantic Kernel scope fields for project, repo, service, workflow, policy, and memory scope.

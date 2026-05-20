@@ -239,6 +239,45 @@ cargo run -p mandoforge-api --bin mandoforge-worker
 The same worker drains both session-loop jobs and approved execution jobs. It is
 the local entrypoint for the always-on orchestrator loop.
 
+Governed coding-agent CLI profiles:
+
+```bash
+# Codex CLI profile
+curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
+  -H 'content-type: application/json' \
+  -H 'x-mandoforge-subject: admin-1' \
+  -H 'x-mandoforge-roles: admin' \
+  -d '{
+    "name": "codex-cli-worker",
+    "runtime_type": "codex_cli",
+    "command": "/usr/bin/codex",
+    "default_args": ["exec", "--json"],
+    "remote_computer_required": true
+  }'
+
+# Claude Code CLI profile
+curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
+  -H 'content-type: application/json' \
+  -H 'x-mandoforge-subject: admin-1' \
+  -H 'x-mandoforge-roles: admin' \
+  -d '{
+    "name": "claude-code-worker",
+    "runtime_type": "claude_code",
+    "command": "/usr/local/bin/claude",
+    "default_args": ["--print"],
+    "remote_computer_required": true
+  }'
+```
+
+Bind one profile to a specialist agent or handoff assignment, then call
+`agent_cli.exec` with the matching `profile` and `task`. The approved execution
+job is drained by `mandoforge-worker`, and the result records `profile`,
+`runtime_type`, `stdout`, `stderr`, truncation flags, exit status, timeline
+events, and audit records. This keeps Codex CLI, Claude Code CLI, Gemini,
+OpenCode, and Aider inside the same Tool Router, Policy Engine, Approval Engine,
+worker lease, Remote Computer, event log, and audit path instead of letting a
+worker invoke opaque subprocesses directly.
+
 Codex App Server adapter:
 
 ```bash

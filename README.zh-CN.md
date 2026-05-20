@@ -208,6 +208,44 @@ cargo run -p mandoforge-api --bin mandoforge-worker
 或 `/api/sessions/:id/events` 写入任务后，session-loop job 由 worker claim，
 再进入 provider / tool / approval / execution queue 路径。
 
+受管 coding-agent CLI profile：
+
+```bash
+# Codex CLI profile
+curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
+  -H 'content-type: application/json' \
+  -H 'x-mandoforge-subject: admin-1' \
+  -H 'x-mandoforge-roles: admin' \
+  -d '{
+    "name": "codex-cli-worker",
+    "runtime_type": "codex_cli",
+    "command": "/usr/bin/codex",
+    "default_args": ["exec", "--json"],
+    "remote_computer_required": true
+  }'
+
+# Claude Code CLI profile
+curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
+  -H 'content-type: application/json' \
+  -H 'x-mandoforge-subject: admin-1' \
+  -H 'x-mandoforge-roles: admin' \
+  -d '{
+    "name": "claude-code-worker",
+    "runtime_type": "claude_code",
+    "command": "/usr/local/bin/claude",
+    "default_args": ["--print"],
+    "remote_computer_required": true
+  }'
+```
+
+把其中一个 profile 绑定到 specialist agent 或 handoff assignment 后，再用
+`agent_cli.exec` 传入匹配的 `profile` 和 `task`。批准后的 execution job 由
+`mandoforge-worker` 消费，结果会记录 `profile`、`runtime_type`、`stdout`、
+`stderr`、截断标记、退出状态、timeline events 和 audit records。这样 Codex
+CLI、Claude Code CLI、Gemini、OpenCode、Aider 都仍然在 Tool Router、Policy
+Engine、Approval Engine、worker lease、Remote Computer、event log、audit path
+之内，而不是让 worker 直接调用不可观测的黑盒 subprocess。
+
 ## Docker
 
 ```bash

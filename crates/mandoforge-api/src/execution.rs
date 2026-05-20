@@ -1850,6 +1850,7 @@ async fn execute_approved_remote_computer_agent_cli(
         AgentCliProfileConfigSource::Managed => "managed",
         AgentCliProfileConfigSource::Environment => "environment",
     };
+    let runtime_type = profile_config.runtime_type.clone();
     let command = remote_agent_cli_exec_command(&request, &profile_config)?;
     let config = RemoteComputerRunnerConfig::from_env();
     let runner = remote_computer_runner_for_config(&config);
@@ -1862,6 +1863,7 @@ async fn execute_approved_remote_computer_agent_cli(
             json!({
                 "profile": profile,
                 "profile_source": profile_source,
+                "runtime_type": runtime_type,
                 "task": &request.task,
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": remote_computer.id,
@@ -1881,7 +1883,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 session_id: Some(approval.session_id),
                 pod_name: Some(pod_name.clone()),
                 metadata: Some(
-                    json!({"command": command, "tool_call_id": tool_call.id, "profile": profile, "profile_source": profile_source}),
+                    json!({"command": command, "tool_call_id": tool_call.id, "profile": profile, "profile_source": profile_source, "runtime_type": runtime_type}),
                 ),
             },
         )
@@ -1932,6 +1934,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "tool": tool_call.tool_name,
                 "profile": profile,
                 "profile_source": profile_source,
+                "runtime_type": runtime_type,
                 "stdout_bytes": stdout.original_bytes,
                 "stderr_bytes": stderr.original_bytes,
                 "status": status,
@@ -1948,6 +1951,7 @@ async fn execute_approved_remote_computer_agent_cli(
             json!({
                 "profile": profile,
                 "profile_source": profile_source,
+                "runtime_type": runtime_type,
                 "status": status,
                 "stdout": stdout.text,
                 "stdout_bytes": stdout.original_bytes,
@@ -1971,6 +1975,8 @@ async fn execute_approved_remote_computer_agent_cli(
     let result = json!({
         "runner": "remote_computer_pod_exec",
         "profile": profile,
+        "profile_source": profile_source,
+        "runtime_type": runtime_type,
         "remote_computer_id": remote_computer.id,
         "assignment_id": assignment.id,
         "lease_id": assignment.lease_id,
@@ -2013,6 +2019,8 @@ async fn execute_approved_remote_computer_agent_cli(
             json!({
                 "tool": tool_call.tool_name,
                 "profile": profile,
+                "profile_source": profile_source,
+                "runtime_type": runtime_type,
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": remote_computer.id,
                 "assignment_id": assignment.id,
@@ -2652,6 +2660,7 @@ async fn run_agent_cli(
     let profile = normalize_agent_cli_profile(&request.profile)?;
     let config = agent_cli_profile_config(state, &profile).await?;
     enforce_bound_agent_cli_profile(state, session_id, &profile).await?;
+    let runtime_type = config.runtime_type.clone();
     if config.remote_computer_required {
         return Err(AppError::bad_request(format!(
             "agent runtime profile requires Remote Computer execution: {profile}"
@@ -2668,6 +2677,7 @@ async fn run_agent_cli(
             "agent_cli.task.started",
             json!({
                 "profile": profile,
+                "runtime_type": runtime_type,
                 "task": &request.task,
                 "workspace": workspace,
                 "runner": "agent-cli"
@@ -2722,6 +2732,7 @@ async fn run_agent_cli(
             json!({
                 "profile": profile,
                 "profile_source": profile_source,
+                "runtime_type": runtime_type,
                 "exit_code": output.status.code(),
                 "stdout": stdout.text,
                 "stdout_bytes": stdout.original_bytes,
@@ -2744,6 +2755,7 @@ async fn run_agent_cli(
         "runner": "agent-cli",
         "profile": profile,
         "profile_source": profile_source,
+        "runtime_type": runtime_type,
         "status": output.status.code(),
         "stdout": stdout.text,
         "stdout_bytes": stdout.original_bytes,
@@ -2766,6 +2778,7 @@ struct AgentCliProfileConfig {
     env: Vec<(String, String)>,
     timeout_seconds: Option<u64>,
     remote_computer_required: bool,
+    runtime_type: String,
     source: AgentCliProfileConfigSource,
 }
 
@@ -2843,9 +2856,9 @@ async fn agent_cli_profile_config(
                 "agent runtime profile is not enabled: {profile}"
             )));
         }
-        if managed_profile.runtime_type != "agent_cli" {
+        if !agent_runtime_profile_is_cli_executable(&managed_profile.runtime_type) {
             return Err(AppError::bad_request(format!(
-                "agent runtime profile {profile} is not an agent_cli runtime"
+                "agent runtime profile {profile} is not executable through agent_cli.exec"
             )));
         }
         let env = managed_profile
@@ -2868,6 +2881,7 @@ async fn agent_cli_profile_config(
                 .timeout_seconds
                 .and_then(|value| u64::try_from(value).ok()),
             remote_computer_required: managed_profile.remote_computer_required,
+            runtime_type: managed_profile.runtime_type,
             source: AgentCliProfileConfigSource::Managed,
         });
     }
@@ -2920,8 +2934,16 @@ async fn agent_cli_profile_config(
         env: Vec::new(),
         timeout_seconds,
         remote_computer_required: false,
+        runtime_type: "agent_cli".to_string(),
         source: AgentCliProfileConfigSource::Environment,
     })
+}
+
+fn agent_runtime_profile_is_cli_executable(runtime_type: &str) -> bool {
+    matches!(
+        runtime_type,
+        "agent_cli" | "codex_cli" | "claude_code" | "gemini" | "opencode" | "aider"
+    )
 }
 
 #[allow(dead_code)]
