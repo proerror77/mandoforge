@@ -36,6 +36,20 @@ abstraction:
   threads. Infrastructure panels remain available, but they should not be the
   operator's first mental model.
 
+Status update, 2026-05-20:
+
+- The first managed-agent baseline is now present: Environment CRUD, sessions
+  bound to environments, `/api/sessions/:id/events`, queue-claimed
+  `session_loop_jobs`, `mandoforge-worker`, managed-agent-style timeline events,
+  durable `session_threads`, and a session-first UI shell.
+- This roadmap should therefore be read as a refinement plan, not as a list of
+  completely absent features.
+- The remaining gap is making the Claude-style contract complete end to end:
+  resumable non-terminal session states, event-cursor processing, single-path
+  session-loop continuation, environment queue binding, live streaming,
+  specialist thread membership, lease-fenced finalization, and production
+  restart/recovery evidence.
+
 ## Stage 2 Production Adoption
 
 ### Goal
@@ -163,13 +177,15 @@ governed execution substrates.
 
 Primary owner: integration owner.
 
+Status: baseline landed; continue hardening the contract.
+
 Scope:
 
-- Add first-class Environment as the product abstraction above runtime profiles,
+- Keep first-class Environment as the product abstraction above runtime profiles,
   Remote Computer, Codex App Server, and future hosted runtimes.
-- Define the canonical resource chain: Agent Version -> Environment -> Session
+- Keep the canonical resource chain: Agent Version -> Environment -> Session
   -> Events -> Threads.
-- Map existing Agent Runtime Profiles and Remote Computer profiles into
+- Continue mapping Agent Runtime Profiles and Remote Computer profiles into
   Environment versions without breaking current APIs.
 - Record release gates, policy snapshots, vault reachability, MCP reachability,
   state mounts, and worker queue bindings on the Environment contract.
@@ -185,15 +201,20 @@ Acceptance criteria:
 
 Primary lanes: Lane A and Lane C.
 
+Status: baseline landed; the remaining work is correctness and resumability.
+
 Scope:
 
-- Promote `POST /api/sessions/:id/events` as the main session driver.
-- Make `/api/sessions/:id/run` a compatibility wrapper that appends a user event
+- Keep `POST /api/sessions/:id/events` as the main session driver.
+- Keep `/api/sessions/:id/run` as a compatibility wrapper that appends a user event
   and enqueues the session loop.
-- Add explicit event names for session status, model request spans, tool use,
-  tool result, custom tool use, approval wait, and completion.
-- Stream existing and new events through `/api/sessions/:id/stream` so the UI can
-  render live progress without polling raw admin panels.
+- Replace demo-era persisted terminal completion with explicit idle, running,
+  requires_action, rescheduling, and terminated semantics.
+- Add event-cursor or processed-sequence tracking so each session-loop job
+  consumes the intended unprocessed user, approval, and custom-tool-result
+  events.
+- Harden `/api/sessions/:id/stream` into a live stream with cursor/reconnect
+  semantics instead of relying only on a point-in-time event snapshot.
 
 Acceptance criteria:
 
@@ -206,11 +227,17 @@ Acceptance criteria:
 
 Primary lanes: Lane C and Lane D.
 
+Status: session-loop jobs exist; environment placement and single-path
+continuation remain.
+
 Scope:
 
-- Add an environment work queue above low-level execution jobs.
-- Let orchestrator workers claim session-loop work when user events arrive.
+- Promote environment queue binding into the session-loop claim path, or add an
+  environment work queue above low-level execution jobs.
+- Keep orchestrator workers claiming session-loop work when user events arrive.
 - Keep the LLM/provider call outside the API request path.
+- Route approval resolution and execution-job completion back through
+  `session_loop_jobs` instead of directly resuming the provider inline.
 - Preserve Tool Router, Policy Engine, Approval Engine, event log, artifact, and
   audit paths as authoritative.
 - Keep lower-level execution jobs for actual file, shell, Codex, MCP, and
@@ -296,11 +323,16 @@ Acceptance criteria:
 
 Primary lanes: Lane A, Lane B, and Lane C.
 
+Status: durable `session_threads` exist; thread membership and handoff
+semantics need tightening.
+
 Scope:
 
-- Add `session_threads` as the primary multiagent execution surface.
-- Migrate typed `agent_handoff_events` into thread lifecycle events where the
+- Keep `session_threads` as the primary multiagent execution surface.
+- Continue migrating typed `agent_handoff_events` into thread lifecycle events where the
   handoff is the request and the thread is the durable execution object.
+- Ensure specialist sessions can enumerate their own child/specialist thread
+  membership, not only receive lifecycle events emitted by the source session.
 - Enforce allowlisted source agent, target agent, intent enum, schema version, risk level, and approval requirement.
 - Persist request, accept, reject, fail, and complete transitions in timeline and audit logs.
 - Support Reader / Analyzer / Writer role boundaries for untrusted input workflows.
@@ -316,9 +348,12 @@ Acceptance criteria:
 
 Primary lanes: Lane A and Lane C.
 
+Status: the first managed-session workspace shell exists; continue making it
+operationally exact.
+
 Scope:
 
-- Rebuild the first screen around Session intake, Agent selection, Environment
+- Keep the first screen centered on Session intake, Agent selection, Environment
   selection, current stream, blocking actions, artifacts, and child threads.
 - Move raw infrastructure panels behind an Infrastructure tab.
 - Show "what runs where" explicitly: API harness, orchestrator worker,
@@ -352,14 +387,17 @@ Acceptance criteria:
 ## Recommended Execution Order
 
 1. Keep Stage 2 production adoption evidence work separate from product roadmap work.
-2. Add the Managed Session Resource Model: Agent Version, Environment, Session,
-   Events, Threads.
-3. Promote event-driven sessions and make `/run` a compatibility wrapper.
-4. Add the Orchestrator worker loop and environment work queue.
-5. Reframe Remote Computer as `Environment(type=remote_computer)`.
-6. Add session threads for multiagent work and migrate typed handoffs into that model.
-7. Rebuild the UI around sessions/events/threads before expanding more admin panels.
-8. Then expand WorkflowPack, scheduler, Codex traces, and production Remote
+2. Preserve the landed managed-agent baseline: Environment, Session, Events,
+   session-loop jobs, Threads, Remote Computer environment policy, and
+   session-first UI.
+3. Fix resumable session state semantics and event-cursor processing.
+4. Route every continuation through `session_loop_jobs` and add environment
+   queue binding.
+5. Harden live streaming, specialist thread membership, and lease-fenced job
+   finalization.
+6. Add managed-session runtime evidence gates for API/worker restart and
+   recovery.
+7. Then expand WorkflowPack, scheduler, Codex traces, and production Remote
    Computer execution on top of the managed-session runtime.
 
 ## Non-Goals

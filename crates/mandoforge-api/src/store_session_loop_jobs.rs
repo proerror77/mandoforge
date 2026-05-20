@@ -34,10 +34,12 @@ impl AppState {
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
-                if let Some(existing) = store.session_loop_jobs.values().find(|existing| {
+                if let Some(existing) = store.session_loop_jobs.values_mut().find(|existing| {
                     existing.session_id == session_id
                         && existing.status == SessionLoopJobStatus::Queued
                 }) {
+                    existing.trigger_event_id = trigger_event_id;
+                    existing.reason = reason.to_string();
                     return Ok(existing.clone());
                 }
                 store.session_loop_jobs.insert(job.id, job.clone());
@@ -52,8 +54,8 @@ impl AppState {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, NULL, NULL, $9, $10, NULL)
                      ON CONFLICT (tenant_id, session_id)
                      WHERE status = 'queued'
-                     DO UPDATE SET trigger_event_id = session_loop_jobs.trigger_event_id,
-                                   reason = session_loop_jobs.reason
+                     DO UPDATE SET trigger_event_id = EXCLUDED.trigger_event_id,
+                                   reason = EXCLUDED.reason
                      RETURNING id, session_id, environment_id, status, trigger_event_id, reason,
                                enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                                attempt_count, max_attempts, last_error",
@@ -149,23 +151,80 @@ impl AppState {
     pub(crate) async fn complete_session_loop_job(
         &self,
         id: Uuid,
+        worker_id: &str,
     ) -> Result<SessionLoopJob, AppError> {
-        self.update_session_loop_job_status(id, SessionLoopJobStatus::Completed, None, None)
-            .await
+        self.update_session_loop_job_status(
+            id,
+            SessionLoopJobStatus::Completed,
+            Some(worker_id),
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn fail_session_loop_job(
         &self,
         id: Uuid,
+        worker_id: &str,
         error: &str,
     ) -> Result<SessionLoopJob, AppError> {
         self.update_session_loop_job_status(
             id,
             SessionLoopJobStatus::Failed,
-            None,
+            Some(worker_id),
             Some(error.to_string()),
         )
         .await
+    }
+
+    pub(crate) async fn discard_session_loop_job(
+        &self,
+        id: Uuid,
+        error: &str,
+    ) -> Result<SessionLoopJob, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let job = store
+                    .session_loop_jobs
+                    .get_mut(&id)
+                    .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                if !matches!(
+                    job.status,
+                    SessionLoopJobStatus::Queued | SessionLoopJobStatus::Running
+                ) {
+                    return Err(AppError::not_found("session loop job not found"));
+                }
+                let worker_id = job.worker_id.clone();
+                apply_session_loop_job_status(
+                    job,
+                    SessionLoopJobStatus::Failed,
+                    worker_id.as_deref(),
+                    Some(error.to_string()),
+                );
+                Ok(job.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE session_loop_jobs
+                     SET status = 'failed',
+                         completed_at = COALESCE(completed_at, now()),
+                         lease_expires_at = NULL,
+                         last_error = $1
+                     WHERE tenant_id = $2 AND id = $3 AND status IN ('queued', 'running')
+                     RETURNING id, session_id, environment_id, status, trigger_event_id, reason,
+                               enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
+                               attempt_count, max_attempts, last_error",
+                )
+                .bind(error)
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                session_loop_job_from_row(row)
+            }
+        }
     }
 
     async fn update_session_loop_job_status(
@@ -199,6 +258,19 @@ impl AppState {
                         SessionLoopJobStatus::Completed | SessionLoopJobStatus::Failed => false,
                     };
                     if !claimable {
+                        return Err(AppError::not_found("session loop job not found"));
+                    }
+                } else if matches!(
+                    status,
+                    SessionLoopJobStatus::Completed | SessionLoopJobStatus::Failed
+                ) {
+                    let job = store
+                        .session_loop_jobs
+                        .get(&id)
+                        .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                    if job.status != SessionLoopJobStatus::Running
+                        || job.worker_id.as_deref() != worker_id
+                    {
                         return Err(AppError::not_found("session loop job not found"));
                     }
                 }
@@ -250,7 +322,7 @@ impl AppState {
                              completed_at = COALESCE(completed_at, now()),
                              lease_expires_at = NULL,
                              last_error = COALESCE($2, last_error)
-                         WHERE tenant_id = $3 AND id = $4
+                         WHERE tenant_id = $3 AND id = $4 AND status = 'running' AND worker_id = $5
                          RETURNING id, session_id, environment_id, status, trigger_event_id, reason,
                                    enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                                    attempt_count, max_attempts, last_error",
@@ -259,6 +331,7 @@ impl AppState {
                     .bind(last_error)
                     .bind(self.current_tenant_id())
                     .bind(id)
+                    .bind(worker_id.unwrap_or("session-loop-worker"))
                     .fetch_optional(pool)
                     .await?,
                     SessionLoopJobStatus::Queued => sqlx::query(

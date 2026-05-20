@@ -50,20 +50,27 @@ MandoForge 做的就是这一层公共能力。上面可以长出各行各业的
 
 ## 核心运行闭环
 
-MandoForge 要沉淀的是这条通用 Agent 作业链路：
+MandoForge 要贴近的是 Claude Managed Agents 风格的产品模型：
 
 ```text
-创建 Agent
--> 创建 Session
+Agent -> Environment -> Session -> Events -> Threads
+```
+
+通用治理执行链路仍然重要，但它应该位于这层 managed-agent 表面之下：
+
+```text
+创建或恢复 Session
+-> 写入 user/tool/approval Event
+-> worker queue claim session-loop work
 -> 调用模型
 -> 解析工具调用
 -> 检查策略
 -> 需要时暂停审批
--> 人类批准或拒绝
--> 在 workspace / sandbox 中执行工具
+-> 人类批准、拒绝，或回写 tool result
+-> 在 workspace / sandbox / Codex / MCP / Remote Computer Environment 中执行工具
 -> 生成 artifact
--> 写入事件和审计
--> 回放完整 timeline
+-> 写入 Events、Threads 和 Audit
+-> 实时回流并回放完整 timeline
 ```
 
 这条链路一旦稳定，就可以被不同业务 Agent 复用。业务层只需要换 Agent 配置、工具、数据源和审批策略，不需要每次重新发明运行时底座。
@@ -102,7 +109,8 @@ Stage 2 的 repo-controlled pilot 已完成。严格审计和真实外部生产 
 
 ## 现在最重要的设计方向
 
-当前最重要的下一步不是做某个行业 demo，而是把 Agent 中台修正到 managed-agent 的产品模型：
+当前最重要的下一步不是做某个行业 demo，而是让 Agent 中台贴近 Claude
+Managed Agents 的产品模型，同时保持自托管、provider-neutral 和 policy-governed：
 
 ```text
 Agent -> Environment -> Session -> Events -> Threads
@@ -125,7 +133,7 @@ Agent -> Environment -> Session -> Events -> Threads
 - 把 Orchestrator 执行从 API request path 里移出来，交给 queue-claimed session loop。
 - 把 session status、model spans、tool use、approvals、artifacts、child threads 实时回流到 UI。
 
-已落地的 baseline：
+当前 managed-agent baseline：
 
 - `GET/POST /api/environments` 和 `GET/PATCH/DELETE /api/environments/:id` 管理第一等 Environment 资源。
 - `POST /api/sessions` 接受 `environment_id`，并在 session event log 写入 `session.environment_bound`。
@@ -136,10 +144,15 @@ Agent -> Environment -> Session -> Events -> Threads
 - UI 的开始任务表单会加载 environments，并把新 session 绑定到选择的环境。
 - UI 的运行路径先围绕 managed-session 对象组织：Agent、Environment、Event Stream、Blocking Actions、Artifacts 和 Threads；worker、Remote Computer、provider、Vault、MCP、tenant 等底层设施保留在系统状态和高级面板里。
 
-剩余生产化工作是集群证据：runtime 已强制执行
-`Environment(type=remote_computer)` 合同，但真实 Kubernetes Pod execution
-仍依赖已配置的 Remote Computer transport，以及外部 state-sync / sidecar /
-worker-pool evidence gates。
+当前对齐缺口记录在 [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md)
+和 [Stage 2 / Stage 3 Roadmap](docs/stage2-stage3-roadmap.md)。最重要的剩余工作是把
+Claude-style contract 做成端到端闭环：可恢复的非 terminal idle session、基于
+event cursor 的 loop processing、live streaming、environment queue binding、
+lease-fenced job finalization，以及能证明 worker restart / session recovery 的生产证据。
+
+剩余生产化工作也包括集群证据：runtime 已强制执行
+`Environment(type=remote_computer)` policy，但真实 Kubernetes Pod execution 仍依赖已配置的
+Remote Computer transport，以及外部 state-sync / sidecar / worker-pool evidence gates。
 
 ## 本地运行
 
@@ -226,6 +239,7 @@ kubectl -n agent-os port-forward svc/mandoforge-api 8787:8787
 - [Stage 2 Gap Audit](docs/stage2-gap-audit.md)
 - [Stage 2 Completion Audit](docs/stage2-completion-audit.md)
 - [Stage 2 Production Adoption Runbook](docs/stage2-production-adoption-runbook.md)
+- [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md)
 - [Whiskey Adoption Runbook](docs/whiskey-adoption-runbook.md)
 - [Whiskey Adoption Status](docs/whiskey-adoption-status.md)
 - [MandoForge Roadmap v2](docs/mandoforge-roadmap-v2.md)

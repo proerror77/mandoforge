@@ -17,6 +17,8 @@ pub(crate) struct HarnessContext {
     pub(crate) event_count: usize,
     pub(crate) last_user_message: Option<String>,
     pub(crate) approved_tool_result_count: usize,
+    pub(crate) custom_tool_result_count: usize,
+    pub(crate) recent_custom_tool_results: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

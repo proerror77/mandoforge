@@ -155,6 +155,16 @@ pub(crate) async fn run_execution_job(
     worker_id: &str,
 ) -> Result<ExecutionJob, AppError> {
     let job = state.execution_queue.start(job_id, worker_id).await?;
+    if !crate::session_accepts_worker_execution(state, job.session_id).await? {
+        return retry_or_fail_started_execution_job(
+            state,
+            &job,
+            None,
+            AppError::bad_request("execution job session is no longer active"),
+            json!({"stage": "session_status"}),
+        )
+        .await;
+    }
     let remote_environment_contract =
         match remote_computer_environment_contract_for_job(state, &job).await {
             Ok(contract) => contract,
@@ -439,6 +449,10 @@ pub(crate) async fn run_execution_job(
         }
     };
     if result.is_ok() {
+        let completed = state
+            .execution_queue
+            .complete_started(job.id, worker_id)
+            .await?;
         finalize_remote_computer_assignment_for_job(
             state,
             &job,
@@ -448,7 +462,7 @@ pub(crate) async fn run_execution_job(
             json!({"execution_job_status": "completed"}),
         )
         .await?;
-        state.execution_queue.complete(job.id).await
+        Ok(completed)
     } else {
         let error = result.expect_err("checked error");
         retry_or_fail_started_execution_job(
@@ -472,7 +486,11 @@ async fn retry_or_fail_started_execution_job(
     let error_message = error.message.clone();
     let updated = state
         .execution_queue
-        .retry_or_fail(job.id, &error_message)
+        .retry_or_fail_started(
+            job.id,
+            job.worker_id.as_deref().unwrap_or(""),
+            &error_message,
+        )
         .await?;
     let queued = updated.status == ExecutionJobStatus::Queued;
     let assignment_status = if queued { "released" } else { "failed" };

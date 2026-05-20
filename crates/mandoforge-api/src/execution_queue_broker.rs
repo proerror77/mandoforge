@@ -1115,6 +1115,22 @@ impl BrokerExecutionQueue {
         };
         NatsJetStreamClient::ack(config, ack_subject).await
     }
+
+    async fn ack_message_id(
+        &self,
+        config: &BrokerQueueConfig,
+        message_id: String,
+    ) -> Result<(), AppError> {
+        match self.kind {
+            BrokerQueueKind::Redis => {
+                let command = RedisStreamCommand::xack(config, &message_id)?;
+                RedisStreamClient::execute(config, &command).await?;
+                Ok(())
+            }
+            BrokerQueueKind::Nats => Ok(()),
+            BrokerQueueKind::NatsJetstream => NatsJetStreamClient::ack(config, message_id).await,
+        }
+    }
 }
 
 #[async_trait]
@@ -1199,6 +1215,31 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         pending_job.job.completed_at = Some(Utc::now());
         pending_job.job.lease_expires_at = None;
         Ok(pending_job.job.clone())
+    }
+
+    async fn complete_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        let config = self.broker_config().await?;
+        let (job, message_id) = {
+            let mut pending = self.pending.write().await;
+            let pending_job = pending
+                .get_mut(&job_id)
+                .ok_or_else(|| AppError::not_found("execution job not found"))?;
+            if pending_job.job.status != ExecutionJobStatus::Running
+                || pending_job.job.worker_id.as_deref() != Some(worker_id)
+            {
+                return Err(AppError::not_found("execution job not found"));
+            }
+            pending_job.job.status = ExecutionJobStatus::Completed;
+            pending_job.job.completed_at = Some(Utc::now());
+            pending_job.job.lease_expires_at = None;
+            (pending_job.job.clone(), pending_job.message_id.clone())
+        };
+        self.ack_message_id(config, message_id).await?;
+        Ok(job)
     }
 
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
@@ -1286,6 +1327,47 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
                 }
                 BrokerQueueKind::Nats => {}
             }
+        }
+        Ok(job)
+    }
+
+    async fn retry_or_fail_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        error: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        let config = self.broker_config().await?;
+        let (job, message_id) = {
+            let mut pending = self.pending.write().await;
+            let pending_job = pending
+                .get_mut(&job_id)
+                .ok_or_else(|| AppError::not_found("execution job not found"))?;
+            if pending_job.job.status != ExecutionJobStatus::Running
+                || pending_job.job.worker_id.as_deref() != Some(worker_id)
+            {
+                return Err(AppError::not_found("execution job not found"));
+            }
+            pending_job.job.last_error = Some(error.to_string());
+            if pending_job.job.attempt_count < pending_job.job.max_attempts {
+                pending_job.job.status = ExecutionJobStatus::Queued;
+                pending_job.job.started_at = None;
+                pending_job.job.completed_at = None;
+                pending_job.job.worker_id = None;
+                pending_job.job.lease_expires_at = None;
+                (pending_job.job.clone(), None)
+            } else {
+                pending_job.job.status = ExecutionJobStatus::Failed;
+                pending_job.job.completed_at = Some(Utc::now());
+                pending_job.job.lease_expires_at = None;
+                (
+                    pending_job.job.clone(),
+                    Some(pending_job.message_id.clone()),
+                )
+            }
+        };
+        if let Some(message_id) = message_id {
+            self.ack_message_id(config, message_id).await?;
         }
         Ok(job)
     }
@@ -1824,7 +1906,15 @@ mod tests {
             .await
             .expect("start job");
         assert_eq!(running.status, ExecutionJobStatus::Running);
-        let completed = queue.complete(jobs[0].id).await.expect("ack complete");
+        let stale_complete = queue
+            .complete_started(jobs[0].id, "worker-2")
+            .await
+            .expect_err("stale worker cannot complete started broker job");
+        assert!(format!("{stale_complete:?}").contains("execution job not found"));
+        let completed = queue
+            .complete_started(jobs[0].id, "worker-1")
+            .await
+            .expect("ack complete");
         assert_eq!(completed.status, ExecutionJobStatus::Completed);
         let captured = server.await.expect("captured commands");
 
@@ -2055,7 +2145,15 @@ mod tests {
         assert_eq!(running.status, ExecutionJobStatus::Running);
         assert_eq!(running.worker_id.as_deref(), Some("worker-1"));
 
-        let completed = queue.complete(job_id).await.expect("ack job");
+        let stale_retry = queue
+            .retry_or_fail_started(job_id, "worker-2", "late failure")
+            .await
+            .expect_err("stale worker cannot retry started broker job");
+        assert!(format!("{stale_retry:?}").contains("execution job not found"));
+        let completed = queue
+            .complete_started(job_id, "worker-1")
+            .await
+            .expect("ack job");
         assert_eq!(completed.status, ExecutionJobStatus::Completed);
 
         server.await.expect("server");

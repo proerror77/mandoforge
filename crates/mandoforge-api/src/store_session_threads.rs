@@ -19,7 +19,10 @@ impl AppState {
                     .session_threads
                     .values()
                     .filter(|thread| {
-                        session_id.is_none_or(|session_id| thread.session_id == session_id)
+                        session_id.is_none_or(|session_id| {
+                            thread.session_id == session_id
+                                || thread.specialist_session_id == Some(session_id)
+                        })
                     })
                     .cloned()
                     .collect();
@@ -33,7 +36,8 @@ impl AppState {
                                 agent_version_id, environment_id, source_handoff_id,
                                 specialist_session_id, status, title, context, created_at, updated_at
                          FROM session_threads
-                         WHERE tenant_id = $1 AND session_id = $2
+                         WHERE tenant_id = $1
+                           AND (session_id = $2 OR specialist_session_id = $2)
                          ORDER BY created_at ASC",
                     )
                     .bind(self.current_tenant_id())

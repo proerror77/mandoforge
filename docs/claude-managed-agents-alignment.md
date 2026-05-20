@@ -208,25 +208,14 @@ The Agent OS UI should have this hierarchy:
 
 Infrastructure remains available, but it is not the first screen.
 
-## Revised Implementation Order
+## Current Alignment State
 
-1. Add the Claude-style model document and update roadmap wording.
-2. Add first-class `Environment` schema/API and map existing runtime profiles
-   and Remote Computer profiles into it.
-3. Add `POST /api/sessions/:id/events` as the primary session driver.
-4. Make `/run` a compatibility wrapper over user events.
-5. Add session statuses and event names aligned with the event-driven model:
-   `session.status_running`, `session.status_idle`,
-   `session.status_rescheduling`, `session.status_terminated`,
-   `span.model_request_start`, `span.model_request_end`,
-   `agent.tool_use`, `agent.tool_result`, `agent.custom_tool_use`.
-6. Add environment work queue and orchestrator worker claim loop.
-7. Reframe Remote Computer execution as a self-hosted environment worker.
-8. Add `session_threads` and migrate typed handoffs into thread lifecycle.
-9. Rewrite the UI around sessions/events/threads before expanding more admin
-   panels.
+This is the authoritative status snapshot for the Claude Managed Agents
+alignment. The target model is intentionally close to Claude Managed Agents, but
+MandoForge should not claim exact Claude API parity. It should claim an
+equivalent product contract where the implementation is actually wired through.
 
-Implementation update, 2026-05-20:
+Implementation baseline, 2026-05-20:
 
 - The current runtime has first-class `environments`, event-driven
   `/api/sessions/:id/events`, queue-claimed `session_loop_jobs`, and
@@ -249,6 +238,36 @@ Implementation update, 2026-05-20:
   Environment, Event Stream, Blocking Actions, Artifacts, and Threads before
   raw worker / Remote Computer / provider infrastructure panels.
 
+Remaining alignment work:
+
+| Claude-style contract | Current MandoForge baseline | Required next correction |
+| --- | --- | --- |
+| Sessions remain resumable and normally return to idle after a loop. | Runtime emits managed-agent-style status events, but the persisted session enum still uses demo-era terminal `completed` for a successful pass. | Add explicit persisted `idle`, `running`, `requires_action`, `rescheduling`, and `terminated` semantics; normal loop completion should return to idle, and terminated should require an explicit stop/final-close path. |
+| User, approval, and custom tool result events are the durable input contract. | `/api/sessions/:id/events` persists events and wakes the loop, but the provider context is still rebuilt mostly from whole-session history and reduced fields. | Add an event cursor or processed sequence range so each session-loop job consumes the intended unprocessed event window, including custom tool results and approval resolution payloads. |
+| Session loop continuation is the single orchestration path. | Initial user events use `session_loop_jobs`; approval continuation and execution-job completion still have direct provider-resume paths. | Route approval/tool-result continuation back through `session_loop_jobs` so retry, lease, metrics, audit, and tracing stay on one path. |
+| Environment owns placement for session work. | Environment records and Remote Computer policies exist; workers still globally poll session-loop and execution-job endpoints. | Promote worker queue binding into the session-loop claim path, or introduce an environment work queue above low-level execution jobs. |
+| Streaming is live progress. | `/api/sessions/:id/stream` exposes session events through SSE, but the production-grade live tail/reconnect contract still needs hardening. | Back streaming with a live broadcaster, DB tail, or poll-and-push contract with cursor/reconnect semantics. |
+| Thread APIs show each participating session's thread view. | Primary and specialist thread rows are durable, and lifecycle events are emitted. | Ensure specialist sessions can enumerate their own child thread membership, not only receive thread lifecycle events. |
+| Production readiness proves restart/resume behavior. | Stage 2 evidence gates cover many external controllers and readiness endpoints. | Add managed-session runtime evidence: enqueue events, drain jobs, restart API/worker, prove resumed session state, thread lineage, and lease-fenced finalization. |
+
+## Revised Implementation Order
+
+1. Keep the Claude-style resource chain as the product contract:
+   `Agent -> Environment -> Session -> Events -> Threads`.
+2. Preserve the landed baseline: Environment API, session event API,
+   session-loop jobs, managed-session UI, Remote Computer environment policy,
+   and durable session threads.
+3. Replace demo-era terminal session completion with explicit resumable session
+   states.
+4. Add event-cursor driven session-loop processing.
+5. Make every continuation path enqueue `session_loop_jobs`.
+6. Promote Environment queue binding or add an environment work queue above
+   low-level execution jobs.
+7. Harden live event streaming and thread membership views.
+8. Add production evidence gates for managed-session restart and recovery.
+9. Then expand Workflow Packs, scheduler, Codex traces, and production Remote
+   Computer execution on top of the managed-session runtime.
+
 ## Non-Goals
 
 - Do not turn the orchestrator into an always-running LLM daemon.
@@ -257,6 +276,9 @@ Implementation update, 2026-05-20:
 - Do not expose worker queue internals as the primary product entrypoint.
 - Do not make Workflow Packs the OS. Packs run on top of the managed-session
   runtime.
-- Do not claim Claude parity until MandoForge can create/resume a session,
-  drive it via events, stream model/tool/session events, pause for approvals,
-  and run work through an environment queue.
+- Do not claim exact Claude API parity. Claim MandoForge parity only for the
+  product contract that has been implemented and verified.
+- Do not call a deployment production-ready for managed sessions until it can
+  create/resume a session, drive it via events, stream model/tool/session
+  events, pause for approvals, run work through an environment queue, and
+  recover after API/worker restart with evidence.

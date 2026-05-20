@@ -52,8 +52,17 @@ impl ExecutionQueue {
         self.backend.start(job_id, worker_id).await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn complete(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.backend.complete(job_id).await
+    }
+
+    pub(crate) async fn complete_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.backend.complete_started(job_id, worker_id).await
     }
 
     #[allow(dead_code)]
@@ -65,12 +74,24 @@ impl ExecutionQueue {
         self.backend.cancel(job_id).await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn retry_or_fail(
         &self,
         job_id: Uuid,
         error: &str,
     ) -> Result<ExecutionJob, AppError> {
         self.backend.retry_or_fail(job_id, error).await
+    }
+
+    pub(crate) async fn retry_or_fail_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        error: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.backend
+            .retry_or_fail_started(job_id, worker_id, error)
+            .await
     }
 
     pub(crate) async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
@@ -93,11 +114,24 @@ pub(crate) trait ExecutionQueueBackend: Send + Sync {
 
     async fn complete(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
 
+    async fn complete_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError>;
+
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
 
     async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
 
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError>;
+
+    async fn retry_or_fail_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        error: &str,
+    ) -> Result<ExecutionJob, AppError>;
 
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError>;
 
@@ -260,6 +294,15 @@ impl ExecutionQueueBackend for MemoryExecutionQueue {
             .await
     }
 
+    async fn complete_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.update_started(job_id, worker_id, ExecutionJobStatus::Completed, None)
+            .await
+    }
+
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.update(job_id, ExecutionJobStatus::Failed, None).await
     }
@@ -289,6 +332,21 @@ impl ExecutionQueueBackend for MemoryExecutionQueue {
             job.lease_expires_at = None;
         }
         Ok(job.clone())
+    }
+
+    async fn retry_or_fail_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        error: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.update_started(
+            job_id,
+            worker_id,
+            ExecutionJobStatus::Queued,
+            Some(error.to_string()),
+        )
+        .await
     }
 
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
@@ -343,6 +401,58 @@ impl MemoryExecutionQueue {
         }
         Ok(job.clone())
     }
+
+    async fn update_started(
+        &self,
+        job_id: Uuid,
+        expected_worker_id: &str,
+        status: ExecutionJobStatus,
+        last_error: Option<String>,
+    ) -> Result<ExecutionJob, AppError> {
+        let mut state = self.inner.write().await;
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if job.status != ExecutionJobStatus::Running
+            || job.worker_id.as_deref() != Some(expected_worker_id)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        if let Some(last_error) = last_error {
+            job.last_error = Some(last_error);
+        }
+        match status {
+            ExecutionJobStatus::Completed => {
+                job.status = ExecutionJobStatus::Completed;
+                job.completed_at = Some(Utc::now());
+                job.lease_expires_at = None;
+            }
+            ExecutionJobStatus::Queued => {
+                if job.attempt_count < job.max_attempts {
+                    job.status = ExecutionJobStatus::Queued;
+                    job.started_at = None;
+                    job.completed_at = None;
+                    job.worker_id = None;
+                    job.lease_expires_at = None;
+                } else {
+                    job.status = ExecutionJobStatus::Failed;
+                    job.completed_at = Some(Utc::now());
+                    job.lease_expires_at = None;
+                }
+            }
+            ExecutionJobStatus::Failed => {
+                job.status = ExecutionJobStatus::Failed;
+                job.completed_at = Some(Utc::now());
+                job.lease_expires_at = None;
+            }
+            ExecutionJobStatus::Canceled | ExecutionJobStatus::Running => {
+                return Err(AppError::bad_request("unsupported started job transition"));
+            }
+        }
+        Ok(job.clone())
+    }
 }
 
 #[async_trait]
@@ -388,6 +498,15 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
             .await
     }
 
+    async fn complete_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.update_started(job_id, worker_id, ExecutionJobStatus::Completed, None)
+            .await
+    }
+
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.update(job_id, ExecutionJobStatus::Failed, None).await
     }
@@ -412,6 +531,33 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
         .bind(error)
         .bind(self.current_tenant_id())
         .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        execution_job_from_row(row)
+    }
+
+    async fn retry_or_fail_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        error: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        let row = sqlx::query(
+            "UPDATE execution_jobs
+             SET status = CASE WHEN attempt_count < max_attempts THEN 'queued' ELSE 'failed' END,
+                 started_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE started_at END,
+                 completed_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE COALESCE(completed_at, now()) END,
+                 worker_id = CASE WHEN attempt_count < max_attempts THEN NULL ELSE worker_id END,
+                 lease_expires_at = NULL,
+                 last_error = $1
+             WHERE tenant_id = $2 AND id = $3 AND status = 'running' AND worker_id = $4
+             RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+        )
+        .bind(error)
+        .bind(self.current_tenant_id())
+        .bind(job_id)
+        .bind(worker_id)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::not_found("execution job not found"))?;
@@ -488,6 +634,35 @@ impl PostgresExecutionQueue {
             .bind(job_id)
             .fetch_optional(&self.pool)
             .await?,
+        }
+        .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        execution_job_from_row(row)
+    }
+
+    async fn update_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        status: ExecutionJobStatus,
+        last_error: Option<String>,
+    ) -> Result<ExecutionJob, AppError> {
+        let row = match status {
+            ExecutionJobStatus::Completed | ExecutionJobStatus::Failed => sqlx::query(
+                "UPDATE execution_jobs
+                 SET status = $1, completed_at = COALESCE(completed_at, now()), lease_expires_at = NULL, last_error = COALESCE($2, last_error)
+                 WHERE tenant_id = $3 AND id = $4 AND status = 'running' AND worker_id = $5
+                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+            )
+            .bind(status.as_str())
+            .bind(last_error)
+            .bind(self.current_tenant_id())
+            .bind(job_id)
+            .bind(worker_id)
+            .fetch_optional(&self.pool)
+            .await?,
+            ExecutionJobStatus::Queued | ExecutionJobStatus::Canceled | ExecutionJobStatus::Running => {
+                return Err(AppError::bad_request("unsupported started job transition"));
+            }
         }
         .ok_or_else(|| AppError::not_found("execution job not found"))?;
         execution_job_from_row(row)

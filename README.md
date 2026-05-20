@@ -44,20 +44,28 @@ The current repo is best understood as a **Rust-native Agent OS kernel prototype
 
 ## Core Runtime Loop
 
-MandoForge is designed around this generic agent job loop:
+MandoForge is designed around a Claude Managed Agents-style product model:
 
 ```text
-Create Agent
--> Create Session
+Agent -> Environment -> Session -> Events -> Threads
+```
+
+The generic governed execution loop still matters, but it sits underneath that
+managed-agent surface:
+
+```text
+Create or resume Session
+-> Append user/tool/approval Event
+-> Claim session-loop work through a worker queue
 -> Call Provider
 -> Parse Tool Call
 -> Check Policy
 -> Pause For Approval When Needed
--> Human Approves Or Rejects
--> Execute Tool In Workspace Or Sandbox
+-> Human Approves, Rejects, Or Provides Tool Result
+-> Execute Tool In Workspace, Sandbox, Codex, MCP, Or Remote Computer Environment
 -> Create Artifact
--> Persist Events And Audit
--> Replay Timeline
+-> Persist Events, Threads, And Audit
+-> Stream And Replay Timeline
 ```
 
 Once this loop is stable, different business agents can reuse it by changing agent configuration, tools, data sources, policies, and approval rules.
@@ -97,7 +105,8 @@ Stage 2 is complete for the repo-controlled pilot. The strict audit and the rema
 ## Main Design Direction
 
 The next important direction is not another vertical demo. It is making the
-Agent middleware foundation match the managed-agent product model:
+Agent middleware foundation closely track the Claude Managed Agents product
+model while staying self-hostable, provider-neutral, and policy-governed:
 
 ```text
 Agent -> Environment -> Session -> Events -> Threads
@@ -121,7 +130,7 @@ The immediate slice is event-driven session state:
 - Move orchestrator execution out of the API request path and into a queue-claimed session loop.
 - Stream session status, model spans, tool use, approvals, artifacts, and child threads back to the UI.
 
-Implemented baseline:
+Current managed-agent baseline:
 
 - `GET/POST /api/environments` and `GET/PATCH/DELETE /api/environments/:id` manage first-class Environment records.
 - `POST /api/sessions` accepts `environment_id` and records `session.environment_bound` in the session event log.
@@ -132,9 +141,17 @@ Implemented baseline:
 - The UI start form loads environments and binds new sessions to the selected environment.
 - The UI run view is organized around the managed-session objects first: Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads. Raw worker, Remote Computer, provider, Vault, MCP, and tenant infrastructure remain in system and advanced panels.
 
-The remaining production hardening work is cluster evidence: the
-`Environment(type=remote_computer)` contract is enforced by the runtime, while
-real Kubernetes Pod execution still depends on the configured Remote Computer
+Current alignment gaps are tracked in
+[Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) and
+[Stage 2 / Stage 3 Roadmap](docs/stage2-stage3-roadmap.md). The most important
+remaining work is to make the Claude-style contract complete end to end:
+resumable non-terminal idle sessions, event-cursor based loop processing, live
+streaming, environment queue binding, lease-fenced job finalization, and
+production evidence that proves worker restart and session recovery.
+
+The remaining production hardening work is also cluster evidence:
+`Environment(type=remote_computer)` policy is enforced by the runtime, while real
+Kubernetes Pod execution still depends on the configured Remote Computer
 transport and the external state-sync / sidecar / worker-pool evidence gates.
 
 ## Run Locally
@@ -264,6 +281,7 @@ These manifests are a self-hosted pilot starting point, not a production hardeni
 - [Stage 2 Gap Audit](docs/stage2-gap-audit.md)
 - [Stage 2 Completion Audit](docs/stage2-completion-audit.md)
 - [Stage 2 Production Adoption Runbook](docs/stage2-production-adoption-runbook.md)
+- [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md)
 - [Whiskey Adoption Runbook](docs/whiskey-adoption-runbook.md)
 - [Whiskey Adoption Status](docs/whiskey-adoption-status.md)
 - [MandoForge Roadmap v2](docs/mandoforge-roadmap-v2.md)

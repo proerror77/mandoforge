@@ -85,12 +85,22 @@ async fn main() -> Result<()> {
                 eprintln!("session loop job not claimable: {}", job.id);
                 continue;
             }
-            let updated: SessionLoopJob = response
-                .error_for_status()
-                .with_context(|| format!("run session loop job {} failed", job.id))?
-                .json()
-                .await
-                .with_context(|| format!("parse session loop job {} run response", job.id))?;
+            let updated: SessionLoopJob = match response.error_for_status() {
+                Ok(response) => match response.json().await {
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        eprintln!(
+                            "parse session loop job {} run response failed: {error}",
+                            job.id
+                        );
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    eprintln!("run session loop job {} failed: {error}", job.id);
+                    continue;
+                }
+            };
             processed += 1;
             println!(
                 "session loop job attempt finished: {} status={}",
@@ -131,12 +141,22 @@ async fn main() -> Result<()> {
                 eprintln!("execution job not claimable: {}", job.id);
                 continue;
             }
-            let updated: ExecutionJob = response
-                .error_for_status()
-                .with_context(|| format!("run execution job {} failed", job.id))?
-                .json()
-                .await
-                .with_context(|| format!("parse execution job {} run response", job.id))?;
+            let updated: ExecutionJob = match response.error_for_status() {
+                Ok(response) => match response.json().await {
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        eprintln!(
+                            "parse execution job {} run response failed: {error}",
+                            job.id
+                        );
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    eprintln!("run execution job {} failed: {error}", job.id);
+                    continue;
+                }
+            };
             processed += 1;
             println!(
                 "execution job attempt finished: {} status={}",
