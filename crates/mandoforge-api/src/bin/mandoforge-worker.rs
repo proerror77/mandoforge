@@ -2,7 +2,7 @@ use std::{env, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use tokio::time::sleep;
 
 #[derive(Debug, Deserialize)]
@@ -56,17 +56,13 @@ async fn main() -> Result<()> {
 
     let mut processed = 0usize;
     loop {
-        let session_loop_jobs: Vec<SessionLoopJob> = client
-            .get(format!("{base_url}/api/session-loop-jobs"))
-            .worker_auth(&worker_subject, &worker_roles, api_token.as_deref())
-            .send()
-            .await
-            .context("list session loop jobs")?
-            .error_for_status()
-            .context("list session loop jobs failed")?
-            .json()
-            .await
-            .context("parse session loop jobs")?;
+        let session_loop_jobs: Vec<SessionLoopJob> = fetch_job_list(
+            client
+                .get(format!("{base_url}/api/session-loop-jobs"))
+                .worker_auth(&worker_subject, &worker_roles, api_token.as_deref()),
+            "session loop jobs",
+        )
+        .await;
 
         for job in session_loop_jobs
             .into_iter()
@@ -112,17 +108,13 @@ async fn main() -> Result<()> {
             }
         }
 
-        let jobs: Vec<ExecutionJob> = client
-            .get(format!("{base_url}/api/execution-jobs"))
-            .worker_auth(&worker_subject, &worker_roles, api_token.as_deref())
-            .send()
-            .await
-            .context("list execution jobs")?
-            .error_for_status()
-            .context("list execution jobs failed")?
-            .json()
-            .await
-            .context("parse execution jobs")?;
+        let jobs: Vec<ExecutionJob> = fetch_job_list(
+            client
+                .get(format!("{base_url}/api/execution-jobs"))
+                .worker_auth(&worker_subject, &worker_roles, api_token.as_deref()),
+            "execution jobs",
+        )
+        .await;
 
         for job in jobs
             .into_iter()
@@ -179,6 +171,33 @@ async fn main() -> Result<()> {
     }
 }
 
+async fn fetch_job_list<T>(request: reqwest::RequestBuilder, label: &str) -> Vec<T>
+where
+    T: DeserializeOwned,
+{
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("list {label} failed: {error}");
+            return Vec::new();
+        }
+    };
+    let response = match response.error_for_status() {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("list {label} failed: {error}");
+            return Vec::new();
+        }
+    };
+    match response.json().await {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            eprintln!("parse {label} failed: {error}");
+            Vec::new()
+        }
+    }
+}
+
 trait WorkerAuthRequestBuilder {
     fn worker_auth(
         self,
@@ -223,4 +242,60 @@ async fn wait_for_api(client: &reqwest::Client, base_url: &str) -> Result<()> {
         "API healthz did not become ready: {}",
         last_error.unwrap_or_else(|| "unknown error".to_string())
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, routing::get};
+    use tokio::net::TcpListener;
+
+    async fn serve_once(route: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock worker server");
+        let addr = listener.local_addr().expect("mock worker server addr");
+        tokio::spawn(async move {
+            axum::serve(listener, route)
+                .await
+                .expect("serve mock worker");
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn fetch_job_list_returns_empty_on_server_error() {
+        let base_url = serve_once(Router::new().route(
+            "/api/session-loop-jobs",
+            get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        ))
+        .await;
+        let client = reqwest::Client::new();
+
+        let jobs: Vec<SessionLoopJob> = fetch_job_list(
+            client.get(format!("{base_url}/api/session-loop-jobs")),
+            "session loop jobs",
+        )
+        .await;
+
+        assert!(jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_job_list_returns_empty_on_invalid_json() {
+        let base_url = serve_once(Router::new().route(
+            "/api/execution-jobs",
+            get(|| async { (StatusCode::OK, "not-json") }),
+        ))
+        .await;
+        let client = reqwest::Client::new();
+
+        let jobs: Vec<ExecutionJob> = fetch_job_list(
+            client.get(format!("{base_url}/api/execution-jobs")),
+            "execution jobs",
+        )
+        .await;
+
+        assert!(jobs.is_empty());
+    }
 }

@@ -46,6 +46,9 @@ fetch_json() {
   if [[ "$http_status" != 2* ]]; then
     echo "remote computer evidence request failed: $method $path returned HTTP $http_status" >&2
     sed -n '1,40p' "$response_body" >&2
+    if [[ "$http_status" == "403" ]] && grep -q "x-mandoforge-roles is only accepted in explicit insecure dev auth mode" "$response_body"; then
+      echo "hint: start the local API with MANDOFORGE_INSECURE_DEV_AUTH=1 when using this dev-header evidence gate." >&2
+    fi
     rm -f "$response_body"
     exit 1
   fi
@@ -67,6 +70,9 @@ write_summary() {
   local sidecar_supervision_status
   local sidecar_recovery_status
   local runner_status
+  local runner_configured
+  local runner_ready
+  local runner_message
   local state_sync_evidence_status
   local state_sync_validation_status
   local state_sync_controller_fresh
@@ -83,6 +89,9 @@ write_summary() {
   sidecar_supervision_status="$(jq -r '.sidecar_supervision.status // "unknown"' "$readiness_file")"
   sidecar_recovery_status="$(jq -r '.sidecar_recovery.status // "unknown"' "$readiness_file")"
   runner_status="$(jq -r '.status // "unknown"' "$runner_file")"
+  runner_configured="$(jq -r '.configured // false' "$runner_file")"
+  runner_ready="$(jq -r '(.configured == true) and (((.status // "") == "ready") or ((.status // "") == "dry_run_ready") or ((.status // "") == "live_ready"))' "$runner_file")"
+  runner_message="$(jq -r '.message // ""' "$runner_file")"
   state_sync_evidence_status="missing"
   state_sync_validation_status="unknown"
   if [[ -s "$state_sync_evidence_file" ]]; then
@@ -99,6 +108,9 @@ write_summary() {
       .production_state_sync.production_blocked,
       (.sidecar_recovery.status == "blocked")
     ] | map(select(. == true)) | length' "$readiness_file")"
+  if [[ "$runner_ready" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "remote_computer_status=$status"
@@ -107,6 +119,8 @@ write_summary() {
     echo "sidecar_supervision_status=$sidecar_supervision_status"
     echo "sidecar_recovery_status=$sidecar_recovery_status"
     echo "runner_status=$runner_status"
+    echo "runner_configured=$runner_configured"
+    echo "runner_ready=$runner_ready"
     echo "state_sync_evidence_status=$state_sync_evidence_status"
     echo "state_sync_validation_status=$state_sync_validation_status"
     echo "state_sync_controller_evidence_fresh=$state_sync_controller_fresh"
@@ -122,9 +136,15 @@ write_summary() {
     echo
     echo "state_sync_blocking_reasons:"
     jq -r '.production_state_sync.blocking_reasons[]? | "- \(.)"' "$readiness_file"
+    if [[ "$runner_ready" != "true" ]]; then
+      echo "- remote computer runner is not ready: status=$runner_status configured=$runner_configured message=$runner_message"
+    fi
     echo
     echo "runbook_actions:"
     jq -r '.runbook_actions[]? | "- \(.)"' "$readiness_file"
+    if [[ "$runner_ready" != "true" ]]; then
+      echo "- configure the Remote Computer runner before declaring Remote Computer evidence ready"
+    fi
   } >"$summary_file"
 
   cat "$summary_file"

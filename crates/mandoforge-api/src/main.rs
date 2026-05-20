@@ -33977,15 +33977,15 @@ async fn assign_execution_job_remote_computer_lease(
     headers: HeaderMap,
     Json(input): Json<CreateRemoteComputerJobAssignment>,
 ) -> Result<Json<RemoteComputerJobAssignment>, AppError> {
+    let job = state.execution_queue.get(id).await?;
     authorize_request(
         &state,
         &headers,
-        Permission::ExecutionJobsRun,
-        "execution_job",
-        Some(id),
+        Permission::SessionsRun,
+        "session",
+        Some(job.session_id),
     )
     .await?;
-    let job = state.execution_queue.get(id).await?;
     if job.status != ExecutionJobStatus::Queued && job.status != ExecutionJobStatus::Running {
         return Err(AppError::bad_request(
             "only queued or running execution jobs can be assigned to remote computer leases",
@@ -34574,18 +34574,82 @@ async fn acquire_remote_computer_state_lock(
     headers: HeaderMap,
     Json(input): Json<CreateRemoteComputerStateLock>,
 ) -> Result<Json<RemoteComputerStateLock>, AppError> {
+    let session_id = input.session_id.ok_or_else(|| {
+        AppError::bad_request("Remote Computer state lock requires session_id for scoped access")
+    })?;
     authorize_request(
         &state,
         &headers,
         Permission::ExecutionJobsRun,
-        "remote_computer_state_lock",
-        None,
+        "session",
+        Some(session_id),
     )
     .await?;
+    ensure_remote_computer_lock_refs_match_session(&state, &input, session_id).await?;
     let lock = state.acquire_remote_computer_state_lock(input).await?;
     record_remote_computer_state_lock_event(&state, &lock, "remote_computer.state_lock_acquired")
         .await?;
     Ok(Json(lock))
+}
+
+async fn ensure_remote_computer_lock_refs_match_session(
+    state: &AppState,
+    input: &CreateRemoteComputerStateLock,
+    session_id: Uuid,
+) -> Result<(), AppError> {
+    if let Some(lease_id) = input.lease_id {
+        let lease = state
+            .list_remote_computer_leases()
+            .await?
+            .into_iter()
+            .find(|lease| lease.id == lease_id)
+            .ok_or_else(|| AppError::not_found("Remote Computer lease not found"))?;
+        if lease.session_id != Some(session_id) {
+            return Err(AppError::forbidden(
+                "Remote Computer state lock lease does not belong to the session",
+            ));
+        }
+        if let Some(remote_computer_id) = input.remote_computer_id
+            && lease.remote_computer_id != remote_computer_id
+        {
+            return Err(AppError::forbidden(
+                "Remote Computer state lock lease does not belong to the remote computer",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn authorize_remote_computer_state_lock_release(
+    state: &AppState,
+    headers: &HeaderMap,
+    lock: &RemoteComputerStateLock,
+) -> Result<(), AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    let session_id = lock.session_id.ok_or_else(|| {
+        AppError::forbidden("Remote Computer state lock is not bound to a session")
+    })?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::ExecutionJobsRun,
+        resource_type: "session".to_string(),
+        resource_id: Some(session_id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(state, &principal, &request).await?;
+    if !principal.roles.contains(&Role::Admin)
+        && let Some(owner) = lock.owner.as_deref()
+    {
+        let worker_id = header_value(headers, "x-mandoforge-worker-id")
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if worker_id != Some(owner) {
+            return Err(AppError::forbidden(
+                "Remote Computer state lock owner does not match worker identity",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn release_remote_computer_state_lock(
@@ -34594,14 +34658,13 @@ async fn release_remote_computer_state_lock(
     headers: HeaderMap,
     Json(input): Json<ReleaseRemoteComputerStateLock>,
 ) -> Result<Json<RemoteComputerStateLock>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::ExecutionJobsRun,
-        "remote_computer_state_lock",
-        Some(id),
-    )
-    .await?;
+    let existing = state
+        .list_remote_computer_state_locks()
+        .await?
+        .into_iter()
+        .find(|lock| lock.id == id)
+        .ok_or_else(|| AppError::not_found("Remote Computer state lock not found"))?;
+    authorize_remote_computer_state_lock_release(&state, &headers, &existing).await?;
     let lock = state.release_remote_computer_state_lock(id, input).await?;
     record_remote_computer_state_lock_event(&state, &lock, "remote_computer.state_lock_released")
         .await?;
@@ -34628,19 +34691,49 @@ async fn record_remote_computer_sidecar_heartbeat(
     headers: HeaderMap,
     Json(input): Json<CreateRemoteComputerSidecarHeartbeat>,
 ) -> Result<Json<RemoteComputerSidecarHeartbeat>, AppError> {
+    let session_id = input.session_id.ok_or_else(|| {
+        AppError::bad_request("Remote Computer sidecar heartbeat requires session_id")
+    })?;
     authorize_request(
         &state,
         &headers,
         Permission::ExecutionJobsRun,
-        "remote_computer_sidecar_heartbeat",
-        Some(input.remote_computer_id),
+        "session",
+        Some(session_id),
     )
     .await?;
+    ensure_remote_computer_heartbeat_refs_match_session(&state, &input, session_id).await?;
     let heartbeat = state
         .record_remote_computer_sidecar_heartbeat(input)
         .await?;
     record_remote_computer_sidecar_heartbeat_event(&state, &heartbeat).await?;
     Ok(Json(heartbeat))
+}
+
+async fn ensure_remote_computer_heartbeat_refs_match_session(
+    state: &AppState,
+    input: &CreateRemoteComputerSidecarHeartbeat,
+    session_id: Uuid,
+) -> Result<(), AppError> {
+    if let Some(assignment_id) = input.assignment_id {
+        let assignment = state
+            .list_remote_computer_job_assignments()
+            .await?
+            .into_iter()
+            .find(|assignment| assignment.id == assignment_id)
+            .ok_or_else(|| AppError::not_found("Remote Computer job assignment not found"))?;
+        if assignment.session_id != session_id {
+            return Err(AppError::forbidden(
+                "Remote Computer sidecar heartbeat assignment does not belong to the session",
+            ));
+        }
+        if assignment.remote_computer_id != input.remote_computer_id {
+            return Err(AppError::forbidden(
+                "Remote Computer sidecar heartbeat assignment does not belong to the remote computer",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn run_remote_computer_sidecar_recovery(
@@ -44786,6 +44879,28 @@ not json
             json!("Remote Computer state lock is already held")
         );
 
+        let (status, value) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/remote-computers/state-locks/{}/release",
+                    lock.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .header("x-mandoforge-worker-id", "other-worker")
+                .body(Body::from(json!({"reason": "wrong worker"}).to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            value["error"],
+            json!("Remote Computer state lock owner does not match worker identity")
+        );
+
         let released: RemoteComputerStateLock = request_json(
             app.clone(),
             Request::builder()
@@ -44797,6 +44912,7 @@ not json
                 .header("content-type", "application/json")
                 .header("x-mandoforge-subject", "operator-1")
                 .header("x-mandoforge-roles", "operator")
+                .header("x-mandoforge-worker-id", "state-lock-worker")
                 .body(Body::from(json!({"reason": "done"}).to_string()))
                 .expect("valid request"),
         )
@@ -44832,6 +44948,30 @@ not json
             event.event_type == "remote_computer.state_lock_released"
                 && event.payload["lock_id"] == json!(lock.id)
         }));
+
+        let (status, value) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/state-locks")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "lock_key": "memory/missing-session.md",
+                        "owner": "state-lock-worker"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            value["error"],
+            json!("Remote Computer state lock requires session_id for scoped access")
+        );
     }
 
     #[tokio::test]
@@ -44879,6 +45019,79 @@ not json
                 .expect("valid request"),
         )
         .await;
+        let lease: RemoteComputerLease = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/remote-computers/{}/leases", computer.id))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "worker_id": "sidecar-heartbeat-worker"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/agent_cli.exec/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "profile": "heartbeat-worker",
+                        "task": "Report heartbeat artifacts"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
+        )
+        .await;
+        let job = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id && job.tool_name == "agent_cli.exec")
+        .expect("heartbeat execution job queued");
+        let assignment: RemoteComputerJobAssignment = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/execution-jobs/{}/remote-computer-lease",
+                    job.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "lease_id": lease.id,
+                        "assigned_by": "operator-1"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
 
         let heartbeat: RemoteComputerSidecarHeartbeat = request_json(
             app.clone(),
@@ -44892,6 +45105,7 @@ not json
                     json!({
                         "remote_computer_id": computer.id,
                         "session_id": session.id,
+                        "assignment_id": assignment.id,
                         "sidecar_name": "artifact-discovery",
                         "status": "enabled",
                         "metadata": {"artifact_dir": "/workspace/artifacts"}
@@ -44904,6 +45118,48 @@ not json
         assert_eq!(heartbeat.remote_computer_id, computer.id);
         assert_eq!(heartbeat.sidecar_name, "artifact-discovery");
         assert_eq!(heartbeat.status, "enabled");
+
+        let other_session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({"agent_id": agents[0].id, "title": "sidecar heartbeat other session"})
+                        .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let (status, value) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/remote-computers/sidecars/heartbeats")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::from(
+                    json!({
+                        "remote_computer_id": computer.id,
+                        "session_id": other_session.id,
+                        "assignment_id": assignment.id,
+                        "sidecar_name": "artifact-discovery",
+                        "status": "enabled"
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            value["error"],
+            json!("Remote Computer sidecar heartbeat assignment does not belong to the session")
+        );
 
         let heartbeats: Vec<RemoteComputerSidecarHeartbeat> = request_json(
             app.clone(),

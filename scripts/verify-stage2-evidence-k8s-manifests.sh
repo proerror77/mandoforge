@@ -376,6 +376,11 @@ if ! grep -q "remote-computer-state-sync-evidence.json" "$remote_computer_script
   exit 1
 fi
 
+if ! grep -q "runner_ready" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must fail closed when runner readiness is not configured" >&2
+  exit 1
+fi
+
 if ! grep -q "remote-computer-state-sync-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit Remote Computer state-sync evidence metadata" >&2
   exit 1
