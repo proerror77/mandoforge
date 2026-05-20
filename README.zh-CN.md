@@ -137,6 +137,7 @@ Agent -> Environment -> Session -> Events -> Threads
 
 - `GET/POST /api/environments` 和 `GET/PATCH/DELETE /api/environments/:id` 管理第一等 Environment 资源。
 - `POST /api/sessions` 接受 `environment_id`，并在 session event log 写入 `session.environment_bound`。
+- `Environment.runtime_profile_id` 是 session 的 canonical managed runtime-adapter 绑定。`agent_cli.exec` 仍是 CLI-backed adapters 的兼容 facade，但请求里的 profile 必须先匹配绑定的 Environment profile，之后才回退到 handoff 或 agent runtime profile；旧的 env-var allowlist 只在没有 managed binding 时生效。
 - `POST /api/sessions/:id/events` 会 enqueue 可被 worker lease claim 的 `session_loop_job`；`mandoforge-worker` 在 API request path 之外执行 orchestrator loop。
 - session 执行会写入 managed-agent 风格的 `session.status_*`、`span.model_request_*`、`agent.tool_use`、`agent.tool_result` 和 `thread.*` timeline events。
 - `GET /api/sessions/:id/threads` 暴露 durable `session_threads`；Manager 到 Specialist 的 typed handoff 会创建挂在 parent session 下的 child specialist thread。

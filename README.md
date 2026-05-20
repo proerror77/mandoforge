@@ -134,6 +134,7 @@ Current managed-agent baseline:
 
 - `GET/POST /api/environments` and `GET/PATCH/DELETE /api/environments/:id` manage first-class Environment records.
 - `POST /api/sessions` accepts `environment_id` and records `session.environment_bound` in the session event log.
+- `Environment.runtime_profile_id` is the canonical managed runtime-adapter binding for the session. `agent_cli.exec` remains a compatibility facade for CLI-backed adapters, but requested profiles must match the bound environment profile before falling back to handoff or agent runtime profiles. The legacy env-var allowlist only applies when no managed binding exists.
 - `POST /api/sessions/:id/events` enqueues a lease-claimed `session_loop_job`; `mandoforge-worker` claims it and runs the orchestrator loop outside the API request path.
 - Session execution emits managed-agent style `session.status_*`, `span.model_request_*`, `agent.tool_use`, `agent.tool_result`, and `thread.*` timeline events.
 - `GET /api/sessions/:id/threads` exposes durable `session_threads`; typed manager-to-specialist handoffs create child specialist threads linked to the parent session.

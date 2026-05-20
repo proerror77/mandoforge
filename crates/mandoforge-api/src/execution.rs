@@ -2806,6 +2806,12 @@ struct AgentCliProfileConfig {
     source: AgentCliProfileConfigSource,
 }
 
+#[derive(Debug, Clone)]
+struct BoundAgentCliProfile {
+    name: String,
+    source: &'static str,
+}
+
 fn normalize_agent_cli_profile(profile: &str) -> Result<String, AppError> {
     let normalized = profile.trim().to_ascii_lowercase();
     if normalized.is_empty()
@@ -2825,27 +2831,40 @@ async fn enforce_bound_agent_cli_profile(
     session_id: Uuid,
     requested_profile: &str,
 ) -> Result<(), AppError> {
-    if env_flag("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE") {
-        return Ok(());
-    }
-    let Some(bound_profile_name) = bound_agent_cli_profile_name(state, session_id).await? else {
+    let Some(bound_profile) = bound_agent_cli_profile(state, session_id).await? else {
+        if env_flag("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE") {
+            return Ok(());
+        }
         return Err(AppError::bad_request(
             "agent_cli.exec requires a session-bound runtime profile",
         ));
     };
-    let bound_profile = normalize_agent_cli_profile(&bound_profile_name)?;
-    if bound_profile != requested_profile {
+    let bound_profile_name = normalize_agent_cli_profile(&bound_profile.name)?;
+    if bound_profile_name != requested_profile {
         return Err(AppError::bad_request(format!(
-            "agent_cli.exec profile must match session runtime profile: requested {requested_profile}, bound {bound_profile}"
+            "agent_cli.exec profile must match session {} runtime profile: requested {requested_profile}, bound {bound_profile_name}",
+            bound_profile.source
         )));
     }
     Ok(())
 }
 
-async fn bound_agent_cli_profile_name(
+async fn bound_agent_cli_profile(
     state: &AppState,
     session_id: Uuid,
-) -> Result<Option<String>, AppError> {
+) -> Result<Option<BoundAgentCliProfile>, AppError> {
+    let session = state.get_session(session_id).await?;
+    if let Some(environment_id) = session.environment_id {
+        let environment = state.get_environment(environment_id).await?;
+        if let Some(profile_id) = environment.runtime_profile_id {
+            let profile = state.get_agent_runtime_profile(profile_id).await?;
+            return Ok(Some(BoundAgentCliProfile {
+                name: profile.name,
+                source: "environment",
+            }));
+        }
+    }
+
     if let Some(assignment) = state
         .list_agent_handoff_assignments(Some(session_id))
         .await?
@@ -2855,16 +2874,21 @@ async fn bound_agent_cli_profile_name(
     {
         if let Some(profile_id) = assignment.runtime_profile_id {
             let profile = state.get_agent_runtime_profile(profile_id).await?;
-            return Ok(Some(profile.name));
+            return Ok(Some(BoundAgentCliProfile {
+                name: profile.name,
+                source: "handoff",
+            }));
         }
     }
 
-    let session = state.get_session(session_id).await?;
     let agent = state.get_agent(session.agent_id).await?;
     match agent.runtime_profile_id {
         Some(profile_id) => {
             let profile = state.get_agent_runtime_profile(profile_id).await?;
-            Ok(Some(profile.name))
+            Ok(Some(BoundAgentCliProfile {
+                name: profile.name,
+                source: "agent",
+            }))
         }
         None => Ok(None),
     }

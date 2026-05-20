@@ -53949,6 +53949,416 @@ not json
     }
 
     #[tokio::test]
+    async fn environment_runtime_profile_is_canonical_for_agent_cli_exec() {
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let shim_dir = test_workspace_root()
+            .join("agent-cli-shims")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&shim_dir).expect("create shim dir");
+        let env_shim_path = shim_dir.join("environment-coder");
+        let agent_shim_path = shim_dir.join("agent-coder");
+        fs::write(
+            &env_shim_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho \"source=environment\"\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"task=$MANDOFORGE_AGENT_TASK\"\necho \"argv=$*\"\n",
+        )
+        .expect("write environment fake CLI");
+        fs::write(
+            &agent_shim_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho \"source=agent\"\n",
+        )
+        .expect("write agent fake CLI");
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&env_shim_path, fs::Permissions::from_mode(0o755))
+                .expect("chmod environment fake CLI");
+            fs::set_permissions(&agent_shim_path, fs::Permissions::from_mode(0o755))
+                .expect("chmod agent fake CLI");
+        }
+
+        let environment_profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "environment-codex-worker",
+                    "runtime_type": "agent_cli",
+                    "command": env_shim_path.to_string_lossy(),
+                    "default_args": ["--managed"],
+                    "timeout_seconds": 30,
+                    "remote_computer_required": false
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let agent_profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "agent-codex-worker",
+                    "runtime_type": "agent_cli",
+                    "command": agent_shim_path.to_string_lossy(),
+                    "default_args": ["--managed"],
+                    "timeout_seconds": 30,
+                    "remote_computer_required": false
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let environment: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Canonical Runtime Environment",
+                    "environment_type": "self_hosted",
+                    "runtime_profile_id": environment_profile.id,
+                    "worker_queue_binding": {"queue": "managed-agent-runtime"},
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Agent Profile Must Yield To Environment",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_profile_id": agent_profile.id,
+                    "tools": ["agent_cli.exec"]
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "environment_id": environment.id,
+                    "title": "environment canonical runtime"
+                }),
+            ),
+        )
+        .await;
+
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/agent_cli.exec/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "profile": "environment-codex-worker",
+                        "task": "Run through environment runtime adapter",
+                        "args": ["--sandbox", "workspace-write"]
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
+        )
+        .await;
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id && job.tool_name == "agent_cli.exec")
+        .expect("agent CLI execution job queued")
+        .id;
+        let completed: execution_queue::ExecutionJob = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{job_id}/run"))
+                .header("x-mandoforge-worker-id", "environment-runtime-worker-1")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            completed.status,
+            ExecutionJobStatus::Completed,
+            "{completed:?}"
+        );
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let result = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "agent_cli.exec")
+            .and_then(|call| call.result.as_ref())
+            .expect("agent CLI result");
+        assert_eq!(result["profile"], "environment-codex-worker");
+        assert_eq!(result["profile_source"], "managed");
+        assert_eq!(result["runtime_type"], "agent_cli");
+        assert_eq!(result["runtime_adapter_event_count"], 0);
+        assert!(
+            result["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("source=environment")
+        );
+        assert!(
+            result["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("profile=environment-codex-worker")
+        );
+        assert!(!result["stdout"].as_str().unwrap().contains("source=agent"));
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "agent_cli.task.completed"
+                && event.payload["runtime_type"] == "agent_cli"
+                && event.payload["profile"] == "environment-codex-worker"
+        }));
+    }
+
+    #[tokio::test]
+    async fn environment_runtime_profile_blocks_requested_profile_override() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let shim_dir = test_workspace_root()
+            .join("agent-cli-shims")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&shim_dir).expect("create shim dir");
+        let environment_shim_path = shim_dir.join("bound-runtime");
+        let legacy_shim_path = shim_dir.join("legacy-runtime");
+        fs::write(
+            &environment_shim_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho \"bound-runtime\"\n",
+        )
+        .expect("write bound fake CLI");
+        fs::write(
+            &legacy_shim_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho \"legacy-runtime\"\n",
+        )
+        .expect("write legacy fake CLI");
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&environment_shim_path, fs::Permissions::from_mode(0o755))
+                .expect("chmod bound fake CLI");
+            fs::set_permissions(&legacy_shim_path, fs::Permissions::from_mode(0o755))
+                .expect("chmod legacy fake CLI");
+        }
+        let _allow_requested =
+            EnvVarGuard::set("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE", "1");
+        let _allowed_profiles =
+            EnvVarGuard::set("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES", "legacy-coder");
+        let _legacy_command = EnvVarGuard::set(
+            "MANDOFORGE_AGENT_CLI_LEGACY_CODER_COMMAND",
+            &legacy_shim_path.to_string_lossy(),
+        );
+        let _legacy_args = EnvVarGuard::remove("MANDOFORGE_AGENT_CLI_LEGACY_CODER_ARGS");
+
+        let environment_profile: AgentRuntimeProfile = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-runtime-profiles",
+                json!({
+                    "name": "bound-environment-coder",
+                    "runtime_type": "agent_cli",
+                    "command": environment_shim_path.to_string_lossy(),
+                    "timeout_seconds": 30,
+                    "remote_computer_required": false
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let environment: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Override Blocking Environment",
+                    "environment_type": "self_hosted",
+                    "runtime_profile_id": environment_profile.id,
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agents[0].id,
+                    "environment_id": environment.id,
+                    "title": "environment blocks requested legacy profile"
+                }),
+            ),
+        )
+        .await;
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/agent_cli.exec/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "profile": "legacy-coder",
+                        "task": "This must not bypass environment binding"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
+        )
+        .await;
+        let job_id = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.approval_id == approved.id && job.tool_name == "agent_cli.exec")
+        .expect("agent CLI execution job queued")
+        .id;
+
+        for attempt in 1..=3 {
+            let (status, body) = request_value(
+                app.clone(),
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/execution-jobs/{job_id}/run"))
+                    .header(
+                        "x-mandoforge-worker-id",
+                        format!("environment-override-worker-{attempt}"),
+                    )
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await;
+            if attempt < 3 {
+                assert_eq!(status, StatusCode::OK);
+                let job: execution_queue::ExecutionJob =
+                    serde_json::from_value(body).expect("execution job response");
+                assert_eq!(job.status, ExecutionJobStatus::Queued);
+                assert!(
+                    job.last_error
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("session environment runtime profile")
+                );
+            } else {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(
+                    body["error"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("session environment runtime profile")
+                );
+            }
+        }
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent_cli_call = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "agent_cli.exec")
+            .expect("agent CLI tool call");
+        assert_eq!(agent_cli_call.status, "failed");
+        assert!(
+            agent_cli_call
+                .error
+                .as_ref()
+                .and_then(|error| error["error"].as_str())
+                .is_some_and(|error| error.contains("session environment runtime profile"))
+        );
+    }
+
+    #[tokio::test]
     async fn agent_runtime_profile_release_gates_cover_hosted_runtime_allowlist() {
         let app = test_app().await;
         let runtime_profiles = [
