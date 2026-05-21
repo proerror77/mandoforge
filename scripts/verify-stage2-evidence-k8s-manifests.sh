@@ -1750,6 +1750,11 @@ if ! grep -q "summary worker evidence cluster id" scripts/verify-stage2-evidence
   exit 1
 fi
 
+if ! grep -q "local Remote Computer state backend evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject local Remote Computer state backend evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "production-evidence-run.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must write a run identity manifest" >&2
   exit 1
