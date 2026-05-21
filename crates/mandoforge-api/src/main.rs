@@ -52892,6 +52892,30 @@ not json
                 && event.payload["runner"] == "app-server"
                 && event.payload["poll_attempts"] == 1
         }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.turn.started"
+                && event.payload["runtime_type"] == "codex_app_server"
+                && event.payload["thread_id"] == "thread-1"
+                && event.payload["turn_id"] == "turn-1"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.item"
+                && event.payload["runtime_type"] == "codex_app_server"
+                && event.payload["item"]["status"] == "completed"
+                && event.payload["item"]["result"]["message"] == "completed"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.final"
+                && event.payload["runtime_type"] == "codex_app_server"
+                && event.payload["final_message"] == "completed"
+                && event.payload["artifact_id"].is_string()
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.turn.completed"
+                && event.payload["runtime_type"] == "codex_app_server"
+                && event.payload["status"] == "completed"
+                && event.payload["final_artifact_id"].is_string()
+        }));
 
         let runs: Vec<CodexAppServerRun> = request_json(
             app.clone(),

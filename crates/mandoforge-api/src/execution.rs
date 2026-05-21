@@ -2493,6 +2493,15 @@ async fn run_codex_app_server(
             serde_json::to_value(&turn)?,
         )
         .await?;
+    record_codex_app_server_runtime_turn_started(
+        state,
+        session_id,
+        turn_run.id,
+        &thread.thread_id,
+        &turn,
+        &turn_request,
+    )
+    .await?;
     let poll_result = poll_codex_app_server_turn_for_worker(
         state,
         config,
@@ -2533,6 +2542,19 @@ async fn run_codex_app_server(
             }),
         )
         .await?;
+
+    if poll_result.terminal {
+        record_codex_app_server_runtime_turn_completed(
+            state,
+            session_id,
+            turn_run.id,
+            &thread.thread_id,
+            &final_turn,
+            &final_status,
+            poll_result.attempts,
+        )
+        .await?;
+    }
 
     if event_type == "codex.task.failed" {
         return Err(AppError::bad_request(format!(
@@ -2624,6 +2646,10 @@ async fn poll_codex_app_server_turn_for_worker(
                         }),
                     )
                     .await?;
+                record_codex_app_server_runtime_item(
+                    state, session_id, run_id, &turn, attempts, &status, terminal,
+                )
+                .await?;
             }
             Err(error) => {
                 status = "poll_failed".to_string();
@@ -2686,6 +2712,241 @@ fn codex_app_server_turn_status_is_terminal(status: &str) -> bool {
 
 fn codex_app_server_turn_status_succeeded(status: &str) -> bool {
     status.trim().eq_ignore_ascii_case("completed")
+}
+
+async fn record_codex_app_server_runtime_turn_started(
+    state: &AppState,
+    session_id: Uuid,
+    run_id: Uuid,
+    thread_id: &str,
+    turn: &CodexTurnResponse,
+    turn_request: &CodexTurnRequest,
+) -> Result<(), AppError> {
+    state
+        .append_event(
+            "runtime_adapter",
+            Some(run_id),
+            session_id,
+            "runtime.turn.started",
+            json!({
+                "profile": "codex-app-server",
+                "runtime_type": "codex_app_server",
+                "source": "codex_app_server",
+                "source_operation": "turn.create",
+                "run_id": run_id,
+                "thread_id": thread_id,
+                "turn_id": turn.turn_id,
+                "status": turn.status,
+                "resume_handle": {
+                    "source": "codex_app_server",
+                    "thread_id": thread_id,
+                    "turn_id": turn.turn_id,
+                },
+                "request": {
+                    "message": turn_request.message,
+                    "metadata": turn_request.metadata,
+                },
+            }),
+        )
+        .await
+        .map(|_| ())
+}
+
+async fn record_codex_app_server_runtime_item(
+    state: &AppState,
+    session_id: Uuid,
+    run_id: Uuid,
+    turn: &CodexTurnResponse,
+    attempt: u32,
+    status: &str,
+    terminal: bool,
+) -> Result<(), AppError> {
+    state
+        .append_event(
+            "runtime_adapter",
+            Some(run_id),
+            session_id,
+            "runtime.item",
+            json!({
+                "profile": "codex-app-server",
+                "runtime_type": "codex_app_server",
+                "source": "codex_app_server",
+                "source_operation": "turn.poll",
+                "run_id": run_id,
+                "turn_id": turn.turn_id,
+                "thread_id": turn.thread_id,
+                "item": {
+                    "attempt": attempt,
+                    "status": status,
+                    "terminal": terminal,
+                    "result": turn.result,
+                },
+            }),
+        )
+        .await
+        .map(|_| ())
+}
+
+async fn record_codex_app_server_runtime_turn_completed(
+    state: &AppState,
+    session_id: Uuid,
+    run_id: Uuid,
+    thread_id: &str,
+    turn: &CodexTurnResponse,
+    status: &str,
+    poll_attempts: u32,
+) -> Result<(), AppError> {
+    let usage = runtime_adapter_usage(&turn.result);
+    if let Some(usage) = usage.as_ref() {
+        state
+            .append_event(
+                "runtime_adapter",
+                Some(run_id),
+                session_id,
+                "runtime.usage",
+                json!({
+                    "profile": "codex-app-server",
+                    "runtime_type": "codex_app_server",
+                    "source": "codex_app_server",
+                    "source_operation": "turn.completed",
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "turn_id": turn.turn_id,
+                    "usage": usage,
+                }),
+            )
+            .await?;
+    }
+
+    let final_message = codex_app_server_final_message(&turn.result)
+        .unwrap_or_else(|| status.trim().to_string())
+        .trim()
+        .to_string();
+    let final_output = truncate_output(&final_message, execution_output_limit_bytes());
+    let artifact = Artifact {
+        id: Uuid::new_v4(),
+        session_id,
+        artifact_type: "markdown".to_string(),
+        name: "codex-app-server-runtime-final-message.md".to_string(),
+        path: Some("codex-app-server-runtime-final-message.md".to_string()),
+        content: json!({
+            "markdown": final_output.text,
+            "markdown_bytes": final_output.original_bytes,
+            "markdown_truncated": final_output.truncated,
+            "profile": "codex-app-server",
+            "runtime_type": "codex_app_server",
+            "turn_id": turn.turn_id,
+            "thread_id": thread_id,
+            "source": "codex_app_server",
+            "run_id": run_id,
+        }),
+        created_at: Utc::now(),
+    };
+    let artifact = state.insert_artifact(artifact).await?;
+    state
+        .append_event(
+            "system",
+            Some(artifact.id),
+            session_id,
+            "artifact.created",
+            json!({
+                "artifact_id": artifact.id,
+                "name": artifact.name,
+                "path": artifact.path,
+                "artifact_type": artifact.artifact_type,
+                "source": "runtime.final",
+                "runtime_type": "codex_app_server",
+                "thread_id": thread_id,
+                "turn_id": turn.turn_id,
+                "run_id": run_id,
+            }),
+        )
+        .await?;
+    state
+        .append_event(
+            "runtime_adapter",
+            Some(run_id),
+            session_id,
+            "runtime.final",
+            json!({
+                "profile": "codex-app-server",
+                "runtime_type": "codex_app_server",
+                "source": "codex_app_server",
+                "source_operation": "turn.completed",
+                "run_id": run_id,
+                "thread_id": thread_id,
+                "turn_id": turn.turn_id,
+                "status": status,
+                "final_message": final_message,
+                "artifact_id": artifact.id,
+            }),
+        )
+        .await?;
+    state
+        .append_event(
+            "runtime_adapter",
+            Some(run_id),
+            session_id,
+            "runtime.turn.completed",
+            json!({
+                "profile": "codex-app-server",
+                "runtime_type": "codex_app_server",
+                "source": "codex_app_server",
+                "source_operation": "turn.completed",
+                "run_id": run_id,
+                "thread_id": thread_id,
+                "turn_id": turn.turn_id,
+                "status": status,
+                "poll_attempts": poll_attempts,
+                "usage": usage,
+                "final_artifact_id": artifact.id,
+            }),
+        )
+        .await
+        .map(|_| ())
+}
+
+fn codex_app_server_final_message(result: &Value) -> Option<String> {
+    if let Some(message) = result.as_str() {
+        return non_empty_string(message);
+    }
+    for key in [
+        "final_message",
+        "message",
+        "content",
+        "output",
+        "result",
+        "text",
+    ] {
+        if let Some(value) = result.get(key) {
+            if let Some(message) = value.as_str() {
+                if let Some(message) = non_empty_string(message) {
+                    return Some(message);
+                }
+            }
+            if let Some(message) = string_value_at(value, &["content"]) {
+                if let Some(message) = non_empty_string(&message) {
+                    return Some(message);
+                }
+            }
+        }
+    }
+    if !result.is_null() {
+        serde_json::to_string(result)
+            .ok()
+            .and_then(|message| non_empty_string(&message))
+    } else {
+        None
+    }
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 #[allow(dead_code)]

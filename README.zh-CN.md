@@ -247,7 +247,8 @@ curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
 它们的 JSONL 或 stream-json 输出会被写成 `runtime_adapter.event` session
 events，并带基础 secret-key redaction 和 event-count limits。Codex CLI 和
 Claude Code CLI 输出也会映射成 normalized runtime turn records，覆盖 turn
-start、items/tool calls、usage、final message、artifact 和 completion。这样 CLI-backed
+start、items/tool calls、usage、final message、artifact 和 completion；Codex
+App Server turn API 也会用同一套 taxonomy 记录 thread/turn lineage。这样 CLI-backed
 agents 仍然在 Tool Router、Policy Engine、Approval Engine、worker lease、
 Remote Computer、event log、audit path 之内，同时产品语义会往
 Environment-owned runtime adapter 推进。`agent_cli.exec` 仍然是兼容 facade；

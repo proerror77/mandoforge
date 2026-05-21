@@ -279,7 +279,8 @@ OpenCode, and Aider profiles are treated as runtime adapters: their JSONL or
 stream-json output is ingested into `runtime_adapter.event` session events with
 basic secret-key redaction and event-count limits. Codex CLI and Claude Code
 CLI output also maps into normalized runtime turn records for turn start,
-items/tool calls, usage, final messages, artifacts, and completion. This keeps CLI-backed agents
+items/tool calls, usage, final messages, artifacts, and completion; Codex App
+Server turn APIs emit the same taxonomy with thread/turn lineage. This keeps CLI-backed agents
 inside the same Tool Router, Policy Engine, Approval Engine, worker lease,
 Remote Computer, event log, and audit path while moving the product semantics
 toward Environment-owned runtime adapters. `agent_cli.exec` remains the

@@ -255,6 +255,7 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [x] Stage 4.1 follow-up: Make `Environment.runtime_profile_id` the canonical runtime-adapter binding for managed sessions and demote `agent_cli.exec` to a compatibility facade.
 - [x] Stage 4.1 follow-up: Persist runtime turn metadata for Codex CLI resume handles, `--output-schema` validation, usage/timing, collected items, and final-message artifacts.
 - [x] Stage 4.1 follow-up: Normalize Claude Code CLI stream-json into runtime turn started, item, usage, final, and completed events.
+- [x] Stage 4.1 follow-up: Normalize Codex App Server turn create/poll/finalize output into runtime turn started, item, final, artifact, and completed events.
 - [x] Stage 4.1 follow-up: Persist session-loop event cursor windows with pending sequence ranges and processed high-water marks.
 - [x] Stage 4.1 follow-up: Route approved execution completion back through durable `execution.completed` events and event-windowed session-loop jobs.
 - [x] Stage 4.1 follow-up: Bind worker polling and direct job claims to Environment ids for session-loop and execution queues.
