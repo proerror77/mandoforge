@@ -101,10 +101,13 @@ completion blocker, the controller evidence must also identify the same
 multi-node real cluster across worker load, state sync, and sidecar replacement,
 and state sync must report a supported distributed filesystem backend such as
 `juicefs`, `cephfs`, or `longhorn-rwx`. Worker evidence must explicitly report
-load validation and isolated worker-pool configuration, state-sync evidence must
-name the state claim plus checked state-contract paths, and sidecar validation
-must report healthy replacement Pods plus checked Pod counts; single-host,
-local-hostpath, or shape-only controller evidence does not satisfy this proof.
+validated controller execution, real cluster target kind, production cluster id,
+`node_count >= 2`, load validation, and isolated worker-pool configuration;
+the standalone worker gate also rejects mismatches with
+`MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID`. State-sync evidence must name the
+state claim plus checked state-contract paths, and sidecar validation must report
+healthy replacement Pods plus checked Pod counts; single-host, local-hostpath,
+or shape-only controller evidence does not satisfy this proof.
 The matching in-cluster template is
 `deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml`.
 

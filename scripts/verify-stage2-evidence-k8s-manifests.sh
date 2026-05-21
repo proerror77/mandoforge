@@ -845,6 +845,21 @@ if ! grep -q "worker-load-validation-evidence.json" "$worker_script"; then
   exit 1
 fi
 
+if ! grep -q "is_real_cluster_kind" "$worker_script" || ! grep -q "load_validation_node_count" "$worker_script" || ! grep -q "load_validation_cluster_id" "$worker_script"; then
+  echo "Worker evidence script must require real multi-node cluster load-validation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "load_validation_controller_load_validated" "$worker_script" || ! grep -q "load_validation_controller_isolated_worker_pool" "$worker_script"; then
+  echo "Worker evidence script must require controller-confirmed load and isolated worker-pool checks" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID" "$worker_script"; then
+  echo "Worker evidence script must compare controller evidence with the configured production cluster id" >&2
+  exit 1
+fi
+
 if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit worker load-validation evidence metadata" >&2
   exit 1
