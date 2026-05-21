@@ -795,8 +795,13 @@ if ! grep -q "rotation_rotated_count" "$vault_script" || ! grep -q "rotation_cat
   exit 1
 fi
 
-if ! grep -q "recovery_id" "$vault_script" || ! grep -q "recovery_target_kind" "$vault_script" || ! grep -q "recovery_step_count" "$vault_script"; then
-  echo "Vault evidence script must require audited KMS recovery id, target kind, and recovery steps" >&2
+if ! grep -q "recovery_id" "$vault_script" || ! grep -q "recovery_target_kind" "$vault_script" || ! grep -q "recovery_step_count" "$vault_script" || ! grep -q "kms_recovery_step_detail_count" "$vault_script"; then
+  echo "Vault evidence script must require audited KMS recovery id, target kind, and recovery step details" >&2
+  exit 1
+fi
+
+if ! grep -q "kms_recovery_step_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "kms_recovery_step_detail_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Completion audit and archive verifier must require KMS recovery step audit details" >&2
   exit 1
 fi
 
@@ -877,6 +882,11 @@ fi
 
 if ! grep -q "invalid KMS recovery step status evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject failed KMS recovery steps" >&2
+  exit 1
+fi
+
+if ! grep -q "missing KMS recovery step audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject KMS recovery steps without audit details" >&2
   exit 1
 fi
 

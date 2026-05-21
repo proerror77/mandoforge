@@ -77,6 +77,18 @@ is_production_identity() {
   [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
 }
 
+kms_recovery_step_detail_count() {
+  jq -r '[
+    .response.controller_execution.steps[]?
+    | select(
+        type == "object"
+        and ((.name // .step // .kind // .action // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -142,6 +154,7 @@ write_summary() {
   local recovery_id
   local recovery_target_kind
   local recovery_step_count
+  local recovery_step_detail_count
   local rotation_evidence_status
   local rotation_run_status
   local rotation_production_backend
@@ -180,6 +193,7 @@ write_summary() {
   recovery_id=""
   recovery_target_kind="unknown"
   recovery_step_count="0"
+  recovery_step_detail_count="0"
   if [[ -s "$recovery_evidence_file" ]]; then
     recovery_evidence_status="$(jq -r '.status // "unknown"' "$recovery_evidence_file")"
     recovery_validation_status="$(jq -r '.response.status // "unknown"' "$recovery_evidence_file")"
@@ -190,6 +204,7 @@ write_summary() {
     recovery_id="$(jq -r '.response.controller_execution.recovery_id // ""' "$recovery_evidence_file")"
     recovery_target_kind="$(jq -r '.response.controller_execution.recovery_target_kind // "unknown"' "$recovery_evidence_file")"
     recovery_step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$recovery_evidence_file")"
+    recovery_step_detail_count="$(kms_recovery_step_detail_count "$recovery_evidence_file")"
   fi
   rotation_evidence_status="not_requested"
   rotation_run_status="not_run"
@@ -322,6 +337,9 @@ write_summary() {
   if [[ ! "$recovery_step_count" =~ ^[0-9]+$ || "$recovery_step_count" == "0" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ ! "$recovery_step_detail_count" =~ ^[0-9]+$ || ! "$recovery_step_count" =~ ^[0-9]+$ || "$recovery_step_detail_count" -lt "$recovery_step_count" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "vault_readiness_status=$status"
@@ -348,6 +366,7 @@ write_summary() {
     echo "recovery_id=$recovery_id"
     echo "recovery_target_kind=$recovery_target_kind"
     echo "recovery_step_count=$recovery_step_count"
+    echo "recovery_step_detail_count=$recovery_step_detail_count"
     echo "rotation_evidence_status=$rotation_evidence_status"
     echo "rotation_run_status=$rotation_run_status"
     echo "rotation_production_backend=$rotation_production_backend"
@@ -458,6 +477,9 @@ write_summary() {
     fi
     if [[ ! "$recovery_step_count" =~ ^[0-9]+$ || "$recovery_step_count" == "0" ]]; then
       echo "- KMS recovery did not report any audited recovery steps"
+    fi
+    if [[ ! "$recovery_step_detail_count" =~ ^[0-9]+$ || ! "$recovery_step_count" =~ ^[0-9]+$ || "$recovery_step_detail_count" -lt "$recovery_step_count" ]]; then
+      echo "- KMS recovery did not include audited detail for every recovery step: detail_count=$recovery_step_detail_count step_count=$recovery_step_count"
     fi
     if [[ "$recovery_controller_fresh" != "true" ]]; then
       echo "- KMS recovery controller evidence is not fresh"

@@ -546,6 +546,18 @@ kms_rotation_detail_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+kms_recovery_step_detail_count() {
+  jq -r '[
+    .response.controller_execution.steps[]?
+    | select(
+        type == "object"
+        and ((.name // .step // .kind // .action // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
@@ -1398,6 +1410,7 @@ artifact_contract_issue() {
     local recovery_id
     local recovery_target_kind
     local step_count
+    local step_detail_count
     local invalid_step_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -1410,6 +1423,7 @@ artifact_contract_issue() {
     recovery_id="$(jq -r '.response.controller_execution.recovery_id // ""' "$artifact" 2>/dev/null || echo "")"
     recovery_target_kind="$(jq -r '.response.controller_execution.recovery_target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+    step_detail_count="$(kms_recovery_step_detail_count "$artifact")"
     invalid_step_count="$(jq -r '[.response.controller_execution.steps[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$evidence_status" != "captured" ]]; then
@@ -1450,6 +1464,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
       printf 'step_count=%s' "$step_count"
+      return 0
+    fi
+    if [[ ! "$step_detail_count" =~ ^[0-9]+$ || "$step_detail_count" -lt "$step_count" ]]; then
+      printf 'step_detail_count=%s step_count=%s' "$step_detail_count" "$step_count"
       return 0
     fi
     if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then
