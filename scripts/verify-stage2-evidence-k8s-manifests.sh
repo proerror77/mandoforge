@@ -1700,6 +1700,11 @@ if ! grep -q "managed-session-restart-resume-evidence.json" scripts/stage2-compl
   exit 1
 fi
 
+if ! grep -q "managed-session-restart-resume)" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must map managed-session restart/resume to required artifacts" >&2
+  exit 1
+fi
+
 if ! grep -q "managed-session-restart-resume-evidence.json" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must inspect managed-session restart/resume evidence" >&2
   exit 1

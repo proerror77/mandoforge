@@ -150,6 +150,10 @@ required_evidence_artifacts_for_requirement() {
       echo "$SOURCE_EVIDENCE_DIR/finance-export-delivery-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/finance-export-delivery-observer.json"
       ;;
+    managed-session-restart-resume)
+      echo "$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
+      echo "$SOURCE_EVIDENCE_DIR/managed-session-restart-resume-evidence.json"
+      ;;
     ui-production-crud)
       echo "$SOURCE_EVIDENCE_DIR/local-script-scripts-verify-static-ui-actionbook.sh.json"
       echo "$SOURCE_EVIDENCE_DIR/local-script-scripts-verify-static-ui-assets.sh.json"
