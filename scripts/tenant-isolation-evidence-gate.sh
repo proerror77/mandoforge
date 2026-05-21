@@ -6,11 +6,18 @@ SUBJECT="${MANDOFORGE_STAGE2_GATE_SUBJECT:-tenant-isolation-evidence-gate}"
 ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/tenant-isolation-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
+AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
 
 auth_headers=(
-  -H "x-mandoforge-subject: $SUBJECT"
-  -H "x-mandoforge-roles: $ROLES"
 )
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -56,13 +63,17 @@ fetch_json() {
 
 write_summary() {
   local readiness_file="$EVIDENCE_DIR/api-tenant-isolation-readiness.json"
+  local validation_evidence_file="$EVIDENCE_DIR/tenant-routing-validation-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
   local status
   local score
   local runtime_mode
   local routing_status
+  local cross_tenant_routing_supported
   local routing_controller_fresh
   local routing_controller_age_hours
+  local routing_validation_evidence_status
+  local routing_validation_status
   local rls_enabled
   local rls_forced
   local tenant_context
@@ -72,20 +83,44 @@ write_summary() {
   score="$(jq -r '.readiness_score // 0' "$readiness_file")"
   runtime_mode="$(jq -r '.runtime_tenant_mode // "unknown"' "$readiness_file")"
   routing_status="$(jq -r '.production_routing.status // "unknown"' "$readiness_file")"
+  cross_tenant_routing_supported="$(jq -r '.production_routing.cross_tenant_routing_supported // false' "$readiness_file")"
   routing_controller_fresh="$(jq -r '.production_routing.controller_evidence_fresh // false' "$readiness_file")"
   routing_controller_age_hours="$(jq -r '.production_routing.latest_controller_age_hours // "none"' "$readiness_file")"
+  routing_validation_evidence_status="missing"
+  routing_validation_status="unknown"
+  if [[ -s "$validation_evidence_file" ]]; then
+    routing_validation_evidence_status="$(jq -r '.status // "unknown"' "$validation_evidence_file")"
+    routing_validation_status="$(jq -r '.response.status // "unknown"' "$validation_evidence_file")"
+  fi
   rls_enabled="$(jq -r '.rls.enabled // false' "$readiness_file")"
   rls_forced="$(jq -r '.rls.forced // false' "$readiness_file")"
   tenant_context="$(jq -r '.rls.tenant_context_configured // false' "$readiness_file")"
-  blocked_count="$(jq -r 'if .production_routing.production_blocked == true then 1 else 0 end' "$readiness_file")"
+  blocked_count="$(jq -r '[
+      .production_routing.production_blocked,
+      (.runtime_tenant_mode != "tenant_routed"),
+      (.production_routing.cross_tenant_routing_supported != true),
+      (.production_routing.controller_evidence_fresh != true),
+      (.rls.enabled != true),
+      (.rls.forced != true),
+      (.rls.tenant_context_configured != true)
+    ] | map(select(. == true)) | length' "$readiness_file")"
+  if [[ "$routing_validation_evidence_status" != "captured" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$routing_validation_status" != "validated" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "tenant_isolation_status=$status"
     echo "readiness_score=$score"
     echo "runtime_tenant_mode=$runtime_mode"
     echo "production_routing_status=$routing_status"
+    echo "cross_tenant_routing_supported=$cross_tenant_routing_supported"
     echo "production_routing_controller_evidence_fresh=$routing_controller_fresh"
     echo "production_routing_controller_age_hours=$routing_controller_age_hours"
+    echo "routing_validation_evidence_status=$routing_validation_evidence_status"
+    echo "routing_validation_status=$routing_validation_status"
     echo "rls_enabled=$rls_enabled"
     echo "rls_forced=$rls_forced"
     echo "tenant_context_configured=$tenant_context"
@@ -97,6 +132,21 @@ write_summary() {
     echo
     echo "routing_blocking_reasons:"
     jq -r '.production_routing.blocking_reasons[]? | "- \(.)"' "$readiness_file"
+    if [[ "$runtime_mode" != "tenant_routed" ]]; then
+      echo "- runtime tenant mode is not tenant_routed: $runtime_mode"
+    fi
+    if [[ "$cross_tenant_routing_supported" != "true" ]]; then
+      echo "- cross-tenant routing support is not enabled"
+    fi
+    if [[ "$routing_controller_fresh" != "true" ]]; then
+      echo "- tenant routing controller evidence is not fresh"
+    fi
+    if [[ "$routing_validation_status" != "validated" ]]; then
+      echo "- tenant routing validation status is not validated: $routing_validation_status"
+    fi
+    if [[ "$rls_enabled" != "true" || "$rls_forced" != "true" || "$tenant_context" != "true" ]]; then
+      echo "- RLS is not fully enabled, forced, and tenant-context configured"
+    fi
     echo
     echo "runbook_actions:"
     jq -r '.runbook_actions[]? | "- \(.)"' "$readiness_file"
@@ -110,12 +160,30 @@ write_summary() {
   fi
 }
 
+capture_routing_validation_evidence() {
+  local routing_response
+  local validation_evidence_file="$EVIDENCE_DIR/tenant-routing-validation-evidence.json"
+
+  routing_response="$(fetch_json POST /api/tenant-isolation/routing/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$routing_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$routing_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$validation_evidence_file"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/tenant-isolation/readiness >/dev/null
-fetch_json POST /api/tenant-isolation/routing/validate >/dev/null
+capture_routing_validation_evidence
 fetch_json GET /api/tenant-isolation/readiness >/dev/null
 write_summary

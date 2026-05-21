@@ -508,6 +508,26 @@ if ! grep -q "/api/tenant-isolation/routing/validate" "$tenant_script"; then
   exit 1
 fi
 
+if ! grep -q "tenant-routing-validation-evidence.json" "$tenant_script"; then
+  echo "Tenant isolation evidence script must write explicit routing validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "tenant-routing-validation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit tenant routing validation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "runtime_tenant_mode.*tenant_routed" "$tenant_script"; then
+  echo "Tenant isolation evidence script must fail closed unless runtime tenant mode is tenant_routed" >&2
+  exit 1
+fi
+
+if ! grep -q "rls.forced" "$tenant_script"; then
+  echo "Tenant isolation evidence script must fail closed unless RLS is forced" >&2
+  exit 1
+fi
+
 if ! grep -q "vault-evidence-gate.sh" deploy/stage2-evidence/vault-evidence-job.example.yaml; then
   echo "Vault evidence Job does not run the dedicated evidence gate" >&2
   exit 1

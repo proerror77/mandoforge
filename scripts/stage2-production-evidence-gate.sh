@@ -582,6 +582,24 @@ capture_finance_export_delivery_validation() {
     }' >"$delivery_file"
 }
 
+capture_tenant_routing_validation() {
+  local routing_response
+  local routing_file="$EVIDENCE_DIR/tenant-routing-validation-evidence.json"
+
+  routing_response="$(fetch_json POST /api/tenant-isolation/routing/validate)"
+  jq -n \
+    --arg status "captured" \
+    --arg response_file "$routing_response" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --slurpfile response "$routing_response" \
+    '{
+      status: $status,
+      generated_at: $generated_at,
+      response_file: $response_file,
+      response: ($response[0] // {})
+    }' >"$routing_file"
+}
+
 capture_remote_computer_state_sync_validation() {
   local state_sync_response
   local state_sync_file="$EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
@@ -835,7 +853,7 @@ capture_policy_rollout_due_run() {
 }
 
 run_controller_validations() {
-  fetch_json POST /api/tenant-isolation/routing/validate >/dev/null
+  capture_tenant_routing_validation
   fetch_json POST /api/providers/policy-gate/run >/dev/null
   fetch_json POST /api/providers/deployment/validate >/dev/null
   capture_policy_rollout_orchestration_validation

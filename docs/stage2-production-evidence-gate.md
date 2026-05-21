@@ -115,7 +115,14 @@ For a narrower tenant-isolation proof, run:
 ./scripts/tenant-isolation-evidence-gate.sh
 ```
 
-That gate collects tenant isolation readiness and audited production routing validation evidence into `.mandoforge/tenant-isolation-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects tenant isolation readiness and audited production routing
+validation evidence into `.mandoforge/tenant-isolation-evidence/`, including an
+explicit `tenant-routing-validation-evidence.json` wrapper. It fails closed
+unless the target reports `tenant_routed` runtime mode, cross-tenant routing
+support, fresh controller evidence, validated routing evidence, and RLS enabled,
+forced, and tenant-context configured. The matching in-cluster template is
+`deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml`, which
+persists its output under the Stage 2 production evidence PVC.
 
 For a narrower Vault/KMS proof, run:
 
