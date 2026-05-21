@@ -321,6 +321,7 @@ policy_due_run_scan_detail_count() {
         and ((.policy_id // .policy // .policy_key // .policy_name // "") | length > 0)
         and ((.revision_id // .revision // .policy_revision_id // .version // "") | length > 0)
         and ((.status // .result // .action // "") | ascii_downcase | IN("scanned", "checked", "skipped", "noop", "activated", "validated", "passed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .scanned_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1"
 }
@@ -1834,7 +1835,7 @@ JSON
     "scanned_count": 1,
     "skipped_count": 1,
     "scanned_revisions": [
-      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "status": "scanned"}
+      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "status": "scanned", "audit_id": "policy-due-run-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
     ],
     "checked_at": "1970-01-01T00:00:00Z"
   }
@@ -4107,6 +4108,38 @@ JSON
     "scanned_revisions": [
       {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "status": "scanned"}
     ],
+    "checked_at": "1970-01-01T00:00:00Z"
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-due-run-scan-audit-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-due-run-scan-audit-negative.out 2>/tmp/mandoforge-stage2-archive-policy-due-run-scan-audit-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing policy due-run scan audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/policy-rollout-due-run-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "noop",
+    "scanned_count": 1,
+    "skipped_count": 1,
+    "scanned_revisions": [
+      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "status": "scanned", "audit_id": "policy-due-run-audit-1", "scanned_at": "1970-01-01T00:00:00Z"}
+    ],
     "checked_at": ""
   }
 }
@@ -4137,7 +4170,7 @@ JSON
     "scanned_count": 1,
     "skipped_count": 1,
     "scanned_revisions": [
-      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "status": "scanned"}
+      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "status": "scanned", "audit_id": "policy-due-run-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
     ],
     "checked_at": "1970-01-01T00:00:00Z"
   }

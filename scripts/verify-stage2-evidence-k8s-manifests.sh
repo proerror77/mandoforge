@@ -1230,7 +1230,7 @@ if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-production-ev
   exit 1
 fi
 
-if ! grep -q "due_run_scanned_count" "$policy_rollout_script" || ! grep -q "due_run_scan_detail_count" "$policy_rollout_script" || ! grep -q "due_run_checked_at" "$policy_rollout_script"; then
+if ! grep -q "due_run_scanned_count" "$policy_rollout_script" || ! grep -q "due_run_scan_detail_count" "$policy_rollout_script" || ! grep -q "due_run_checked_at" "$policy_rollout_script" || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*scanned_at.*timestamp" "$policy_rollout_script"; then
   echo "Policy rollout evidence script must require audited due-run scan count, scan details, and checked_at evidence" >&2
   exit 1
 fi
@@ -1275,7 +1275,7 @@ if ! grep -q "policy rollout validation evidence_status" scripts/stage2-completi
   exit 1
 fi
 
-if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "scanned_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "scan_detail_count" scripts/stage2-completion-audit-gate.sh; then
+if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "scanned_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "scan_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*scanned_at.*timestamp" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must contract-check policy rollout due-run evidence" >&2
   exit 1
 fi
@@ -1305,7 +1305,7 @@ if ! grep -q "policy_store_id" scripts/stage2-completion-audit-gate.sh || ! grep
   exit 1
 fi
 
-if ! grep -q "policy-rollout-due-run-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "scanned_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "scan_detail_count" scripts/verify-stage2-evidence-archive.sh; then
+if ! grep -q "policy-rollout-due-run-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "scanned_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "scan_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*scanned_at.*timestamp" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must contract-check policy rollout due-run evidence" >&2
   exit 1
 fi
@@ -1897,6 +1897,11 @@ fi
 
 if ! grep -q "missing policy due-run scan detail evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject policy due-run evidence without scanned revision details" >&2
+  exit 1
+fi
+
+if ! grep -q "missing policy due-run scan audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject policy due-run scanned revisions without audit details" >&2
   exit 1
 fi
 

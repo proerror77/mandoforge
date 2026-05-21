@@ -85,6 +85,7 @@ policy_due_run_scan_detail_count() {
         and ((.policy_id // .policy // .policy_key // .policy_name // "") | length > 0)
         and ((.revision_id // .revision // .policy_revision_id // .version // "") | length > 0)
         and ((.status // .result // .action // "") | ascii_downcase | IN("scanned", "checked", "skipped", "noop", "activated", "validated", "passed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .scanned_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1" 2>/dev/null || echo "0"
 }
