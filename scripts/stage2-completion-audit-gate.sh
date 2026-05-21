@@ -247,6 +247,21 @@ is_production_kms_environment() {
   esac
 }
 
+is_production_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$value" ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
+}
+
+is_finance_system_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  is_production_identity "$value" || return 1
+  [[ ! "$value" =~ (^|[./:_-])(feishu|lark|drive|file|artifact)([./:_-]|$) ]] || return 1
+}
+
 artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
@@ -256,10 +271,12 @@ artifact_contract_issue() {
     local observer_status
     local delivery_mode
     local delivery_count
+    local system_id
 
     observer_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "invalid_json")"
     delivery_mode="$(jq -r '.export_state.delivery_mode // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     delivery_count="$(jq -r '.export_state.delivery_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    system_id="$(jq -r '.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // ""' "$artifact" 2>/dev/null || echo "")"
 
     if [[ "$observer_status" != "ok" ]]; then
       printf 'observer_status=%s' "$observer_status"
@@ -274,8 +291,17 @@ artifact_contract_issue() {
         ;;
       *)
         printf 'delivery_mode=%s is not accounting/ERP' "$delivery_mode"
+        return 0
         ;;
     esac
+    if [[ -z "$system_id" ]]; then
+      printf 'system_id is missing'
+      return 0
+    fi
+    if ! is_finance_system_identity "$system_id"; then
+      printf 'system_id=%s is not a true ERP/accounting system identity' "$system_id"
+      return 0
+    fi
   fi
 
   if [[ "$req_id" == "policy-rollout" && "$artifact_name" == "policy-rollout-orchestration-validation-evidence.json" ]]; then
@@ -317,6 +343,10 @@ artifact_contract_issue() {
       printf 'controller_id is missing'
       return 0
     fi
+    if ! is_production_identity "$controller_id"; then
+      printf 'controller_id=%s is pilot/mock/local' "$controller_id"
+      return 0
+    fi
     if ! is_production_policy_rollout_scope "$rollout_scope"; then
       printf 'rollout_scope=%s is not production-grade' "$rollout_scope"
       return 0
@@ -337,12 +367,14 @@ artifact_contract_issue() {
     local rls_enforced
     local tenant_context_validated
     local cross_tenant_negative_tests
+    local deployment_id
 
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$artifact" 2>/dev/null || echo "0")"
     rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$artifact" 2>/dev/null || echo "false")"
     tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$artifact" 2>/dev/null || echo "false")"
     cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$artifact" 2>/dev/null || echo "false")"
+    deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
 
     case "$target_kind" in
       multi_tenant_deployment|enterprise_multi_tenant|production_multi_tenant)
@@ -366,6 +398,10 @@ artifact_contract_issue() {
     fi
     if [[ "$cross_tenant_negative_tests" != "true" ]]; then
       printf 'cross_tenant_negative_tests=%s' "$cross_tenant_negative_tests"
+      return 0
+    fi
+    if ! is_production_identity "$deployment_id"; then
+      printf 'deployment_id=%s is pilot/mock/local' "${deployment_id:-<empty>}"
       return 0
     fi
   fi
@@ -411,6 +447,10 @@ artifact_contract_issue() {
       printf 'backend_id or key_id is missing'
       return 0
     fi
+    if ! is_production_identity "$backend_id" || ! is_production_identity "$key_id"; then
+      printf 'backend_id or key_id is pilot/mock/local'
+      return 0
+    fi
   fi
 
   if [[ "$req_id" == "vault-kms" && "$artifact_name" == "vault-kms-recovery-evidence.json" ]]; then
@@ -446,6 +486,10 @@ artifact_contract_issue() {
     fi
     if [[ -z "$backend_id" || -z "$key_id" ]]; then
       printf 'backend_id or key_id is missing'
+      return 0
+    fi
+    if ! is_production_identity "$backend_id" || ! is_production_identity "$key_id"; then
+      printf 'backend_id or key_id is pilot/mock/local'
       return 0
     fi
   fi

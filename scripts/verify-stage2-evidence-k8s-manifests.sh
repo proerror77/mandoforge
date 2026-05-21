@@ -568,6 +568,11 @@ if ! grep -q "target_kind=.*broader multi-tenant" scripts/stage2-completion-audi
   exit 1
 fi
 
+if ! grep -q "deployment_id=.*pilot/mock/local" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must reject pilot/mock/local tenant deployment ids" >&2
+  exit 1
+fi
+
 if ! grep -q "cross_tenant_negative_tests" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require tenant cross-tenant negative-test evidence" >&2
   exit 1
@@ -685,6 +690,11 @@ fi
 
 if ! grep -q "backend_kind=.*is not production KMS/HSM" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must reject non-production KMS/HSM backend evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "backend_id or key_id is pilot/mock/local" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must reject pilot/mock/local KMS backend and key ids" >&2
   exit 1
 fi
 
@@ -1033,6 +1043,11 @@ if ! grep -q "is not production policy controller" scripts/stage2-completion-aud
   exit 1
 fi
 
+if ! grep -q "controller_id=.*pilot/mock/local" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must reject pilot/mock/local policy controller ids" >&2
+  exit 1
+fi
+
 if ! grep -q "codex-app-server-evidence-gate.sh" deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml; then
   echo "Codex App Server evidence Job does not run the dedicated evidence gate" >&2
   exit 1
@@ -1340,6 +1355,11 @@ fi
 
 if ! grep -q "finance-export-delivery-observer.json" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require finance export delivery observer evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "true ERP/accounting system identity" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must reject artifact-store finance system ids" >&2
   exit 1
 fi
 
