@@ -134,10 +134,12 @@ write_summary() {
   local worker_controller_fresh
   local worker_validation_status
   local worker_validation_response_status
+  local state_sync_evidence_status
   local remote_state_ready
   local state_sync_response_status
   local state_controller_fresh
   local sidecar_recovery_ready
+  local sidecar_recovery_evidence_status
   local sidecar_recovery_response_status
   local sidecar_validation_status
   local runner_ready
@@ -172,6 +174,7 @@ write_summary() {
   worker_cluster_profile="$(jq -r '.response.controller_execution.cluster_profile // "unknown"' "$worker_validation")"
 
   remote_state_ready="$(jq -r '.production_state_sync.status == "ready" and (.production_state_sync.production_blocked == false)' "$remote_readiness")"
+  state_sync_evidence_status="$(jq -r '.status // "unknown"' "$state_sync")"
   state_sync_response_status="$(jq -r '.response.status // "unknown"' "$state_sync")"
   state_controller_fresh="$(jq -r '.production_state_sync.controller_evidence_fresh == true' "$remote_readiness")"
   state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$state_sync")"
@@ -182,6 +185,7 @@ write_summary() {
   state_checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$state_sync")"
   state_cluster_profile="$(jq -r '.response.controller_execution.cluster_profile // "unknown"' "$state_sync")"
   sidecar_recovery_ready="$(jq -r '.sidecar_recovery.status == "ready"' "$remote_readiness")"
+  sidecar_recovery_evidence_status="not_requested"
   sidecar_recovery_response_status="not_requested"
   sidecar_validation_status="not_requested"
   sidecar_cluster_id=""
@@ -191,6 +195,7 @@ write_summary() {
   sidecar_replacement_pods_healthy="false"
   sidecar_checked_pod_count="0"
   if [[ -s "$sidecar_recovery" ]]; then
+    sidecar_recovery_evidence_status="$(jq -r '.status // "unknown"' "$sidecar_recovery")"
     sidecar_recovery_response_status="$(jq -r '.response.status // "unknown"' "$sidecar_recovery")"
     sidecar_validation_status="$(jq -r '.response.validation_result.status // "unknown"' "$sidecar_recovery")"
     sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$sidecar_recovery")"
@@ -218,6 +223,7 @@ write_summary() {
   is_multi_node "$worker_node_count" || blocked_count=$((blocked_count + 1))
   is_production_identity "$worker_cluster_id" || blocked_count=$((blocked_count + 1))
   [[ "$remote_state_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
+  [[ "$state_sync_evidence_status" == "captured" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_controller_fresh" == "true" ]] || blocked_count=$((blocked_count + 1))
   is_real_cluster_kind "$state_target_kind" || blocked_count=$((blocked_count + 1))
   is_multi_node "$state_node_count" || blocked_count=$((blocked_count + 1))
@@ -229,6 +235,7 @@ write_summary() {
   [[ "$runner_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
   if [[ "$RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" == "1" ]]; then
     [[ "$sidecar_recovery_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
+    [[ "$sidecar_recovery_evidence_status" == "captured" ]] || blocked_count=$((blocked_count + 1))
     [[ "$sidecar_recovery_response_status" == "validated" || "$sidecar_recovery_response_status" == "recovered" || "$sidecar_recovery_response_status" == "ready" || "$sidecar_recovery_response_status" == "completed" ]] || blocked_count=$((blocked_count + 1))
     [[ "$sidecar_validation_status" == "validated" ]] || blocked_count=$((blocked_count + 1))
     is_real_cluster_kind "$sidecar_target_kind" || blocked_count=$((blocked_count + 1))
@@ -255,6 +262,7 @@ write_summary() {
     --arg worker_node_count "$worker_node_count" \
     --arg worker_cluster_profile "$worker_cluster_profile" \
     --arg state_sync_response_status "$state_sync_response_status" \
+    --arg state_sync_evidence_status "$state_sync_evidence_status" \
     --arg state_cluster_id "$state_cluster_id" \
     --arg state_target_kind "$state_target_kind" \
     --arg state_node_count "$state_node_count" \
@@ -263,6 +271,7 @@ write_summary() {
     --arg state_checked_path_count "$state_checked_path_count" \
     --arg state_cluster_profile "$state_cluster_profile" \
     --arg sidecar_recovery_response_status "$sidecar_recovery_response_status" \
+    --arg sidecar_recovery_evidence_status "$sidecar_recovery_evidence_status" \
     --arg sidecar_validation_status "$sidecar_validation_status" \
     --arg sidecar_cluster_id "$sidecar_cluster_id" \
     --arg sidecar_target_kind "$sidecar_target_kind" \
@@ -309,6 +318,7 @@ write_summary() {
         sidecar_recovery_file: $sidecar_recovery,
         state_sync_ready: $remote_state_sync_ready,
         state_controller_evidence_fresh: $remote_state_controller_evidence_fresh,
+        state_sync_evidence_status: $state_sync_evidence_status,
         state_sync_response_status: $state_sync_response_status,
         state_sync_cluster_id: $state_cluster_id,
         state_sync_target_kind: $state_target_kind,
@@ -320,6 +330,7 @@ write_summary() {
         runner_ready: $remote_runner_ready,
         sidecar_recovery_required: $sidecar_recovery_required,
         sidecar_recovery_ready: $sidecar_recovery_ready,
+        sidecar_recovery_evidence_status: $sidecar_recovery_evidence_status,
         sidecar_recovery_response_status: $sidecar_recovery_response_status,
         sidecar_validation_status: $sidecar_validation_status,
         sidecar_cluster_id: $sidecar_cluster_id,
@@ -345,6 +356,7 @@ write_summary() {
     jq -r '"worker_node_count=\(.worker.node_count)"' "$summary_json"
     jq -r '"remote_state_sync_ready=\(.remote_computer.state_sync_ready)"' "$summary_json"
     jq -r '"remote_state_controller_evidence_fresh=\(.remote_computer.state_controller_evidence_fresh)"' "$summary_json"
+    jq -r '"remote_state_sync_evidence_status=\(.remote_computer.state_sync_evidence_status)"' "$summary_json"
     jq -r '"remote_state_cluster_id=\(.remote_computer.state_sync_cluster_id)"' "$summary_json"
     jq -r '"remote_state_target_kind=\(.remote_computer.state_sync_target_kind)"' "$summary_json"
     jq -r '"remote_state_node_count=\(.remote_computer.state_sync_node_count)"' "$summary_json"
@@ -354,6 +366,7 @@ write_summary() {
     jq -r '"remote_runner_ready=\(.remote_computer.runner_ready)"' "$summary_json"
     jq -r '"sidecar_recovery_required=\(.remote_computer.sidecar_recovery_required)"' "$summary_json"
     jq -r '"sidecar_recovery_ready=\(.remote_computer.sidecar_recovery_ready)"' "$summary_json"
+    jq -r '"sidecar_recovery_evidence_status=\(.remote_computer.sidecar_recovery_evidence_status)"' "$summary_json"
     jq -r '"sidecar_recovery_response_status=\(.remote_computer.sidecar_recovery_response_status)"' "$summary_json"
     jq -r '"sidecar_validation_status=\(.remote_computer.sidecar_validation_status)"' "$summary_json"
     jq -r '"sidecar_cluster_id=\(.remote_computer.sidecar_cluster_id)"' "$summary_json"
@@ -368,6 +381,7 @@ write_summary() {
     is_real_cluster_kind "$worker_target_kind" || echo "- worker load validation target is not a real cluster kind: $worker_target_kind"
     is_multi_node "$worker_node_count" || echo "- worker load validation did not report a multi-node cluster: node_count=$worker_node_count"
     is_production_identity "$worker_cluster_id" || echo "- worker load validation cluster id is pilot/mock/local: ${worker_cluster_id:-<empty>}"
+    [[ "$state_sync_evidence_status" == "captured" ]] || echo "- Remote Computer state-sync evidence was not captured: $state_sync_evidence_status"
     is_real_cluster_kind "$state_target_kind" || echo "- Remote Computer state-sync target is not a real cluster kind: $state_target_kind"
     is_multi_node "$state_node_count" || echo "- Remote Computer state-sync did not report a multi-node cluster: node_count=$state_node_count"
     is_production_identity "$state_cluster_id" || echo "- Remote Computer state-sync cluster id is pilot/mock/local: ${state_cluster_id:-<empty>}"
@@ -376,6 +390,7 @@ write_summary() {
     [[ "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_count" -gt 0 ]] || echo "- Remote Computer state-sync did not report any checked state contract paths: checked_path_count=$state_checked_path_count"
     [[ "$same_cluster_target" == "true" ]] || echo "- worker, state-sync, and sidecar evidence do not share the same cluster id"
     if [[ "$RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" == "1" ]]; then
+      [[ "$sidecar_recovery_evidence_status" == "captured" ]] || echo "- sidecar replacement evidence was not captured: $sidecar_recovery_evidence_status"
       [[ "$sidecar_validation_status" == "validated" ]] || echo "- sidecar replacement validation controller did not validate replacement: $sidecar_validation_status"
       is_real_cluster_kind "$sidecar_target_kind" || echo "- sidecar replacement target is not a real cluster kind: $sidecar_target_kind"
       is_multi_node "$sidecar_node_count" || echo "- sidecar replacement did not report a multi-node cluster: node_count=$sidecar_node_count"

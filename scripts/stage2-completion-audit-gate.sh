@@ -558,6 +558,7 @@ artifact_contract_issue() {
   fi
 
   if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "worker-load-validation-evidence.json" ]]; then
+    local evidence_status
     local controller_status
     local target_kind
     local node_count
@@ -565,6 +566,7 @@ artifact_contract_issue() {
     local load_validated
     local isolated_worker_pool_configured
 
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     node_count="$(jq -r '.response.controller_execution.node_count // 0' "$artifact" 2>/dev/null || echo "0")"
@@ -572,6 +574,10 @@ artifact_contract_issue() {
     load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$artifact" 2>/dev/null || echo "false")"
     isolated_worker_pool_configured="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$artifact" 2>/dev/null || echo "false")"
 
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'worker evidence_status=%s' "$evidence_status"
+      return 0
+    fi
     if [[ "$controller_status" != "validated" ]]; then
       printf 'worker controller_status=%s' "$controller_status"
       return 0
@@ -599,6 +605,7 @@ artifact_contract_issue() {
   fi
 
   if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "remote-computer-state-sync-evidence.json" ]]; then
+    local evidence_status
     local controller_status
     local target_kind
     local node_count
@@ -607,6 +614,7 @@ artifact_contract_issue() {
     local state_claim
     local checked_path_count
 
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     node_count="$(jq -r '.response.controller_execution.node_count // 0' "$artifact" 2>/dev/null || echo "0")"
@@ -615,6 +623,10 @@ artifact_contract_issue() {
     state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$artifact" 2>/dev/null || echo "")"
     checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$artifact" 2>/dev/null || echo "0")"
 
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'state-sync evidence_status=%s' "$evidence_status"
+      return 0
+    fi
     if [[ "$controller_status" != "validated" ]]; then
       printf 'state-sync controller_status=%s' "$controller_status"
       return 0
@@ -646,6 +658,7 @@ artifact_contract_issue() {
   fi
 
   if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "remote-computer-sidecar-recovery-evidence.json" ]]; then
+    local evidence_status
     local validation_status
     local target_kind
     local node_count
@@ -654,6 +667,7 @@ artifact_contract_issue() {
     local replacement_pods_healthy
     local checked_pod_count
 
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     validation_status="$(jq -r '.response.validation_result.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_kind="$(jq -r '.response.validation_result.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     node_count="$(jq -r '.response.validation_result.node_count // 0' "$artifact" 2>/dev/null || echo "0")"
@@ -662,6 +676,10 @@ artifact_contract_issue() {
     replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$artifact" 2>/dev/null || echo "false")"
     checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$artifact" 2>/dev/null || echo "0")"
 
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'sidecar recovery evidence_status=%s' "$evidence_status"
+      return 0
+    fi
     if [[ "$validation_status" != "validated" ]]; then
       printf 'validation_status=%s' "$validation_status"
       return 0

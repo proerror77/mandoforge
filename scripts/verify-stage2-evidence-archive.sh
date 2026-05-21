@@ -135,18 +135,24 @@ artifact_issue() {
 
   case "$relative_path" in
     worker-load-validation-evidence.json)
+      local evidence_status
       local controller_status
       local target_kind
       local node_count
       local cluster_id
       local load_validated
       local isolated_worker_pool_configured
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
       node_count="$(jq -r '.response.controller_execution.node_count // 0' "$path")"
       cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$path")"
       load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$path")"
       isolated_worker_pool_configured="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
       if [[ "$controller_status" != "validated" ]]; then
         printf '%s controller_status=%s' "$relative_path" "$controller_status"
         return 0
@@ -177,6 +183,7 @@ artifact_issue() {
       fi
       ;;
     remote-computer-state-sync-evidence.json)
+      local evidence_status
       local controller_status
       local target_kind
       local node_count
@@ -184,6 +191,7 @@ artifact_issue() {
       local cluster_id
       local state_claim
       local checked_path_count
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
       node_count="$(jq -r '.response.controller_execution.node_count // 0' "$path")"
@@ -191,6 +199,10 @@ artifact_issue() {
       cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$path")"
       state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$path")"
       checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
       if [[ "$controller_status" != "validated" ]]; then
         printf '%s controller_status=%s' "$relative_path" "$controller_status"
         return 0
@@ -225,6 +237,7 @@ artifact_issue() {
       fi
       ;;
     remote-computer-sidecar-recovery-evidence.json)
+      local evidence_status
       local status
       local target_kind
       local node_count
@@ -232,6 +245,7 @@ artifact_issue() {
       local cluster_id
       local replacement_pods_healthy
       local checked_pod_count
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
       status="$(jq -r '.response.validation_result.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.validation_result.target_kind // "unknown"' "$path")"
       node_count="$(jq -r '.response.validation_result.node_count // 0' "$path")"
@@ -239,6 +253,10 @@ artifact_issue() {
       cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$path")"
       replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$path")"
       checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
       if [[ "$status" != "validated" ]]; then
         printf '%s validation_status=%s' "$relative_path" "$status"
         return 0
@@ -1115,6 +1133,7 @@ self_test() {
 JSON
   cat >"$tmpdir/evidence/worker-load-validation-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "controller_execution": {
       "status": "validated",
@@ -1156,6 +1175,7 @@ JSON
 JSON
   cat >"$tmpdir/evidence/remote-computer-state-sync-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "controller_execution": {
       "status": "validated",
@@ -1171,6 +1191,7 @@ JSON
 JSON
   cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "validation_result": {
       "status": "validated",
@@ -1479,6 +1500,7 @@ JSON
 JSON
   cat >"$tmpdir/evidence/worker-load-validation-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "controller_execution": {
       "status": "validated",
@@ -1493,6 +1515,7 @@ JSON
 JSON
   cat >"$tmpdir/evidence/remote-computer-state-sync-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "controller_execution": {
       "status": "validated",
@@ -1508,6 +1531,7 @@ JSON
 JSON
   cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "validation_result": {
       "status": "validated",

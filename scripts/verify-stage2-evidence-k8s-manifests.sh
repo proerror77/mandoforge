@@ -490,6 +490,11 @@ if ! grep -q "sidecar_recovery_required" "$worker_remote_computer_script"; then
   exit 1
 fi
 
+if ! grep -q "state_sync_evidence_status" "$worker_remote_computer_script" || ! grep -q "sidecar_recovery_evidence_status" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must require captured state-sync and sidecar evidence wrappers" >&2
+  exit 1
+fi
+
 if ! grep -q "same_cluster_target" "$worker_remote_computer_script"; then
   echo "Worker/Remote Computer evidence script must require worker and Remote Computer evidence from the same cluster" >&2
   exit 1
@@ -1610,6 +1615,11 @@ if ! grep -q "load_validated" scripts/verify-stage2-evidence-archive.sh || ! gre
   exit 1
 fi
 
+if ! grep -q "worker-load-validation-evidence.json evidence_status" scripts/verify-stage2-evidence-archive.sh && ! grep -q "evidence_status=%s" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require captured worker and Remote Computer evidence wrappers" >&2
+  exit 1
+fi
+
 if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must inspect worker real-cluster evidence" >&2
   exit 1
@@ -1617,6 +1627,11 @@ fi
 
 if ! grep -q "load_validated" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_path_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "replacement_pods_healthy" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require audited worker load, state-contract, and sidecar replacement evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "worker evidence_status" scripts/stage2-completion-audit-gate.sh || ! grep -q "state-sync evidence_status" scripts/stage2-completion-audit-gate.sh || ! grep -q "sidecar recovery evidence_status" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require captured worker and Remote Computer evidence wrappers" >&2
   exit 1
 fi
 
