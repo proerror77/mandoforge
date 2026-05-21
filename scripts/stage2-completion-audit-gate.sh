@@ -438,6 +438,24 @@ tenant_negative_test_detail_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+forced_rls_table_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.rls_tables[]?,
+      .response.controller_execution.rls_table_details[]?,
+      .response.controller_execution.rls_table_checks[]?,
+      .response.controller_execution.forced_rls_tables[]?
+    )
+    | select(
+        type == "object"
+        and ((.table // .table_name // .relation // .name // "") | length > 0)
+        and ((.schema // .namespace // "public") | length > 0)
+        and ((.rls_enabled // .enabled // false) == true)
+        and ((.rls_forced // .forced // .force_rls // false) == true)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 kms_rotation_detail_count() {
   jq -r '[
     (
@@ -1115,6 +1133,7 @@ artifact_contract_issue() {
     local rls_enforced
     local rls_table_count
     local rls_forced_table_count
+    local rls_table_detail_count
     local tenant_context_validated
     local cross_tenant_negative_tests
     local cross_tenant_negative_test_count
@@ -1130,6 +1149,7 @@ artifact_contract_issue() {
     rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$artifact" 2>/dev/null || echo "false")"
     rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
     rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    rls_table_detail_count="$(forced_rls_table_detail_count "$artifact")"
     tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$artifact" 2>/dev/null || echo "false")"
     cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$artifact" 2>/dev/null || echo "false")"
     cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$artifact" 2>/dev/null || echo "0")"
@@ -1174,6 +1194,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$rls_forced_table_count" =~ ^[0-9]+$ || ! "$rls_table_count" =~ ^[0-9]+$ || "$rls_forced_table_count" -lt "$rls_table_count" ]]; then
       printf 'rls_forced_table_count=%s is less than rls_table_count=%s' "$rls_forced_table_count" "$rls_table_count"
+      return 0
+    fi
+    if [[ ! "$rls_table_detail_count" =~ ^[0-9]+$ || "$rls_table_detail_count" -lt "$rls_table_count" ]]; then
+      printf 'forced_rls_table_detail_count=%s rls_table_count=%s' "$rls_table_detail_count" "$rls_table_count"
       return 0
     fi
     if [[ "$tenant_context_validated" != "true" ]]; then

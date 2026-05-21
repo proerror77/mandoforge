@@ -51,6 +51,24 @@ is_production_identity() {
   [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
 }
 
+forced_rls_table_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.rls_tables[]?,
+      .response.controller_execution.rls_table_details[]?,
+      .response.controller_execution.rls_table_checks[]?,
+      .response.controller_execution.forced_rls_tables[]?
+    )
+    | select(
+        type == "object"
+        and ((.table // .table_name // .relation // .name // "") | length > 0)
+        and ((.schema // .namespace // "public") | length > 0)
+        and ((.rls_enabled // .enabled // false) == true)
+        and ((.rls_forced // .forced // .force_rls // false) == true)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -107,6 +125,7 @@ write_summary() {
   local routing_rls_enforced
   local routing_rls_table_count
   local routing_rls_forced_table_count
+  local routing_forced_rls_table_detail_count
   local routing_tenant_context_validated
   local routing_cross_tenant_negative_tests
   local routing_cross_tenant_negative_test_count
@@ -133,6 +152,7 @@ write_summary() {
   routing_rls_enforced="false"
   routing_rls_table_count="0"
   routing_rls_forced_table_count="0"
+  routing_forced_rls_table_detail_count="0"
   routing_tenant_context_validated="false"
   routing_cross_tenant_negative_tests="false"
   routing_cross_tenant_negative_test_count="0"
@@ -148,6 +168,7 @@ write_summary() {
     routing_rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$validation_evidence_file")"
     routing_rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$validation_evidence_file")"
     routing_rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$validation_evidence_file")"
+    routing_forced_rls_table_detail_count="$(forced_rls_table_detail_count "$validation_evidence_file")"
     routing_tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$validation_evidence_file")"
     routing_cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$validation_evidence_file")"
     routing_cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$validation_evidence_file")"
@@ -208,6 +229,9 @@ write_summary() {
   if [[ ! "$routing_rls_forced_table_count" =~ ^[0-9]+$ || ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_rls_forced_table_count" -lt "$routing_rls_table_count" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ ! "$routing_forced_rls_table_detail_count" =~ ^[0-9]+$ || ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_forced_rls_table_detail_count" -lt "$routing_rls_table_count" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$routing_tenant_context_validated" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -239,6 +263,7 @@ write_summary() {
     echo "routing_rls_enforced=$routing_rls_enforced"
     echo "routing_rls_table_count=$routing_rls_table_count"
     echo "routing_rls_forced_table_count=$routing_rls_forced_table_count"
+    echo "routing_forced_rls_table_detail_count=$routing_forced_rls_table_detail_count"
     echo "routing_tenant_context_validated=$routing_tenant_context_validated"
     echo "routing_cross_tenant_negative_tests=$routing_cross_tenant_negative_tests"
     echo "routing_cross_tenant_negative_test_count=$routing_cross_tenant_negative_test_count"
@@ -286,6 +311,9 @@ write_summary() {
     fi
     if [[ ! "$routing_rls_forced_table_count" =~ ^[0-9]+$ || ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_rls_forced_table_count" -lt "$routing_rls_table_count" ]]; then
       echo "- tenant routing controller did not confirm forced RLS for every reported table: forced=$routing_rls_forced_table_count total=$routing_rls_table_count"
+    fi
+    if [[ ! "$routing_forced_rls_table_detail_count" =~ ^[0-9]+$ || ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_forced_rls_table_detail_count" -lt "$routing_rls_table_count" ]]; then
+      echo "- tenant routing controller did not include forced-RLS table details for every reported table: detail_count=$routing_forced_rls_table_detail_count total=$routing_rls_table_count"
     fi
     if [[ "$routing_tenant_context_validated" != "true" ]]; then
       echo "- tenant routing controller did not confirm tenant context propagation"

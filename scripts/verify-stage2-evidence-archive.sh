@@ -145,6 +145,24 @@ tenant_negative_test_detail_count() {
   ] | length' "$1"
 }
 
+forced_rls_table_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.rls_tables[]?,
+      .response.controller_execution.rls_table_details[]?,
+      .response.controller_execution.rls_table_checks[]?,
+      .response.controller_execution.forced_rls_tables[]?
+    )
+    | select(
+        type == "object"
+        and ((.table // .table_name // .relation // .name // "") | length > 0)
+        and ((.schema // .namespace // "public") | length > 0)
+        and ((.rls_enabled // .enabled // false) == true)
+        and ((.rls_forced // .forced // .force_rls // false) == true)
+      )
+  ] | length' "$1"
+}
+
 kms_rotation_detail_count() {
   jq -r '[
     (
@@ -553,6 +571,7 @@ artifact_issue() {
       local rls_enforced
       local rls_table_count
       local rls_forced_table_count
+      local rls_table_detail_count
       local tenant_context_validated
       local cross_tenant_negative_tests
       local cross_tenant_negative_test_count
@@ -567,6 +586,7 @@ artifact_issue() {
       rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$path")"
       rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$path")"
       rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$path")"
+      rls_table_detail_count="$(forced_rls_table_detail_count "$path")"
       tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$path")"
       cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$path")"
       cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$path")"
@@ -606,6 +626,10 @@ artifact_issue() {
       fi
       if [[ ! "$rls_forced_table_count" =~ ^[0-9]+$ || ! "$rls_table_count" =~ ^[0-9]+$ || "$rls_forced_table_count" -lt "$rls_table_count" ]]; then
         printf '%s rls_forced_table_count=%s is less than rls_table_count=%s' "$relative_path" "$rls_forced_table_count" "$rls_table_count"
+        return 0
+      fi
+      if [[ ! "$rls_table_detail_count" =~ ^[0-9]+$ || "$rls_table_detail_count" -lt "$rls_table_count" ]]; then
+        printf '%s forced_rls_table_detail_count=%s rls_table_count=%s' "$relative_path" "$rls_table_detail_count" "$rls_table_count"
         return 0
       fi
       if [[ ! "$cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_count" == "0" ]]; then
@@ -1583,8 +1607,12 @@ JSON
       "tenant_count": 2,
       "tenant_samples": ["tenant-a", "tenant-b"],
       "rls_enforced": true,
-      "rls_table_count": 12,
-      "rls_forced_table_count": 12,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
@@ -3075,8 +3103,8 @@ JSON
       "tenant_count": 2,
       "tenant_samples": ["tenant-a", "tenant-b"],
       "rls_enforced": true,
-      "rls_table_count": 12,
-      "rls_forced_table_count": 8,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 1,
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
@@ -3118,8 +3146,55 @@ JSON
       "tenant_count": 2,
       "tenant_samples": ["tenant-a", "tenant-b"],
       "rls_enforced": true,
-      "rls_table_count": 12,
-      "rls_forced_table_count": 12,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-rls-table-detail-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-rls-table-detail-negative.out 2>/tmp/mandoforge-stage2-archive-tenant-rls-table-detail-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing forced-RLS table detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": ["tenant-a", "tenant-b"],
+      "rls_enforced": true,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": false,
       "cross_tenant_negative_test_count": 0
@@ -3156,8 +3231,12 @@ JSON
       "tenant_count": 2,
       "tenant_samples": ["tenant-a", "tenant-b"],
       "rls_enforced": true,
-      "rls_table_count": 12,
-      "rls_forced_table_count": 12,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3
@@ -3194,8 +3273,12 @@ JSON
       "tenant_count": 2,
       "tenant_samples": ["tenant-a", "tenant-b"],
       "rls_enforced": true,
-      "rls_table_count": 12,
-      "rls_forced_table_count": 12,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
       "tenant_context_validated": false,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
@@ -3237,8 +3320,12 @@ JSON
       "tenant_count": 1,
       "tenant_samples": ["tenant-a", "tenant-b"],
       "rls_enforced": true,
-      "rls_table_count": 12,
-      "rls_forced_table_count": 12,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
@@ -3280,8 +3367,12 @@ JSON
       "tenant_count": 2,
       "tenant_samples": ["tenant-a"],
       "rls_enforced": true,
-      "rls_table_count": 12,
-      "rls_forced_table_count": 12,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
@@ -3323,8 +3414,12 @@ JSON
       "tenant_count": 2,
       "tenant_samples": ["tenant-a", "tenant-a"],
       "rls_enforced": true,
-      "rls_table_count": 12,
-      "rls_forced_table_count": 12,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
@@ -3366,8 +3461,12 @@ JSON
       "tenant_count": 2,
       "tenant_samples": ["tenant-a", "tenant-b"],
       "rls_enforced": true,
-      "rls_table_count": 12,
-      "rls_forced_table_count": 12,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,

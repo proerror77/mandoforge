@@ -630,8 +630,8 @@ if ! grep -q "routing_tenant_sample_count" "$tenant_script"; then
   exit 1
 fi
 
-if ! grep -q "routing_rls_table_count" "$tenant_script" || ! grep -q "routing_rls_forced_table_count" "$tenant_script"; then
-  echo "Tenant isolation evidence script must require RLS table and forced-RLS coverage counts" >&2
+if ! grep -q "routing_rls_table_count" "$tenant_script" || ! grep -q "routing_rls_forced_table_count" "$tenant_script" || ! grep -q "routing_forced_rls_table_detail_count" "$tenant_script"; then
+  echo "Tenant isolation evidence script must require RLS table counts and forced-RLS table detail evidence" >&2
   exit 1
 fi
 
@@ -670,8 +670,8 @@ if ! grep -q "cross_tenant_negative_tests" scripts/stage2-completion-audit-gate.
   exit 1
 fi
 
-if ! grep -q "tenant_sample_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "rls_forced_table_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/stage2-completion-audit-gate.sh; then
-  echo "Stage 2 completion audit must require audited tenant samples, forced-RLS counts, and negative-test details" >&2
+if ! grep -q "tenant_sample_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "rls_forced_table_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "forced_rls_table_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require audited tenant samples, forced-RLS table details, and negative-test details" >&2
   exit 1
 fi
 
@@ -1790,8 +1790,8 @@ if ! grep -q "tenant routing evidence_status" scripts/stage2-completion-audit-ga
   exit 1
 fi
 
-if ! grep -q "tenant_sample_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rls_forced_table_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/verify-stage2-evidence-archive.sh; then
-  echo "Stage 2 evidence archive verifier must require audited tenant samples, forced-RLS counts, and negative-test details" >&2
+if ! grep -q "tenant_sample_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rls_forced_table_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "forced_rls_table_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive verifier must require audited tenant samples, forced-RLS table details, and negative-test details" >&2
   exit 1
 fi
 
@@ -1802,6 +1802,11 @@ fi
 
 if ! grep -q "incomplete forced-RLS evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject incomplete forced-RLS tenant evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "missing forced-RLS table detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject tenant evidence without forced-RLS table details" >&2
   exit 1
 fi
 
