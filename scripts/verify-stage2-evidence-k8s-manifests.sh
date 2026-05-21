@@ -1720,6 +1720,11 @@ if ! grep -q "missing cross-tenant negative tests" scripts/verify-stage2-evidenc
   exit 1
 fi
 
+if ! grep -q "single tenant sample evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject tenant evidence without audited multi-tenant samples" >&2
+  exit 1
+fi
+
 if ! grep -q "evidence_status=%s" scripts/verify-stage2-evidence-archive.sh || ! grep -q "validation_status=%s" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive verifier must require captured and validated tenant routing evidence" >&2
   exit 1
