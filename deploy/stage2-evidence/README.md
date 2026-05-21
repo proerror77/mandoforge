@@ -11,7 +11,7 @@ Stage 2 is complete only when `/api/stage2/readiness` reports no open gaps and t
 - `stage2-controller-env-secret.example.yaml` is the Kubernetes Secret shape for those controller settings. Replace placeholders through your secret manager or deployment pipeline; do not commit real values.
 - `stage2-production-evidence-pvc.example.yaml` is the persistent evidence volume shape for strict production runs.
 - `stage2-production-evidence-gate-job.example.yaml` runs the strict production gate and reads validation flags from `mandoforge-stage2-controller-env`.
-- `../../scripts/render-stage2-controller-secret.sh` renders the real controller Secret from an env file and fails closed on placeholders unless `ALLOW_STAGE2_CONTROLLER_PLACEHOLDERS=1` is set.
+- `../../scripts/render-stage2-controller-secret.sh` renders the real controller Secret from an env file and runs the strict production evidence preflight first unless `ALLOW_STAGE2_CONTROLLER_PLACEHOLDERS=1` is set.
 - `../../scripts/stage2-production-evidence-preflight.sh` checks a real env file before rendering the Secret. It validates that the still-open external production backlog points at non-placeholder, non-pilot controller targets without printing token values.
 
 ## Local Manifest Verification

@@ -1650,6 +1650,11 @@ if ! grep -q "MANAGED_SESSION_RUNTIME_TARGET_ID" scripts/render-stage2-controlle
   exit 1
 fi
 
+if ! grep -q "stage2-production-evidence-preflight.sh" scripts/render-stage2-controller-secret.sh; then
+  echo "Stage 2 Secret render must run the strict production evidence preflight before rendering" >&2
+  exit 1
+fi
+
 if ! grep -q "finance ERP system id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must bind finance evidence to the declared ERP system id" >&2
   exit 1

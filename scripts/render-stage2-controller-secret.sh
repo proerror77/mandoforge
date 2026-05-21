@@ -5,6 +5,8 @@ env_file="${1:-deploy/stage2-evidence/stage2-production-controllers.env.example}
 namespace="${MANDOFORGE_K8S_NAMESPACE:-agent-os}"
 secret_name="${MANDOFORGE_STAGE2_CONTROLLER_SECRET_NAME:-mandoforge-stage2-controller-env}"
 allow_placeholders="${ALLOW_STAGE2_CONTROLLER_PLACEHOLDERS:-0}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+preflight_script="$script_dir/stage2-production-evidence-preflight.sh"
 
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "kubectl is required to render the Stage 2 controller Secret" >&2
@@ -39,6 +41,8 @@ if [[ "$allow_placeholders" != "1" ]]; then
     grep -nEi '^MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID=.*(feishu|lark|drive|file|artifact)' "$env_file" >&2
     exit 1
   fi
+
+  "$preflight_script" "$env_file"
 fi
 
 kubectl create secret generic "$secret_name" \
