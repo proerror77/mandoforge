@@ -795,6 +795,11 @@ if ! grep -q "recovery_id" "$vault_script" || ! grep -q "recovery_target_kind" "
   exit 1
 fi
 
+if ! grep -q "invalid recovery step status count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must reject failed KMS recovery steps" >&2
+  exit 1
+fi
+
 if ! grep -q "backend_kind=.*is not production KMS/HSM" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must reject non-production KMS/HSM backend evidence" >&2
   exit 1
@@ -857,6 +862,11 @@ fi
 
 if ! grep -q "missing KMS recovery steps" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject KMS recovery evidence without audited steps" >&2
+  exit 1
+fi
+
+if ! grep -q "invalid KMS recovery step status evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject failed KMS recovery steps" >&2
   exit 1
 fi
 

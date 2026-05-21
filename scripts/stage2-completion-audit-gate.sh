@@ -1053,6 +1053,7 @@ artifact_contract_issue() {
     local recovery_id
     local recovery_target_kind
     local step_count
+    local invalid_step_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     recovery_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -1064,6 +1065,7 @@ artifact_contract_issue() {
     recovery_id="$(jq -r '.response.controller_execution.recovery_id // ""' "$artifact" 2>/dev/null || echo "")"
     recovery_target_kind="$(jq -r '.response.controller_execution.recovery_target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+    invalid_step_count="$(jq -r '[.response.controller_execution.steps[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$evidence_status" != "captured" ]]; then
       printf 'KMS recovery evidence_status=%s' "$evidence_status"
@@ -1103,6 +1105,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
       printf 'step_count=%s' "$step_count"
+      return 0
+    fi
+    if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then
+      printf 'invalid recovery step status count=%s' "$invalid_step_count"
       return 0
     fi
   fi
