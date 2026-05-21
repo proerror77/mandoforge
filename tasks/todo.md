@@ -261,6 +261,7 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [x] Stage 4.1 follow-up: Bind worker polling and direct job claims to Environment ids for session-loop and execution queues.
 - [x] Stage 4.1 follow-up: Bind worker polling and direct job claims to Environment worker queue pools from `worker_queue_binding`.
 - [x] Stage 4.1 follow-up: Add SSE reconnect cursors for session event streams using event sequence ids, `?after_seq=`, and `Last-Event-ID`.
+- [x] Stage 4.1 follow-up: Keep session event streams live after replay by pushing newly appended session events to connected SSE clients.
 - [x] Stage 4.2: Add Managed Agent Registry fields for manager/specialist kind, runtime profile binding, tool policy, MCP servers, skills, Workflow Pack memberships, Remote Computer profile, semantic scopes, and release state.
 - [x] Stage 4.2: Add Agent Builder / Console surfaces for runtime profile, tools, skills, MCP, Remote Computer profile, and semantic scope selection.
 - [x] Stage 4.3: Add Minimal Semantic Kernel scope fields for project, repo, service, workflow, policy, and memory scope.

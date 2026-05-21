@@ -354,7 +354,7 @@ Runtime:
 - `POST /api/sessions/:id/events`
 - `POST /api/sessions/:id/run` (compatibility wrapper for the demo-era run flow)
 - `GET /api/sessions/:id/events`
-- `GET /api/sessions/:id/stream`
+- `GET /api/sessions/:id/stream` (SSE replay with `?after_seq=` / `Last-Event-ID`, then live push for newly appended events)
 - `GET /api/sessions/:id/tool-calls`
 - `GET /api/sessions/:id/audit-logs`
 

@@ -18,6 +18,7 @@ use axum::{
     routing::{delete, get, patch, post},
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Executor, PgPool, postgres::PgPoolOptions};
@@ -14332,6 +14333,7 @@ async fn stream_events(
     )
     .await?;
     let after_seq = stream_after_seq(&headers, query.after_seq)?;
+    let live_events = store_events::subscribe_session_events();
     let events = state
         .list_events(id)
         .await
@@ -14339,14 +14341,42 @@ async fn stream_events(
         .into_iter()
         .filter(|event| after_seq.map_or(true, |after_seq| event.seq > after_seq))
         .collect::<Vec<_>>();
-    let stream = futures_util::stream::iter(events.into_iter().map(|event| {
-        Ok(Event::default()
-            .event(event.event_type.clone())
-            .id(event.seq.to_string())
-            .json_data(event)
-            .unwrap_or_else(|_| Event::default().event("error").data("serialization failed")))
-    }));
+    let replay_high_water = events
+        .iter()
+        .map(|event| event.seq)
+        .max()
+        .or(after_seq)
+        .unwrap_or_default();
+    let replay_stream = futures_util::stream::iter(events.into_iter().map(sse_session_event));
+    let live_stream =
+        futures_util::stream::unfold((live_events, replay_high_water), move |state| async move {
+            let (mut live_events, mut high_water) = state;
+            loop {
+                match live_events.recv().await {
+                    Ok(event)
+                        if event.session_id == id
+                            && event.seq > high_water
+                            && after_seq.map_or(true, |after_seq| event.seq > after_seq) =>
+                    {
+                        high_water = event.seq;
+                        return Some((sse_session_event(event), (live_events, high_water)));
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        });
+    let stream = replay_stream.chain(live_stream);
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+fn sse_session_event(event: SessionEvent) -> Result<Event, std::convert::Infallible> {
+    Ok(Event::default()
+        .event(event.event_type.clone())
+        .id(event.seq.to_string())
+        .json_data(event)
+        .unwrap_or_else(|_| Event::default().event("error").data("serialization failed")))
 }
 
 fn stream_after_seq(
@@ -38310,6 +38340,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{Method, Request, StatusCode},
     };
+    use futures_util::StreamExt;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -57526,16 +57557,39 @@ not json
         (status, value)
     }
 
-    async fn request_text(app: Router, request: Request<Body>) -> (StatusCode, String) {
+    async fn request_sse_until_contains(
+        app: Router,
+        request: Request<Body>,
+        needles: &[&str],
+    ) -> (StatusCode, String) {
         let response = app.oneshot(request).await.expect("request succeeds");
         let status = response.status();
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read response body");
-        (
-            status,
-            String::from_utf8(body.to_vec()).expect("utf8 response body"),
-        )
+        let body = sse_response_until_contains(response, needles).await;
+        (status, body)
+    }
+
+    async fn sse_response_until_contains(response: Response, needles: &[&str]) -> String {
+        let mut stream = response.into_body().into_data_stream();
+        let mut body = String::new();
+        let deadline = tokio::time::sleep(Duration::from_secs(2));
+        tokio::pin!(deadline);
+        loop {
+            if needles.iter().all(|needle| body.contains(needle)) {
+                return body;
+            }
+            tokio::select! {
+                chunk = stream.next() => {
+                    let Some(chunk) = chunk else {
+                        return body;
+                    };
+                    let chunk = chunk.expect("read sse chunk");
+                    body.push_str(&String::from_utf8_lossy(&chunk));
+                }
+                _ = &mut deadline => {
+                    return body;
+                }
+            }
+        }
     }
 
     fn json_request(method: &str, uri: &str, body: Value) -> Request<Body> {
@@ -58234,7 +58288,7 @@ not json
         )
         .await;
 
-        let (status, body) = request_text(
+        let (status, body) = request_sse_until_contains(
             app,
             Request::builder()
                 .uri(format!(
@@ -58243,6 +58297,10 @@ not json
                 ))
                 .body(Body::empty())
                 .expect("valid request"),
+            &[
+                &format!("id: {}\n", custom_events[0].seq),
+                "event: agent.custom_tool_result\n",
+            ],
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -58304,19 +58362,97 @@ not json
         )
         .await;
 
-        let (status, body) = request_text(
+        let (status, body) = request_sse_until_contains(
             app,
             Request::builder()
                 .uri(format!("/api/sessions/{}/stream", session.id))
                 .header("last-event-id", first[0].seq.to_string())
                 .body(Body::empty())
                 .expect("valid request"),
+            &[&format!("id: {}\n", second[0].seq)],
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(!body.contains("already seen"));
         assert!(body.contains("after reconnect"));
         assert!(body.contains(&format!("id: {}\n", second[0].seq)));
+    }
+
+    #[tokio::test]
+    async fn session_stream_pushes_events_appended_after_connect() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agents[0].id,
+                    "title": "live stream"
+                }),
+            ),
+        )
+        .await;
+        let first: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "user.message",
+                        "payload": {"message": "already replayed"}
+                    }]
+                }),
+            ),
+        )
+        .await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/sessions/{}/stream?after_seq={}",
+                        session.id, first[0].seq
+                    ))
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("stream response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let appended: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "user.message",
+                        "payload": {"message": "live after connect"}
+                    }]
+                }),
+            ),
+        )
+        .await;
+
+        let body = sse_response_until_contains(
+            response,
+            &[&format!("id: {}\n", appended[0].seq), "live after connect"],
+        )
+        .await;
+        assert!(!body.contains("already replayed"));
+        assert!(body.contains("event: user.message\n"));
     }
 
     #[tokio::test]

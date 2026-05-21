@@ -214,8 +214,9 @@ Scope:
   sequence window and advances `processed_event_seq` on completion.
 - Preserve `/api/sessions/:id/stream` reconnect semantics: emitted SSE ids are
   session event sequences, and `?after_seq=` / `Last-Event-ID` replay only
-  events after the caller's cursor. The remaining hardening is true live
-  tailing through a broadcaster, DB tail, or poll-and-push loop.
+  events after the caller's cursor. Keep live tailing attached after replay so
+  connected clients receive newly appended session events without polling; the
+  remaining hardening is production fan-out/backpressure evidence.
 
 Acceptance criteria:
 

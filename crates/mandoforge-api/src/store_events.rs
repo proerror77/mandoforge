@@ -1,11 +1,32 @@
+use std::sync::OnceLock;
+
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::Value;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::event_from_row;
 use crate::{AppError, AppState, SessionEvent};
+
+const SESSION_EVENT_BROADCAST_CAPACITY: usize = 1024;
+
+pub(crate) fn subscribe_session_events() -> broadcast::Receiver<SessionEvent> {
+    session_event_broadcaster().subscribe()
+}
+
+fn publish_session_event(event: &SessionEvent) {
+    let _ = session_event_broadcaster().send(event.clone());
+}
+
+fn session_event_broadcaster() -> &'static broadcast::Sender<SessionEvent> {
+    static BROADCASTER: OnceLock<broadcast::Sender<SessionEvent>> = OnceLock::new();
+    BROADCASTER.get_or_init(|| {
+        let (sender, _) = broadcast::channel(SESSION_EVENT_BROADCAST_CAPACITY);
+        sender
+    })
+}
 
 impl AppState {
     pub(crate) async fn list_events(
@@ -102,6 +123,7 @@ impl AppState {
             }
         };
         self.emit_telemetry_event(&event).await;
+        publish_session_event(&event);
         Ok(event)
     }
 }
