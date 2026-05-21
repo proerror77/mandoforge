@@ -88,9 +88,12 @@ required_evidence_artifacts_for_requirement() {
   local req_id="$1"
   case "$req_id" in
     tenant-routing)
+      echo "$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
       echo "$SOURCE_EVIDENCE_DIR/api-tenant-isolation-routing-validate.json"
+      echo "$SOURCE_EVIDENCE_DIR/tenant-routing-validation-evidence.json"
       ;;
     policy-rollout)
+      echo "$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
       echo "$SOURCE_EVIDENCE_DIR/policy-rollout-orchestration-validation-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/policy-rollout-due-run-evidence.json"
       ;;
@@ -101,10 +104,12 @@ required_evidence_artifacts_for_requirement() {
       echo "$SOURCE_EVIDENCE_DIR/provider-production-rollback-evidence.json"
       ;;
     vault-kms)
+      echo "$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
       echo "$SOURCE_EVIDENCE_DIR/vault-kms-recovery-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/vault-kms-rotation-evidence.json"
       ;;
     worker-remote-computer)
+      echo "$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
       echo "$SOURCE_EVIDENCE_DIR/worker-load-validation-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
@@ -138,6 +143,7 @@ required_evidence_artifacts_for_requirement() {
       echo "$SOURCE_EVIDENCE_DIR/observability-collector-remediation-evidence.json"
       ;;
     finance-close)
+      echo "$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
       echo "$SOURCE_EVIDENCE_DIR/finance-close-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/finance-reconciliation-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/usage-export-csv-evidence.json"
@@ -290,6 +296,43 @@ artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
   local artifact_name="${artifact##*/}"
+
+  if [[ "$artifact_name" == "production-evidence-run.json" ]]; then
+    local expected_cluster_id
+    local expected_tenant_deployment_id
+    local expected_policy_controller_id
+    local expected_kms_backend_id
+    local expected_kms_key_id
+    local expected_finance_system_id
+
+    expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_tenant_deployment_id="$(jq -r '.expected_targets.tenant_routing.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_policy_controller_id="$(jq -r '.expected_targets.policy_rollout.controller_id // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_kms_backend_id="$(jq -r '.expected_targets.vault_kms.backend_id // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_kms_key_id="$(jq -r '.expected_targets.vault_kms.key_id // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_finance_system_id="$(jq -r '.expected_targets.finance.system_id // ""' "$artifact" 2>/dev/null || echo "")"
+
+    if [[ "$req_id" == "worker-remote-computer" ]] && ! is_production_identity "$expected_cluster_id"; then
+      printf 'expected worker/Remote Computer cluster id=%s is pilot/mock/local' "${expected_cluster_id:-<empty>}"
+      return 0
+    fi
+    if [[ "$req_id" == "tenant-routing" ]] && ! is_production_identity "$expected_tenant_deployment_id"; then
+      printf 'expected tenant deployment id=%s is pilot/mock/local' "${expected_tenant_deployment_id:-<empty>}"
+      return 0
+    fi
+    if [[ "$req_id" == "policy-rollout" ]] && ! is_production_identity "$expected_policy_controller_id"; then
+      printf 'expected policy controller id=%s is pilot/mock/local' "${expected_policy_controller_id:-<empty>}"
+      return 0
+    fi
+    if [[ "$req_id" == "vault-kms" ]] && { ! is_production_identity "$expected_kms_backend_id" || ! is_production_identity "$expected_kms_key_id"; }; then
+      printf 'expected KMS backend or key id is pilot/mock/local'
+      return 0
+    fi
+    if [[ "$req_id" == "finance-close" ]] && ! is_finance_system_identity "$expected_finance_system_id"; then
+      printf 'expected finance system id=%s is not a true ERP/accounting system identity' "${expected_finance_system_id:-<empty>}"
+      return 0
+    fi
+  fi
 
   if [[ "$req_id" == "finance-close" && "$artifact_name" == "finance-export-delivery-observer.json" ]]; then
     local observer_status
@@ -608,24 +651,103 @@ artifact_contract_issue() {
 
 requirement_cross_artifact_issue() {
   local req_id="$1"
+  local run_manifest="$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
 
   if [[ "$req_id" == "worker-remote-computer" ]]; then
     local worker_artifact="$SOURCE_EVIDENCE_DIR/worker-load-validation-evidence.json"
     local state_artifact="$SOURCE_EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
     local sidecar_artifact="$SOURCE_EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
+    local expected_cluster_id
     local worker_cluster_id
     local state_cluster_id
     local sidecar_cluster_id
 
+    expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$run_manifest" 2>/dev/null || echo "")"
     worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$worker_artifact" 2>/dev/null || echo "")"
     state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$state_artifact" 2>/dev/null || echo "")"
     sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$sidecar_artifact" 2>/dev/null || echo "")"
 
+    if [[ -n "$expected_cluster_id" && -n "$worker_cluster_id" && "$expected_cluster_id" != "$worker_cluster_id" ]]; then
+      printf 'worker cluster id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_cluster_id" && -n "$state_cluster_id" && "$expected_cluster_id" != "$state_cluster_id" ]]; then
+      printf 'state-sync cluster id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_cluster_id" && -n "$sidecar_cluster_id" && "$expected_cluster_id" != "$sidecar_cluster_id" ]]; then
+      printf 'sidecar cluster id does not match production-evidence-run.json'
+      return 0
+    fi
     if [[ -n "$worker_cluster_id" && -n "$state_cluster_id" && -n "$sidecar_cluster_id" ]]; then
       if ! [[ "$worker_cluster_id" == "$state_cluster_id" && "$worker_cluster_id" == "$sidecar_cluster_id" ]]; then
         printf 'worker, state-sync, and sidecar evidence do not share one cluster id'
         return 0
       fi
+    fi
+  fi
+
+  if [[ "$req_id" == "tenant-routing" ]]; then
+    local expected_deployment_id
+    local actual_deployment_id
+    expected_deployment_id="$(jq -r '.expected_targets.tenant_routing.deployment_id // ""' "$run_manifest" 2>/dev/null || echo "")"
+    actual_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$SOURCE_EVIDENCE_DIR/tenant-routing-validation-evidence.json" 2>/dev/null || echo "")"
+    if [[ -n "$expected_deployment_id" && -n "$actual_deployment_id" && "$expected_deployment_id" != "$actual_deployment_id" ]]; then
+      printf 'tenant routing deployment id does not match production-evidence-run.json'
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "policy-rollout" ]]; then
+    local expected_controller_id
+    local actual_controller_id
+    expected_controller_id="$(jq -r '.expected_targets.policy_rollout.controller_id // ""' "$run_manifest" 2>/dev/null || echo "")"
+    actual_controller_id="$(jq -r '.response.controller_execution.controller_id // ""' "$SOURCE_EVIDENCE_DIR/policy-rollout-orchestration-validation-evidence.json" 2>/dev/null || echo "")"
+    if [[ -n "$expected_controller_id" && -n "$actual_controller_id" && "$expected_controller_id" != "$actual_controller_id" ]]; then
+      printf 'policy rollout controller id does not match production-evidence-run.json'
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "vault-kms" ]]; then
+    local expected_backend_id
+    local expected_key_id
+    local rotation_backend_id
+    local rotation_key_id
+    local recovery_backend_id
+    local recovery_key_id
+    expected_backend_id="$(jq -r '.expected_targets.vault_kms.backend_id // ""' "$run_manifest" 2>/dev/null || echo "")"
+    expected_key_id="$(jq -r '.expected_targets.vault_kms.key_id // ""' "$run_manifest" 2>/dev/null || echo "")"
+    rotation_backend_id="$(jq -r '.response.external_execution.backend_id // ""' "$SOURCE_EVIDENCE_DIR/vault-kms-rotation-evidence.json" 2>/dev/null || echo "")"
+    rotation_key_id="$(jq -r '.response.external_execution.key_id // ""' "$SOURCE_EVIDENCE_DIR/vault-kms-rotation-evidence.json" 2>/dev/null || echo "")"
+    recovery_backend_id="$(jq -r '.response.controller_execution.backend_id // ""' "$SOURCE_EVIDENCE_DIR/vault-kms-recovery-evidence.json" 2>/dev/null || echo "")"
+    recovery_key_id="$(jq -r '.response.controller_execution.key_id // ""' "$SOURCE_EVIDENCE_DIR/vault-kms-recovery-evidence.json" 2>/dev/null || echo "")"
+    if [[ -n "$expected_backend_id" && -n "$rotation_backend_id" && "$expected_backend_id" != "$rotation_backend_id" ]]; then
+      printf 'KMS rotation backend id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_key_id" && -n "$rotation_key_id" && "$expected_key_id" != "$rotation_key_id" ]]; then
+      printf 'KMS rotation key id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_backend_id" && -n "$recovery_backend_id" && "$expected_backend_id" != "$recovery_backend_id" ]]; then
+      printf 'KMS recovery backend id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_key_id" && -n "$recovery_key_id" && "$expected_key_id" != "$recovery_key_id" ]]; then
+      printf 'KMS recovery key id does not match production-evidence-run.json'
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "finance-close" ]]; then
+    local expected_finance_system_id
+    local actual_finance_system_id
+    expected_finance_system_id="$(jq -r '.expected_targets.finance.system_id // ""' "$run_manifest" 2>/dev/null || echo "")"
+    actual_finance_system_id="$(jq -r '.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // ""' "$SOURCE_EVIDENCE_DIR/finance-export-delivery-observer.json" 2>/dev/null || echo "")"
+    if [[ -n "$expected_finance_system_id" && -n "$actual_finance_system_id" && "$expected_finance_system_id" != "$actual_finance_system_id" ]]; then
+      printf 'finance ERP system id does not match production-evidence-run.json'
+      return 0
     fi
   fi
 }

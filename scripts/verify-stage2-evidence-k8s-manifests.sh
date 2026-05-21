@@ -1448,8 +1448,23 @@ if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-completion-au
   exit 1
 fi
 
+if ! grep -q "production-evidence-run.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require the run identity manifest" >&2
+  exit 1
+fi
+
+if ! grep -q "tenant-routing-validation-evidence.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require tenant routing validation evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "do not share one cluster id" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must reject mixed-cluster worker/Remote Computer evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "does not match production-evidence-run.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must cross-check evidence identities against the run manifest" >&2
   exit 1
 fi
 
