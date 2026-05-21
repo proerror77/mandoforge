@@ -72,6 +72,12 @@ The controller matrix is the source of truth for Stage 2 production adoption wir
 
 3. Create a reviewed production env file from `deploy/stage2-evidence/stage2-production-controllers.env.example`.
 
+   ```bash
+   scripts/stage2-production-evidence-preflight.sh /secure/path/stage2-production-controllers.env
+   ```
+
+   This preflight is not completion evidence. It fails closed when the open production-adoption targets still point at placeholders, local mock controllers, Whiskey pilot URLs, disabled sidecar replacement, or missing token/key values.
+
    Keep `ALLOW_BLOCKED=0`, `RUN_STAGE2_PRODUCTION_VALIDATIONS=1`, `VERIFY_STAGE2_VALIDATION_COVERAGE=1`, and `RUN_STAGE2_COMPLETION_AUDIT=1` for a strict adoption attempt.
 
 4. Render the Kubernetes Secret from the reviewed env file.

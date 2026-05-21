@@ -6,6 +6,7 @@ job_manifest="deploy/stage2-evidence/stage2-evidence-gate-job.yaml"
 secret_manifest="deploy/stage2-evidence/stage2-controller-env-secret.example.yaml"
 production_job_manifest="deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml"
 render_secret_script="scripts/render-stage2-controller-secret.sh"
+production_preflight_script="scripts/stage2-production-evidence-preflight.sh"
 api_source="crates/mandoforge-api/src/main.rs"
 
 required_template_vars=(
@@ -149,6 +150,11 @@ if [[ ! -x "$render_secret_script" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$production_preflight_script" ]]; then
+  echo "missing executable Stage 2 production evidence preflight script: $production_preflight_script" >&2
+  exit 1
+fi
+
 for var in "${required_template_vars[@]}"; do
   if ! grep -q "^${var}=" "$template"; then
     echo "Stage 2 controller env template is missing $var" >&2
@@ -184,6 +190,26 @@ fi
 
 if grep -q 'MANDOFORGE_STAGE2_TEAM_ID' "$render_secret_script"; then
   echo "Stage 2 controller Secret render must not require MANDOFORGE_STAGE2_TEAM_ID now that evidence gates auto-discover teams" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must require sidecar replacement evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must require finance ERP observer evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_KMS_VALIDATION_MODE external" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must require external KMS validation mode" >&2
+  exit 1
+fi
+
+if ! grep -q "whiskey" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must reject Whiskey pilot targets" >&2
   exit 1
 fi
 
