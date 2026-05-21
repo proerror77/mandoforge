@@ -760,6 +760,10 @@ artifact_contract_issue() {
     local environment
     local backend_id
     local key_id
+    local rotation_id
+    local rotated_count
+    local catalog_updated_count
+    local action_count
 
     rotation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     execution_status="$(jq -r '.response.external_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -768,6 +772,10 @@ artifact_contract_issue() {
     environment="$(jq -r '.response.external_execution.environment // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     backend_id="$(jq -r '.response.external_execution.backend_id // ""' "$artifact" 2>/dev/null || echo "")"
     key_id="$(jq -r '.response.external_execution.key_id // ""' "$artifact" 2>/dev/null || echo "")"
+    rotation_id="$(jq -r '.response.external_execution.rotation_id // ""' "$artifact" 2>/dev/null || echo "")"
+    rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    action_count="$(jq -r 'if ((.response.actions // null) | type) == "array" then (.response.actions | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$rotation_status" != "validated" ]]; then
       printf 'rotation_status=%s' "$rotation_status"
@@ -797,6 +805,22 @@ artifact_contract_issue() {
       printf 'backend_id or key_id is pilot/mock/local'
       return 0
     fi
+    if ! is_production_identity "$rotation_id"; then
+      printf 'rotation_id=%s is pilot/mock/local' "${rotation_id:-<empty>}"
+      return 0
+    fi
+    if [[ ! "$rotated_count" =~ ^[0-9]+$ || "$rotated_count" == "0" ]]; then
+      printf 'rotated_count=%s' "$rotated_count"
+      return 0
+    fi
+    if [[ ! "$catalog_updated_count" =~ ^[0-9]+$ || "$catalog_updated_count" == "0" ]]; then
+      printf 'catalog_updated_count=%s' "$catalog_updated_count"
+      return 0
+    fi
+    if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
+      printf 'action_count=%s' "$action_count"
+      return 0
+    fi
   fi
 
   if [[ "$req_id" == "vault-kms" && "$artifact_name" == "vault-kms-recovery-evidence.json" ]]; then
@@ -806,6 +830,9 @@ artifact_contract_issue() {
     local environment
     local backend_id
     local key_id
+    local recovery_id
+    local recovery_target_kind
+    local step_count
 
     recovery_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -813,6 +840,9 @@ artifact_contract_issue() {
     environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     backend_id="$(jq -r '.response.controller_execution.backend_id // ""' "$artifact" 2>/dev/null || echo "")"
     key_id="$(jq -r '.response.controller_execution.key_id // ""' "$artifact" 2>/dev/null || echo "")"
+    recovery_id="$(jq -r '.response.controller_execution.recovery_id // ""' "$artifact" 2>/dev/null || echo "")"
+    recovery_target_kind="$(jq -r '.response.controller_execution.recovery_target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$recovery_status" != "validated" ]]; then
       printf 'recovery_status=%s' "$recovery_status"
@@ -836,6 +866,18 @@ artifact_contract_issue() {
     fi
     if ! is_production_identity "$backend_id" || ! is_production_identity "$key_id"; then
       printf 'backend_id or key_id is pilot/mock/local'
+      return 0
+    fi
+    if ! is_production_identity "$recovery_id"; then
+      printf 'recovery_id=%s is pilot/mock/local' "${recovery_id:-<empty>}"
+      return 0
+    fi
+    if [[ "$recovery_target_kind" != "production_kms_backend" && "$recovery_target_kind" != "production_hsm_backend" && "$recovery_target_kind" != "enterprise_kms_backend" ]]; then
+      printf 'recovery_target_kind=%s is not production' "$recovery_target_kind"
+      return 0
+    fi
+    if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
+      printf 'step_count=%s' "$step_count"
       return 0
     fi
   fi

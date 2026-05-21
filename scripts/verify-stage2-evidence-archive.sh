@@ -418,6 +418,10 @@ artifact_issue() {
       local environment
       local backend_id
       local key_id
+      local rotation_id
+      local rotated_count
+      local catalog_updated_count
+      local action_count
       status="$(jq -r '.response.status // "unknown"' "$path")"
       execution_status="$(jq -r '.response.external_execution.status // "unknown"' "$path")"
       production_backend="$(jq -r '.response.external_execution.production_backend // false' "$path")"
@@ -425,6 +429,10 @@ artifact_issue() {
       environment="$(jq -r '.response.external_execution.environment // "unknown"' "$path")"
       backend_id="$(jq -r '.response.external_execution.backend_id // ""' "$path")"
       key_id="$(jq -r '.response.external_execution.key_id // ""' "$path")"
+      rotation_id="$(jq -r '.response.external_execution.rotation_id // ""' "$path")"
+      rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$path")"
+      catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$path")"
+      action_count="$(jq -r 'if ((.response.actions // null) | type) == "array" then (.response.actions | length) else 0 end' "$path")"
       if [[ "$status" != "validated" || "$execution_status" != "validated" || "$production_backend" != "true" ]]; then
         printf '%s status=%s execution_status=%s production_backend=%s' "$relative_path" "$status" "$execution_status" "$production_backend"
         return 0
@@ -445,6 +453,26 @@ artifact_issue() {
         printf '%s backend_id=%s is a pilot/mock/local identity' "$relative_path" "$backend_id"
         return 0
       fi
+      if ! is_production_identity_value "$key_id"; then
+        printf '%s key_id=%s is a pilot/mock/local identity' "$relative_path" "$key_id"
+        return 0
+      fi
+      if ! is_production_identity_value "$rotation_id"; then
+        printf '%s rotation_id=%s is a pilot/mock/local identity' "$relative_path" "${rotation_id:-<empty>}"
+        return 0
+      fi
+      if [[ ! "$rotated_count" =~ ^[0-9]+$ || "$rotated_count" == "0" ]]; then
+        printf '%s rotated_count=%s' "$relative_path" "$rotated_count"
+        return 0
+      fi
+      if [[ ! "$catalog_updated_count" =~ ^[0-9]+$ || "$catalog_updated_count" == "0" ]]; then
+        printf '%s catalog_updated_count=%s' "$relative_path" "$catalog_updated_count"
+        return 0
+      fi
+      if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
+        printf '%s action_count=%s' "$relative_path" "$action_count"
+        return 0
+      fi
       ;;
     vault-kms-recovery-evidence.json)
       local status
@@ -453,12 +481,18 @@ artifact_issue() {
       local environment
       local backend_id
       local key_id
+      local recovery_id
+      local recovery_target_kind
+      local step_count
       status="$(jq -r '.response.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       backend_kind="$(jq -r '.response.controller_execution.backend_kind // "unknown"' "$path")"
       environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$path")"
       backend_id="$(jq -r '.response.controller_execution.backend_id // ""' "$path")"
       key_id="$(jq -r '.response.controller_execution.key_id // ""' "$path")"
+      recovery_id="$(jq -r '.response.controller_execution.recovery_id // ""' "$path")"
+      recovery_target_kind="$(jq -r '.response.controller_execution.recovery_target_kind // "unknown"' "$path")"
+      step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$path")"
       if [[ "$status" != "validated" || "$controller_status" != "validated" ]]; then
         printf '%s status=%s controller_status=%s' "$relative_path" "$status" "$controller_status"
         return 0
@@ -477,6 +511,22 @@ artifact_issue() {
       fi
       if ! is_production_identity_value "$backend_id"; then
         printf '%s backend_id=%s is a pilot/mock/local identity' "$relative_path" "$backend_id"
+        return 0
+      fi
+      if ! is_production_identity_value "$key_id"; then
+        printf '%s key_id=%s is a pilot/mock/local identity' "$relative_path" "$key_id"
+        return 0
+      fi
+      if ! is_production_identity_value "$recovery_id"; then
+        printf '%s recovery_id=%s is a pilot/mock/local identity' "$relative_path" "${recovery_id:-<empty>}"
+        return 0
+      fi
+      if [[ "$recovery_target_kind" != "production_kms_backend" && "$recovery_target_kind" != "production_hsm_backend" && "$recovery_target_kind" != "enterprise_kms_backend" ]]; then
+        printf '%s recovery_target_kind=%s is not production' "$relative_path" "$recovery_target_kind"
+        return 0
+      fi
+      if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
+        printf '%s step_count=%s' "$relative_path" "$step_count"
         return 0
       fi
       ;;
@@ -1058,8 +1108,13 @@ JSON
       "backend_kind": "aws_kms",
       "environment": "production",
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
-      "key_id": "key-1"
-    }
+      "key_id": "key-1",
+      "rotation_id": "kms-rotation-1",
+      "rotated_count": 1
+    },
+    "rotated_count": 1,
+    "catalog_updated_count": 1,
+    "actions": ["external_kms_rotation_confirmed"]
   }
 }
 JSON
@@ -1072,7 +1127,13 @@ JSON
       "backend_kind": "aws_kms",
       "environment": "production",
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
-      "key_id": "key-1"
+      "key_id": "key-1",
+      "recovery_id": "kms-recovery-1",
+      "recovery_target_kind": "production_kms_backend",
+      "steps": [
+        {"name": "restore-key-material", "status": "validated"},
+        {"name": "verify-secret-consumers", "status": "passed"}
+      ]
     }
   }
 }

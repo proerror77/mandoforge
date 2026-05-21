@@ -129,7 +129,7 @@ These items are required before claiming a specific production deployment is val
 1. Run tenant routing evidence against a real multi-tenant deployment with RLS enabled, forced for every reported RLS table, tenant context configured, at least two audited tenant samples, and a nonzero audited cross-tenant negative-test count.
 2. Run policy rollout orchestration against a real production policy controller target with production policy store/deployment ids, audited orchestration steps, rollback support, and due-run scan evidence.
 3. Run provider gate, rollout, and rollback evidence against real provider deployment targets.
-4. Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend.
+4. Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend with production rotation/recovery ids, nonzero rotated record and catalog update counts, and audited recovery steps.
 5. Run worker load validation, isolated worker-pool validation, and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem, including state claim/path checks and healthy replacement Pod checks.
 6. Run approval notification delivery evidence against real webhook, Slack, or email provider targets.
 7. Run MCP connector deployment, rollout, and rollback evidence against a real team connector target.

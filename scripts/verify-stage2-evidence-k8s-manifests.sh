@@ -735,6 +735,16 @@ if ! grep -q "backend_id or key_id is pilot/mock/local" "$vault_script"; then
   exit 1
 fi
 
+if ! grep -q "rotation_rotated_count" "$vault_script" || ! grep -q "rotation_catalog_updated_count" "$vault_script" || ! grep -q "rotation_id" "$vault_script"; then
+  echo "Vault evidence script must require audited KMS rotation id, rotated count, and catalog update count" >&2
+  exit 1
+fi
+
+if ! grep -q "recovery_id" "$vault_script" || ! grep -q "recovery_target_kind" "$vault_script" || ! grep -q "recovery_step_count" "$vault_script"; then
+  echo "Vault evidence script must require audited KMS recovery id, target kind, and recovery steps" >&2
+  exit 1
+fi
+
 if ! grep -q "backend_kind=.*is not production KMS/HSM" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must reject non-production KMS/HSM backend evidence" >&2
   exit 1
@@ -742,6 +752,16 @@ fi
 
 if ! grep -q "backend_id or key_id is pilot/mock/local" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must reject pilot/mock/local KMS backend and key ids" >&2
+  exit 1
+fi
+
+if ! grep -q "rotated_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "catalog_updated_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "recovery_target_kind" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must require audited KMS rotation and recovery details" >&2
+  exit 1
+fi
+
+if ! grep -q "rotation_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "catalog_updated_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "recovery_target_kind" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require audited KMS rotation and recovery details" >&2
   exit 1
 fi
 

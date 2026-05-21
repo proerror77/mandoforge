@@ -52629,6 +52629,8 @@ not json
         assert_eq!(run.catalog_updated_count, 1);
         assert_eq!(run.external_execution["attempted"], true);
         assert_eq!(run.external_execution["status"], "validated");
+        assert_eq!(run.external_execution["rotation_id"], "kms-rotation-1");
+        assert_eq!(run.external_execution["rotated_count"], 1);
         assert!(
             run.actions
                 .iter()
@@ -52765,6 +52767,8 @@ not json
         assert_eq!(execution["backend_kind"], "aws_kms");
         assert_eq!(execution["environment"], "production");
         assert_eq!(execution["key_id"], "key-1");
+        assert_eq!(execution["recovery_target_kind"], "production_kms_backend");
+        assert_eq!(execution["steps"].as_array().unwrap().len(), 2);
         let payloads = payloads.lock().await;
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0]["type"], "mandoforge.kms_recovery_validation");

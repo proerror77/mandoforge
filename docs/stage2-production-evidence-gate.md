@@ -150,9 +150,12 @@ That gate collects Vault readiness, Vault health, KMS recovery validation, and
 KMS rotation evidence into `.mandoforge/vault-evidence/`. It fails closed unless
 Vault is healthy, the secret provider is ready, the KMS/HSM backend is external
 and ready, rotation evidence is captured and validated against a reported
-production backend kind/environment/backend id/key id, and recovery evidence is
-captured with fresh validated controller evidence for the same class of
-production backend identity. The matching in-cluster
+production backend kind/environment/backend id/key id with a production
+rotation id, nonzero rotated record count, nonzero catalog update count, and
+audited rotation actions, and recovery evidence is captured with fresh validated
+controller evidence for the same class of production backend identity. Recovery
+evidence must also report a production recovery id, production recovery target
+kind, and audited recovery steps. The matching in-cluster
 template is `deploy/stage2-evidence/vault-evidence-job.example.yaml`, which
 persists its output under the Stage 2 production evidence PVC.
 

@@ -139,6 +139,9 @@ write_summary() {
   local recovery_environment
   local recovery_backend_id
   local recovery_key_id
+  local recovery_id
+  local recovery_target_kind
+  local recovery_step_count
   local rotation_evidence_status
   local rotation_run_status
   local rotation_production_backend
@@ -146,6 +149,10 @@ write_summary() {
   local rotation_environment
   local rotation_backend_id
   local rotation_key_id
+  local rotation_id
+  local rotation_rotated_count
+  local rotation_catalog_updated_count
+  local rotation_action_count
   local blocked_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
@@ -169,6 +176,9 @@ write_summary() {
   recovery_environment="unknown"
   recovery_backend_id=""
   recovery_key_id=""
+  recovery_id=""
+  recovery_target_kind="unknown"
+  recovery_step_count="0"
   if [[ -s "$recovery_evidence_file" ]]; then
     recovery_evidence_status="$(jq -r '.status // "unknown"' "$recovery_evidence_file")"
     recovery_validation_status="$(jq -r '.response.status // "unknown"' "$recovery_evidence_file")"
@@ -176,6 +186,9 @@ write_summary() {
     recovery_environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$recovery_evidence_file")"
     recovery_backend_id="$(jq -r '.response.controller_execution.backend_id // ""' "$recovery_evidence_file")"
     recovery_key_id="$(jq -r '.response.controller_execution.key_id // ""' "$recovery_evidence_file")"
+    recovery_id="$(jq -r '.response.controller_execution.recovery_id // ""' "$recovery_evidence_file")"
+    recovery_target_kind="$(jq -r '.response.controller_execution.recovery_target_kind // "unknown"' "$recovery_evidence_file")"
+    recovery_step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$recovery_evidence_file")"
   fi
   rotation_evidence_status="not_requested"
   rotation_run_status="not_run"
@@ -184,6 +197,10 @@ write_summary() {
   rotation_environment="unknown"
   rotation_backend_id=""
   rotation_key_id=""
+  rotation_id=""
+  rotation_rotated_count="0"
+  rotation_catalog_updated_count="0"
+  rotation_action_count="0"
   if [[ -s "$rotation_evidence_file" ]]; then
     rotation_evidence_status="$(jq -r '.status // "unknown"' "$rotation_evidence_file")"
     rotation_run_status="$(jq -r '.response.status // "unknown"' "$rotation_evidence_file")"
@@ -192,6 +209,10 @@ write_summary() {
     rotation_environment="$(jq -r '.response.external_execution.environment // "unknown"' "$rotation_evidence_file")"
     rotation_backend_id="$(jq -r '.response.external_execution.backend_id // ""' "$rotation_evidence_file")"
     rotation_key_id="$(jq -r '.response.external_execution.key_id // ""' "$rotation_evidence_file")"
+    rotation_id="$(jq -r '.response.external_execution.rotation_id // ""' "$rotation_evidence_file")"
+    rotation_rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$rotation_evidence_file")"
+    rotation_catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$rotation_evidence_file")"
+    rotation_action_count="$(jq -r 'if ((.response.actions // null) | type) == "array" then (.response.actions | length) else 0 end' "$rotation_evidence_file")"
   fi
   blocked_count="$(jq -r '[
       .production_rotation.production_blocked,
@@ -243,6 +264,18 @@ write_summary() {
   if ! is_production_identity "$rotation_backend_id" || ! is_production_identity "$rotation_key_id"; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! is_production_identity "$rotation_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$rotation_rotated_count" =~ ^[0-9]+$ || "$rotation_rotated_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$rotation_catalog_updated_count" =~ ^[0-9]+$ || "$rotation_catalog_updated_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$rotation_action_count" =~ ^[0-9]+$ || "$rotation_action_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$recovery_controller_production_backend" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -256,6 +289,15 @@ write_summary() {
     blocked_count="$((blocked_count + 1))"
   fi
   if ! is_production_identity "$recovery_backend_id" || ! is_production_identity "$recovery_key_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_identity "$recovery_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$recovery_target_kind" != "production_kms_backend" && "$recovery_target_kind" != "production_hsm_backend" && "$recovery_target_kind" != "enterprise_kms_backend" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$recovery_step_count" =~ ^[0-9]+$ || "$recovery_step_count" == "0" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
 
@@ -281,6 +323,9 @@ write_summary() {
     echo "recovery_environment=$recovery_environment"
     echo "recovery_backend_id=$recovery_backend_id"
     echo "recovery_key_id=$recovery_key_id"
+    echo "recovery_id=$recovery_id"
+    echo "recovery_target_kind=$recovery_target_kind"
+    echo "recovery_step_count=$recovery_step_count"
     echo "rotation_evidence_status=$rotation_evidence_status"
     echo "rotation_run_status=$rotation_run_status"
     echo "rotation_production_backend=$rotation_production_backend"
@@ -288,6 +333,10 @@ write_summary() {
     echo "rotation_environment=$rotation_environment"
     echo "rotation_backend_id=$rotation_backend_id"
     echo "rotation_key_id=$rotation_key_id"
+    echo "rotation_id=$rotation_id"
+    echo "rotation_rotated_count=$rotation_rotated_count"
+    echo "rotation_catalog_updated_count=$rotation_catalog_updated_count"
+    echo "rotation_action_count=$rotation_action_count"
     echo "production_blocked_count=$blocked_count"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "secret_lifecycle_run=$RUN_SECRET_LIFECYCLE"
@@ -333,6 +382,18 @@ write_summary() {
     if ! is_production_identity "$rotation_backend_id" || ! is_production_identity "$rotation_key_id"; then
       echo "- KMS rotation backend_id or key_id is pilot/mock/local: backend_id=${rotation_backend_id:-<empty>} key_id=${rotation_key_id:-<empty>}"
     fi
+    if ! is_production_identity "$rotation_id"; then
+      echo "- KMS rotation did not report a production rotation_id: ${rotation_id:-<empty>}"
+    fi
+    if [[ ! "$rotation_rotated_count" =~ ^[0-9]+$ || "$rotation_rotated_count" == "0" ]]; then
+      echo "- KMS rotation did not report any rotated records: rotated_count=$rotation_rotated_count"
+    fi
+    if [[ ! "$rotation_catalog_updated_count" =~ ^[0-9]+$ || "$rotation_catalog_updated_count" == "0" ]]; then
+      echo "- KMS rotation did not update the secret catalog: catalog_updated_count=$rotation_catalog_updated_count"
+    fi
+    if [[ ! "$rotation_action_count" =~ ^[0-9]+$ || "$rotation_action_count" == "0" ]]; then
+      echo "- KMS rotation did not report any audited actions"
+    fi
     echo
     echo "recovery_blocking_reasons:"
     jq -r '.production_recovery.blocking_reasons[]? | "- \(.)"' "$readiness_file"
@@ -362,6 +423,15 @@ write_summary() {
     fi
     if ! is_production_identity "$recovery_backend_id" || ! is_production_identity "$recovery_key_id"; then
       echo "- KMS recovery backend_id or key_id is pilot/mock/local: backend_id=${recovery_backend_id:-<empty>} key_id=${recovery_key_id:-<empty>}"
+    fi
+    if ! is_production_identity "$recovery_id"; then
+      echo "- KMS recovery did not report a production recovery_id: ${recovery_id:-<empty>}"
+    fi
+    if [[ "$recovery_target_kind" != "production_kms_backend" && "$recovery_target_kind" != "production_hsm_backend" && "$recovery_target_kind" != "enterprise_kms_backend" ]]; then
+      echo "- KMS recovery target kind is not production: $recovery_target_kind"
+    fi
+    if [[ ! "$recovery_step_count" =~ ^[0-9]+$ || "$recovery_step_count" == "0" ]]; then
+      echo "- KMS recovery did not report any audited recovery steps"
     fi
     if [[ "$recovery_controller_fresh" != "true" ]]; then
       echo "- KMS recovery controller evidence is not fresh"
