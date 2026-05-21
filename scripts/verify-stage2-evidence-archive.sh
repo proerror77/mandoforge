@@ -1801,6 +1801,45 @@ JSON
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
       "key_id": "key-1",
       "rotation_id": "kms-rotation-1",
+      "rotated_count": 0
+    },
+    "rotated_count": 0,
+    "catalog_updated_count": 1,
+    "actions": ["external_kms_rotation_confirmed"]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-vault-rotation-count-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-vault-rotation-count-negative.out 2>/tmp/mandoforge-stage2-archive-vault-rotation-count-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected zero KMS rotated count to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/vault-kms-rotation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "external_execution": {
+      "status": "validated",
+      "production_backend": true,
+      "backend_kind": "aws_kms",
+      "environment": "production",
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1",
+      "rotation_id": "kms-rotation-1",
       "rotated_count": 1
     },
     "rotated_count": 1,
