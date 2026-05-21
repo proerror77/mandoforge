@@ -105,8 +105,9 @@ and state sync must report a supported distributed filesystem backend such as
 `juicefs`, `cephfs`, or `longhorn-rwx`. Worker evidence must explicitly report
 validated controller execution, real cluster target kind, production cluster id,
 `node_count >= 2`, load validation, isolated worker-pool configuration, and
-worker-pool load-check details with check name, worker pool or queue,
-passed/validated/completed status, and audit id, trace id, run id, or timestamp detail;
+worker-pool load-check details in the combined summary with check name, worker
+pool or queue, passed/validated/completed status, and audit id, trace id, run id,
+or timestamp detail;
 the standalone worker gate also rejects mismatches with
 `MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID`. State-sync evidence must name the
 state claim plus checked state-contract paths with passed statuses and audit id,
