@@ -1680,6 +1680,11 @@ if ! grep -q "missing isolated worker pool evidence" scripts/verify-stage2-evide
   exit 1
 fi
 
+if ! grep -q "single-node worker evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject single-node worker evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must inspect worker real-cluster evidence" >&2
   exit 1
