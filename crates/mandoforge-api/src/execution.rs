@@ -3456,7 +3456,7 @@ async fn record_runtime_adapter_turn_metadata(
 }
 
 fn runtime_adapter_turn_metadata_supported(runtime_type: &str) -> bool {
-    runtime_type == "codex_cli"
+    matches!(runtime_type, "codex_cli" | "claude_code")
 }
 
 fn build_runtime_adapter_turn_metadata(
@@ -3501,7 +3501,7 @@ fn build_runtime_adapter_turn_metadata(
             }
         }
 
-        if is_runtime_turn_started_event(adapter_event_type) {
+        if is_runtime_turn_started_event_value(adapter_event_type, &event.event) {
             metadata.started_event_index.get_or_insert(event.index);
             metadata.status.get_or_insert_with(|| "running".to_string());
         }
@@ -3522,7 +3522,7 @@ fn build_runtime_adapter_turn_metadata(
             metadata.final_message = Some(final_message);
             metadata.final_message_event_index = Some(event.index);
         }
-        if is_runtime_turn_completed_event(adapter_event_type) {
+        if is_runtime_turn_completed_event_value(adapter_event_type, &event.event) {
             metadata.completed_event_index = Some(event.index);
             metadata.status = runtime_adapter_status(adapter_event_type, &event.event);
         }
@@ -3536,6 +3536,14 @@ fn is_runtime_turn_started_event(adapter_event_type: &str) -> bool {
         adapter_event_type,
         "turn.started" | "response.started" | "session.started" | "task.started"
     )
+}
+
+fn is_runtime_turn_started_event_value(adapter_event_type: &str, event: &Value) -> bool {
+    is_runtime_turn_started_event(adapter_event_type)
+        || (adapter_event_type == "system"
+            && (string_value_at(event, &["session_id"]).is_some()
+                || string_value_at(event, &["conversation_id"]).is_some()
+                || string_value_at(event, &["thread_id"]).is_some()))
 }
 
 fn is_runtime_turn_completed_event(adapter_event_type: &str) -> bool {
@@ -3552,10 +3560,25 @@ fn is_runtime_turn_completed_event(adapter_event_type: &str) -> bool {
     )
 }
 
+fn is_runtime_turn_completed_event_value(adapter_event_type: &str, event: &Value) -> bool {
+    is_runtime_turn_completed_event(adapter_event_type)
+        || (adapter_event_type == "result"
+            && event
+                .get("subtype")
+                .and_then(Value::as_str)
+                .is_some_and(|subtype| {
+                    matches!(
+                        subtype,
+                        "success" | "completed" | "failed" | "failure" | "error"
+                    )
+                }))
+}
+
 fn is_runtime_item_event(adapter_event_type: &str) -> bool {
     adapter_event_type.starts_with("item.")
         || adapter_event_type.ends_with(".item")
         || adapter_event_type == "item"
+        || adapter_event_type == "assistant"
 }
 
 fn is_runtime_tool_call_event(adapter_event_type: &str) -> bool {
@@ -3572,6 +3595,9 @@ fn is_runtime_usage_event(adapter_event_type: &str) -> bool {
 fn runtime_adapter_turn_id(adapter_event_type: &str, event: &Value) -> Option<String> {
     string_value_at(event, &["turn_id"])
         .or_else(|| string_value_at(event, &["turn", "id"]))
+        .or_else(|| string_value_at(event, &["session_id"]))
+        .or_else(|| string_value_at(event, &["conversation_id"]))
+        .or_else(|| string_value_at(event, &["thread_id"]))
         .or_else(|| {
             if is_runtime_turn_started_event(adapter_event_type)
                 || is_runtime_turn_completed_event(adapter_event_type)
@@ -3589,7 +3615,7 @@ fn runtime_adapter_resume_handle(adapter_event_type: &str, event: &Value) -> Opt
         .cloned()
         .or_else(|| event.get("resume").cloned())
         .or_else(|| {
-            if !is_runtime_turn_started_event(adapter_event_type) {
+            if !is_runtime_turn_started_event_value(adapter_event_type, event) {
                 return None;
             }
             string_value_at(event, &["session_id"])
@@ -3724,6 +3750,15 @@ fn runtime_adapter_status(adapter_event_type: &str, event: &Value) -> Option<Str
                 Some("completed".to_string())
             } else if adapter_event_type.ends_with(".failed") {
                 Some("failed".to_string())
+            } else if adapter_event_type == "result" {
+                event
+                    .get("subtype")
+                    .and_then(Value::as_str)
+                    .and_then(|subtype| match subtype {
+                        "success" | "completed" => Some("completed".to_string()),
+                        "failed" | "failure" | "error" => Some("failed".to_string()),
+                        _ => None,
+                    })
             } else {
                 None
             }
@@ -3760,7 +3795,7 @@ fn runtime_adapter_tool_call_value(adapter_event_type: &str, event: &Value) -> V
 }
 
 fn runtime_adapter_final_message(adapter_event_type: &str, event: &Value) -> Option<String> {
-    if !(is_runtime_turn_completed_event(adapter_event_type)
+    if !(is_runtime_turn_completed_event_value(adapter_event_type, event)
         || matches!(
             adapter_event_type,
             "final" | "final.message" | "agent.message" | "message.output"
@@ -3775,6 +3810,7 @@ fn runtime_adapter_final_message(adapter_event_type: &str, event: &Value) -> Opt
         "text",
         "content",
         "output",
+        "result",
     ] {
         if let Some(value) = event.get(key) {
             if let Some(message) = value.as_str() {

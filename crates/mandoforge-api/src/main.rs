@@ -53552,7 +53552,7 @@ not json
         let shim_path = shim_dir.join("claude");
         fs::write(
             &shim_path,
-            "#!/usr/bin/env bash\nset -euo pipefail\necho '{\"type\":\"system\",\"token\":\"secret\"}'\necho '{\"type\":\"assistant\",\"message\":{\"content\":\"done\"}}'\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"task=$MANDOFORGE_AGENT_TASK\"\necho \"argv=$*\"\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\necho '{\"type\":\"system\",\"session_id\":\"claude-session-1\",\"token\":\"secret\"}'\necho '{\"type\":\"assistant\",\"message\":{\"content\":\"done\"}}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":345,\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8},\"result\":\"Claude final\"}'\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"task=$MANDOFORGE_AGENT_TASK\"\necho \"argv=$*\"\n",
         )
         .expect("write fake claude CLI");
         #[cfg(unix)]
@@ -53677,7 +53677,9 @@ not json
         assert_eq!(result["profile"], "claude-code-worker");
         assert_eq!(result["profile_source"], "managed");
         assert_eq!(result["runtime_type"], "claude_code");
-        assert_eq!(result["runtime_adapter_event_count"], 2);
+        assert_eq!(result["runtime_adapter_event_count"], 3);
+        assert_eq!(result["runtime_turn_event_count"], 5);
+        assert_eq!(result["runtime_final_artifact_count"], 1);
         assert!(
             result["stdout"]
                 .as_str()
@@ -53707,7 +53709,7 @@ not json
             .iter()
             .filter(|event| event.event_type == "runtime_adapter.event")
             .collect::<Vec<_>>();
-        assert_eq!(runtime_events.len(), 2);
+        assert_eq!(runtime_events.len(), 3);
         assert!(runtime_events.iter().any(|event| {
             event.payload["runtime_type"] == "claude_code"
                 && event.payload["log_mode"] == "claude_stream_json"
@@ -53717,6 +53719,33 @@ not json
         assert!(runtime_events.iter().any(|event| {
             event.payload["adapter_event_type"] == "assistant"
                 && event.payload["event"]["message"]["content"] == "done"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.turn.started"
+                && event.payload["runtime_type"] == "claude_code"
+                && event.payload["turn_id"] == "claude-session-1"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.item"
+                && event.payload["runtime_type"] == "claude_code"
+                && event.payload["item"]["message"]["content"] == "done"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.usage"
+                && event.payload["runtime_type"] == "claude_code"
+                && event.payload["usage"]["total_tokens"] == 8
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.final"
+                && event.payload["runtime_type"] == "claude_code"
+                && event.payload["final_message"] == "Claude final"
+                && event.payload["artifact_id"].is_string()
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.turn.completed"
+                && event.payload["runtime_type"] == "claude_code"
+                && event.payload["status"] == "completed"
+                && event.payload["duration_ms"] == 345
         }));
     }
 
