@@ -54886,7 +54886,7 @@ not json
         );
 
         let events: Vec<SessionEvent> = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri(format!("/api/sessions/{}/events", session.id))
                 .body(Body::empty())
@@ -54938,6 +54938,26 @@ not json
                 && event.payload["runtime_type"] == "claude_code"
                 && event.payload["status"] == "completed"
                 && event.payload["duration_ms"] == 345
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/audit-logs", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "tool.completed"
+                && log.details["tool"] == "agent_cli.exec"
+                && log.details["profile"] == "claude-code-worker"
+                && log.details["profile_source"] == "managed"
+                && log.details["runtime_type"] == "claude_code"
+                && log.details["runner"] == "agent-cli"
+                && log.details["runtime_adapter_event_count"] == 3
+                && log.details["runtime_turn_event_count"] == 5
+                && log.details["runtime_final_artifact_count"] == 1
         }));
     }
 
@@ -55088,7 +55108,7 @@ not json
         );
 
         let events: Vec<SessionEvent> = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri(format!("/api/sessions/{}/events", session.id))
                 .body(Body::empty())
@@ -55153,6 +55173,26 @@ not json
         assert!(events.iter().any(|event| {
             event.event_type == "artifact.created"
                 && event.payload["name"] == "runtime-final-message.md"
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/audit-logs", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "tool.completed"
+                && log.details["tool"] == "agent_cli.exec"
+                && log.details["profile"] == "codex-cli-worker"
+                && log.details["profile_source"] == "managed"
+                && log.details["runtime_type"] == "codex_cli"
+                && log.details["runner"] == "agent-cli"
+                && log.details["runtime_adapter_event_count"] == 5
+                && log.details["runtime_turn_event_count"] == 6
+                && log.details["runtime_final_artifact_count"] == 1
         }));
     }
 

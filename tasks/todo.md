@@ -113,7 +113,7 @@
 - [x] Add local-verified Redis RESP client boundary before enabling Redis queue backend selection.
 - [x] Add local-verified Redis worker read command boundary before enabling broker worker handoff.
 - [x] Enable Redis Stream readgroup/ack drain through the API-backed execution worker path.
-- [x] Add Stage 2 gap audit mapping PRD requirements to current code evidence and remaining gaps.
+- [x] Remove the legacy non-core deployment evidence track from Agent OS core completion.
 - [x] Add Stage 2 approver role and pending approval modify endpoint that updates waiting tool args before approval.
 - [x] Add approval expiry persistence, expire API, timeline events, and decision fail-closed behavior.
 - [x] Add static approval argument review and modify UI.
@@ -153,7 +153,7 @@
 - [x] Add audited team-level MCP connector health run API and static UI action.
 - [x] Add due-only scheduled MCP connector health runs with persisted last health metadata.
 - [x] Add usage/cost aggregation API for provider requests, tool runtime, approvals, and configured provider pricing.
-- [x] Add token-level provider usage and cost accounting for OpenAI-compatible responses.
+- [x] Add token-level provider usage and cost metering for OpenAI-compatible responses.
 - [x] Add persisted usage/cost rollup snapshots and static rollup UI.
 - [x] Add static cost dashboard breakdowns for provider cost and tool runtime.
 - [x] Add provider budget forecast and alert rows to usage summary.
@@ -194,27 +194,10 @@
 - [x] Stage 3: add first-class WorkflowPack / DomainPack install, validation, staging, eval, and release gates.
 - [x] Stage 3: add Stage 3 lane-local verification scripts and integration-owner gates for scheduler, Codex traces, Remote Computer execution, handoffs, and workflow packs.
 
-## External Production Adoption Backlog
+## Agent OS Core Evidence
 
-Current Whiskey production-like pilot blocker:
-
-- [ ] Run isolated worker-pool validation and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem, including load-validated worker pool checks, state claim/path checks, and healthy replacement Pod checks.
-
-Post-pilot enterprise promotions that should stay visible but are not the current Whiskey pilot blocker:
-
-- [x] Run Codex App Server deployment and ops evidence against a real App Server target on Whiskey.
-- [x] Run worker load validation evidence against the Whiskey single-host queue worker target.
-- [x] Run MCP connector deployment, rollout, and rollback evidence against a real `whiskey-docs` team connector target.
-- [x] Run eval/release rollout, orchestration, deployment, and rollback evidence against the Whiskey production-like release target.
-- [x] Run OTel collector deployment, cluster rollout, and remediation evidence against the Whiskey single-node collector target.
-- [x] Run provider gate, rollout, and rollback evidence against the real DeepSeek provider deployment target on Whiskey.
-- [x] Run approval notification delivery evidence against a real Feishu/Lark IM target.
-- [x] Run finance close, export delivery, and reconciliation evidence against a real Feishu Drive export target.
-- [ ] Run tenant routing evidence against a broader real multi-tenant deployment with RLS enabled, forced for every reported RLS table, tenant context configured, at least two audited tenant samples, and a nonzero audited cross-tenant negative-test count beyond the current Whiskey tenant-routed pilot.
-- [ ] Run policy rollout orchestration against a real production policy controller target instead of the current Whiskey pilot controller, including production policy store/deployment ids, audited orchestration steps, rollback support, and due-run scan evidence.
-- [ ] Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend instead of the current Whiskey pilot KMS/Vault boundary, including production rotation/recovery ids, nonzero rotated record and catalog update counts, and audited recovery steps.
-- [x] Promote the `whiskey-docs` connector from authenticated private GitHub repo contents to a broader Lark docs/wiki or other enterprise knowledge target.
-- [ ] Promote finance export from Feishu Drive artifact delivery to a true accounting-system or ERP target.
+Every agent action, tool call, approval, artifact, and runtime turn must be
+reconstructable from `session_events`, `tool_calls`, and `audit_logs`.
 
 ## Workflow Pack / Domain Pack Adaptation
 
@@ -237,10 +220,11 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 ## Roadmap V3 / Claude Managed Agents Alignment
 
 - [x] Record the Claude Managed Agents research and product-model correction: Agent -> Environment -> Session -> Events -> Threads.
+- [x] Fix the ownership boundary: MandoForge Agent Runtime calls Codex CLI / Claude Code CLI / Codex App Server as runtime adapters; Manager Agent is a managed work coordinator, not a separate runtime orchestrator.
 - [x] Add first-class Environment resources above runtime profiles, Remote Computer profiles, Codex App Server profiles, and future hosted runtimes.
 - [x] Make `POST /api/sessions/:id/events` the primary session driver and keep `/run` as a compatibility wrapper.
 - [x] Add explicit session/model/tool/custom-tool/thread event names aligned with managed-agent execution.
-- [x] Add a queue-claimed Orchestrator session loop outside the API request path.
+- [x] Add a queue-claimed runtime session loop outside the API request path.
 - [x] Reframe Remote Computer as `Environment(type=remote_computer)` and move Pod execution under the Environment worker contract.
 - [x] Add `session_threads` as the durable multiagent execution object and migrate typed handoffs into thread lifecycle.
 - [x] Rebuild the web UI around Sessions, Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads before exposing raw infrastructure panels.

@@ -17,6 +17,53 @@ MandoForge runs, governs, audits, and replays those agents.
 
 The goal is to build a reusable operating layer for agents across industries. A commerce agent, finance agent, internal operations agent, code execution agent, legal review agent, or data analysis agent should not each rebuild its own runtime, approval system, audit log, sandbox, cost tracking, and release gate. MandoForge provides that shared foundation.
 
+## Agent OS Stack
+
+MandoForge is organized as an Agent OS, not as a production-evidence checklist:
+
+```text
+Existing Work Surfaces
+  Slack / Feishu / GitHub / Jira / Linear / Email
+        |
+Collaboration Layer
+  WorkItem / Project / Assignment / Review
+  Agent Teammate / Squad / Activity Feed
+        |
+Manager Agent / Work Coordination Layer
+  Task decomposition / routing / escalation / review
+        |
+Managed Runtime Layer
+  Session / Event Log / Tool Router / Policy
+  Approval / Audit / Artifact / Eval
+        |
+Semantic Layer / Ontology Service
+  Business Objects / Metrics / Relations
+  Actions / Permissions / Tool Bindings
+  Retrieval Context / Data Contracts
+        |
+Enterprise Data Foundation
+  Warehouse / Lakehouse / Postgres / Vector
+  Graph / Docs / APIs / Event Streams
+```
+
+The Managed Runtime Layer can borrow the useful parts of Claude Managed Agents:
+Agent, Environment, Session, Events, and Threads. That model does not define the
+whole Agent OS. The higher product layers remain MandoForge-owned.
+
+The runtime boundary is explicit:
+
+```text
+MandoForge Agent Runtime
+  -> Codex CLI / Claude Code CLI / Codex App Server runtime adapters
+  -> normalized events, tool calls, artifacts, and audit logs
+```
+
+MandoForge manages sessions, context, policy, approvals, audit, artifacts,
+resume cursors, streaming, and worker leases. Codex CLI and Claude Code CLI are
+execution backends that MandoForge calls and supervises. Manager Agents are
+managed agents running on this runtime; they coordinate WorkItems and
+Assignments, but they do not own a separate execution stack.
+
 ## Why Agent Middleware?
 
 A useful enterprise agent is more than a model call. It usually needs:
@@ -40,11 +87,11 @@ MandoForge is the common layer for those capabilities. Domain agents sit above i
 - It is not a thin OpenAI API wrapper.
 - It is not a complete production platform yet.
 
-The current repo is best understood as a **Rust-native Agent OS kernel prototype** with Stage 1 and the repo-controlled Stage 2 governed-runtime pilot complete. Real production deployments still require environment-specific adoption evidence before they can be called validated.
+The current repo is best understood as a **Rust-native Agent OS kernel prototype**. The Managed Runtime Layer is in place for the repo-controlled pilot; the Collaboration, Manager Agent, and Semantic layers are the next productization surface.
 
 ## Core Runtime Loop
 
-MandoForge is designed around a Claude Managed Agents-style product model:
+The Managed Runtime Layer is designed around a Claude Managed Agents-style runtime model:
 
 ```text
 Agent -> Environment -> Session -> Events -> Threads
@@ -70,6 +117,10 @@ Create or resume Session
 
 Once this loop is stable, different business agents can reuse it by changing agent configuration, tools, data sources, policies, and approval rules.
 
+The current implementation status is tracked in
+[docs/runtime-truth-audit.md](docs/runtime-truth-audit.md): runtime facts,
+remaining core gaps, and the evidence required for managed agent actions.
+
 ## Current State
 
 Stage 1 implements the generic runtime kernel:
@@ -90,32 +141,32 @@ Stage 2 adds the governed middleware pilot layer:
 - RBAC.
 - Workflow Pack / Domain Pack contracts for installable industry workflow packages.
 - Provider governance, model allowlists, budgets, and health checks.
-- Vault secret-reference boundaries.
+- Secret-reference and credential boundaries.
 - Worker queues, Redis/NATS handoff, and worker readiness.
 - Approval v2: argument modification, delegated approval, expiry, escalation, and notifications.
 - MCP Gateway governance.
 - Codex App Server adapter.
 - Eval, release gates, rollback, and drift checks.
-- Observability, usage, cost, and finance operations.
+- Observability, usage, and cost tracking.
 - Scheduler due-runs.
 - Remote Computer readiness skeleton.
 
-Stage 2 is complete for the repo-controlled pilot. The strict audit and the remaining external production adoption backlog are in [Stage 2 Completion Audit](docs/stage2-completion-audit.md).
+Stage 2 is complete for the repo-controlled pilot. The core completion evidence is the runtime action record: session events, tool calls, approvals, artifacts, and audit logs.
 
 ## Main Design Direction
 
-The next important direction is not another vertical demo. It is making the
-Agent middleware foundation closely track the Claude Managed Agents product
-model while staying self-hostable, provider-neutral, and policy-governed:
+The next important direction is not another vertical demo. It is building the
+full Agent OS stack around the runtime kernel:
 
 ```text
-Agent -> Environment -> Session -> Events -> Threads
+Work Surfaces -> Collaboration -> Manager Agent / Work Coordination -> Managed Runtime -> Semantic Layer -> Data Foundation
 ```
 
-The most important near-term slice is **Managed Session Runtime**:
+The most important near-term slice is still **Managed Session Runtime**, because
+the upper layers depend on a reliable event-driven runtime:
 
 ```text
-Create or resume a session, send user events, run the orchestrator loop through a governed environment queue, and stream model/tool/session events back to the UI.
+Create or resume a session, send user events, run the runtime session loop through a governed environment queue, call the selected CLI/runtime adapter, and stream model/tool/session events back to the UI.
 ```
 
 This is a correction to the earlier Remote Computer-first framing. Remote
@@ -127,7 +178,7 @@ The immediate slice is event-driven session state:
 - Add first-class Environment resources above runtime profiles and Remote Computer profiles.
 - Make `POST /api/sessions/:id/events` the primary way to drive work.
 - Treat `POST /api/sessions/:id/run` as a compatibility wrapper over user events.
-- Move orchestrator execution out of the API request path and into a queue-claimed session loop.
+- Move runtime session-loop execution out of the API request path and into a queue-claimed worker path.
 - Stream session status, model spans, tool use, approvals, artifacts, and child threads back to the UI.
 
 Current managed-agent baseline:
@@ -135,31 +186,29 @@ Current managed-agent baseline:
 - `GET/POST /api/environments` and `GET/PATCH/DELETE /api/environments/:id` manage first-class Environment records.
 - `POST /api/sessions` accepts `environment_id` and records `session.environment_bound` in the session event log.
 - `Environment.runtime_profile_id` is the canonical managed runtime-adapter binding for the session. `agent_cli.exec` remains a compatibility facade for CLI-backed adapters, but requested profiles must match the bound environment profile before falling back to handoff or agent runtime profiles. The legacy env-var allowlist only applies when no managed binding exists.
-- `POST /api/sessions/:id/events` enqueues a lease-claimed `session_loop_job`; `mandoforge-worker` claims it and runs the orchestrator loop outside the API request path.
+- `POST /api/sessions/:id/events` enqueues a lease-claimed `session_loop_job`; `mandoforge-worker` claims it and runs the runtime session loop outside the API request path.
 - Session execution emits managed-agent style `session.status_*`, `span.model_request_*`, `agent.tool_use`, `agent.tool_result`, and `thread.*` timeline events.
 - `GET /api/sessions/:id/threads` exposes durable `session_threads`; typed manager-to-specialist handoffs create child specialist threads linked to the parent session.
 - `Environment(type=remote_computer)` now owns automatic Remote Computer assignment: approved execution jobs only auto-claim leases or warm-pool resources that match the session environment contract, and remote environments fail closed when the Remote Computer execution transport is not enabled.
 - The UI start form loads environments and binds new sessions to the selected environment.
-- The UI run view is organized around the managed-session objects first: Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads. Raw worker, Remote Computer, provider, Vault, MCP, and tenant infrastructure remain in system and advanced panels.
+- The UI run view is organized around the managed-session objects first: Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads. Raw worker, Remote Computer, provider, secret, MCP, and tenant infrastructure remain in system and advanced panels.
 
-Current alignment gaps are tracked in
+Runtime alignment is tracked in
 [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) and
-[Stage 2 / Stage 3 Roadmap](docs/stage2-stage3-roadmap.md). The most important
-remaining work is to make the Claude-style contract complete end to end:
-resumable non-terminal idle sessions, event-cursor based loop processing, live
-streaming, environment queue binding, lease-fenced job finalization, and
-production evidence that proves worker restart and session recovery.
-
-The remaining production hardening work is also cluster evidence:
-`Environment(type=remote_computer)` policy is enforced by the runtime, while real
-Kubernetes Pod execution still depends on the configured Remote Computer
-transport and the external state-sync / sidecar / worker-pool evidence gates.
+[Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md). The core runtime
+contract now centers on resumable idle sessions, event-cursor loop processing,
+live streaming, Environment-bound worker claims, and lease-fenced job
+finalization. The next product work should move upward into WorkItems,
+Assignments, Manager Agent planning, and Semantic Objects rather than sideways
+into deployment-evidence tracks.
 
 ## Run Locally
 
 Start the API:
 
 ```bash
+MANDOFORGE_INSECURE_DEV_AUTH=1 \
+MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1 \
 cargo run -p mandoforge-api
 ```
 
@@ -239,7 +288,7 @@ cargo run -p mandoforge-api --bin mandoforge-worker
 ```
 
 The same worker drains both session-loop jobs and approved execution jobs. It is
-the local entrypoint for the always-on orchestrator loop. `WORKER_ENVIRONMENT_ID`
+the local entrypoint for the always-available runtime session loop. `WORKER_ENVIRONMENT_ID`
 binds a worker to one Environment id; `WORKER_POOL` or `WORKER_QUEUE` binds it
 to Environments whose `worker_queue_binding` names the same pool.
 
@@ -273,22 +322,28 @@ curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
   }'
 ```
 
-Bind one profile to a specialist agent or handoff assignment, then call
-`agent_cli.exec` with the matching `profile` and `task`. The approved execution
-job is drained by `mandoforge-worker`, and the result records legacy
-`profile`, `runtime_type`, `stdout`, `stderr`, truncation flags, and exit
-status fields for compatibility. Managed `codex_cli`, `claude_code`, Gemini,
-OpenCode, and Aider profiles are treated as runtime adapters: their JSONL or
-stream-json output is ingested into `runtime_adapter.event` session events with
-basic secret-key redaction and event-count limits. Codex CLI and Claude Code
-CLI output also maps into normalized runtime turn records for turn start,
-items/tool calls, usage, final messages, artifacts, and completion; Codex App
-Server turn APIs emit the same taxonomy with thread/turn lineage. This keeps CLI-backed agents
-inside the same Tool Router, Policy Engine, Approval Engine, worker lease,
-Remote Computer, event log, and audit path while moving the product semantics
-toward Environment-owned runtime adapters. `agent_cli.exec` remains the
-compatibility facade; the target Managed Agents model is
-`Agent -> Environment -> Session -> runtime adapter -> Events`.
+Bind one profile to an Environment, specialist agent, or handoff assignment.
+MandoForge Agent Runtime then calls the selected CLI/runtime adapter through the
+session-loop worker path. `agent_cli.exec` can still be used with the matching
+`profile` and `task` as a compatibility facade, and the approved execution job
+is drained by `mandoforge-worker`.
+
+Managed `codex_cli`, `claude_code`, Gemini, OpenCode, and Aider profiles are
+treated as runtime adapters: their JSONL or stream-json output is ingested into
+`runtime_adapter.event` session events with basic secret-key redaction and
+event-count limits. Codex CLI and Claude Code CLI output also maps into
+normalized runtime turn records for turn start, items/tool calls, usage, final
+messages, artifacts, and completion; Codex App Server turn APIs emit the same
+taxonomy with thread/turn lineage.
+
+This keeps CLI-backed agents inside the same Tool Router, Policy Engine,
+Approval Engine, worker lease, Remote Computer, event log, and audit path while
+moving the product semantics toward Environment-owned runtime adapters. The
+target Managed Agents model is:
+
+```text
+Agent -> Environment -> Session -> runtime adapter -> Events
+```
 
 Codex App Server adapter:
 
@@ -329,14 +384,10 @@ These manifests are a self-hosted pilot starting point, not a production hardeni
 - [Runtime Architecture](docs/architecture.md)
 - [Stage 1 Plan](docs/stage1-plan.md)
 - [Stage 1 Completion Audit](docs/stage1-completion-audit.md)
-- [Stage 2 Gap Audit](docs/stage2-gap-audit.md)
 - [Stage 2 Completion Audit](docs/stage2-completion-audit.md)
-- [Stage 2 Production Adoption Runbook](docs/stage2-production-adoption-runbook.md)
-- [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md)
-- [Whiskey Adoption Runbook](docs/whiskey-adoption-runbook.md)
-- [Whiskey Adoption Status](docs/whiskey-adoption-status.md)
+- [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) - runtime-layer reference only
 - [MandoForge Roadmap v2](docs/mandoforge-roadmap-v2.md)
-- [Stage 2 / Stage 3 Roadmap](docs/stage2-stage3-roadmap.md)
+- [Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md)
 - [Workflow Pack Adaptation Plan](docs/workflow-pack-adaptation-plan.md)
 - [WorkflowPack Manifest Contract](docs/workflow-pack-manifest-contract.md)
 - [Agent Remote Computer Plan](docs/agent-remote-computer-plan.md)
@@ -378,7 +429,7 @@ Governance and operations:
 - `GET /api/remote-computers/readiness`
 - `GET /api/remote-computers/runner/readiness`
 - `POST /api/scheduler/run-due`
-- `GET /api/usage/finance-operations/summary`
+- `GET /api/usage`
 - `GET /api/observability/collector-readiness`
 
 ## Security Boundary

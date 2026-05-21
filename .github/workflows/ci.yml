@@ -39,15 +39,9 @@ jobs:
           while IFS= read -r -d '' script; do
             bash -n "$script"
           done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print0 | sort -z)
-      - run: scripts/verify-stage2-controller-env-template.sh
-      - run: scripts/verify-stage2-evidence-k8s-manifests.sh
-      - run: scripts/verify-stage2-controller-drill.sh
-      - run: scripts/verify-stage2-evidence-archive.sh --self-test
       - run: scripts/verify-observability-k8s-manifests.sh
       - run: scripts/verify-remote-computer-k8s-manifests.sh
       - run: kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out
-      - run: kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out && wc -l /tmp/mandoforge-stage2-evidence-kustomize.out
-      - run: kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone >/tmp/mandoforge-stage2-production-evidence-kustomize.out && wc -l /tmp/mandoforge-stage2-production-evidence-kustomize.out
 
   rust:
     name: Rust tests
@@ -69,6 +63,32 @@ jobs:
             cargo-${{ runner.os }}-
       - run: cargo fetch --locked
       - run: cargo fmt --all -- --check
-      - run: cargo test --workspace --locked --all-targets
+      - run: cargo test --workspace --locked --all-targets -- --test-threads=1
       - run: scripts/verify-workflow-pack-manifest.sh
-      - run: scripts/stage2-controller-drill-live-gate.sh
+      - name: Agent OS core evidence gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG_FILE="$(mktemp -t mandoforge-agent-os-core-ci.XXXXXX.log)"
+          MANDOFORGE_ADDR=127.0.0.1:8787 \
+            MANDOFORGE_WORKSPACE_ROOT=.mandoforge/ci-agent-os-core-workspaces \
+            MANDOFORGE_INSECURE_DEV_AUTH=1 \
+            MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1 \
+            cargo run -p mandoforge-api >"$LOG_FILE" 2>&1 &
+          API_PID="$!"
+          trap 'kill "$API_PID" >/dev/null 2>&1 || true; wait "$API_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
+              BASE_URL=http://127.0.0.1:8787 \
+                MANDOFORGE_WORKSPACE_ROOT=.mandoforge/ci-agent-os-core-workspaces \
+                ./scripts/agent-os-core-evidence-gate.sh
+              exit 0
+            fi
+            if ! kill -0 "$API_PID" >/dev/null 2>&1; then
+              cat "$LOG_FILE" >&2
+              exit 1
+            fi
+            sleep 0.5
+          done
+          cat "$LOG_FILE" >&2
+          exit 1

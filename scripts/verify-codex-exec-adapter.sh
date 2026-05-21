@@ -2,6 +2,13 @@
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
+SUBJECT="${MANDOFORGE_CODEX_ADAPTER_VERIFY_SUBJECT:-admin-1}"
+ROLES="${MANDOFORGE_CODEX_ADAPTER_VERIFY_ROLES:-admin}"
+
+auth_headers=(
+  -H "x-mandoforge-subject: $SUBJECT"
+  -H "x-mandoforge-roles: $ROLES"
+)
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "codex adapter verification requires jq" >&2
@@ -12,6 +19,7 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 
 AGENT_ID="$(
   curl -fsS "$BASE_URL/api/agents" \
+    "${auth_headers[@]}" \
     | jq -r 'map(select(.name == "Generic Orchestrator Agent"))[0].id // empty'
 )"
 if [[ -z "$AGENT_ID" || "$AGENT_ID" == "null" ]]; then
@@ -21,6 +29,7 @@ fi
 
 SESSION_ID="$(
   curl -fsS -X POST "$BASE_URL/api/sessions" \
+    "${auth_headers[@]}" \
     -H 'content-type: application/json' \
     -d "$(jq -nc --arg agent_id "$AGENT_ID" '{
       agent_id: $agent_id,
@@ -32,6 +41,7 @@ SESSION_ID="$(
 
 APPROVAL_ID="$(
   curl -fsS -X POST "$BASE_URL/api/tools/codex.exec/execute" \
+    "${auth_headers[@]}" \
     -H 'content-type: application/json' \
     -d "$(jq -nc --arg session_id "$SESSION_ID" '{
       session_id: $session_id,
@@ -43,10 +53,13 @@ APPROVAL_ID="$(
     | jq -r '.approval_id'
 )"
 
-curl -fsS -X POST "$BASE_URL/api/approvals/$APPROVAL_ID/approve" >/dev/null
+curl -fsS -X POST "$BASE_URL/api/approvals/$APPROVAL_ID/approve" \
+  "${auth_headers[@]}" \
+  >/dev/null
 
 TOOL_CALL="$(
   curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/tool-calls" \
+    "${auth_headers[@]}" \
     | jq -c 'map(select(.tool_name == "codex.exec"))[0]'
 )"
 echo "$TOOL_CALL" | jq -e '
@@ -57,6 +70,7 @@ echo "$TOOL_CALL" | jq -e '
 
 EVENT_TYPES="$(
   curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/events" \
+    "${auth_headers[@]}" \
     | jq -r '[.[].event_type] | unique | join(",")'
 )"
 if [[ "$EVENT_TYPES" != *"codex.event"* || "$EVENT_TYPES" != *"codex.task.completed"* ]]; then
@@ -66,6 +80,7 @@ fi
 
 ARTIFACTS="$(
   curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/artifacts" \
+    "${auth_headers[@]}" \
     | jq -r '[.[].name] | join(",")'
 )"
 if [[ "$ARTIFACTS" != *"codex-final-message.md"* ]]; then

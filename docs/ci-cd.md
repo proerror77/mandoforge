@@ -7,7 +7,7 @@ Mandoforge keeps the default CI path fast and moves full evidence runs to explic
 `.github/workflows/ci.yml` runs on every push and pull request:
 
 - `Static gates` checks JavaScript syntax, shell syntax, Kubernetes manifest renderability, and evidence manifest validators without compiling Rust.
-- `Rust tests` installs the stable Rust toolchain, restores Cargo registry and `target/` cache, runs `cargo fetch --locked`, checks formatting, and runs `cargo test --workspace --locked --all-targets`.
+- `Rust tests` installs the stable Rust toolchain, restores Cargo registry and `target/` cache, runs `cargo fetch --locked`, checks formatting, and runs `cargo test --workspace --locked --all-targets -- --test-threads=1`.
 
 The Rust job intentionally does not run both `cargo check` and `cargo test` on every PR. `cargo test --all-targets` already compiles the workspace test targets and avoids a second full compile path in ordinary CI.
 

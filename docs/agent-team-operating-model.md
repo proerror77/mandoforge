@@ -127,14 +127,14 @@ Owns:
 - `crates/mandoforge-api/src/store_eval.rs`
 - `crates/mandoforge-api/src/store_usage_rollups.rs`
 - `crates/mandoforge-api/src/store_cost_alert_routes.rs`
-- provider, MCP, Vault, observability, finance, and scheduler evidence gates
+- provider, MCP, secrets, observability, scheduler, and release/eval gates
 
 Good tasks:
 
 - external control-plane boundaries
 - health checks
 - model/provider governance
-- usage, cost, and finance exports
+- usage, cost, and optional export surfaces
 - OTel readiness
 
 Avoid:
@@ -185,16 +185,14 @@ cargo fmt --all -- --check
 cargo check -p mandoforge-api
 ```
 
-Also run the lane-specific evidence or verifier script.
+Also run the lane-specific core verifier for the area being changed.
 
 Examples:
 
 ```bash
-scripts/tenant-isolation-evidence-gate.sh
-scripts/approval-notification-evidence-gate.sh
-scripts/worker-evidence-gate.sh
-scripts/remote-computer-evidence-gate.sh
-scripts/provider-governance-evidence-gate.sh
+BASE_URL=http://127.0.0.1:8787 scripts/agent-os-core-evidence-gate.sh
+scripts/verify-codex-exec-adapter.sh
+scripts/verify-remote-computer-k8s-manifests.sh
 ```
 
 ### Integration Gate
@@ -202,38 +200,29 @@ scripts/provider-governance-evidence-gate.sh
 The integration owner runs:
 
 ```bash
-cargo test -p mandoforge-api
-scripts/stage2-controller-drill-live-gate.sh
+cargo test -p mandoforge-api -- --test-threads=1
+scripts/stage1-final-gate.sh
 ```
 
-If evidence metadata changes, also run:
-
-```bash
-scripts/stage2-completion-audit-gate.sh
-```
+Deployment-specific evidence scripts are outside the main integration gate. Run
+them only when the change explicitly modifies that script family.
 
 ### Mainline Gate
 
 Before pushing main:
 
 ```bash
-cargo test --workspace --locked --all-targets
-scripts/verify-stage2-controller-env-template.sh
-scripts/verify-stage2-evidence-k8s-manifests.sh
-scripts/verify-stage2-controller-drill.sh
-scripts/verify-stage2-evidence-archive.sh --self-test
+cargo test --workspace --locked --all-targets -- --test-threads=1
 scripts/verify-observability-k8s-manifests.sh
 scripts/verify-remote-computer-k8s-manifests.sh
 kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out
-kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out
-kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone >/tmp/mandoforge-stage2-production-evidence-kustomize.out
 ```
 
 ## Suitable Parallel Work
 
 - additive APIs inside one lane
 - store methods owned by one lane
-- lane-specific evidence gates
+- lane-specific core verifiers
 - K8s manifests owned by one lane
 - fail-closed validation within one capability
 - docs that describe a specific lane-owned capability

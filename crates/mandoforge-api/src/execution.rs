@@ -2065,6 +2065,9 @@ async fn execute_approved_remote_computer_agent_cli(
                 "status": status,
                 "stdout_chars": stdout.text.chars().count(),
                 "stderr_chars": stderr.text.chars().count(),
+                "runtime_adapter_event_count": adapter_events.len(),
+                "runtime_turn_event_count": turn_recording.event_count,
+                "runtime_final_artifact_count": turn_recording.final_artifact_count,
                 "resumed_after_approval": true
             }),
         ))
@@ -2163,7 +2166,17 @@ async fn execute_approved_agent_cli(
                     "tool.completed",
                     "tool_call",
                     Some(tool_call.id),
-                    json!({"tool": tool_call.tool_name, "profile": result.get("profile"), "resumed_after_approval": true}),
+                    json!({
+                        "tool": tool_call.tool_name,
+                        "profile": result.get("profile"),
+                        "profile_source": result.get("profile_source"),
+                        "runtime_type": result.get("runtime_type"),
+                        "runner": result.get("runner"),
+                        "runtime_adapter_event_count": result.get("runtime_adapter_event_count"),
+                        "runtime_turn_event_count": result.get("runtime_turn_event_count"),
+                        "runtime_final_artifact_count": result.get("runtime_final_artifact_count"),
+                        "resumed_after_approval": true
+                    }),
                 ))
                 .await?;
             Ok(())

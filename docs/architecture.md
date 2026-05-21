@@ -1,337 +1,320 @@
-# Generic Agent OS Runtime Architecture
+# Agent OS Architecture
 
-## Fit Against PRD v2
+MandoForge is an Agent OS kernel and middleware layer. It is not a vertical
+agent app, and it is not an enterprise production-evidence checklist.
 
-The current architecture is partially aligned with Generic Agent OS PRD v2.
-
-Aligned:
-
-- Runtime-first direction.
-- Agent is treated as configuration, not a microservice.
-- Sessions bind to an agent version.
-- Session and append-only event log are core objects.
-- Postgres is the durable store when `DATABASE_URL` is set.
-- Tool execution is routed through a `ToolExecutor` registry and named tool endpoints.
-- Approval and artifacts are first-class API/store concepts.
-- Tool calls and audit logs are written for generic diagnostics, manual tool execution, approvals, and worker resume paths.
-- Generic diagnostics demo has replaced the commerce GMV demo.
-- Docker Compose and Kubernetes skeleton exist.
-- Stage 1 YAML policy is loaded and enforced globally, then narrowed by session agent-version tool allowlists.
-- Session run, tool catalog reads, manual tool execution, approval decisions, execution job drain, read/list API paths, and core write API paths now pass through the RBAC `Authorizer`; the demo default principal is an operator, and explicit invalid/no-role principals fail closed.
-- Admin-only policy inspection and tool-decision simulation APIs expose the active YAML policy in structured form and let the static Policy Console test allow/deny/approval decisions without editing the runtime policy.
-- Admin-only Vault health checks report whether the secret provider is reserved or Vault, expose only redacted configuration checks, and keep secret reads fail-closed unless Vault is explicitly configured.
-- Approved shell execution can use the optional Docker runner.
-- Approved jobs can be queued for external worker handoff through the execution job API and drained by `scripts/execution-worker-loop.sh`, the `mandoforge-worker` Rust binary, or the static Worker Dashboard; the queue is durable in Postgres mode and records `worker_id` plus a short lease for reclaim. Redis mode now uses `XADD` for enqueue, `XREADGROUP` for API-backed drain, and `XACK` for completion/failure acknowledgement. NATS mode publishes approved jobs to a Core NATS subject and drains through a queue subscription; it is broker-native handoff without JetStream durability. `nats_jetstream` uses request/reply publish ack, stream and durable consumer checks, pull-consumer drain, and explicit ack subject publication for completion/final failure.
-- Worker deployment entries exist for Docker Compose and Kubernetes.
-- Approval resume executes the approved tool, rebuilds harness context, resumes the provider for provider-run sessions, and then emits the final provider response before completing the session.
-- Approval v2 groundwork includes an `approver` role, `POST /api/approvals/:id/modify`, which updates pending tool-call arguments, appends `approval.modified`, and leaves the approval pending for approve/reject, plus `expires_at` and `POST /api/approvals/:id/expire`, which append `approval.expired` and make later decisions fail closed. Manual approval requests can delegate a decision to an `approver_subject`; non-admin principals must match that subject while admins can override. Approval groups and escalation rules are persisted through Admin-only APIs, `POST /api/approvals/:id/escalate` assigns pending approvals to a configured group/rule, and non-admin approvers must belong to the delegated group before deciding. The static Approval Queue exposes original args, modified args, delegated approver/group, a JSON-path argument diff table, decision payload, and pending-approval modify/escalate controls before approve/reject.
-- Stage 2 governance groundwork includes `organizations`, `teams`, `projects`, `memberships`, and `tenant_invitations` tables plus Admin-only CRUD/list routes for the hierarchy; principals can derive roles from persisted memberships when role headers are absent, scoped agent/session/tool/approval/job access checks team or project membership for non-admin principals, and agent/session list APIs hide scoped resources outside the caller's memberships. The runtime is still a single-tenant deployment, so any incoming `x-mandoforge-tenant-id` header must match the configured runtime tenant and fails closed otherwise; tenant isolation readiness now includes a production routing gate that blocks until runtime tenant routing, fail-closed headers, membership scope enforcement, and RLS are all ready. Organizations persist `owner_subject`, new organizations default ownership to the creating admin subject, ownership transfer is audited and rejected for archived organizations, archived empty organizations can be deleted only when no teams, memberships, or invitations remain, and tenant bootstrap provisioning creates an organization plus optional team/project and owner membership in one audited path. Admins can create/revoke scoped tenant invitations, invitees can accept pending token-bound invitations without a pre-existing role, acceptance creates the scoped membership, and invitation create/revoke/accept/expire decisions are audited. The static Admin Console can bootstrap tenant scopes, create/select organizations, create teams/projects, create memberships, transfer organization ownership, archive/delete organizations, create/revoke tenant invitations, and reuse selected team IDs in adjacent provider/MCP governance forms.
-- Provider governance groundwork includes Admin-only provider registry routes, audited `PATCH /api/providers/:id/status` for active/disabled/archived emergency lifecycle control, `POST /api/providers/:id/status-approval` plus approve/reject routes for separation-of-duties provider status changes, `GET /api/providers/:id/health` for static provider configuration checks plus audited OpenAI-compatible `/v1/models` probes when `base_url` and `api_key_env` are configured, `POST /api/providers/deployment/validate` for audited active-provider deployment validation evidence, `provider_access` rows per team with audited update/archive lifecycle, model allowlist enforcement when creating a team-scoped agent, fail-closed creation when a stored provider or provider access grant is archived/disabled, runtime provider selection from stored provider rows with active-status enforcement, and daily request/cost budget gates before `llm.request` events are emitted. Direct provider status changes must declare `emergency=true` and a non-empty reason; audit records include the `provider_lifecycle_emergency` policy decision with previous/requested status evidence. Provider deployment validation can call `MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_URL` with sanitized provider health evidence, and `MANDOFORGE_PROVIDER_DEPLOYMENT_CONTROLLER_REQUIRED=true` makes deployment readiness fail closed until recent validated controller evidence exists. Provider policy gates can be inspected through `GET /api/providers/policy-gate`, executed as audited manual runs through `POST /api/providers/policy-gate/run`, executed by the aggregate scheduler when no fresh run covers configured providers, and reviewed through `GET /api/providers/policy-gate/runs`; the run summary now includes production enforcement status so a failed, warning, stale, or missing gate explicitly blocks provider rollout. `GET /api/providers/summary` reports deployment readiness and blocks production claims until a recent healthy validation covers active providers and any required deployment controller has validated. `POST /api/providers/production-rollout/run` records an audited production rollout only when the latest gate is fresh, passing, covers the current provider set, and a configured `MANDOFORGE_PROVIDER_ROLLOUT_CONTROLLER_URL` confirms the rollout through a bounded HTTP controller call; otherwise it records a blocked rollout without enabling production use. `POST /api/providers/production-rollout/rollback` records an audited rollback only when prior applied rollout evidence exists and `MANDOFORGE_PROVIDER_ROLLOUT_ROLLBACK_CONTROLLER_URL` confirms rollback/recovery with provider ids and source rollout metadata; otherwise it records a blocked rollback without pretending recovery happened.
-- Usage groundwork includes `GET /api/usage`, which aggregates provider request/response counts, prompt/completion/total tokens from provider responses, configured per-request and per-1K-token provider pricing, provider budget status over the last 24 hours, tool status counts, tool runtime, approval counts, sessions, and session events for the current tenant. Admins can persist current usage/cost snapshots through `POST /api/usage/rollups`, query `GET /api/usage/trends` for current-vs-rollup or rollup-vs-rollup cost/token/tool-call deltas, 7-day and 30-day run-rate forecasts, provider budget exhaustion projections, budget pressure, top-provider cost attribution, and operator recommendations, export an audited finance CSV through `GET /api/usage/export.csv`, and review provider cost/token breakdowns, provider budget forecast rows, trend windows, CSV export status, tool runtime breakdowns, and rollup snapshots in the static console. `GET /api/usage/finance-operations/summary` adds an operations view over that data by combining readiness score, rollup freshness, export status, alert delivery status, alert acknowledgement coverage, recent finance/export audit evidence, runbook actions, and a production close readiness gate that blocks until rollups are fresh, the export target is configured, recent delivered export evidence exists, current alerts are delivered, critical alerts are acknowledged, and no failed delivery evidence is present. `MANDOFORGE_FINANCE_CLOSE_CONTROLLER_REQUIRED=true` additionally blocks production close readiness until `MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL` is configured and recent audited close-controller evidence is closed. `POST /api/usage/finance-operations/run` executes a controlled finance close run that creates a missing/stale rollup, uses existing alert/export delivery boundaries only when their configuration is ready, and calls `MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL` when configured after the production close gate is ready.
-- Observability groundwork includes `GET /api/observability`, which summarizes telemetry configuration, session/tool/approval/job status counts, event categories, recent error events, and queue/approval backpressure signals for the static dashboard. `GET /api/observability/collector-readiness` exposes OTLP collector readiness, signal paths, health-check result, sampling state, collector-specific attention items, a production-ops readiness gate that blocks until OTLP is enabled, the collector endpoint and logs/traces/metrics paths are configured, sampling is nonzero, and collector health is checked healthy, plus a collector deployment-readiness gate that blocks until a recent audited healthy deployment validation exists. `POST /api/observability/collector/deployment/validate` performs bounded collector health validation and, when `MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_URL` is configured, calls an external deployment controller with service, endpoint, signal-path, and subject evidence; `MANDOFORGE_OBSERVABILITY_COLLECTOR_DEPLOYMENT_CONTROLLER_REQUIRED=true` makes deployment readiness fail closed until that controller has recent validated audit evidence. Collector readiness also reports remediation supervision readiness; when `MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_REQUIRED=true`, production readiness blocks until the external remediation controller is configured and has recent audited successful execution evidence. The HTTP telemetry exporter now emits OTLP-shaped logs, traces, and metrics payloads to `/v1/logs`, `/v1/traces`, and `/v1/metrics` from the same runtime session-event boundary. `POST /api/observability/remediation/run` turns safe backpressure signals into an audited remediation run by executing due approval expiration/escalation checks and Codex App Server stale-turn polling while returning explicit manual-action markers for worker drains and failure triage; when `MANDOFORGE_OBSERVABILITY_REMEDIATION_CONTROLLER_URL` is configured and remediation actions exist, it also calls the external controller with before/after backpressure evidence and records fail-closed controller execution details in audit/UI output.
-- External scheduler groundwork includes `POST /api/scheduler/run-due`, an Admin-only audited aggregate endpoint designed for cron or Kubernetes CronJob callers. It runs the same due-run boundaries used by the UI for provider policy gates, policy rollout activation, approval expiration/escalation, agent release automation, MCP scheduled health checks, MCP connector rollouts across active teams, Codex App Server stale-turn polling, current cost-alert delivery when active alert routing or fallback webhook configuration exists, and optional scheduled finance export delivery, then returns a single run summary for scheduler logs and operations review. When `MANDOFORGE_SCHEDULER_TOKEN` is configured, scheduler mutation requires `x-mandoforge-scheduler-token` in addition to Admin authorization. The Kubernetes skeleton includes `mandoforge-scheduler`, a CronJob that calls this endpoint every five minutes for self-hosted pilot deployments through a dedicated ServiceAccount with token automount disabled and Secret-sourced scheduler subject, role, and shared-token headers. `GET /api/scheduler/summary` exposes deployment readiness that blocks production claims until the CronJob identity is Secret-backed, demo admin headers are absent, token header wiring exists, and the API runtime has the shared token configured.
-- The static web console now includes Admin Console panels for usage, policy inspection/simulation, stored providers, eval runs, and governance status in addition to the Stage 1 session timeline, approvals, artifacts, tool calls, and audit views.
-- Policy Center supports active YAML policy inspection, single-tool simulation, batch policy testing, validated persisted policy revisions, revision diffing against the active runtime policy, default or custom rollout gate suites, rollout percentage metadata, optional RFC3339 activation windows, activation metadata, and audit logging for policy simulation/test/revision actions. The static console renders policy diffs as added/changed/removed summaries and tables, and renders gate results as rollout, suite, pass/fail, activation window, and per-tool expected/actual decisions. Activating a 100% gated revision hot-swaps the in-memory runtime policy used by simulation, SQL safety, and Tool Router decisions; activating a partial rollout keeps the current baseline policy and applies the candidate to a deterministic percentage of sessions by session UUID bucket. Admins can inspect runtime rollout status, cancel a staged rollout, run due scheduled rollout activation for passed draft revisions inside their activation window, and roll back the active policy to the most recent archived active revision through audited API/UI paths.
-- Approval v2 supports delegated approver and delegated group enforcement, escalation rules, expiry, argument modification, persisted notification channel policy with bounded retries/backoff, env-gated webhook notification delivery for pending approvals through `MANDOFORGE_APPROVAL_WEBHOOK_URL`, Slack delivery through `MANDOFORGE_APPROVAL_SLACK_WEBHOOK_URL`, email-relay delivery through `MANDOFORGE_APPROVAL_EMAIL_RELAY_URL`, and an Admin due-run API that expires overdue approvals, advances pending approvals through ordered escalation rules when their `after_seconds` threshold is due, writes timeline/audit records, and attempts notification delivery for each scheduled escalation. Delivery payloads include delegated approver or approval-group target subjects so downstream channels can fan out to the right people while MandoForge keeps the approval decision boundary centralized. `GET /api/approvals/notification-channel-policies` and `POST /api/approvals/notification-channel-policies` manage persisted channel policy without storing endpoint secrets. `POST /api/approvals/notifications/run` performs an audited bounded delivery pass for pending approvals and skips recently notified approvals. `POST /api/approvals/notifications/deployment/validate` performs an audited routing/channel-policy deployment validation without sending notifications; when `MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_URL` is configured it also calls an external deployment controller with sanitized routing evidence, and `MANDOFORGE_APPROVAL_NOTIFICATION_DEPLOYMENT_CONTROLLER_REQUIRED=true` makes deployment readiness fail closed until recent validated controller evidence exists. `GET /api/approvals/notifications/runs` exposes delivery-run history plus production-ops readiness and deployment-readiness gates that block on missing channels, missing active channel policy, unroutable pending approvals, failed/reserved/stale runs, missing delivery evidence, missing validation evidence, stale validation evidence, latest unhealthy validation, or missing required controller evidence.
-- Provider Settings in the static console can create/update stored providers with base URLs, API key env/ref credentials, daily request budgets, per-request and per-1K-token pricing config, request separated status approvals, perform explicitly reasoned emergency activate/disable/archive actions, run/review provider policy gates, and inspect provider health check results.
-- Provider key-reference rotation is exposed as an Admin API that updates `config.api_key_ref`, removes any env-key fallback, and writes an audit record containing only old/new secret references, never secret values.
-- Usage/cost tracking includes warning/critical provider budget alerts, an Admin-only alert listing endpoint, audited acknowledgement route, audited alert route management for webhook/Slack/email channels, and a delivery route that uses configured webhook routes, Slack incoming webhook routes, HTTP email relay routes through `MANDOFORGE_COST_ALERT_EMAIL_RELAY_URL`, direct SMTP relay through `MANDOFORGE_COST_ALERT_SMTP_ADDR` and `MANDOFORGE_COST_ALERT_SMTP_FROM`, or the fallback `MANDOFORGE_COST_ALERT_WEBHOOK_URL`. Alert delivery attempts now write audit metadata, the aggregate scheduler due-plan/run surfaces process alert delivery when current alerts and a configured route/target exist, and the static Usage panel can create routes, trigger delivery or acknowledgement, run Finance Ops, show the latest status, and review Finance Operations readiness/runbook actions.
-- Finance usage exports can be downloaded through `GET /api/usage/export.csv`, delivered manually through `POST /api/usage/export/deliver`, or run from the aggregate scheduler when `MANDOFORGE_USAGE_EXPORT_SCHEDULE` is enabled. Delivery is fail-closed/reserved until `MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL` is configured, and audit records store metadata only, not the CSV body.
-- Evaluation groundwork includes eval datasets, cases, and version-bound run records with deterministic Stage 2 graders for policy decisions, tool allowlist coverage, SQL safety, sandbox path checks, and final-answer required fragments. `grading_policy.kind = "judge"` uses an env-gated `EvalJudgeClient` boundary when `MANDOFORGE_EVAL_JUDGE_URL` is configured, or a persisted `eval_judge` provider profile when `grading_policy.judge_profile` names an active profile. Judge profiles store endpoint/model/timeout and optional `vault:path#key` API key references in the provider registry, augment judge requests with profile/model evidence, and never resolve or expose secret values in UI/audit payloads. Unconfigured judge cases fail closed with explicit run details. `POST /api/eval/suites/stage2-regression` bootstraps a default regression dataset covering high-risk policy, blocked tools, required tool coverage, read/write SQL safety, sandbox path boundaries, final-answer evidence, and optional external judge scoring. `POST /api/eval/runs/:id/gate` evaluates a run against score/status requirements and returns pass/fail reasons. `POST /api/agents/:id/releases` enforces that the referenced eval run targets the same agent version, is completed, and meets `min_score` before directly promoting a release; `POST /api/agents/:id/release-requests` creates a `pending_approval` production promotion request with requested-by, delegated approver, request reason, eval evidence, and optional automation policy. Approve/reject endpoints enforce separation of duties before a pending request can become `promoted` or `rejected`. `POST /api/agents/releases/run-due` scans pending release requests, auto-promotes only system-delegated requests whose automation window is open and whose eval score still meets the gate, calls `MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL` first when configured, skips controller failures with audit-visible execution evidence, skips eligible promotions when `MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED=true` but no controller is configured, and auto-rejects expired requests fail-closed with audit records. `POST /api/agents/releases/deployment/validate` records an audited release deployment-validation run and can execute an external deployment controller through `MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_URL` using sanitized release/eval/automation counts only; `MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED=true` makes deployment readiness fail closed unless recent validated controller evidence exists. `GET /api/agents/releases/automation-runs` summarizes audited release automation history and reports production rollout readiness, production orchestration readiness, and deployment readiness that blocks on missing/stale validation evidence, missing required controller evidence, missing/stale supervision, expired/stale pending releases, skipped automation, manual approval residue, or any remaining pending release request. `GET /api/agents/releases/summary` aggregates release status, environment, pending/manual/automated queues, expired/stale attention items, and latest promoted releases by environment for rollout dashboards. `POST /api/agents/:id/releases/:release_id/rollback` marks promoted releases as rolled back only after an optional external rollback/recovery controller confirms the operation through `MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_URL`; `MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED=true` makes rollback fail closed when that controller is missing. `GET /api/eval/runs/:id/drift` compares a run to the previous run for the same dataset and agent. The static console can create eval judge profiles, bootstrap the Stage 2 suite, create eval datasets, add JSON eval cases, run an agent against a dataset, inspect cases/runs, gate a run at 100%, check drift, request manual or automated prod approval, run due release automation, validate release deployment supervision, review release automation run history and production readiness, review rollout summary metrics/attention items/latest promotions, promote passing runs to staging/prod, approve/reject pending releases, list releases, and roll back promoted releases with audit-visible controller evidence.
-- OTel groundwork is now wired into the session event append path, so session, provider, tool, approval, sandbox, codex, and worker events can be exported through the configured telemetry exporter with native OTLP HTTP log/trace/metric payloads, status, counters, duration, provider/client/tool IDs, approval IDs, worker IDs, and tool-call counts when those fields are present.
-- OpenAI-compatible provider credentials can be direct env values or `vault:path#key` secret references; vault references use the `SecretProvider` boundary and fail closed on the default reserved provider. `MANDOFORGE_SECRET_PROVIDER=vault` explicitly selects the Vault KV v2 provider boundary, while the default remains `reserved`.
-- The static Vault panel can run `GET /api/vault/health`, register scoped secret references, list reference metadata, rotate references without exposing secret values, and execute `POST /api/vault/kms/rotation/run` as an audited external KMS rotation boundary. Vault readiness includes a production rotation gate that blocks until Vault is healthy, external KMS/HSM readiness is configured with `MANDOFORGE_KMS_ENDPOINT`, all consumer refs resolve to catalog entries, no active refs are stale, and a recent validated rotation gate run exists. The rotation run now sends a bounded HTTP request to the configured KMS endpoint with provider/key/policy metadata and secret ref identifiers only; audit records external execution status and counts, and local secret catalog versions are updated only when the external KMS response explicitly confirms rotated secret record ids.
-- Codex App Server groundwork includes an env-gated `CodexAppServerClient` boundary and Admin-only adapter routes for health, deployment validation, thread creation, turn creation, turn polling, stale-turn polling, command execution, interrupt, persisted run listing, trace summary/detail, and artifact sync into MandoForge session artifacts. If `MANDOFORGE_CODEX_APP_SERVER_URL` is unset, the adapter fails closed. `POST /api/codex-app-server/deployment/validate` performs a bounded health validation and writes audit evidence; when `MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL` is configured it calls an external deployment controller with app-server endpoint and timeout evidence, and `MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_REQUIRED=true` makes deployment readiness fail closed until recent validated controller evidence exists. Thread/turn/command/interrupt/poll responses are persisted in `codex_app_server_runs` for replay/debugging, and bounded polling updates run status/error with audit history. `POST /api/codex-app-server/runs/poll-stale` finds stale non-terminal turn runs, polls each bounded candidate, writes per-run poll audit records plus a stale-poll due-run audit record, and `POST /api/scheduler/run-due` invokes the same path for external cron/Kubernetes supervision. `GET /api/codex-app-server/control-plane/summary` now includes a production-ops readiness gate that blocks when the adapter is unconfigured, failed/interrupted traces exist, stale non-terminal turns exist, stale-poll supervision is missing/stale, or the latest stale-poll due-run failed, plus a deployment-readiness gate that blocks on missing/stale/unhealthy deployment validation evidence or missing required deployment-controller evidence. `GET /api/codex-app-server/traces/:trace_key` returns the run list, status timeline, status/operation counts, terminal/non-terminal counts, command IDs, latest error, duration, next action, and latest response for a single trace. Approved `codex.exec` can run with `auto`, `cli`, or `app-server` execution strategy; `auto` tries App Server when configured and records `codex.task.fallback` before returning to the CLI path if the App Server attempt fails. Queue-backed approved `codex.exec` work is drained by execution workers instead of running inline: the worker creates App Server thread/turn records, polls bounded turn status, writes `codex.task.event` timeline records, records retryable failures back to the execution queue, and completes the tool call only after a terminal completed turn. The static Admin Console exposes deployment validation, steering actions, stale-turn polling, structured trace detail drill-downs, imports returned artifacts into the timeline/audit path, lists persisted steering runs, summarizes active/terminal/failed long-running turns, and renders reserved/fail-closed production ops responses clearly.
-
-Not yet aligned:
-
-- External worker mode is API-drained for memory/Postgres/Redis/NATS queues. Redis Streams enqueue and drain are available through `MANDOFORGE_EXECUTION_QUEUE_BACKEND=redis`; Core NATS publish and queue-subscription drain are available through `MANDOFORGE_EXECUTION_QUEUE_BACKEND=nats`. NATS JetStream publish, durable pull-consumer drain, and explicit ack are available through `MANDOFORGE_EXECUTION_QUEUE_BACKEND=nats_jetstream` or `jetstream`.
-- Credentialed external provider verification exists for both env-key and Vault-reference OpenAI-compatible provider configs; secret values are resolved only through the `SecretProvider` boundary and are not persisted in health/audit payloads.
-- MCP Gateway execution is now available through `mcp.call` when configured; global server allowlists are enforced by the gateway config, and team-scoped sessions must also pass the persisted MCP server registry/tool allowlist before the HTTP call. Admins can call the team MCP server discovery endpoint to import gateway-discovered tools into the persisted allowlist. The team MCP server lifecycle APIs can patch transport/config/allowlists, activate/disable/archive connectors, run audited single-server health checks, run audited team-level batch health checks, run due-only scheduled health checks based on connector `config.health_check.interval_seconds`, and run an audited deployment validation pass across team connectors. MCP connector configs can declare normalized `vault:path#key` `secret_refs`; the API validates those references and health checks report reference counts/paths without resolving or exposing secret values. At runtime, scoped `mcp.call` resolves configured secret refs through the `SecretProvider` boundary before calling the MCP Gateway and fails closed before gateway I/O if refs cannot be read; secret values are not written into tool args, timeline, or audit payloads. Scheduled due runs persist last health metadata back to connector config for cron/worker-driven supervision. Connector rollout APIs can stage config/transport/tool/status changes with candidate health preflight, activation windows, audited due-run application, and rollback to the previous snapshot. Due rollout application calls `MANDOFORGE_MCP_ROLLOUT_CONTROLLER_URL` first when configured, and `MANDOFORGE_MCP_ROLLOUT_CONTROLLER_REQUIRED=true` skips due apply when that controller is missing. Rollback can call `MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_URL` before restoring the previous snapshot, and `MANDOFORGE_MCP_ROLLOUT_ROLLBACK_CONTROLLER_REQUIRED=true` blocks rollback unless that controller is configured and confirms recovery. `POST /api/teams/:team_id/mcp-servers/deployment/validate` records team connector deployment validation evidence without pretending to deploy connectors; when `MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_URL` is configured it calls an external deployment controller with sanitized connector health evidence, and `MANDOFORGE_MCP_DEPLOYMENT_CONTROLLER_REQUIRED=true` makes deployment readiness fail closed until recent validated controller evidence exists. `GET /api/teams/:team_id/mcp-servers/rollouts/summary` aggregates connector status, transport, pending/manual/scheduled/due/expired rollout queues, preflight failures, attention items, and latest rollout history for rollout dashboards; `GET /api/teams/:team_id/mcp-servers/rollouts/runs` exposes audited rollout due-run history plus production rollout readiness, production orchestration readiness, and deployment readiness that block on failed preflight, expired/due/pending rollouts, manual apply steps, failed/stale/missing due-runs, missing fresh scheduler supervision evidence, missing/stale/unhealthy deployment validation, or missing required deployment-controller evidence. Disabled/archived connectors fail closed before the MCP Gateway call. The static Admin Console can manage config JSON, secret refs, allowlists, health checks, due health, deployment validation, discovery import, status changes, rollout requests, due rollout runs, apply, rollback, and review connector rollout summary metrics/attention/history.
-- Adding broader remediation automation, remaining production RBAC policy expansion, and production Vault providers remain later-stage work.
-
-## Runtime Layers
+## Product Stack
 
 ```text
-Web UI
-  Agent Builder / Session Console / Timeline / Approval / Audit
-
-Rust Agent OS API
-  Agents / Sessions / Events / Tools / Approvals / Artifacts / SSE
-
-Managed Agent Runtime
-  Session Store / Event Store / Context Builder
-  Harness Loop / Provider Router / Tool Router
-  Policy Engine / Approval Engine / Audit Logger
-  Artifact Store / Workspace Manager / Telemetry
-
-Execution Layer
-  file.read / file.write / sql.query / shell.exec / codex.exec
-  approval.request / artifact.create / mcp.call
-
-Sandbox / Worker Layer
-  session workspace / Docker runner / Codex CLI adapter / Codex App Server adapter
-  gVisor and distributed workers later
-
-Context / Data Foundation
-  files / artifacts / generic demo Postgres / MCP resources later
+Existing Work Surfaces
+  Slack / Feishu / GitHub / Jira / Linear / Email
+        |
+Collaboration Layer
+  WorkItem / Project / Assignment / Review
+  Agent Teammate / Squad / Activity Feed
+        |
+Manager Agent / Work Coordination Layer
+  Task decomposition / routing / escalation / review
+        |
+Managed Runtime Layer
+  Session / Event Log / Tool Router / Policy
+  Approval / Audit / Artifact / Eval
+        |
+Semantic Layer / Ontology Service
+  Business Objects / Metrics / Relations
+  Actions / Permissions / Tool Bindings
+  Retrieval Context / Data Contracts
+        |
+Enterprise Data Foundation
+  Warehouse / Lakehouse / Postgres / Vector
+  Graph / Docs / APIs / Event Streams
 ```
+
+The current repository is strongest in the Managed Runtime Layer. Claude Managed
+Agents is a useful reference for that layer only: Agent, Environment, Session,
+Events, and Threads. It does not define the whole Agent OS.
+
+Core ownership:
+
+- MandoForge Agent Runtime owns sessions, event logs, policy, approval, audit,
+  artifacts, threads, cursor/resume, streaming, and worker leases.
+- Codex CLI, Claude Code CLI, Codex App Server, and future agent runtimes are
+  runtime adapters called by MandoForge.
+- Manager Agents are managed agents running on MandoForge. They coordinate work
+  through WorkItems, Assignments, Reviews, and child threads; they do not own a
+  separate runtime orchestrator.
+
+## Core Boundary
+
+Agent OS core completion is proven by runtime action evidence:
+
+- `session_events` is the ordered action timeline.
+- `tool_calls` is the durable tool-action table.
+- `audit_logs` is the operator decision and side-effect trail.
+
+Every user input, model turn, policy decision, approval request/decision, tool
+call/result, runtime adapter turn, artifact, thread transition, and session
+state change must be reconstructable from those records.
+
+The implementation-level status is tracked in
+[runtime-truth-audit.md](runtime-truth-audit.md).
+
+## Runtime Model
+
+```text
+Agent Version
+  -> Environment
+  -> Session
+  -> Event
+  -> Session Loop Job
+  -> Runtime Turn
+  -> Tool / Approval / Artifact / Thread
+  -> Stream + Replay
+```
+
+Rules:
+
+- Creating a session does not imply work starts.
+- `POST /api/sessions/:id/events` is the primary driver.
+- `POST /api/sessions/:id/run` is a compatibility wrapper that appends a user
+  event.
+- Session-loop jobs process explicit event sequence windows and advance a
+  processed high-water mark.
+- UI replay must come from durable event/tool/audit/artifact/thread state, not
+  transient provider state.
+
+The runtime session loop calls an LLM or CLI-backed runtime adapter to execute
+an agent turn. The adapter may run its own local agent loop, but MandoForge stays
+the supervisor and evidence layer:
+
+```text
+MandoForge Agent Runtime
+  -> runtime profile
+  -> runtime adapter
+      -> Codex CLI
+      -> Claude Code CLI
+      -> Codex App Server
+      -> future hosted/self-hosted runtimes
+  -> normalized session events, tool calls, artifacts, and audit logs
+```
+
+MandoForge should not reimplement the Codex or Claude Code agent loop. It should
+prepare context, call the selected CLI/runtime adapter, ingest structured output,
+enforce policy/approval, and persist the evidence.
 
 ## Store Boundary
 
-The code supports two backends:
+The runtime supports two store backends:
 
-- Postgres backend: enabled when `DATABASE_URL` is set. Startup connects through SQLx, executes Stage 1 migrations, sets the default Postgres `mandoforge.tenant_id` session context from `MANDOFORGE_TENANT_ID` (or the default demo tenant), refreshes that setting on pool acquire from the request-local tenant context, seeds the configured tenant, and inserts the Generic Orchestrator Agent.
-- Memory backend: enabled when `DATABASE_URL` is missing. This keeps local UI/API demos fast and avoids requiring Docker for every small change.
+- Postgres when `DATABASE_URL` is set.
+- In-memory fallback for local development.
 
-The public API shape is identical for both backends. Route handlers call `AppState` methods instead of touching storage directly.
+The public API shape should stay identical across both. Route handlers should
+go through `AppState` and the `store_*` modules instead of touching storage
+directly.
 
-Current store method groups:
+Current core store groups:
 
-- `store_entities`: agents, agent versions, and sessions.
+- `store_entities`: agents, agent versions, environments, and sessions.
 - `store_events`: append-only session events.
 - `store_tool_calls`: tool-call persistence and status updates.
 - `store_artifacts`: artifact persistence.
 - `store_approvals`: approval persistence and decisions.
 - `store_audit`: audit-log persistence.
-- `store_seed`: demo agent seed wiring.
+- `store_manager_plans`: manager-agent planning records.
+- `store_semantic`: semantic sources, objects, links, and context packets.
 
-Store boundary rules:
+## Event Contract
 
-- Keep the `store_*` modules as the persistence boundary.
-- Keep agent version read APIs available for agent/version inspection.
-- Keep Postgres row mapping in `store_rows` so storage queries and row decoding can evolve separately.
-- Keep backend type definitions in `store_backend` so startup wiring and store methods share the same backend contract.
-- Keep agent, agent-version, and session storage methods in `store_entities`.
-- Keep session event log storage methods in `store_events`.
-- Keep tool-call storage methods in `store_tool_calls`.
-- Keep artifact storage methods in `store_artifacts`.
-- Keep approval storage methods in `store_approvals`.
-- Keep audit-log storage methods in `store_audit`.
-- Keep demo seed storage wiring in `store_seed`.
+`session_events` is the durable context object. It is not the model context
+window.
 
-## Event Log Contract
-
-`session_events` is the durable context object. It is not the model context window.
-
-Rules:
+Required properties:
 
 - Events are append-only.
 - `seq` is session-local and monotonic.
-- Tool calls, tool results, policy decisions, approvals, artifacts, and final reports are linked by event sequence and payload references.
-- UI replay must be derived from the event log, not from transient harness state.
+- Tool calls, tool results, policy decisions, approvals, artifacts, runtime
+  turns, thread transitions, and final reports link back to event sequence and
+  payload references.
+- SSE uses event `seq` as the reconnect cursor.
 
-Stage 1 event types:
+Important event families:
 
-- `user.message`
-- `agent.plan`
-- `agent.message`
-- `agent.final`
-- `llm.request`
-- `llm.response`
-- `llm.error`
-- `tool.call`
-- `tool.result`
-- `tool.error`
-- `policy.allowed`
-- `policy.denied`
-- `policy.requires_approval`
-- `approval.requested`
-- `approval.approved`
-- `approval.rejected`
-- `sandbox.started`
-- `sandbox.output`
-- `sandbox.completed`
-- `sandbox.failed`
-- `codex.task.started`
-- `codex.task.event`
-- `codex.task.completed`
-- `codex.task.failed`
-- `execution.queued`
-- `artifact.created`
-- `session.started`
-- `session.paused`
-- `session.resumed`
-- `session.status_requires_action`
-- `session.status_terminated`
-- `session.failed`
-- `session.interrupted`
+- `user.*`
+- `session.*`
+- `span.model_*`
+- `runtime.turn.*`
+- `runtime.item`
+- `runtime.tool_call`
+- `runtime.usage`
+- `agent.tool_use`
+- `agent.tool_result`
+- `approval.*`
+- `policy.*`
+- `execution.*`
+- `artifact.*`
+- `thread.*`
 
 ## Tool Boundary
 
-Target Stage 1 tools:
+Tools are primitive capabilities. Product features should be outcomes achieved
+by agents operating in a loop, not workflow logic hidden inside tools.
 
-- `file.read`: low risk.
-- `file.write`: medium risk, approval required.
-- `sql.query`: medium risk, read-only enforced.
-- `shell.exec`: high risk, approval required.
-- `codex.exec`: high risk, approval required.
-- `approval.request`: low risk.
-- `artifact.create`: low risk.
+Core tools:
 
-The current code exposes descriptors, a `ToolExecutor` trait, a tool registry, `tool_calls`, policy events, audit logs, and normalized results for the generic diagnostics path.
+- `file.read`
+- `file.write`
+- `sql.query`
+- `shell.exec`
+- `codex.exec`
+- `agent_cli.exec`
+- `mcp.call`
+- `approval.request`
+- `artifact.create`
 
-## Policy Boundary
+Rules:
 
-Stage 1 policy is defined in `config/policy.stage1.yaml`.
+- All tool execution goes through the Tool Router.
+- Tool policy is evaluated before execution.
+- High-risk tools pause for approval.
+- Tool input, result or error, status, and session linkage are persisted in
+  `tool_calls`.
+- Tool side effects append session events and audit entries.
+- `codex.exec` and `agent_cli.exec` can remain compatibility or lower-level
+  execution facades, but the product model for managed sessions is
+  Environment-owned runtime adapters.
 
-Current enforced checks:
+## Policy And Approval Boundary
 
-- Sessions bind to an agent version at creation time.
-- Tool execution is constrained by the session agent version's enabled tools before global YAML policy is applied.
-- Agent version `approval_policy` can narrow allowed tools, block tools, or require approval for a tool.
-- `sql.query` rejects non-read SQL.
-- `codex.exec` only allows `read-only` and `workspace-write` sandbox modes without extra approval.
+Policy controls whether a tool is allowed, denied, or requires approval.
+Approval controls human authorization for high-risk actions.
 
-Next enforcement work:
+Rules:
 
-- Expand policy coverage for later worker, HTTP, and MCP tools.
+- Policy decisions append events.
+- Approval requests append events and audit logs.
+- Approval decisions append events and audit logs.
+- Approval or tool-result continuation must re-enter through the session loop,
+  not a direct provider resume path.
 
-## Sandbox Boundary
+## Runtime Adapter Boundary
 
-Sandbox and approval are separate:
+Runtime adapters are the execution backends for MandoForge Agent Runtime. They
+normalize external agent runtimes into the Agent OS event model.
 
-- Sandbox controls files, process execution, network, timeout, and workspace path.
-- Approval controls whether humans allow high-risk tool calls to proceed.
+Targets:
 
-Stage 1 workspace target:
+- Codex CLI.
+- Claude Code CLI.
+- Codex App Server.
+- Future hosted or self-hosted runtimes.
 
-```text
-workspaces/{session_id}/
-  input/
-  output/
-  artifacts/
-  tmp/
-  logs/
-  .agent-os/
-    manifest.json
-    policy.json
-    events.jsonl
-```
+Normalized turn model:
 
-## Codex Worker Boundary
+- `runtime.turn.started`
+- `runtime.item`
+- `runtime.tool_call`
+- `runtime.usage`
+- `runtime.final`
+- `runtime.turn.completed`
 
-`codex.exec` uses a session-scoped workspace:
+Adapters should preserve resume handles, usage, timing, schema validation,
+collected items, final messages, artifacts, and runtime lineage.
 
-```text
-{MANDOFORGE_WORKSPACE_ROOT}/{session_id}
-```
+Adapter rules:
 
-Allowed non-extra-approval sandbox modes:
+- CLI-backed runtimes are not opaque shell tools in the product model.
+- `Environment.runtime_profile_id` selects the adapter for a session.
+- `agent_cli.exec` remains a compatibility facade while managed sessions move
+  toward direct Environment-owned runtime adapters.
+- The adapter can call the model and run its local loop, but session state,
+  policy, approval, audit, artifacts, streaming, and replay remain owned by
+  MandoForge.
 
-- `read-only`
-- `workspace-write`
+## Collaboration Layer
 
-Current worker boundary:
+The next product layer above runtime is not another demo agent. It is durable
+work coordination:
 
-- Keep `execution.rs` as the in-process execution boundary for approved `file.write`, `shell.exec`, and `codex.exec`.
-- Keep output-size limits on approved shell and Codex execution results.
-- Keep `execution_queue.rs` as the queue facade for approved tool jobs.
-- Keep `ExecutionQueueBackend` as the backend seam for memory, Postgres, and later broker-backed queues.
-- Keep `execution_queue_broker.rs` as the broker backend boundary. Redis Stream enqueue/group/read/ack operations, Core NATS publish/queue-subscription drain operations, and raw NATS JetStream publish/pull/ack operations are implemented behind the `ExecutionQueueBackend` facade and locally verified with mock TCP tests. Core NATS mode is not a JetStream durability claim; JetStream mode requires `MANDOFORGE_NATS_URL` plus optional `MANDOFORGE_NATS_STREAM` and consumer group overrides.
-- Keep `BrokerQueueConfig` and `BrokerQueueHealthCheck` as the broker configuration and readiness boundary before selecting a concrete Redis or NATS client.
-- Keep `codex_app_server.rs` as the env-gated HTTP adapter boundary for experimental Codex App Server thread, turn, polling, stale polling, command, and interrupt APIs. The reserved client fails closed unless `MANDOFORGE_CODEX_APP_SERVER_URL` is configured, and the static Codex App Server panel should surface that reserved state without bypassing the approval-governed `codex.exec` path. Keep App Server artifact sync inside the existing artifact/event/audit path so replay does not depend on App Server state. Persisted Codex App Server runs are grouped by `GET /api/codex-app-server/traces` into per-turn trace summaries with run/command/poll/error counts, latest status, terminal state, and operation sets for dashboard review; `GET /api/codex-app-server/traces/:trace_key` is the trace drill-down boundary for per-run status timelines and latest responses. Scheduler due-runs call the stale-turn polling path so cron/Kubernetes supervision can advance old non-terminal turns without relying on manual UI polling. Keep `codex.exec` strategy selection explicit: `app-server` fails closed on App Server errors, `cli` stays on Codex CLI, and `auto` records fallback before returning to CLI. When `MANDOFORGE_EXECUTION_WORKER=queue`, approved Codex App Server work must remain worker-drained through execution jobs so long-running turn supervision is observable, auditable, and recoverable through the same worker dashboard.
-- Managed CLI runtimes are transitioning from plain subprocess tools to runtime adapters. The current compatibility facade is `agent_cli.exec`: it still produces legacy tool results, but managed `codex_cli` and `claude_code` profiles parse JSONL / stream-json output into canonical `runtime_adapter.event` session events with basic secret-key redaction and event-count limits. Managed `codex_cli`, `claude_code`, and Codex App Server runs now derive structured runtime turn records from runtime output or turn APIs: `runtime.turn.started`, `runtime.item`, `runtime.tool_call`, `runtime.usage`, `runtime.final`, and `runtime.turn.completed` capture resume/session handles, `--output-schema` metadata where available, schema validation, usage/timing, collected items, tool calls, final-message artifacts, and App Server thread/turn lineage. `Environment.runtime_profile_id` is now the canonical adapter binding for managed sessions; requested CLI profiles must match that environment binding before falling back to handoff or agent runtime profiles, and the legacy env-var allowlist is only a no-binding fallback.
-- Codex CLI releases that add richer turn results, first-class auth surfaces, and `codex exec resume --output-schema` should be treated as runtime-adapter inputs. The adapter layer persists Codex CLI turn handles, usage/timing, collected items, schema validation results, and final-message artifacts instead of reducing the run to a process exit code plus stdout/stderr.
-- Session-loop jobs persist an event cursor window with `pending_event_seq_start`, `pending_event_seq_end`, and `processed_event_seq`. Enqueue expands a queued job to cover newly appended session events, running jobs fence concurrent queued work with separate sequence ranges, and completion advances the processed high-water mark so resumed workers know which event window was already consumed.
-- Goal state is a durable session-loop input rather than a host-agent side channel: `session.goal.created`, `session.goal.updated`, `session.goal.completed`, and `session.goal.blocked` are accepted through `POST /api/sessions/:id/events`, enqueue the loop with the goal event as the trigger, and are included in provider harness context as recent goal events for resumable long-running work.
-- Managed sessions persist lifecycle names instead of demo-era terminal success states: `idle`, `running`, `requires_action`, `rescheduling`, `terminated`, and `failed`. The API still reads older `created`, `waiting_approval`, and `completed` rows compatibly, and a migration upgrades those values so ordinary session-loop completion returns to resumable `idle` rather than a terminal state. `user.interrupt` is treated as explicit operator stop intent and moves the session to `terminated`.
-- Approved execution completion is now a session-loop input: inline and queue-backed workers append `execution.completed` session events and enqueue the loop with that event as the trigger, so provider continuation uses the same event cursor, lease, audit, and tracing path as user messages and custom tool results.
-- Worker queue polling honors Environment placement. Workers can send `x-mandoforge-environment-id` (or run `mandoforge-worker` with `WORKER_ENVIRONMENT_ID`) to list and claim only session-loop and execution jobs whose session is bound to that Environment; workers can also send `x-mandoforge-worker-pool` (or `WORKER_POOL` / `WORKER_QUEUE`) to list and claim only jobs whose session Environment has a matching `worker_queue_binding.queue`, `worker_pool`, or `pool`. Mismatched direct run attempts are treated as not claimable.
-- Session event streaming has reconnect cursors and live push: `GET /api/sessions/:id/stream?after_seq=N` and SSE `Last-Event-ID` replay only events with a higher session event sequence, emitted SSE events use the session event `seq` as their `id`, and the stream subscribes to appended session events after the replay snapshot so connected clients receive model/tool/session progress without polling.
-- Execution jobs persist `attempt_count`, `max_attempts`, and `last_error`. Worker failures should call `retry_or_fail`: retryable jobs return to `queued` for another lease, while exhausted jobs move to `failed`.
-- Keep `MANDOFORGE_EXECUTION_QUEUE_BACKEND` fail-closed for unsupported values: `auto`, `memory`, `postgres`, `redis`, and `nats` are selectable now; generic `broker` remains reserved.
-- Keep `ExecutionWorker` as the swappable worker interface and `InlineExecutionWorker` as the current local implementation.
-- Keep queue-backed worker mode, the API-drained `mandoforge-worker` binary, and the shell worker loop as the current external-worker handoff.
-- Keep `GET /api/execution-jobs/worker-readiness` as the operator gate for this boundary. It reports active queue semantics, worker mode, queued/running/retryable/failed pressure, stale leases, K8s worker manifest coverage, worker Pod hardening status, ServiceAccount/token automount state, RuntimeDefault seccomp, privilege/capability/read-only-root checks, resource bounds, NetworkPolicy presence, HPA/KEDA autoscaling manifest presence, parsed scale targets/min/max replicas, KEDA trigger types, queue-depth scaling evidence, worker load-validation evidence, a production-ops gate, attention items, and runbook actions. `POST /api/execution-jobs/worker-load-validation/run` records an audited validation run without faking success; it reports `attention` unless a durable queue, hardened worker Pod, queue-depth autoscaling, isolated worker pool, and explicit production-like load-validation gate are all present. The production-ops gate remains blocked until durable queue mode, queue-backed workers, hardened worker Pod manifests, queue-depth autoscaling, isolated worker pool evidence, validated load evidence, no failed jobs, and no stale leases are all true. JetStream mode now reports durable broker handoff, worker KEDA exposes queue-depth scaling configuration, the worker manifest is restricted by default, and `deploy/k8s/worker-isolated-pool*.yaml` provides the manifest-backed isolated pool signal; the same readiness path still exposes remaining gaps such as production load validation against a real cluster profile.
-- Replace the API-drained queue with a broker-backed queue in a later production stage.
+- WorkItem.
+- Project.
+- Assignment.
+- Review.
+- Agent Teammate.
+- Squad.
+- Activity Feed.
 
-## Tenant Isolation Boundary
+External work surfaces such as Slack, Feishu, GitHub, Jira, Linear, and Email
+should map into these objects before manager agents act on them.
 
-- The default runtime remains bound to one configured tenant ID. Set `MANDOFORGE_TENANT_ROUTING_MODE=tenant_routed` only for production-like adoption environments where incoming `x-mandoforge-tenant-id` should select the request-local tenant context.
-- Keep org/team/project membership enforcement as the application-layer scope boundary for Stage 2 team pilots.
-- Keep `GET /api/tenant-isolation/readiness` as the operator gate for this boundary. It reports runtime tenant mode, header fail-closed status, scoped resource counts, tenant-scoped table coverage, Postgres Row Level Security migration/runtime state, and a production routing gate that remains blocked until runtime tenant routing, RLS, membership scope, and controller freshness are all ready.
-- `db/migrations/0024_tenant_rls_policies.sql` enables and forces RLS for tracked tenant-scoped tables, including an indirect `agent_versions` policy through `agents`. Postgres connections refresh `mandoforge.tenant_id` before acquire so request-scoped queries and RLS policy checks use the same tenant.
-- Keep cross-tenant RLS and external enterprise target tests as production blockers before claiming full production multi-tenant serving.
+## Manager Agent / Work Coordination Layer
 
-## Vault Boundary
+Manager Agents are managed agents that run on MandoForge Agent Runtime. They
+perform work orchestration, not runtime orchestration.
 
-- Keep `secret_records` as a reference catalog only: it stores path/key/scope/version metadata, never secret values.
-- When `POST /api/vault/secrets` or `POST /api/vault/secrets/:id/rotate` includes a `value`, write that value through the configured `SecretProvider` before mutating the catalog. Reserved or incomplete providers fail closed and do not create or rotate the catalog record.
-- Vault KV v2 is the first concrete provider for read/write. `GET /api/vault/readiness` exposes a fail-closed production rotation gate, and `POST /api/vault/kms/rotation/run` executes a configured external KMS/HSM validation endpoint when Vault and KMS settings are present. The runtime still does not generate or expose secret values during this run; complete enterprise envelope encryption, HSM-specific adapters, approval-backed secret value rotation, and lifecycle operations remain Stage 2/3 hardening work.
+They operate on WorkItems and Assignments:
 
-## Deployment Boundary
+- Intake.
+- Decomposition.
+- Specialist selection.
+- Routing.
+- Escalation.
+- Result review.
 
-Current deployment targets:
+Manager decisions must be structured records, visible in timeline/audit, and
+linked to child session threads.
 
-- Docker Compose for local API + Postgres + worker.
-- K8s skeleton for API + Postgres + worker.
+Rules:
 
-Stage 2/3 target components:
+- Manager Agents use runtime tools to create plans, assignments, reviews,
+  escalations, and child specialist threads.
+- Manager Agents may choose which specialist/runtime profile should handle a
+  task, but execution still goes through the Managed Runtime Layer.
+- Manager Agents must not bypass Tool Router, Policy Engine, Approval Engine,
+  `session_events`, `tool_calls`, `audit_logs`, or artifacts.
 
-- `agent-os-api`
-- `agent-os-web`
-- `runtime-worker`
-- `codex-worker`
-- `sandbox-runner`
-- `mcp-gateway` with `McpGatewayConfig`, `McpGatewayClient`, and a local-verified `HttpMcpGatewayClient` HTTP boundary behind `mcp.call`.
-- `policy-engine` with `Principal`, `Permission`, and `Authorizer` as the RBAC boundary; session run, manual tool execution, approval decisions, execution job drain, read/list APIs, and core write APIs are enforced request paths.
-- `otel-collector` with `ObservabilityConfig`, `TelemetryExporter`, and a local-verified `HttpTelemetryExporter` OTLP HTTP boundary before wiring runtime export paths.
-- `vault` or compatible secret store with `SecretProviderKind`, `SecretProviderConfig`, `SecretRef`, `SecretProvider`, and explicit `reserved` / `vault` provider selection before enabling runtime secret reads by default.
-- `postgres`
-- `redis-or-nats`
-- `object-storage`
+## Semantic Layer
 
-## Agent Remote Computer Target
+The semantic layer gives agents stable business context:
 
-MandoForge should evolve from generic worker drains toward a Kubernetes Pod-based Agent Remote Computer substrate. In that model, a governed session leases an isolated Pod that behaves like a remote machine for the agent: OS tools, workspace, approved skills, runtime config, code execution, artifact output, and state mounts all live behind the same Tool Router, Policy Engine, Approval Engine, event log, and audit path.
+- Semantic sources.
+- Semantic objects.
+- Semantic links.
+- Context packets.
+- Memory writeback candidates.
 
-The current repo does not yet implement this substrate as a complete Pod execution path. Today it has K8s API/worker/scheduler skeletons, queue-backed execution jobs, worker leases, Docker shell sandbox support, a worker readiness gate, and a Remote Computer control-plane skeleton with a Pod template, restricted service account, RWX PVC placeholder, mounted state-contract ConfigMap for Memory/Notes/Skills/artifacts/locks, JuiceFS CSI profile manifest, production state-sync readiness gate, warm-pool Deployment example, KEDA ScaledObject example, an artifact discovery sidecar ConfigMap and fail-closed sidecar container, an opt-in `deploy/kustomization.yaml` bundle for those Remote Computer examples, deny-by-default NetworkPolicy, `remote_computers` / `remote_computer_leases` storage, lease heartbeat/release/fail APIs, `remote_computer_session_attachments`, stale attachment listing, Admin-only stale reclaim, manual execution-job-to-lease assignment, automatic worker assignment to an active matching Remote Computer lease during normal execution-job drains, automatic warm-pool lease claims from available Remote Computers, assignment lifecycle status updates for completed/retry-released/failed/canceled jobs, persisted `remote_computer_state_locks` for Memory/Notes/Skills/artifacts write coordination, persisted sidecar heartbeat records, readiness detection and scheduler audit runs for missing/stale artifact-discovery sidecars, an audited sidecar recovery run that fail-closed plans Pod replacement and only attempts delete/create when both Kubernetes runner gates and `MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED` are enabled, optional post-replacement validation through `MANDOFORGE_REMOTE_COMPUTER_SIDECAR_VALIDATION_URL`, a reserved `RemoteComputerRunner` boundary, a Kubernetes runner with dry-run/probe evidence and live-create payload injection for session/remote-computer/assignment sidecar env, Pod exec intent dry-run, a gated Kubernetes exec WebSocket client boundary with timeout and bounded stdout/stderr/status capture, env-gated job paths that can bind approved `file.write`, `shell.exec`, and `codex.exec` jobs to an assigned Remote Computer Pod, execution-job cancellation that can delete the assigned Pod when the Kubernetes execution transport gate is enabled, Codex final-message artifact capture from Pod exec output, push-based Remote Computer artifact sync into the Artifact Store, bounded shared-workspace artifact discovery via `POST /api/remote-computers/artifacts/discover`, execution transport readiness that reports assignment counts plus remaining sidecar discovery hardening steps, and doubly gated Pod create/delete HTTP calls, Admin-only runner readiness/dry-run/mutate routes, and session event/audit records. It does not yet mount a real distributed Memory/Notes/Skills filesystem into leased agent Pods.
+Context packets should be replayable so operators can inspect what an agent saw
+before it acted. Memory writeback remains approval-gated.
 
-Target control flow:
+## Environment And Remote Computer Boundary
 
-```text
-Agent Session
-  -> Harness / Tool Router / Policy Engine
-  -> Execution Job Queue
-  -> Remote Computer Manager
-  -> Kubernetes Pod lease
-  -> Mounted state filesystem
-  -> Sandbox / Codex / shell / tool execution
-  -> Artifact + Event + Audit sync
-```
+Environment is the runtime placement contract. Remote Computer is one
+Environment implementation, not the top-level product object.
 
-Stage 2 now includes a readiness and lease-state Remote Computer control plane: Pod template, PVC/RWX state mount placeholder plus a matching JuiceFS profile, mounted state-contract ConfigMap, JuiceFS profile manifest, production state-sync readiness gate, warm-pool example manifest, KEDA ScaledObject example, fail-closed artifact discovery sidecar manifest, readiness API, UI readiness panel, lease store, session attachment state, manual and automatic execution-job-to-lease handoff assignment, automatic warm-pool lease claiming, state lock acquire/release APIs for shared state write coordination, sidecar heartbeat API, missing/stale sidecar readiness alerts, scheduler-backed sidecar supervision audit runs, audited sidecar recovery planning with env-gated Pod replacement and optional external validation, worker acknowledgement, assignment lifecycle status updates, reserved Pod exec transport planning, Kubernetes Pod exec intent dry-run, gated runner live-exec WebSocket capture with timeout/output bounds, env-gated assigned-Pod `file.write`, `shell.exec`, and `codex.exec`, execution-job cancellation through assigned Pod deletion, live-create sidecar env injection, push-based Remote Computer artifact sync, bounded artifact discovery from shared workspaces, scheduler-backed stale reclaim, event names, reserved runner readiness/dry-run/mutation evidence, and honest blockers for distributed filesystem, production sidecar replacement validation, and full job-bound Pod execution transport. Stage 3 should make this the primary sandbox substrate by creating Kubernetes Pods per session, syncing artifacts/events back to MandoForge, assigning warm pools, and integrating KEDA/HPA plus a real distributed state filesystem option such as JuiceFS CSI.
+Rules:
 
-See [Agent Remote Computer Plan](agent-remote-computer-plan.md).
+- `Environment.runtime_profile_id` is the canonical runtime-adapter binding.
+- Worker polling and job claims should respect Environment id and worker queue
+  binding.
+- Remote Computer execution must still go through Tool Router, Policy Engine,
+  Approval Engine, session events, artifacts, and audit logs.
+- Remote Computer must not become a side channel around the Agent OS kernel.
 
 ## Verification
 
-Current verified path:
-
-- `cargo fmt --all -- --check`
-- `cargo check -p mandoforge-api --bins`
-- `cargo test -p mandoforge-api` including local mock Vault KV v2 HTTP coverage for token, namespace, path, and secret parsing.
-- `node --check web/app.js`
-- `./scripts/verify-static-ui-actionbook.sh`, the preferred local browser smoke when Playwright or Chrome DevTools MCP is timing out.
-- `kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out`
-- `./scripts/stage1-final-gate.sh`
-- `RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh`
-- `ALLOW_BLOCKED=1 ./scripts/stage2-production-evidence-gate.sh` for read-only Stage 2 readiness inventory against a running API.
-
-Stage 2 completion requires more than this local path. Use `RUN_STAGE2_PRODUCTION_VALIDATIONS=1 ./scripts/stage2-production-evidence-gate.sh` against a real deployment target after configuring the external controller URLs, provider/KMS/notification/collector targets, durable worker queue, Remote Computer state filesystem, and optional `MANDOFORGE_STAGE2_TEAM_ID` for MCP rollout evidence. The gate exits non-zero while `GET /api/stage2/readiness` reports open completion gaps.
-
-After the actionbook smoke, verify that the self-started API and CDP listeners were cleaned up:
+Focused local checks:
 
 ```bash
-lsof -nP -iTCP:8791 -sTCP:LISTEN || true
-lsof -nP -iTCP:9324 -sTCP:LISTEN || true
+cargo fmt --all -- --check
+cargo check -p mandoforge-api --bins
+cargo test -p mandoforge-api -- --test-threads=1
+bash -n scripts/stage1-demo.sh scripts/agent-os-core-evidence-gate.sh scripts/stage1-final-gate.sh
+shellcheck scripts/stage1-demo.sh scripts/agent-os-core-evidence-gate.sh scripts/stage1-final-gate.sh
+git diff --check
 ```
 
-Focused manual Postgres smoke can still be run with:
+Against a running API:
 
 ```bash
-docker compose up -d postgres
-DATABASE_URL=postgres://mandoforge:mandoforge@localhost:5432/mandoforge cargo run -p mandoforge-api
-BASE_URL=http://127.0.0.1:8787 ./scripts/smoke.sh
+BASE_URL=http://127.0.0.1:8787 ./scripts/agent-os-core-evidence-gate.sh
 ```

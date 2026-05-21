@@ -3,16 +3,53 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
 WORKSPACE_ROOT="${MANDOFORGE_WORKSPACE_ROOT:-.mandoforge/workspaces}"
+SUBJECT="${MANDOFORGE_STAGE1_DEMO_SUBJECT:-stage1-demo-principal}"
+ROLES="${MANDOFORGE_STAGE1_DEMO_ROLES:-admin}"
+
+auth_headers=(
+  -H "x-mandoforge-subject: $SUBJECT"
+  -H "x-mandoforge-roles: $ROLES"
+)
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "stage1 demo requires jq" >&2
   exit 1
 fi
 
+drain_session_loop() {
+  local session_id="$1"
+  local reason="$2"
+  local job_id=""
+
+  for _ in $(seq 1 20); do
+    job_id="$(
+      curl -fsS "$BASE_URL/api/session-loop-jobs" \
+        "${auth_headers[@]}" \
+        | jq -r --arg session_id "$session_id" '
+          map(select(.session_id == $session_id and .status == "queued")) | last.id // empty
+        '
+    )"
+    if [[ -n "$job_id" && "$job_id" != "null" ]]; then
+      break
+    fi
+    sleep 0.2
+  done
+
+  if [[ -z "$job_id" || "$job_id" == "null" ]]; then
+    echo "no queued session loop job for $session_id after $reason" >&2
+    exit 1
+  fi
+
+  curl -fsS -X POST "$BASE_URL/api/session-loop-jobs/$job_id/run" \
+    "${auth_headers[@]}" \
+    >/dev/null
+}
+
 curl -fsS "$BASE_URL/healthz" >/dev/null
 
 AGENT_ID="$(
   curl -fsS "$BASE_URL/api/agents" \
+    "${auth_headers[@]}" \
     | jq -r 'map(select(.name == "Generic Orchestrator Agent"))[0].id // empty'
 )"
 if [[ -z "$AGENT_ID" || "$AGENT_ID" == "null" ]]; then
@@ -22,6 +59,7 @@ fi
 
 SESSION_ID="$(
   curl -fsS -X POST "$BASE_URL/api/sessions" \
+    "${auth_headers[@]}" \
     -H 'content-type: application/json' \
     -d "$(jq -nc --arg agent_id "$AGENT_ID" '{
       agent_id: $agent_id,
@@ -31,18 +69,22 @@ SESSION_ID="$(
     | jq -r '.id'
 )"
 
-curl -fsS -X POST "$BASE_URL/api/sessions/$SESSION_ID/run" >/dev/null
+curl -fsS -X POST "$BASE_URL/api/sessions/$SESSION_ID/run" "${auth_headers[@]}" >/dev/null
+drain_session_loop "$SESSION_ID" "session run"
 
 SHELL_APPROVAL_ID="$(
   curl -fsS "$BASE_URL/api/approvals" \
+    "${auth_headers[@]}" \
     | jq -r --arg session_id "$SESSION_ID" '
       map(select(.session_id == $session_id and .action == "shell.exec" and .status == "pending"))[0].id
     '
 )"
-curl -fsS -X POST "$BASE_URL/api/approvals/$SHELL_APPROVAL_ID/approve" >/dev/null
+curl -fsS -X POST "$BASE_URL/api/approvals/$SHELL_APPROVAL_ID/approve" "${auth_headers[@]}" >/dev/null
+drain_session_loop "$SESSION_ID" "shell approval"
 
 WRITE_APPROVAL_ID="$(
   curl -fsS -X POST "$BASE_URL/api/tools/file.write/execute" \
+    "${auth_headers[@]}" \
     -H 'content-type: application/json' \
     -d "$(jq -nc --arg session_id "$SESSION_ID" '{
       session_id: $session_id,
@@ -53,22 +95,26 @@ WRITE_APPROVAL_ID="$(
     }')" \
     | jq -r '.approval_id'
 )"
-curl -fsS -X POST "$BASE_URL/api/approvals/$WRITE_APPROVAL_ID/approve" >/dev/null
+curl -fsS -X POST "$BASE_URL/api/approvals/$WRITE_APPROVAL_ID/approve" "${auth_headers[@]}" >/dev/null
 
 EVENT_TYPES="$(
   curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/events" \
+    "${auth_headers[@]}" \
     | jq -r '[.[].event_type] | unique | join(",")'
 )"
 TOOL_CALLS="$(
   curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/tool-calls" \
+    "${auth_headers[@]}" \
     | jq -r '[.[] | "\(.tool_name):\(.status)"] | join(",")'
 )"
 ARTIFACTS="$(
   curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/artifacts" \
+    "${auth_headers[@]}" \
     | jq -r '[.[].name] | join(",")'
 )"
 AUDIT_ACTIONS="$(
   curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/audit-logs" \
+    "${auth_headers[@]}" \
     | jq -r '[.[].action] | unique | join(",")'
 )"
 

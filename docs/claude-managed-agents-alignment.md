@@ -8,6 +8,18 @@ the same product model where it is structurally correct, while keeping
 MandoForge self-hostable, provider-neutral, auditable, and governed by its own
 policy and worker infrastructure.
 
+The fixed ownership model is:
+
+```text
+MandoForge Agent Runtime
+  owns Session / Events / Threads / Tool Router / Policy / Approval / Audit
+  calls Codex CLI / Claude Code CLI / Codex App Server as runtime adapters
+```
+
+Claude Managed Agents is a reference for runtime orchestration. It does not
+replace the broader Agent OS product stack, and it does not make the Manager
+Agent layer a separate runtime orchestrator.
+
 ## Source Model
 
 Claude Managed Agents is built around five first-class concepts:
@@ -70,7 +82,7 @@ Versioned Agent
   -> Environment
   -> Session
   -> user event
-  -> orchestrator loop job
+  -> runtime session-loop job
   -> model/span events
   -> tool / MCP / custom tool events
   -> policy approval events
@@ -95,7 +107,7 @@ Add `environments` as the canonical execution profile:
 - Workspace/state mount contract.
 - Worker pool or queue binding.
 - Artifact output paths.
-- KMS/Vault and MCP reachability requirements.
+- Secret-reference and MCP reachability requirements.
 - Lifecycle state and release gates.
 
 Existing `agent_runtime_profiles` should either become an implementation detail
@@ -130,16 +142,18 @@ Session creation should bind:
 
 Session execution should be driven by events, not by a synchronous run button.
 
-### 3. Orchestrator As A Queue-Claimed Session Loop
+### 3. Runtime Session Loop As A Queue-Claimed Worker Path
 
-Do not model the orchestrator as a permanently thinking daemon. Model it as a
-versioned coordinator agent whose session loop is claimed by workers.
+Do not model runtime orchestration as a permanently thinking daemon. Model it as
+a queue-claimed session loop whose work is claimed by workers. The loop prepares
+context, calls the selected provider or CLI/runtime adapter, appends events, and
+returns the session to an explicit state.
 
 ```text
 session event appended
-  -> orchestration work item enqueued
-  -> orchestrator worker claims session loop
-  -> provider call emits span.model_request_start/end
+  -> session_loop_job enqueued
+  -> runtime worker claims session loop
+  -> provider or CLI/runtime adapter call emits span/runtime events
   -> plan/tool/custom-tool/approval events are appended
   -> session returns to idle, requires_action, rescheduling, or terminated
 ```
@@ -184,7 +198,7 @@ product abstraction.
 
 Typed agent handoffs should become `session_threads`:
 
-- primary thread = coordinator/orchestrator stream
+- primary thread = coordinator or Manager Agent stream
 - child thread = specialist agent stream
 - every child thread has its own conversation/context
 - child thread shares session environment unless explicitly isolated
@@ -248,44 +262,55 @@ Implementation baseline, 2026-05-20:
   and schema-constrained final output instead of treating CLI stdout as the only
   source of truth.
 
-Remaining alignment work:
+Manager Agent boundary:
 
-| Claude-style contract | Current MandoForge baseline | Required next correction |
+- Manager Agents are managed agents running on MandoForge Agent Runtime.
+- They perform work coordination: intake, decomposition, specialist routing,
+  escalation, and result review.
+- Their decisions become structured manager-plan, assignment, review,
+  escalation, and child-thread records.
+- They do not own a second execution stack. Tool execution, queues, approvals,
+  audit, artifacts, event cursors, and resume remain in the Managed Runtime
+  Layer.
+
+Runtime alignment status:
+
+| Claude-style contract | Current MandoForge baseline | Follow-up / non-core hardening |
 | --- | --- | --- |
 | Sessions remain resumable and normally return to idle after a loop. | Sessions now persist managed-agent lifecycle names: `idle`, `running`, `requires_action`, `rescheduling`, `terminated`, and `failed`. Existing `created`, `waiting_approval`, and `completed` rows are read compatibly and upgraded by migration, normal loop completion returns to `idle` through `session.status_idle` / `session.loop.idle`, and `user.interrupt` is the explicit operator stop path that moves the session to `terminated`. | Add a dedicated final-close route if the product needs a separate close action beyond interrupt/stop events. |
 | User, approval, and custom tool result events are the durable input contract. | `/api/sessions/:id/events` persists events, wakes the loop, and session-loop jobs now store `pending_event_seq_start`, `pending_event_seq_end`, and `processed_event_seq` so each worker owns a concrete event window. Provider context is scoped to that pending range for user/custom-tool inputs, and approval decisions can trigger the loop through their durable event ids when no worker job is required. | Keep expanding typed event payloads for approval and custom-tool results so provider context can avoid legacy compatibility fallbacks. |
 | Session loop continuation is the single orchestration path. | Initial user events, custom-tool results, approval decisions, and approved execution completion now enqueue `session_loop_jobs`; worker completion first writes `execution.completed` and then uses that event as the loop trigger. | Route any remaining non-worker tool-result continuation sources through the same event-windowed path so retry, lease, metrics, audit, and tracing stay on one path. |
 | Environment owns placement for session work. | Environment records and Remote Computer policies exist, and workers can now bind polling/claiming to `x-mandoforge-environment-id` or `x-mandoforge-worker-pool` for both session-loop and execution-job endpoints. Direct run attempts for mismatched Environment ids or worker pools fail as not claimable. | Add scheduler/autoscaler evidence for named pools beyond the API claim/list contract. |
-| CLI-backed runtimes are Environment runtime adapters, not opaque tools. | `agent_cli.exec` can run managed `codex_cli` and `claude_code` runtime profiles, ingests their JSON/stream events into `runtime_adapter.event`, and now treats `Environment.runtime_profile_id` as the canonical managed-session adapter binding before handoff or agent runtime profile fallback. Managed `codex_cli`, `claude_code`, and App Server turn APIs map into normalized runtime turn events. | Keep `agent_cli.exec` as a compatibility facade while extending the same taxonomy to future hosted runtimes. |
+| CLI-backed runtimes are Environment runtime adapters, not opaque tools. | MandoForge Agent Runtime calls managed `codex_cli`, `claude_code`, and App Server runtime profiles, ingests their JSON/stream events into `runtime_adapter.event`, and treats `Environment.runtime_profile_id` as the canonical managed-session adapter binding before handoff or agent runtime profile fallback. `agent_cli.exec` remains a compatibility facade for approved tool paths. Managed `codex_cli`, `claude_code`, and App Server turn APIs map into normalized runtime turn events. | Keep promoting managed CLI execution from compatibility facade into Environment-owned runtime adapters while extending the same taxonomy to future hosted runtimes. |
 | Runtime adapters preserve structured turn state. | Codex CLI JSONL is normalized into runtime turn records for resume handles, structured output schema metadata, timing, usage, collected items, tool calls, final messages, and final-message artifacts. Claude Code stream-json maps `system`, `assistant`, and terminal `result` events into the same turn-start, item, usage, final, and completed taxonomy. Codex App Server turn create/poll/finalize paths now emit the same turn-start, item, final, artifact, and completed records with thread/turn lineage. Session-loop cursors make resumable event windows explicit. | Extend the normalized turn metadata model to future hosted runtimes and richer App Server native event payloads. |
 | Streaming is live progress. | `/api/sessions/:id/stream` exposes session events through SSE, emits each event sequence as the SSE `id`, supports reconnect replay with `?after_seq=` or `Last-Event-ID`, and now keeps the connection subscribed to newly appended session events after the replay snapshot. | Add production-scale fan-out/backpressure evidence for many concurrent streams. |
 | Thread APIs show each participating session's thread view. | Primary and specialist thread rows are durable, and lifecycle events are emitted. | Ensure specialist sessions can enumerate their own child thread membership, not only receive thread lifecycle events. |
-| Production readiness proves restart/resume behavior. | Stage 2 evidence gates cover many external controllers and readiness endpoints, and the managed-session restart/resume evidence gate now requires enqueue, worker-drain, API/worker restart, resumed cursor state, thread lineage, runtime finalization, and lease-fencing proof. | Run that managed-session restart/resume gate against a real production target and archive the evidence with the rest of the Stage 2 production adoption bundle. |
+| Deployment readiness proves restart/resume behavior. | The managed-session restart/resume evidence gate requires enqueue, worker-drain, API/worker restart, resumed cursor state, thread lineage, runtime finalization, and lease-fencing proof. This is the relevant runtime evidence for Agent OS core. | Run that managed-session restart/resume gate against a real target before claiming that specific deployment is ready. |
 
-## Revised Implementation Order
+## Operating Order
 
 1. Keep the Claude-style resource chain as the product contract:
    `Agent -> Environment -> Session -> Events -> Threads`.
 2. Preserve the landed baseline: Environment API, session event API,
    session-loop jobs, managed-session UI, Remote Computer environment policy,
    and durable session threads.
-3. Replace demo-era terminal session completion with explicit resumable session
-   states.
-4. Make every continuation path enqueue `session_loop_jobs`.
-5. Promote environment queue binding into session-loop worker placement.
-6. Promote Environment queue binding or add an environment work queue above
-   low-level execution jobs.
-7. Promote managed CLI execution from the `agent_cli.exec` compatibility facade
-   into Environment-owned runtime adapters.
-8. Harden live event streaming and thread membership views.
-9. Run the managed-session restart and recovery evidence gate against a real
-   production target.
-10. Then expand Workflow Packs, scheduler, Codex traces, and production Remote
-   Computer execution on top of the managed-session runtime.
+3. Preserve explicit resumable session states instead of demo-era terminal-only
+   completion.
+4. Keep every continuation path on `session_loop_jobs`.
+5. Keep Environment queue binding in session-loop worker placement.
+6. Keep managed CLI execution moving toward Environment-owned runtime adapters
+   called by MandoForge Agent Runtime.
+7. Harden live event streaming and thread membership views.
+8. Run the managed-session restart and recovery evidence gate against any target
+   before claiming that target is deployment-ready.
+9. Expand WorkItems, Assignments, Manager Agent plans, Semantic Objects,
+   Workflow Packs, scheduler, Codex traces, and Remote Computer execution on top
+   of the managed-session runtime.
 
 ## Non-Goals
 
-- Do not turn the orchestrator into an always-running LLM daemon.
+- Do not turn the runtime session loop into an always-running LLM daemon.
+- Do not let Manager Agents become a separate runtime orchestrator.
 - Do not let Remote Computer bypass Tool Router, Policy, Approval, Audit, or
   Event Stream.
 - Do not expose worker queue internals as the primary product entrypoint.

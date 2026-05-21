@@ -38,6 +38,52 @@ MandoForge 做的就是这一层公共能力。上面可以长出各行各业的
 - 法务 / 合同 / 审批 Agent
 - 任何需要“工具 + 审批 + 审计 + 回放”的企业 Agent
 
+## Agent OS 分层
+
+MandoForge 的主架构是 Agent OS，不是生产验收证据包：
+
+```text
+Existing Work Surfaces
+  Slack / 飞书 / GitHub / Jira / Linear / Email
+        |
+Collaboration Layer
+  WorkItem / Project / Assignment / Review
+  Agent Teammate / Squad / Activity Feed
+        |
+Manager Agent / Work Coordination Layer
+  Task decomposition / routing / escalation / review
+        |
+Managed Runtime Layer
+  Session / Event Log / Tool Router / Policy
+  Approval / Audit / Artifact / Eval
+        |
+Semantic Layer / Ontology Service
+  Business Objects / Metrics / Relations
+  Actions / Permissions / Tool Bindings
+  Retrieval Context / Data Contracts
+        |
+Enterprise Data Foundation
+  Warehouse / Lakehouse / Postgres / Vector
+  Graph / Docs / APIs / Event Streams
+```
+
+Claude Managed Agents 的 `Agent -> Environment -> Session -> Events -> Threads`
+只适合作为 Managed Runtime Layer 的参考模型，不是整个 Agent OS 的产品架构。
+上层协作、Manager Agent、Semantic Layer 仍然是 MandoForge 自己的 Agent OS 产品层。
+
+Runtime 边界要固定成：
+
+```text
+MandoForge Agent Runtime
+  -> Codex CLI / Claude Code CLI / Codex App Server runtime adapters
+  -> normalized events, tool calls, artifacts, audit logs
+```
+
+MandoForge 负责 session、context、policy、approval、audit、artifact、resume
+cursor、streaming 和 worker lease。Codex CLI / Claude Code CLI 是被
+MandoForge 调用和监管的执行后端。Manager Agent 是跑在这个 runtime 上的
+managed agent，负责 WorkItem / Assignment 协调，不拥有另一套执行栈。
+
 ## 它不是哪些东西？
 
 - 它不是一个现成的垂直行业 SaaS。
@@ -46,11 +92,11 @@ MandoForge 做的就是这一层公共能力。上面可以长出各行各业的
 - 它不是只包装 OpenAI API 的轻量 demo。
 - 它现在也还不是生产级完整平台。
 
-它当前更准确的状态是：**一个 Rust 写的 Agent OS Kernel 雏形，Stage 1 和 repo-controlled Stage 2 governed-runtime pilot 已经完成。** 真实生产环境还需要按 adoption backlog 跑环境级证据，才能声明某个生产部署已经验证。
+它当前更准确的状态是：**一个 Rust 写的 Agent OS Kernel 雏形**。Managed Runtime Layer 已经支撑 repo-controlled pilot；Collaboration、Manager Agent 和 Semantic Layer 是下一步产品化重点。
 
 ## 核心运行闭环
 
-MandoForge 要贴近的是 Claude Managed Agents 风格的产品模型：
+Managed Runtime Layer 可以参考 Claude Managed Agents 风格的运行时模型：
 
 ```text
 Agent -> Environment -> Session -> Events -> Threads
@@ -75,6 +121,9 @@ Agent -> Environment -> Session -> Events -> Threads
 
 这条链路一旦稳定，就可以被不同业务 Agent 复用。业务层只需要换 Agent 配置、工具、数据源和审批策略，不需要每次重新发明运行时底座。
 
+当前实现状态记录在
+[docs/runtime-truth-audit.md](docs/runtime-truth-audit.md)：哪些 runtime 能力已经落地，哪些仍是核心缺口。
+
 ## 当前已经有什么？
 
 Stage 1 已经实现了通用运行时内核：
@@ -95,31 +144,32 @@ Stage 2 已经补上 repo-controlled pilot 需要的治理能力：
 - RBAC 权限控制。
 - Workflow Pack / Domain Pack：可安装、可版本化、可审计的行业工作流包。
 - Provider 管理、模型 allowlist、预算和健康检查。
-- Vault secret reference 边界。
+- Secret reference / credential 边界。
 - Worker queue、Redis / NATS handoff、worker readiness。
 - Approval v2：修改参数、委托审批、过期、升级、通知。
 - MCP Gateway 管理。
 - Codex App Server adapter。
 - Eval / Release gate / rollback。
-- Observability、usage、cost、finance operations。
+- Observability、usage、cost tracking。
 - Scheduler due-run。
 - Remote Computer readiness skeleton。
 
-Stage 2 的 repo-controlled pilot 已完成。严格审计和真实外部生产 adoption backlog 见：[Stage 2 Completion Audit](docs/stage2-completion-audit.md)。
+Stage 2 的 repo-controlled pilot 已完成。核心完成证据应该是 runtime action record：session events、tool calls、approvals、artifacts 和 audit logs。
 
 ## 现在最重要的设计方向
 
-当前最重要的下一步不是做某个行业 demo，而是让 Agent 中台贴近 Claude
-Managed Agents 的产品模型，同时保持自托管、provider-neutral 和 policy-governed：
+当前最重要的下一步不是做某个行业 demo，而是围绕 runtime kernel 往完整
+Agent OS 分层上推进：
 
 ```text
-Agent -> Environment -> Session -> Events -> Threads
+Work Surfaces -> Collaboration -> Manager Agent / Work Coordination -> Managed Runtime -> Semantic Layer -> Data Foundation
 ```
 
-近期重点是 **Managed Session Runtime**：
+近期重点仍然是 **Managed Session Runtime**，因为上层 Collaboration / Manager
+Agent / Semantic Layer 都依赖一个可靠的 event-driven runtime：
 
 ```text
-创建或恢复 Session，写入 user events，让 Orchestrator loop 通过受治理的 Environment queue 执行，并把 model/tool/session events 实时回流到 UI。
+创建或恢复 Session，写入 user events，让 runtime session loop 通过受治理的 Environment queue 执行，调用选定的 CLI/runtime adapter，并把 model/tool/session events 实时回流到 UI。
 ```
 
 这是对之前 Remote Computer-first 叙述的修正。Remote Computer 仍然重要，
@@ -130,7 +180,7 @@ Agent -> Environment -> Session -> Events -> Threads
 - 添加 first-class Environment 资源，放在 runtime profiles 和 Remote Computer profiles 之上。
 - 让 `POST /api/sessions/:id/events` 成为驱动任务的主入口。
 - 把 `POST /api/sessions/:id/run` 降级为向 session 写入 user event 的兼容 wrapper。
-- 把 Orchestrator 执行从 API request path 里移出来，交给 queue-claimed session loop。
+- 把 runtime session-loop 执行从 API request path 里移出来，交给 queue-claimed worker path。
 - 把 session status、model spans、tool use、approvals、artifacts、child threads 实时回流到 UI。
 
 当前 managed-agent baseline：
@@ -138,28 +188,27 @@ Agent -> Environment -> Session -> Events -> Threads
 - `GET/POST /api/environments` 和 `GET/PATCH/DELETE /api/environments/:id` 管理第一等 Environment 资源。
 - `POST /api/sessions` 接受 `environment_id`，并在 session event log 写入 `session.environment_bound`。
 - `Environment.runtime_profile_id` 是 session 的 canonical managed runtime-adapter 绑定。`agent_cli.exec` 仍是 CLI-backed adapters 的兼容 facade，但请求里的 profile 必须先匹配绑定的 Environment profile，之后才回退到 handoff 或 agent runtime profile；旧的 env-var allowlist 只在没有 managed binding 时生效。
-- `POST /api/sessions/:id/events` 会 enqueue 可被 worker lease claim 的 `session_loop_job`；`mandoforge-worker` 在 API request path 之外执行 orchestrator loop。
+- `POST /api/sessions/:id/events` 会 enqueue 可被 worker lease claim 的 `session_loop_job`；`mandoforge-worker` 在 API request path 之外执行 runtime session loop。
 - session 执行会写入 managed-agent 风格的 `session.status_*`、`span.model_request_*`、`agent.tool_use`、`agent.tool_result` 和 `thread.*` timeline events。
 - `GET /api/sessions/:id/threads` 暴露 durable `session_threads`；Manager 到 Specialist 的 typed handoff 会创建挂在 parent session 下的 child specialist thread。
 - `Environment(type=remote_computer)` 现在负责自动 Remote Computer 分配：approved execution jobs 只会自动 claim 与 session environment contract 匹配的 lease 或 warm-pool resource；绑定 remote environment 但未启用 Remote Computer execution transport 时会 fail closed，不会静默退回本地执行。
 - UI 的开始任务表单会加载 environments，并把新 session 绑定到选择的环境。
-- UI 的运行路径先围绕 managed-session 对象组织：Agent、Environment、Event Stream、Blocking Actions、Artifacts 和 Threads；worker、Remote Computer、provider、Vault、MCP、tenant 等底层设施保留在系统状态和高级面板里。
+- UI 的运行路径先围绕 managed-session 对象组织：Agent、Environment、Event Stream、Blocking Actions、Artifacts 和 Threads；worker、Remote Computer、provider、secret、MCP、tenant 等底层设施保留在系统状态和高级面板里。
 
-当前对齐缺口记录在 [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md)
-和 [Stage 2 / Stage 3 Roadmap](docs/stage2-stage3-roadmap.md)。最重要的剩余工作是把
-Claude-style contract 做成端到端闭环：可恢复的非 terminal idle session、基于
-event cursor 的 loop processing、live streaming、environment queue binding、
-lease-fenced job finalization，以及能证明 worker restart / session recovery 的生产证据。
-
-剩余生产化工作也包括集群证据：runtime 已强制执行
-`Environment(type=remote_computer)` policy，但真实 Kubernetes Pod execution 仍依赖已配置的
-Remote Computer transport，以及外部 state-sync / sidecar / worker-pool evidence gates。
+Runtime 对齐状态记录在 [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md)
+和 [Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md)。核心 runtime contract
+现在围绕可恢复的 idle session、基于 event cursor 的 loop processing、live
+streaming、Environment-bound worker claim 和 lease-fenced job finalization 展开。
+下一步主线应该往 WorkItem、Assignment、Manager Agent planning、Semantic Objects
+推进，而不是继续扩展旁支部署验证包。
 
 ## 本地运行
 
 启动 API：
 
 ```bash
+MANDOFORGE_INSECURE_DEV_AUTH=1 \
+MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1 \
 cargo run -p mandoforge-api
 ```
 
@@ -193,7 +242,7 @@ Docker Desktop 可用时：
 RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh
 ```
 
-常驻 worker / orchestrator loop：
+常驻 worker / runtime session loop：
 
 ```bash
 MANDOFORGE_EXECUTION_WORKER=queue \
@@ -242,21 +291,26 @@ curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
   }'
 ```
 
-把其中一个 profile 绑定到 specialist agent 或 handoff assignment 后，再用
-`agent_cli.exec` 传入匹配的 `profile` 和 `task`。批准后的 execution job 由
-`mandoforge-worker` 消费，结果会为了兼容旧路径继续记录 `profile`、
-`runtime_type`、`stdout`、`stderr`、截断标记和退出状态。受管 `codex_cli`、
-`claude_code`、Gemini、OpenCode、Aider profile 会被当作 runtime adapter：
-它们的 JSONL 或 stream-json 输出会被写成 `runtime_adapter.event` session
-events，并带基础 secret-key redaction 和 event-count limits。Codex CLI 和
-Claude Code CLI 输出也会映射成 normalized runtime turn records，覆盖 turn
-start、items/tool calls、usage、final message、artifact 和 completion；Codex
-App Server turn API 也会用同一套 taxonomy 记录 thread/turn lineage。这样 CLI-backed
-agents 仍然在 Tool Router、Policy Engine、Approval Engine、worker lease、
-Remote Computer、event log、audit path 之内，同时产品语义会往
-Environment-owned runtime adapter 推进。`agent_cli.exec` 仍然是兼容 facade；
-目标 Managed Agents 模型是 `Agent -> Environment -> Session -> runtime
-adapter -> Events`。
+把其中一个 profile 绑定到 Environment、specialist agent 或 handoff assignment
+后，MandoForge Agent Runtime 会通过 session-loop worker path 调用选定的
+CLI/runtime adapter。`agent_cli.exec` 仍可以作为兼容 facade，传入匹配的
+`profile` 和 `task`；批准后的 execution job 由 `mandoforge-worker` 消费。
+
+受管 `codex_cli`、`claude_code`、Gemini、OpenCode、Aider profile 会被当作
+runtime adapter：它们的 JSONL 或 stream-json 输出会被写成
+`runtime_adapter.event` session events，并带基础 secret-key redaction 和
+event-count limits。Codex CLI 和 Claude Code CLI 输出也会映射成 normalized
+runtime turn records，覆盖 turn start、items/tool calls、usage、final
+message、artifact 和 completion；Codex App Server turn API 也会用同一套
+taxonomy 记录 thread/turn lineage。
+
+这样 CLI-backed agents 仍然在 Tool Router、Policy Engine、Approval Engine、
+worker lease、Remote Computer、event log、audit path 之内，同时产品语义会往
+Environment-owned runtime adapter 推进。目标 Managed Agents 模型是：
+
+```text
+Agent -> Environment -> Session -> runtime adapter -> Events
+```
 
 ## Docker
 
@@ -286,14 +340,10 @@ kubectl -n agent-os port-forward svc/mandoforge-api 8787:8787
 - [Runtime Architecture](docs/architecture.md)
 - [Stage 1 Plan](docs/stage1-plan.md)
 - [Stage 1 Completion Audit](docs/stage1-completion-audit.md)
-- [Stage 2 Gap Audit](docs/stage2-gap-audit.md)
 - [Stage 2 Completion Audit](docs/stage2-completion-audit.md)
-- [Stage 2 Production Adoption Runbook](docs/stage2-production-adoption-runbook.md)
-- [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md)
-- [Whiskey Adoption Runbook](docs/whiskey-adoption-runbook.md)
-- [Whiskey Adoption Status](docs/whiskey-adoption-status.md)
+- [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) - 仅作为 runtime-layer 参考
 - [MandoForge Roadmap v2](docs/mandoforge-roadmap-v2.md)
-- [Stage 2 / Stage 3 Roadmap](docs/stage2-stage3-roadmap.md)
+- [Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md)
 - [Workflow Pack Adaptation Plan](docs/workflow-pack-adaptation-plan.md)
 - [WorkflowPack Manifest Contract](docs/workflow-pack-manifest-contract.md)
 - [Agent Remote Computer Plan](docs/agent-remote-computer-plan.md)

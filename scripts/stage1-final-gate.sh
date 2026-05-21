@@ -30,10 +30,12 @@ trap cleanup EXIT
 
 cargo fmt --all -- --check
 cargo check -p mandoforge-api --bins
-cargo test -p mandoforge-api
+cargo test -p mandoforge-api -- --test-threads=1
 
 bash -n scripts/smoke.sh
 bash -n scripts/stage1-demo.sh
+bash -n scripts/agent-os-core-evidence-gate.sh
+bash -n scripts/verify-runtime-adapter-turn-metadata.sh
 bash -n scripts/seed-platform-events.sh
 bash -n scripts/verify-postgres-sql-query.sh
 bash -n scripts/verify-docker-shell-runner.sh
@@ -41,7 +43,6 @@ bash -n scripts/verify-codex-exec-adapter.sh
 bash -n scripts/execution-worker-loop.sh
 bash -n scripts/verify-execution-worker-loop.sh
 bash -n scripts/verify-external-provider.sh
-bash -n scripts/stage2-production-evidence-gate.sh
 
 prepare_fake_codex() {
   FAKE_CODEX_DIR="$(mktemp -d -t mandoforge-fake-codex.XXXXXX)"
@@ -98,9 +99,11 @@ if [[ "$RUN_LIVE" != "1" ]]; then
       "$LOG_FILE" \
       "MANDOFORGE_ADDR=$GATE_ADDR" \
       "MANDOFORGE_WORKSPACE_ROOT=$GATE_WORKSPACE_ROOT" \
+      "MANDOFORGE_INSECURE_DEV_AUTH=1" \
+      "MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1" \
       "PATH=$FAKE_CODEX_DIR:$PATH"
 
-    BASE_URL="$GATE_BASE_URL" MANDOFORGE_WORKSPACE_ROOT="$GATE_WORKSPACE_ROOT" ./scripts/stage1-demo.sh
+    BASE_URL="$GATE_BASE_URL" MANDOFORGE_WORKSPACE_ROOT="$GATE_WORKSPACE_ROOT" ./scripts/agent-os-core-evidence-gate.sh
     BASE_URL="$GATE_BASE_URL" ./scripts/verify-codex-exec-adapter.sh
   fi
 
@@ -129,6 +132,8 @@ if [[ "$START_LIVE_STACK" == "1" ]]; then
     "$LOG_FILE" \
     "MANDOFORGE_ADDR=$GATE_ADDR" \
     "MANDOFORGE_WORKSPACE_ROOT=$GATE_WORKSPACE_ROOT" \
+    "MANDOFORGE_INSECURE_DEV_AUTH=1" \
+    "MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1" \
     "DATABASE_URL=$DATABASE_URL" \
     "MANDOFORGE_SHELL_RUNNER=docker" \
     "MANDOFORGE_SHELL_DOCKER_IMAGE=${MANDOFORGE_SHELL_DOCKER_IMAGE:-alpine:3.20}" \
@@ -138,7 +143,7 @@ fi
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
 
-BASE_URL="$BASE_URL" MANDOFORGE_WORKSPACE_ROOT="$GATE_WORKSPACE_ROOT" ./scripts/stage1-demo.sh
+BASE_URL="$BASE_URL" MANDOFORGE_WORKSPACE_ROOT="$GATE_WORKSPACE_ROOT" ./scripts/agent-os-core-evidence-gate.sh
 if [[ "$START_LIVE_STACK" == "1" || "${RUN_CODEX_VERIFY:-0}" == "1" ]]; then
   BASE_URL="$BASE_URL" ./scripts/verify-codex-exec-adapter.sh
 fi
