@@ -4122,9 +4122,21 @@ struct VaultKmsRotationRun {
     stale_rotation_count: usize,
     rotated_count: usize,
     catalog_updated_count: usize,
+    rotation_details: Vec<VaultKmsRotationDetail>,
     blocked_count: usize,
     actions: Vec<String>,
     external_execution: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultKmsRotationDetail {
+    key_id: String,
+    rotation_id: String,
+    secret_record_id: Uuid,
+    status: String,
+    catalog_updated: bool,
+    audit_id: Uuid,
+    rotated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20030,6 +20042,8 @@ where
     let blocked_count = usize::from(!secret_provider.healthy) + usize::from(!kms.configured);
     let mut rotated_count = 0;
     let mut catalog_updated_count = 0;
+    let audit_id = Uuid::new_v4();
+    let mut rotation_details = Vec::new();
     let mut external_execution = json!({
         "attempted": false,
         "status": "skipped",
@@ -20050,6 +20064,16 @@ where
             Ok(outcome) => {
                 external_execution = outcome.summary.clone();
                 rotated_count = outcome.rotated_count;
+                let rotation_detail_key_id = external_execution
+                    .get("key_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(kms.provider.as_str())
+                    .to_string();
+                let rotation_detail_rotation_id = external_execution
+                    .get("rotation_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("external-kms-rotation")
+                    .to_string();
                 for record_id in outcome.rotated_secret_record_ids {
                     if let Some(record) =
                         secret_records.iter().find(|record| record.id == record_id)
@@ -20061,6 +20085,15 @@ where
                         };
                         state.rotate_secret_record(record.id, input).await?;
                         catalog_updated_count += 1;
+                        rotation_details.push(VaultKmsRotationDetail {
+                            key_id: rotation_detail_key_id.clone(),
+                            rotation_id: rotation_detail_rotation_id.clone(),
+                            secret_record_id: record.id,
+                            status: "validated".to_string(),
+                            catalog_updated: true,
+                            audit_id,
+                            rotated_at: checked_at,
+                        });
                     }
                 }
                 actions.extend(outcome.actions);
@@ -20097,19 +20130,21 @@ where
         stale_rotation_count,
         rotated_count,
         catalog_updated_count,
+        rotation_details,
         blocked_count,
         actions,
         external_execution,
     };
     state
-        .append_audit_log(new_audit_log(
-            None,
-            "system",
-            None,
-            "vault.kms_rotation_run",
-            "vault",
-            None,
-            json!({
+        .append_audit_log(AuditLog {
+            id: audit_id,
+            session_id: None,
+            actor_type: "system".to_string(),
+            actor_id: None,
+            action: "vault.kms_rotation_run".to_string(),
+            resource_type: "vault".to_string(),
+            resource_id: None,
+            details: json!({
                 "status": run.status,
                 "kms_provider": run.kms_provider,
                 "kms_status": run.kms_status,
@@ -20119,12 +20154,14 @@ where
                 "stale_rotation_count": run.stale_rotation_count,
                 "rotated_count": run.rotated_count,
                 "catalog_updated_count": run.catalog_updated_count,
+                "rotation_details": run.rotation_details,
                 "blocked_count": run.blocked_count,
                 "actions": run.actions,
                 "external_execution": run.external_execution,
                 "checked_at": run.checked_at,
             }),
-        ))
+            created_at: Utc::now(),
+        })
         .await?;
     Ok(run)
 }
@@ -52757,6 +52794,13 @@ not json
         assert_eq!(run.external_execution["status"], "validated");
         assert_eq!(run.external_execution["rotation_id"], "kms-rotation-1");
         assert_eq!(run.external_execution["rotated_count"], 1);
+        assert_eq!(run.rotation_details.len(), 1);
+        assert_eq!(run.rotation_details[0].key_id, "key-1");
+        assert_eq!(run.rotation_details[0].rotation_id, "kms-rotation-1");
+        assert_eq!(run.rotation_details[0].secret_record_id, record.id);
+        assert!(run.rotation_details[0].catalog_updated);
+        assert_eq!(run.rotation_details[0].status, "validated");
+        assert_ne!(run.rotation_details[0].audit_id, Uuid::nil());
         assert!(
             run.actions
                 .iter()
@@ -52791,6 +52835,7 @@ not json
                 && log.details["status"] == "validated"
                 && log.details["rotated_count"] == 1
                 && log.details["catalog_updated_count"] == 1
+                && log.details["rotation_details"][0]["audit_id"] == json!(log.id)
                 && log.details["external_execution"]["status"] == "validated"
                 && log.details["external_execution"]["production_backend"] == true
         }));

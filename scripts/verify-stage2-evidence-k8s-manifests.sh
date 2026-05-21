@@ -840,6 +840,11 @@ if ! grep -q "rotation_rotated_count" "$vault_script" || ! grep -q "rotation_cat
   exit 1
 fi
 
+if ! grep -q "rotation_details: Vec<VaultKmsRotationDetail>" crates/mandoforge-api/src/main.rs || ! grep -q "catalog_updated: true" crates/mandoforge-api/src/main.rs || ! grep -q "audit_id: Uuid" crates/mandoforge-api/src/main.rs || ! grep -q "rotated_at: DateTime<Utc>" crates/mandoforge-api/src/main.rs; then
+  echo "Vault KMS rotation API must return audited key-level rotation details for production evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*executed_at.*rotated_at.*timestamp" "$vault_script"; then
   echo "Vault evidence script must require KMS rotation key details with audit or timestamp evidence" >&2
   exit 1
