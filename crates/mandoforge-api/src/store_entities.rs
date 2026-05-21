@@ -460,7 +460,7 @@ impl AppState {
             agent_version_id: Some(agent_version.id),
             environment_id: input.environment_id,
             title: input.title,
-            status: SessionStatus::Created,
+            status: SessionStatus::Idle,
             created_at: now,
             updated_at: now,
         };

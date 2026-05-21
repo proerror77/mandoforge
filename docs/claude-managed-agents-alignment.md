@@ -141,7 +141,7 @@ session event appended
   -> orchestrator worker claims session loop
   -> provider call emits span.model_request_start/end
   -> plan/tool/custom-tool/approval events are appended
-  -> session returns to idle, waiting_approval, rescheduling, or terminated
+  -> session returns to idle, requires_action, rescheduling, or terminated
 ```
 
 This keeps the "always available" product feel without a wasteful always-running
@@ -252,7 +252,7 @@ Remaining alignment work:
 
 | Claude-style contract | Current MandoForge baseline | Required next correction |
 | --- | --- | --- |
-| Sessions remain resumable and normally return to idle after a loop. | Runtime emits managed-agent-style status events, but the persisted session enum still uses demo-era terminal `completed` for a successful pass. | Add explicit persisted `idle`, `running`, `requires_action`, `rescheduling`, and `terminated` semantics; normal loop completion should return to idle, and terminated should require an explicit stop/final-close path. |
+| Sessions remain resumable and normally return to idle after a loop. | Sessions now persist managed-agent lifecycle names: `idle`, `running`, `requires_action`, `rescheduling`, `terminated`, and `failed`. Existing `created`, `waiting_approval`, and `completed` rows are read compatibly and upgraded by migration, normal loop completion returns to `idle` through `session.status_idle` / `session.loop.idle`, and `user.interrupt` is the explicit operator stop path that moves the session to `terminated`. | Add a dedicated final-close route if the product needs a separate close action beyond interrupt/stop events. |
 | User, approval, and custom tool result events are the durable input contract. | `/api/sessions/:id/events` persists events, wakes the loop, and session-loop jobs now store `pending_event_seq_start`, `pending_event_seq_end`, and `processed_event_seq` so each worker owns a concrete event window. Provider context is scoped to that pending range for user/custom-tool inputs, and approval decisions can trigger the loop through their durable event ids when no worker job is required. | Keep expanding typed event payloads for approval and custom-tool results so provider context can avoid legacy compatibility fallbacks. |
 | Session loop continuation is the single orchestration path. | Initial user events, custom-tool results, approval decisions, and approved execution completion now enqueue `session_loop_jobs`; worker completion first writes `execution.completed` and then uses that event as the loop trigger. | Route any remaining non-worker tool-result continuation sources through the same event-windowed path so retry, lease, metrics, audit, and tracing stay on one path. |
 | Environment owns placement for session work. | Environment records and Remote Computer policies exist, and workers can now bind polling/claiming to `x-mandoforge-environment-id` or `x-mandoforge-worker-pool` for both session-loop and execution-job endpoints. Direct run attempts for mismatched Environment ids or worker pools fail as not claimable. | Add scheduler/autoscaler evidence for named pools beyond the API claim/list contract. |

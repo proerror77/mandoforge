@@ -745,20 +745,22 @@ struct Session {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SessionStatus {
-    Created,
+    Idle,
     Running,
-    WaitingApproval,
-    Completed,
+    RequiresAction,
+    Rescheduling,
+    Terminated,
     Failed,
 }
 
 impl SessionStatus {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::Created => "created",
+            Self::Idle => "idle",
             Self::Running => "running",
-            Self::WaitingApproval => "waiting_approval",
-            Self::Completed => "completed",
+            Self::RequiresAction => "requires_action",
+            Self::Rescheduling => "rescheduling",
+            Self::Terminated => "terminated",
             Self::Failed => "failed",
         }
     }
@@ -767,11 +769,13 @@ impl SessionStatus {
 impl From<String> for SessionStatus {
     fn from(value: String) -> Self {
         match value.as_str() {
+            "idle" | "created" => Self::Idle,
             "running" => Self::Running,
-            "waiting_approval" => Self::WaitingApproval,
-            "completed" => Self::Completed,
+            "requires_action" | "waiting_approval" => Self::RequiresAction,
+            "rescheduling" => Self::Rescheduling,
+            "terminated" | "completed" => Self::Terminated,
             "failed" => Self::Failed,
-            _ => Self::Created,
+            _ => Self::Idle,
         }
     }
 }
@@ -9524,8 +9528,13 @@ async fn append_incoming_session_event(
             let stored = state
                 .append_event("user", None, session_id, &event.event_type, event.payload)
                 .await?;
-            set_managed_session_status(state, session_id, SessionStatus::Failed, "user interrupt")
-                .await?;
+            set_managed_session_status(
+                state,
+                session_id,
+                SessionStatus::Terminated,
+                "user interrupt",
+            )
+            .await?;
             state
                 .append_event(
                     "system",
@@ -9631,20 +9640,22 @@ async fn set_primary_session_thread_status(
 
 fn managed_thread_status_for_session(status: &SessionStatus) -> &'static str {
     match status {
-        SessionStatus::Created => "idle",
+        SessionStatus::Idle => "idle",
         SessionStatus::Running => "running",
-        SessionStatus::WaitingApproval => "requires_action",
-        SessionStatus::Completed => "terminated",
+        SessionStatus::RequiresAction => "requires_action",
+        SessionStatus::Rescheduling => "rescheduling",
+        SessionStatus::Terminated => "terminated",
         SessionStatus::Failed => "failed",
     }
 }
 
 fn managed_session_status_event(status: &SessionStatus) -> &'static str {
     match status {
-        SessionStatus::Created => "session.status_idle",
+        SessionStatus::Idle => "session.status_idle",
         SessionStatus::Running => "session.status_running",
-        SessionStatus::WaitingApproval => "session.status_requires_action",
-        SessionStatus::Completed => "session.status_terminated",
+        SessionStatus::RequiresAction => "session.status_requires_action",
+        SessionStatus::Rescheduling => "session.status_rescheduling",
+        SessionStatus::Terminated => "session.status_terminated",
         SessionStatus::Failed => "session.status_failed",
     }
 }
@@ -9656,7 +9667,10 @@ pub(crate) async fn session_accepts_worker_execution(
     let session = state.get_session(session_id).await?;
     Ok(matches!(
         session.status,
-        SessionStatus::Created | SessionStatus::Running | SessionStatus::WaitingApproval
+        SessionStatus::Idle
+            | SessionStatus::Running
+            | SessionStatus::RequiresAction
+            | SessionStatus::Rescheduling
     ))
 }
 
@@ -12664,7 +12678,7 @@ async fn enqueue_session_loop_after_approval_event(
     set_managed_session_status(
         state,
         session_id,
-        SessionStatus::Created,
+        SessionStatus::Idle,
         "approval resolved; session loop queued",
     )
     .await?;
@@ -12848,18 +12862,14 @@ async fn run_session_loop(state: &AppState, job: &SessionLoopJob) -> Result<Sess
         set_managed_session_status(
             state,
             id,
-            SessionStatus::WaitingApproval,
+            SessionStatus::RequiresAction,
             "tool approval required",
         )
         .await?
     } else {
-        let session = set_managed_session_status(
-            state,
-            id,
-            SessionStatus::Created,
-            "provider tool loop idled",
-        )
-        .await?;
+        let session =
+            set_managed_session_status(state, id, SessionStatus::Idle, "provider tool loop idled")
+                .await?;
         state
             .append_event(
                 "system",
@@ -14722,7 +14732,7 @@ impl ToolExecutor for ApprovalRequestTool {
         set_managed_session_status(
             state,
             input.session_id,
-            SessionStatus::WaitingApproval,
+            SessionStatus::RequiresAction,
             "tool approval requested",
         )
         .await?;
@@ -15298,7 +15308,7 @@ async fn execute_tool_invocation(
         set_managed_session_status(
             state,
             input.session_id,
-            SessionStatus::WaitingApproval,
+            SessionStatus::RequiresAction,
             "tool approval required",
         )
         .await?;
@@ -31169,7 +31179,7 @@ async fn build_observability_summary(state: &AppState) -> Result<ObservabilitySu
 
     let waiting_approval_sessions = sessions
         .iter()
-        .filter(|session| session.status == SessionStatus::WaitingApproval)
+        .filter(|session| session.status == SessionStatus::RequiresAction)
         .count();
     let failed_sessions = sessions
         .iter()
@@ -44926,9 +44936,31 @@ not json
         assert!(names.contains(&"0039_session_loop_jobs.sql"));
         assert!(names.contains(&"0040_session_threads.sql"));
         assert!(names.contains(&"0041_session_loop_event_cursor.sql"));
+        assert!(names.contains(&"0042_session_managed_statuses.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
+        );
+    }
+
+    #[test]
+    fn session_statuses_use_managed_agent_lifecycle_names() {
+        assert_eq!(SessionStatus::Idle.as_str(), "idle");
+        assert_eq!(SessionStatus::RequiresAction.as_str(), "requires_action");
+        assert_eq!(SessionStatus::Rescheduling.as_str(), "rescheduling");
+        assert_eq!(SessionStatus::Terminated.as_str(), "terminated");
+
+        assert_eq!(
+            SessionStatus::from("created".to_string()),
+            SessionStatus::Idle
+        );
+        assert_eq!(
+            SessionStatus::from("waiting_approval".to_string()),
+            SessionStatus::RequiresAction
+        );
+        assert_eq!(
+            SessionStatus::from("completed".to_string()),
+            SessionStatus::Terminated
         );
     }
 
@@ -56566,7 +56598,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(pending_checkpoint.status, SessionStatus::Created));
+        assert!(matches!(pending_checkpoint.status, SessionStatus::Idle));
         let resume_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
         assert!(resume_jobs.iter().any(|job| {
             job.status == SessionLoopJobStatus::Queued
@@ -56587,7 +56619,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(checkpointed.status, SessionStatus::Created));
+        assert!(matches!(checkpointed.status, SessionStatus::Idle));
 
         let generated: Vec<MemoryWritebackCandidate> = request_json(
             app.clone(),
@@ -58367,7 +58399,7 @@ not json
             ),
         )
         .await;
-        assert!(matches!(session.status, SessionStatus::Created));
+        assert!(matches!(session.status, SessionStatus::Idle));
         let initial_threads: Vec<SessionThread> = request_json(
             app.clone(),
             Request::builder()
@@ -58399,7 +58431,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(running.status, SessionStatus::WaitingApproval));
+        assert!(matches!(running.status, SessionStatus::RequiresAction));
 
         let events: Vec<SessionEvent> = request_json(
             app.clone(),
@@ -58549,7 +58581,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(idle_before_resume.status, SessionStatus::Created));
+        assert!(matches!(idle_before_resume.status, SessionStatus::Idle));
 
         let completed_resume_loop =
             run_next_session_loop_job(app.clone(), session.id, "approval-resume-worker").await;
@@ -58565,7 +58597,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(idle_after_resume.status, SessionStatus::Created));
+        assert!(matches!(idle_after_resume.status, SessionStatus::Idle));
 
         let events_after_approval: Vec<SessionEvent> = request_json(
             app.clone(),
@@ -58663,7 +58695,7 @@ not json
             ),
         )
         .await;
-        assert!(matches!(session.status, SessionStatus::Created));
+        assert!(matches!(session.status, SessionStatus::Idle));
 
         let stored_events: Vec<SessionEvent> = request_json(
             app.clone(),
@@ -58737,7 +58769,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(running.status, SessionStatus::WaitingApproval));
+        assert!(matches!(running.status, SessionStatus::RequiresAction));
 
         let events: Vec<SessionEvent> = request_json(
             app.clone(),
@@ -59264,7 +59296,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(terminal_before.status, SessionStatus::Failed));
+        assert!(matches!(terminal_before.status, SessionStatus::Terminated));
 
         let skipped = run_next_session_loop_job(app.clone(), session.id, "stale-loop-worker").await;
         assert_eq!(skipped.status, SessionLoopJobStatus::Failed);
@@ -59281,7 +59313,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(terminal_after.status, SessionStatus::Failed));
+        assert!(matches!(terminal_after.status, SessionStatus::Terminated));
         let events_after: Vec<SessionEvent> = request_json(
             app,
             Request::builder()
@@ -59347,7 +59379,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(terminal.status, SessionStatus::Failed));
+        assert!(matches!(terminal.status, SessionStatus::Terminated));
 
         let (status, rejected) = request_value(
             app.clone(),
@@ -59435,7 +59467,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(compat_run.status, SessionStatus::Created));
+        assert!(matches!(compat_run.status, SessionStatus::Idle));
         let run_events: Vec<SessionEvent> = request_json(
             app.clone(),
             Request::builder()
@@ -59471,10 +59503,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(
-            after_worker.status,
-            SessionStatus::WaitingApproval
-        ));
+        assert!(matches!(after_worker.status, SessionStatus::RequiresAction));
     }
 
     #[tokio::test]
@@ -59625,7 +59654,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(running.status, SessionStatus::WaitingApproval));
+        assert!(matches!(running.status, SessionStatus::RequiresAction));
 
         let observability: ObservabilitySummary = request_json(
             app.clone(),
@@ -59641,7 +59670,7 @@ not json
         assert_eq!(observability.telemetry.service_name, "mandoforge-api-test");
         assert!(!observability.telemetry.otlp_enabled);
         assert_eq!(
-            observability.sessions_by_status.get("waiting_approval"),
+            observability.sessions_by_status.get("requires_action"),
             Some(&1)
         );
         assert_eq!(
@@ -59836,7 +59865,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(unchanged.status, SessionStatus::Created));
+        assert!(matches!(unchanged.status, SessionStatus::Idle));
     }
 
     #[tokio::test]
@@ -60201,7 +60230,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(waiting.status, SessionStatus::WaitingApproval));
+        assert!(matches!(waiting.status, SessionStatus::RequiresAction));
 
         let (status, error) = request_value(
             app.clone(),
@@ -60689,7 +60718,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(waiting.status, SessionStatus::WaitingApproval));
+        assert!(matches!(waiting.status, SessionStatus::RequiresAction));
 
         let events: Vec<SessionEvent> = request_json(
             app.clone(),
@@ -64532,7 +64561,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(budget_run.status, SessionStatus::WaitingApproval);
+        assert_eq!(budget_run.status, SessionStatus::RequiresAction);
 
         let second_budget_session: Session = request_json(
             app.clone(),
@@ -64795,7 +64824,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(active_run.status, SessionStatus::WaitingApproval);
+        assert_eq!(active_run.status, SessionStatus::RequiresAction);
 
         let scoped_agent: Agent = request_json(
             app.clone(),
@@ -67181,7 +67210,7 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(matches!(completed_session.status, SessionStatus::Created));
+        assert!(matches!(completed_session.status, SessionStatus::Idle));
     }
 
     #[test]
