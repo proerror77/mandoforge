@@ -155,7 +155,8 @@ negative-test counts. Tenant sample, forced-RLS table, and negative-test detail 
 must also carry `deployment_id`, `tenant_deployment_id`, or
 `routing_deployment_id` matching the controller deployment id; a
 single-tenant or Whiskey-only pilot target is inventory evidence, not completion
-proof. The matching in-cluster template is
+proof. The controller deployment id must also match `MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID`
+and the all-up archive manifest's tenant routing target. The matching in-cluster template is
 `deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml`, which
 persists its output under the Stage 2 production evidence PVC.
 

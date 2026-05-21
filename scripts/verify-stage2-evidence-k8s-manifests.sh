@@ -2085,6 +2085,16 @@ if ! grep -q "missing forced-RLS table audit evidence" scripts/verify-stage2-evi
   exit 1
 fi
 
+if ! grep -q "mismatched tenant deployment target evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject tenant deployment target mismatches" >&2
+  exit 1
+fi
+
+if ! grep -q "mismatched tenant deployment detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject tenant detail rows bound to the wrong deployment" >&2
+  exit 1
+fi
+
 if ! grep -q "missing cross-tenant negative tests" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject tenant evidence without cross-tenant negative tests" >&2
   exit 1
