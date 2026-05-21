@@ -50,7 +50,10 @@ is_distributed_state_backend() {
 }
 
 worker_load_check_detail_count() {
-  jq -r '(.response.controller_execution.cluster_id // "") as $cluster_id | [
+  jq -r '
+    (.response.controller_execution.cluster_id // "") as $cluster_id
+    | (.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // "") as $root_worker_pool
+    | [
     (
       .response.controller_execution.load_checks[]?,
       .response.controller_execution.worker_pool_checks[]?,
@@ -61,9 +64,10 @@ worker_load_check_detail_count() {
     | select(
         type == "object"
         and ((.name // .check // .kind // "") | length > 0)
-        and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
         and (($cluster_id // "") | length > 0)
+        and (($root_worker_pool // "") | length > 0)
         and ((.cluster_id // .worker_cluster_id // .target_cluster_id // "") == $cluster_id)
+        and ((.worker_pool // .pool_id // .queue // .queue_name // "") == $root_worker_pool)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -71,7 +75,10 @@ worker_load_check_detail_count() {
 }
 
 summary_worker_load_check_detail_count() {
-  jq -r '(.worker.cluster_id // "") as $cluster_id | [
+  jq -r '
+    (.worker.cluster_id // "") as $cluster_id
+    | (.worker.worker_pool // .worker.pool_id // .worker.queue // .worker.queue_name // "") as $root_worker_pool
+    | [
     (
       .worker.load_checks[]?,
       .worker.worker_pool_checks[]?,
@@ -82,9 +89,10 @@ summary_worker_load_check_detail_count() {
     | select(
         type == "object"
         and ((.name // .check // .kind // "") | length > 0)
-        and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
         and (($cluster_id // "") | length > 0)
+        and (($root_worker_pool // "") | length > 0)
         and ((.cluster_id // .worker_cluster_id // .target_cluster_id // "") == $cluster_id)
+        and ((.worker_pool // .pool_id // .queue // .queue_name // "") == $root_worker_pool)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -571,6 +579,7 @@ artifact_issue() {
       local cluster_id
       local load_validated
       local isolated_worker_pool_configured
+      local worker_pool
       local load_check_detail_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
@@ -579,6 +588,7 @@ artifact_issue() {
       cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$path")"
       load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$path")"
       isolated_worker_pool_configured="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$path")"
+      worker_pool="$(jq -r '.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // ""' "$path")"
       load_check_detail_count="$(worker_load_check_detail_count "$path")"
       if [[ "$evidence_status" != "captured" ]]; then
         printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
@@ -614,6 +624,10 @@ artifact_issue() {
       fi
       if [[ "$isolated_worker_pool_configured" != "true" ]]; then
         printf '%s isolated_worker_pool_configured=%s' "$relative_path" "$isolated_worker_pool_configured"
+        return 0
+      fi
+      if [[ -z "$worker_pool" ]]; then
+        printf '%s worker_pool identity missing' "$relative_path"
         return 0
       fi
       ;;
@@ -753,10 +767,12 @@ artifact_issue() {
       local sidecar_replacement_pods_healthy
       local sidecar_checked_pod_count
       local sidecar_checked_pod_detail_count
+      local worker_pool
       summary_status="$(jq -r '.status // "unknown"' "$path")"
       production_blocked="$(jq -r 'if has("production_blocked") then .production_blocked else true end' "$path")"
       same_cluster_target="$(jq -r '.same_cluster_target // false' "$path")"
       worker_cluster_id="$(jq -r '.worker.cluster_id // ""' "$path")"
+      worker_pool="$(jq -r '.worker.worker_pool // .worker.pool_id // .worker.queue // .worker.queue_name // ""' "$path")"
       state_cluster_id="$(jq -r '.remote_computer.state_sync_cluster_id // ""' "$path")"
       sidecar_cluster_id="$(jq -r '.remote_computer.sidecar_cluster_id // ""' "$path")"
       state_backend="$(jq -r '.remote_computer.distributed_state_backend // "unknown"' "$path")"
@@ -778,6 +794,10 @@ artifact_issue() {
       fi
       if ! is_production_identity_value "$worker_cluster_id" || ! is_production_identity_value "$state_cluster_id" || ! is_production_identity_value "$sidecar_cluster_id"; then
         printf '%s contains a pilot/mock/local cluster id' "$relative_path"
+        return 0
+      fi
+      if [[ -z "$worker_pool" ]]; then
+        printf '%s worker_pool identity missing' "$relative_path"
         return 0
       fi
       if ! is_distributed_state_backend "$state_backend"; then
@@ -1788,6 +1808,7 @@ JSON
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
+      "worker_pool": "managed-agents-prod",
       "load_validated": true,
       "isolated_worker_pool_configured": true,
       "load_checks": [
@@ -1876,6 +1897,7 @@ JSON
   "same_cluster_target": true,
   "worker": {
     "cluster_id": "prod-cluster-1",
+    "worker_pool": "prod-workers",
     "load_check_detail_count": 1,
     "load_checks": [
       {"cluster_id": "prod-cluster-1", "name": "queue-isolated", "worker_pool": "prod-workers", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
@@ -2549,6 +2571,7 @@ JSON
       "target_kind": "k8s_cluster",
       "node_count": 1,
       "cluster_id": "prod-cluster-1",
+      "worker_pool": "managed-agents-prod",
       "load_validated": true,
       "isolated_worker_pool_configured": true
     }
@@ -2582,6 +2605,7 @@ JSON
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
+      "worker_pool": "managed-agents-prod",
       "load_validated": true,
       "isolated_worker_pool_configured": false,
       "load_checks": [
@@ -2618,6 +2642,7 @@ JSON
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
+      "worker_pool": "managed-agents-prod",
       "load_validated": false,
       "isolated_worker_pool_configured": true
     }
@@ -2651,6 +2676,7 @@ JSON
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
+      "worker_pool": "managed-agents-prod",
       "load_validated": true,
       "isolated_worker_pool_configured": true
     }
@@ -2684,6 +2710,7 @@ JSON
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
+      "worker_pool": "managed-agents-prod",
       "load_validated": true,
       "isolated_worker_pool_configured": true,
       "load_checks": [
@@ -2720,6 +2747,7 @@ JSON
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
+      "worker_pool": "managed-agents-prod",
       "load_validated": true,
       "isolated_worker_pool_configured": true,
       "load_checks": [
@@ -5113,6 +5141,7 @@ JSON
   "same_cluster_target": true,
   "worker": {
     "cluster_id": "different-prod-cluster",
+    "worker_pool": "prod-workers",
     "load_check_detail_count": 1,
     "load_checks": [
       {"cluster_id": "prod-cluster-1", "name": "queue-isolated", "worker_pool": "prod-workers", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
@@ -5166,6 +5195,7 @@ JSON
   "same_cluster_target": false,
   "worker": {
     "cluster_id": "prod-cluster-1",
+    "worker_pool": "prod-workers",
     "load_check_detail_count": 1,
     "load_checks": [
       {"cluster_id": "prod-cluster-1", "name": "queue-isolated", "worker_pool": "prod-workers", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
@@ -5219,6 +5249,7 @@ JSON
   "same_cluster_target": true,
   "worker": {
     "cluster_id": "prod-cluster-1",
+    "worker_pool": "prod-workers",
     "load_check_detail_count": 1,
     "load_checks": [
       {"cluster_id": "prod-cluster-1", "name": "queue-isolated", "worker_pool": "prod-workers", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
@@ -5267,6 +5298,7 @@ JSON
   "same_cluster_target": true,
   "worker": {
     "cluster_id": "prod-cluster-1",
+    "worker_pool": "prod-workers",
     "load_check_detail_count": 1,
     "load_checks": [
       {"cluster_id": "different-prod-cluster", "name": "queue-isolated", "worker_pool": "prod-workers", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
@@ -5315,6 +5347,7 @@ JSON
   "same_cluster_target": true,
   "worker": {
     "cluster_id": "prod-cluster-1",
+    "worker_pool": "prod-workers",
     "load_check_detail_count": 1
   },
   "remote_computer": {
@@ -5365,6 +5398,7 @@ JSON
   "same_cluster_target": true,
   "worker": {
     "cluster_id": "prod-cluster-1",
+    "worker_pool": "prod-workers",
     "load_check_detail_count": 1,
     "load_checks": [
       {"cluster_id": "prod-cluster-1", "name": "queue-isolated", "worker_pool": "prod-workers", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}

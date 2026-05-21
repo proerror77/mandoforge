@@ -400,7 +400,10 @@ is_real_cluster_kind() {
 }
 
 worker_load_check_detail_count() {
-  jq -r '(.response.controller_execution.cluster_id // "") as $cluster_id | [
+  jq -r '
+    (.response.controller_execution.cluster_id // "") as $cluster_id
+    | (.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // "") as $root_worker_pool
+    | [
     (
       .response.controller_execution.load_checks[]?,
       .response.controller_execution.worker_pool_checks[]?,
@@ -411,9 +414,10 @@ worker_load_check_detail_count() {
     | select(
         type == "object"
         and ((.name // .check // .kind // "") | length > 0)
-        and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
         and (($cluster_id // "") | length > 0)
+        and (($root_worker_pool // "") | length > 0)
         and ((.cluster_id // .worker_cluster_id // .target_cluster_id // "") == $cluster_id)
+        and ((.worker_pool // .pool_id // .queue // .queue_name // "") == $root_worker_pool)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -421,7 +425,10 @@ worker_load_check_detail_count() {
 }
 
 summary_worker_load_check_detail_count() {
-  jq -r '(.worker.cluster_id // "") as $cluster_id | [
+  jq -r '
+    (.worker.cluster_id // "") as $cluster_id
+    | (.worker.worker_pool // .worker.pool_id // .worker.queue // .worker.queue_name // "") as $root_worker_pool
+    | [
     (
       .worker.load_checks[]?,
       .worker.worker_pool_checks[]?,
@@ -432,9 +439,10 @@ summary_worker_load_check_detail_count() {
     | select(
         type == "object"
         and ((.name // .check // .kind // "") | length > 0)
-        and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
         and (($cluster_id // "") | length > 0)
+        and (($root_worker_pool // "") | length > 0)
         and ((.cluster_id // .worker_cluster_id // .target_cluster_id // "") == $cluster_id)
+        and ((.worker_pool // .pool_id // .queue // .queue_name // "") == $root_worker_pool)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -779,6 +787,7 @@ artifact_contract_issue() {
     local production_blocked
     local same_cluster_target
     local worker_cluster_id
+    local worker_pool
     local state_cluster_id
     local sidecar_cluster_id
     local state_backend
@@ -795,6 +804,7 @@ artifact_contract_issue() {
     production_blocked="$(jq -r 'if has("production_blocked") then .production_blocked else true end' "$artifact" 2>/dev/null || echo "true")"
     same_cluster_target="$(jq -r '.same_cluster_target // false' "$artifact" 2>/dev/null || echo "false")"
     worker_cluster_id="$(jq -r '.worker.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    worker_pool="$(jq -r '.worker.worker_pool // .worker.pool_id // .worker.queue // .worker.queue_name // ""' "$artifact" 2>/dev/null || echo "")"
     state_cluster_id="$(jq -r '.remote_computer.state_sync_cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
     sidecar_cluster_id="$(jq -r '.remote_computer.sidecar_cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
     state_backend="$(jq -r '.remote_computer.distributed_state_backend // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -817,6 +827,10 @@ artifact_contract_issue() {
     fi
     if ! is_production_identity "$worker_cluster_id" || ! is_production_identity "$state_cluster_id" || ! is_production_identity "$sidecar_cluster_id"; then
       printf 'worker/Remote Computer combined summary contains a pilot/mock/local cluster id'
+      return 0
+    fi
+    if [[ -z "$worker_pool" ]]; then
+      printf 'worker/Remote Computer combined summary worker_pool identity missing'
       return 0
     fi
     if ! is_distributed_state_backend "$state_backend"; then
@@ -1118,6 +1132,7 @@ artifact_contract_issue() {
     local cluster_id
     local load_validated
     local isolated_worker_pool_configured
+    local worker_pool
     local load_check_detail_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -1127,6 +1142,7 @@ artifact_contract_issue() {
     cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
     load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$artifact" 2>/dev/null || echo "false")"
     isolated_worker_pool_configured="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$artifact" 2>/dev/null || echo "false")"
+    worker_pool="$(jq -r '.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // ""' "$artifact" 2>/dev/null || echo "")"
     load_check_detail_count="$(worker_load_check_detail_count "$artifact")"
 
     if [[ "$evidence_status" != "captured" ]]; then
@@ -1159,6 +1175,10 @@ artifact_contract_issue() {
     fi
     if [[ "$isolated_worker_pool_configured" != "true" ]]; then
       printf 'isolated_worker_pool_configured=%s' "$isolated_worker_pool_configured"
+      return 0
+    fi
+    if [[ -z "$worker_pool" ]]; then
+      printf 'worker_pool identity missing'
       return 0
     fi
   fi
