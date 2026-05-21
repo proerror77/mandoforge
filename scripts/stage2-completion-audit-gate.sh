@@ -325,6 +325,36 @@ summary_checked_path_detail_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+sidecar_checked_pod_detail_count() {
+  jq -r '[
+    (
+      .response.validation_result.checked_pods[]?,
+      .response.validation_result.replacement_pods[]?,
+      .response.validation_result.pod_checks[]?
+    )
+    | select(
+        type == "object"
+        and ((.pod // .pod_name // .name // "") | length > 0)
+        and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
+summary_sidecar_checked_pod_detail_count() {
+  jq -r '[
+    (
+      .remote_computer.checked_pods[]?,
+      .remote_computer.replacement_pods[]?,
+      .remote_computer.pod_checks[]?
+    )
+    | select(
+        type == "object"
+        and ((.pod // .pod_name // .name // "") | length > 0)
+        and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
@@ -386,6 +416,7 @@ artifact_contract_issue() {
     local state_checked_path_detail_count
     local sidecar_replacement_pods_healthy
     local sidecar_checked_pod_count
+    local sidecar_checked_pod_detail_count
 
     summary_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     production_blocked="$(jq -r 'if has("production_blocked") then .production_blocked else true end' "$artifact" 2>/dev/null || echo "true")"
@@ -399,6 +430,7 @@ artifact_contract_issue() {
     state_checked_path_detail_count="$(summary_checked_path_detail_count "$artifact")"
     sidecar_replacement_pods_healthy="$(jq -r '.remote_computer.replacement_pods_healthy // false' "$artifact" 2>/dev/null || echo "false")"
     sidecar_checked_pod_count="$(jq -r '.remote_computer.checked_pod_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    sidecar_checked_pod_detail_count="$(summary_sidecar_checked_pod_detail_count "$artifact")"
 
     if [[ "$summary_status" != "ready" || "$production_blocked" != "false" ]]; then
       printf 'worker/Remote Computer combined summary status=%s production_blocked=%s' "$summary_status" "$production_blocked"
@@ -434,6 +466,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_count" == "0" ]]; then
       printf 'worker/Remote Computer sidecar checked_pod_count=%s' "$sidecar_checked_pod_count"
+      return 0
+    fi
+    if [[ ! "$sidecar_checked_pod_detail_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_detail_count" -lt "$sidecar_checked_pod_count" ]]; then
+      printf 'worker/Remote Computer sidecar checked_pod_detail_count=%s checked_pod_count=%s' "$sidecar_checked_pod_detail_count" "$sidecar_checked_pod_count"
       return 0
     fi
   fi
@@ -782,6 +818,7 @@ artifact_contract_issue() {
     local cluster_id
     local replacement_pods_healthy
     local checked_pod_count
+    local checked_pod_detail_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     validation_status="$(jq -r '.response.validation_result.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -791,6 +828,7 @@ artifact_contract_issue() {
     cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
     replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$artifact" 2>/dev/null || echo "false")"
     checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    checked_pod_detail_count="$(sidecar_checked_pod_detail_count "$artifact")"
 
     if [[ "$evidence_status" != "captured" ]]; then
       printf 'sidecar recovery evidence_status=%s' "$evidence_status"
@@ -822,6 +860,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$checked_pod_count" =~ ^[0-9]+$ || "$checked_pod_count" == "0" ]]; then
       printf 'checked_pod_count=%s' "$checked_pod_count"
+      return 0
+    fi
+    if [[ ! "$checked_pod_detail_count" =~ ^[0-9]+$ || "$checked_pod_detail_count" -lt "$checked_pod_count" ]]; then
+      printf 'checked_pod_detail_count=%s checked_pod_count=%s' "$checked_pod_detail_count" "$checked_pod_count"
       return 0
     fi
   fi

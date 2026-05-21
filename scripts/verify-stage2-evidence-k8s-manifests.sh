@@ -435,8 +435,8 @@ if ! grep -q "remote-computer-sidecar-recovery-evidence.json" "$remote_computer_
   exit 1
 fi
 
-if ! grep -q "sidecar_replacement_pods_healthy" "$remote_computer_script" || ! grep -q "sidecar_checked_pod_count" "$remote_computer_script"; then
-  echo "Remote Computer evidence script must require healthy replacement Pod evidence and checked Pod counts" >&2
+if ! grep -q "sidecar_replacement_pods_healthy" "$remote_computer_script" || ! grep -q "sidecar_checked_pod_count" "$remote_computer_script" || ! grep -q "sidecar_checked_pod_detail_count" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must require healthy replacement Pod evidence and checked Pod details" >&2
   exit 1
 fi
 
@@ -550,8 +550,8 @@ if ! grep -q "juicefs|cephfs|longhorn-rwx" "$worker_remote_computer_script"; the
   exit 1
 fi
 
-if ! grep -q "state_checked_path_count" "$worker_remote_computer_script" || ! grep -q "state_checked_path_detail_count" "$worker_remote_computer_script" || ! grep -q "sidecar_checked_pod_count" "$worker_remote_computer_script"; then
-  echo "Worker/Remote Computer evidence script must require checked state path details and sidecar Pod counts" >&2
+if ! grep -q "state_checked_path_count" "$worker_remote_computer_script" || ! grep -q "state_checked_path_detail_count" "$worker_remote_computer_script" || ! grep -q "sidecar_checked_pod_detail_count" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must require checked state path and sidecar Pod details" >&2
   exit 1
 fi
 
@@ -1710,8 +1710,8 @@ if ! grep -q "worker-load-validation-evidence.json" scripts/verify-stage2-eviden
   exit 1
 fi
 
-if ! grep -q "load_validated" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_path_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "replacement_pods_healthy" scripts/verify-stage2-evidence-archive.sh; then
-  echo "Stage 2 archive verifier must require audited worker load, state-contract path detail, and sidecar replacement evidence" >&2
+if ! grep -q "load_validated" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_path_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_pod_detail_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require audited worker load, state-contract path detail, and sidecar replacement Pod detail evidence" >&2
   exit 1
 fi
 
@@ -1755,8 +1755,8 @@ if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-completion-au
   exit 1
 fi
 
-if ! grep -q "load_validated" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_path_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "replacement_pods_healthy" scripts/stage2-completion-audit-gate.sh; then
-  echo "Stage 2 completion audit must require audited worker load, state-contract path detail, and sidecar replacement evidence" >&2
+if ! grep -q "load_validated" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_path_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_pod_detail_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require audited worker load, state-contract path detail, and sidecar replacement Pod detail evidence" >&2
   exit 1
 fi
 
@@ -1897,6 +1897,11 @@ fi
 
 if ! grep -q "zero sidecar checked Pod count" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject sidecar replacement evidence without checked Pods" >&2
+  exit 1
+fi
+
+if ! grep -q "missing sidecar checked Pod detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject sidecar replacement evidence without checked Pod details" >&2
   exit 1
 fi
 

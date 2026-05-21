@@ -138,6 +138,7 @@ write_summary() {
   local sidecar_replacement_scope
   local sidecar_replacement_pods_healthy
   local sidecar_checked_pod_count
+  local sidecar_checked_pod_detail_count
   local blocked_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
@@ -194,6 +195,7 @@ write_summary() {
   sidecar_replacement_scope="unknown"
   sidecar_replacement_pods_healthy="false"
   sidecar_checked_pod_count="0"
+  sidecar_checked_pod_detail_count="0"
   if [[ -s "$sidecar_recovery_evidence_file" ]]; then
     sidecar_recovery_evidence_status="$(jq -r '.status // "unknown"' "$sidecar_recovery_evidence_file")"
     sidecar_recovery_run_status="$(jq -r '.response.status // "unknown"' "$sidecar_recovery_evidence_file")"
@@ -204,6 +206,18 @@ write_summary() {
     sidecar_replacement_scope="$(jq -r '.response.validation_result.replacement_scope // "unknown"' "$sidecar_recovery_evidence_file")"
     sidecar_replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$sidecar_recovery_evidence_file")"
     sidecar_checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$sidecar_recovery_evidence_file")"
+    sidecar_checked_pod_detail_count="$(jq -r '[
+      (
+        .response.validation_result.checked_pods[]?,
+        .response.validation_result.replacement_pods[]?,
+        .response.validation_result.pod_checks[]?
+      )
+      | select(
+          type == "object"
+          and ((.pod // .pod_name // .name // "") | length > 0)
+          and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
+        )
+    ] | length' "$sidecar_recovery_evidence_file")"
   fi
   blocked_count="$(jq -r '[
       .production_state_sync.production_blocked,
@@ -261,6 +275,9 @@ write_summary() {
     if [[ ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_count" == "0" ]]; then
       blocked_count="$((blocked_count + 1))"
     fi
+    if [[ ! "$sidecar_checked_pod_detail_count" =~ ^[0-9]+$ || ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_detail_count" -lt "$sidecar_checked_pod_count" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
   fi
 
   {
@@ -293,6 +310,7 @@ write_summary() {
     echo "sidecar_replacement_scope=$sidecar_replacement_scope"
     echo "sidecar_replacement_pods_healthy=$sidecar_replacement_pods_healthy"
     echo "sidecar_checked_pod_count=$sidecar_checked_pod_count"
+    echo "sidecar_checked_pod_detail_count=$sidecar_checked_pod_detail_count"
     echo "production_blocked_count=$blocked_count"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "sidecar_recovery_run=$RUN_SIDECAR_RECOVERY"
@@ -353,6 +371,9 @@ write_summary() {
       fi
       if [[ ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_count" == "0" ]]; then
         echo "- sidecar recovery validation did not report any checked Pods: checked_pod_count=$sidecar_checked_pod_count"
+      fi
+      if [[ ! "$sidecar_checked_pod_detail_count" =~ ^[0-9]+$ || ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_detail_count" -lt "$sidecar_checked_pod_count" ]]; then
+        echo "- sidecar recovery validation did not include checked Pod details for every counted Pod: checked_pod_detail_count=$sidecar_checked_pod_detail_count checked_pod_count=$sidecar_checked_pod_count"
       fi
     fi
     echo

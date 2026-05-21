@@ -162,6 +162,8 @@ write_summary() {
   local sidecar_replacement_scope
   local sidecar_replacement_pods_healthy
   local sidecar_checked_pod_count
+  local sidecar_checked_pod_detail_count
+  local sidecar_checked_pods_json
   local same_cluster_target
 
   worker_production_ready="$(jq -r '.production_ops.status == "ready" and (.production_ops.production_blocked == false)' "$worker_readiness")"
@@ -208,6 +210,8 @@ write_summary() {
   sidecar_replacement_scope="unknown"
   sidecar_replacement_pods_healthy="false"
   sidecar_checked_pod_count="0"
+  sidecar_checked_pod_detail_count="0"
+  sidecar_checked_pods_json="[]"
   if [[ -s "$sidecar_recovery" ]]; then
     sidecar_recovery_evidence_status="$(jq -r '.status // "unknown"' "$sidecar_recovery")"
     sidecar_recovery_response_status="$(jq -r '.response.status // "unknown"' "$sidecar_recovery")"
@@ -218,6 +222,19 @@ write_summary() {
     sidecar_replacement_scope="$(jq -r '.response.validation_result.replacement_scope // "unknown"' "$sidecar_recovery")"
     sidecar_replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$sidecar_recovery")"
     sidecar_checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$sidecar_recovery")"
+    sidecar_checked_pods_json="$(jq -c '[
+      (
+        .response.validation_result.checked_pods[]?,
+        .response.validation_result.replacement_pods[]?,
+        .response.validation_result.pod_checks[]?
+      )
+      | select(
+          type == "object"
+          and ((.pod // .pod_name // .name // "") | length > 0)
+          and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
+        )
+    ]' "$sidecar_recovery")"
+    sidecar_checked_pod_detail_count="$(jq -r 'length' <<<"$sidecar_checked_pods_json")"
   fi
   runner_ready="$(jq -r '(.configured == true) and (((.status // "") == "ready") or ((.status // "") == "dry_run_ready") or ((.status // "") == "live_ready"))' "$runner_readiness")"
   same_cluster_target="false"
@@ -259,6 +276,7 @@ write_summary() {
     [[ "$sidecar_replacement_scope" == "cluster" ]] || blocked_count=$((blocked_count + 1))
     [[ "$sidecar_replacement_pods_healthy" == "true" ]] || blocked_count=$((blocked_count + 1))
     [[ "$sidecar_checked_pod_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_count" -gt 0 ]] || blocked_count=$((blocked_count + 1))
+    [[ "$sidecar_checked_pod_detail_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_detail_count" -ge "$sidecar_checked_pod_count" ]] || blocked_count=$((blocked_count + 1))
   fi
 
   jq -n \
@@ -295,6 +313,7 @@ write_summary() {
     --arg sidecar_replacement_scope "$sidecar_replacement_scope" \
     --arg sidecar_replacement_pods_healthy "$sidecar_replacement_pods_healthy" \
     --arg sidecar_checked_pod_count "$sidecar_checked_pod_count" \
+    --argjson sidecar_checked_pods "$sidecar_checked_pods_json" \
     --argjson worker_production_ready "$(bool_json "$worker_production_ready")" \
     --argjson isolated_worker_pool_configured "$(bool_json "$isolated_pool")" \
     --argjson load_validated "$(bool_json "$load_validated")" \
@@ -355,7 +374,8 @@ write_summary() {
         sidecar_node_count: ($sidecar_node_count | tonumber),
         sidecar_replacement_scope: $sidecar_replacement_scope,
         replacement_pods_healthy: ($sidecar_replacement_pods_healthy == "true"),
-        checked_pod_count: ($sidecar_checked_pod_count | tonumber)
+        checked_pod_count: ($sidecar_checked_pod_count | tonumber),
+        checked_pods: $sidecar_checked_pods
       },
       same_cluster_target: $same_cluster_target
     }' >"$summary_json"
@@ -393,6 +413,7 @@ write_summary() {
     jq -r '"sidecar_replacement_scope=\(.remote_computer.sidecar_replacement_scope)"' "$summary_json"
     jq -r '"sidecar_replacement_pods_healthy=\(.remote_computer.replacement_pods_healthy)"' "$summary_json"
     jq -r '"sidecar_checked_pod_count=\(.remote_computer.checked_pod_count)"' "$summary_json"
+    jq -r '"sidecar_checked_pod_detail_count=\(.remote_computer.checked_pods | length)"' "$summary_json"
     jq -r '"same_cluster_target=\(.same_cluster_target)"' "$summary_json"
     echo
     echo "real_cluster_blocking_reasons:"
@@ -417,6 +438,7 @@ write_summary() {
       [[ "$sidecar_replacement_scope" == "cluster" ]] || echo "- sidecar replacement scope is not cluster-wide: $sidecar_replacement_scope"
       [[ "$sidecar_replacement_pods_healthy" == "true" ]] || echo "- sidecar replacement validation did not report healthy replacement Pods"
       [[ "$sidecar_checked_pod_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_count" -gt 0 ]] || echo "- sidecar replacement validation did not report any checked Pods: checked_pod_count=$sidecar_checked_pod_count"
+      [[ "$sidecar_checked_pod_detail_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_detail_count" -ge "$sidecar_checked_pod_count" ]] || echo "- sidecar replacement validation did not include checked Pod details for every counted Pod: checked_pod_detail_count=$sidecar_checked_pod_detail_count checked_pod_count=$sidecar_checked_pod_count"
     fi
     jq -r '"evidence_dir=\(.evidence_dir)"' "$summary_json"
   } >"$summary_txt"

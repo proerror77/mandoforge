@@ -77,6 +77,36 @@ summary_checked_path_detail_count() {
   ] | length' "$1"
 }
 
+sidecar_checked_pod_detail_count() {
+  jq -r '[
+    (
+      .response.validation_result.checked_pods[]?,
+      .response.validation_result.replacement_pods[]?,
+      .response.validation_result.pod_checks[]?
+    )
+    | select(
+        type == "object"
+        and ((.pod // .pod_name // .name // "") | length > 0)
+        and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
+      )
+  ] | length' "$1"
+}
+
+summary_sidecar_checked_pod_detail_count() {
+  jq -r '[
+    (
+      .remote_computer.checked_pods[]?,
+      .remote_computer.replacement_pods[]?,
+      .remote_computer.pod_checks[]?
+    )
+    | select(
+        type == "object"
+        and ((.pod // .pod_name // .name // "") | length > 0)
+        and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
+      )
+  ] | length' "$1"
+}
+
 is_production_policy_controller_kind() {
   case "$1" in
     production_policy_controller|enterprise_policy_controller|external_policy_controller|policy_controller_cluster)
@@ -279,6 +309,7 @@ artifact_issue() {
       local cluster_id
       local replacement_pods_healthy
       local checked_pod_count
+      local checked_pod_detail_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       status="$(jq -r '.response.validation_result.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.validation_result.target_kind // "unknown"' "$path")"
@@ -287,6 +318,7 @@ artifact_issue() {
       cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$path")"
       replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$path")"
       checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$path")"
+      checked_pod_detail_count="$(sidecar_checked_pod_detail_count "$path")"
       if [[ "$evidence_status" != "captured" ]]; then
         printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
         return 0
@@ -323,6 +355,10 @@ artifact_issue() {
         printf '%s checked_pod_count=%s' "$relative_path" "$checked_pod_count"
         return 0
       fi
+      if [[ ! "$checked_pod_detail_count" =~ ^[0-9]+$ || "$checked_pod_detail_count" -lt "$checked_pod_count" ]]; then
+        printf '%s checked_pod_detail_count=%s checked_pod_count=%s' "$relative_path" "$checked_pod_detail_count" "$checked_pod_count"
+        return 0
+      fi
       ;;
     worker-remote-computer/summary.json)
       local summary_status
@@ -337,6 +373,7 @@ artifact_issue() {
       local state_checked_path_detail_count
       local sidecar_replacement_pods_healthy
       local sidecar_checked_pod_count
+      local sidecar_checked_pod_detail_count
       summary_status="$(jq -r '.status // "unknown"' "$path")"
       production_blocked="$(jq -r 'if has("production_blocked") then .production_blocked else true end' "$path")"
       same_cluster_target="$(jq -r '.same_cluster_target // false' "$path")"
@@ -349,6 +386,7 @@ artifact_issue() {
       state_checked_path_detail_count="$(summary_checked_path_detail_count "$path")"
       sidecar_replacement_pods_healthy="$(jq -r '.remote_computer.replacement_pods_healthy // false' "$path")"
       sidecar_checked_pod_count="$(jq -r '.remote_computer.checked_pod_count // 0' "$path")"
+      sidecar_checked_pod_detail_count="$(summary_sidecar_checked_pod_detail_count "$path")"
       if [[ "$summary_status" != "ready" || "$production_blocked" != "false" ]]; then
         printf '%s status=%s production_blocked=%s' "$relative_path" "$summary_status" "$production_blocked"
         return 0
@@ -383,6 +421,10 @@ artifact_issue() {
       fi
       if [[ ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_count" == "0" ]]; then
         printf '%s sidecar_checked_pod_count=%s' "$relative_path" "$sidecar_checked_pod_count"
+        return 0
+      fi
+      if [[ ! "$sidecar_checked_pod_detail_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_detail_count" -lt "$sidecar_checked_pod_count" ]]; then
+        printf '%s sidecar_checked_pod_detail_count=%s checked_pod_count=%s' "$relative_path" "$sidecar_checked_pod_detail_count" "$sidecar_checked_pod_count"
         return 0
       fi
       ;;
@@ -1347,7 +1389,10 @@ JSON
       "cluster_id": "prod-cluster-1",
       "replacement_scope": "cluster",
       "replacement_pods_healthy": true,
-      "checked_pod_count": 1
+      "checked_pod_count": 1,
+      "checked_pods": [
+        {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+      ]
     }
   }
 }
@@ -1377,7 +1422,10 @@ JSON
       "/agent-state/checkpoints"
     ],
     "replacement_pods_healthy": true,
-    "checked_pod_count": 1
+    "checked_pod_count": 1,
+    "checked_pods": [
+      {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+    ]
   }
 }
 JSON
@@ -2240,8 +2288,45 @@ JSON
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
       "replacement_scope": "cluster",
-      "replacement_pods_healthy": false,
+      "replacement_pods_healthy": true,
       "checked_pod_count": 1
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-sidecar-pod-details-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-sidecar-pod-details-negative.out 2>/tmp/mandoforge-stage2-archive-sidecar-pod-details-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing sidecar checked Pod detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "validation_result": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "replacement_scope": "cluster",
+      "replacement_pods_healthy": false,
+      "checked_pod_count": 1,
+      "checked_pods": [
+        {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+      ]
     }
   }
 }
@@ -2275,7 +2360,10 @@ JSON
       "cluster_id": "prod-cluster-1",
       "replacement_scope": "pod",
       "replacement_pods_healthy": true,
-      "checked_pod_count": 1
+      "checked_pod_count": 1,
+      "checked_pods": [
+        {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+      ]
     }
   }
 }
@@ -2309,7 +2397,10 @@ JSON
       "cluster_id": "prod-cluster-1",
       "replacement_scope": "cluster",
       "replacement_pods_healthy": true,
-      "checked_pod_count": 1
+      "checked_pod_count": 1,
+      "checked_pods": [
+        {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+      ]
     }
   }
 }
@@ -3193,7 +3284,10 @@ JSON
       "cluster_id": "prod-cluster-1",
       "replacement_scope": "cluster",
       "replacement_pods_healthy": true,
-      "checked_pod_count": 1
+      "checked_pod_count": 1,
+      "checked_pods": [
+        {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+      ]
     }
   }
 }
@@ -3222,7 +3316,10 @@ JSON
       "/agent-state/checkpoints"
     ],
     "replacement_pods_healthy": true,
-    "checked_pod_count": 1
+    "checked_pod_count": 1,
+    "checked_pods": [
+      {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+    ]
   }
 }
 JSON
@@ -3268,7 +3365,10 @@ JSON
       "/agent-state/checkpoints"
     ],
     "replacement_pods_healthy": true,
-    "checked_pod_count": 1
+    "checked_pod_count": 1,
+    "checked_pods": [
+      {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+    ]
   }
 }
 JSON
@@ -3314,7 +3414,10 @@ JSON
       "/agent-state/checkpoints"
     ],
     "replacement_pods_healthy": true,
-    "checked_pod_count": 1
+    "checked_pod_count": 1,
+    "checked_pods": [
+      {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+    ]
   }
 }
 JSON
@@ -3396,7 +3499,10 @@ JSON
       "cluster_id": "whiskey-pilot-cluster",
       "replacement_scope": "cluster",
       "replacement_pods_healthy": true,
-      "checked_pod_count": 1
+      "checked_pod_count": 1,
+      "checked_pods": [
+        {"pod": "remote-computer-sidecar-prod-1", "status": "running"}
+      ]
     }
   }
 }
