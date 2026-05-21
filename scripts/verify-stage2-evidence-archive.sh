@@ -107,6 +107,26 @@ summary_sidecar_checked_pod_detail_count() {
   ] | length' "$1"
 }
 
+tenant_negative_test_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.cross_tenant_negative_test_results[]?,
+      .response.controller_execution.cross_tenant_negative_tests_detail[]?,
+      .response.controller_execution.negative_tests[]?
+    )
+    | select(
+        type == "object"
+        and ((.source_tenant // .from_tenant // .tenant_id // "") | length > 0)
+        and ((.target_tenant // .to_tenant // .blocked_tenant_id // "") | length > 0)
+        and ((.source_tenant // .from_tenant // .tenant_id // "") != (.target_tenant // .to_tenant // .blocked_tenant_id // ""))
+        and (
+          ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
+          or (.access_granted == false)
+        )
+      )
+  ] | length' "$1"
+}
+
 is_production_policy_controller_kind() {
   case "$1" in
     production_policy_controller|enterprise_policy_controller|external_policy_controller|policy_controller_cluster)
@@ -441,6 +461,7 @@ artifact_issue() {
       local tenant_context_validated
       local cross_tenant_negative_tests
       local cross_tenant_negative_test_count
+      local cross_tenant_negative_test_detail_count
       local deployment_id
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       validation_status="$(jq -r '.response.status // "unknown"' "$path")"
@@ -454,6 +475,7 @@ artifact_issue() {
       tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$path")"
       cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$path")"
       cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$path")"
+      cross_tenant_negative_test_detail_count="$(tenant_negative_test_detail_count "$path")"
       deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$path")"
       if [[ "$evidence_status" != "captured" ]]; then
         printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
@@ -493,6 +515,10 @@ artifact_issue() {
       fi
       if [[ ! "$cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_count" == "0" ]]; then
         printf '%s cross_tenant_negative_test_count=%s' "$relative_path" "$cross_tenant_negative_test_count"
+        return 0
+      fi
+      if [[ ! "$cross_tenant_negative_test_detail_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_detail_count" -lt "$cross_tenant_negative_test_count" ]]; then
+        printf '%s cross_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$relative_path" "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
         return 0
       fi
       if ! is_production_identity_value "$deployment_id"; then
@@ -1444,7 +1470,12 @@ JSON
       "rls_forced_table_count": 12,
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
-      "cross_tenant_negative_test_count": 3
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+      ]
     }
   }
 }
@@ -2798,7 +2829,12 @@ JSON
       "rls_forced_table_count": 8,
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
-      "cross_tenant_negative_test_count": 3
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+      ]
     }
   }
 }
@@ -2872,9 +2908,52 @@ JSON
       "rls_enforced": true,
       "rls_table_count": 12,
       "rls_forced_table_count": 12,
-      "tenant_context_validated": false,
+      "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-negative-test-details-missing.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-negative-test-details-missing.out 2>/tmp/mandoforge-stage2-archive-tenant-negative-test-details-missing.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing cross-tenant negative test detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": ["tenant-a", "tenant-b"],
+      "rls_enforced": true,
+      "rls_table_count": 12,
+      "rls_forced_table_count": 12,
+      "tenant_context_validated": false,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+      ]
     }
   }
 }
@@ -2912,7 +2991,12 @@ JSON
       "rls_forced_table_count": 12,
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
-      "cross_tenant_negative_test_count": 3
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+      ]
     }
   }
 }
@@ -2950,7 +3034,12 @@ JSON
       "rls_forced_table_count": 12,
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
-      "cross_tenant_negative_test_count": 3
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+      ]
     }
   }
 }
@@ -2988,7 +3077,12 @@ JSON
       "rls_forced_table_count": 12,
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
-      "cross_tenant_negative_test_count": 3
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+      ]
     }
   }
 }
@@ -3026,7 +3120,12 @@ JSON
       "rls_forced_table_count": 12,
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
-      "cross_tenant_negative_test_count": 3
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+      ]
     }
   }
 }

@@ -355,6 +355,26 @@ summary_sidecar_checked_pod_detail_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+tenant_negative_test_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.cross_tenant_negative_test_results[]?,
+      .response.controller_execution.cross_tenant_negative_tests_detail[]?,
+      .response.controller_execution.negative_tests[]?
+    )
+    | select(
+        type == "object"
+        and ((.source_tenant // .from_tenant // .tenant_id // "") | length > 0)
+        and ((.target_tenant // .to_tenant // .blocked_tenant_id // "") | length > 0)
+        and ((.source_tenant // .from_tenant // .tenant_id // "") != (.target_tenant // .to_tenant // .blocked_tenant_id // ""))
+        and (
+          ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
+          or (.access_granted == false)
+        )
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
@@ -997,6 +1017,7 @@ artifact_contract_issue() {
     local tenant_context_validated
     local cross_tenant_negative_tests
     local cross_tenant_negative_test_count
+    local cross_tenant_negative_test_detail_count
     local deployment_id
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -1011,6 +1032,7 @@ artifact_contract_issue() {
     tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$artifact" 2>/dev/null || echo "false")"
     cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$artifact" 2>/dev/null || echo "false")"
     cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    cross_tenant_negative_test_detail_count="$(tenant_negative_test_detail_count "$artifact")"
     deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
 
     if [[ "$evidence_status" != "captured" ]]; then
@@ -1063,6 +1085,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_count" == "0" ]]; then
       printf 'cross_tenant_negative_test_count=%s' "$cross_tenant_negative_test_count"
+      return 0
+    fi
+    if [[ ! "$cross_tenant_negative_test_detail_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_detail_count" -lt "$cross_tenant_negative_test_count" ]]; then
+      printf 'cross_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
       return 0
     fi
     if ! is_production_identity "$deployment_id"; then
