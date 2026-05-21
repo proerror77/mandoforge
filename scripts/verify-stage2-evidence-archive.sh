@@ -250,7 +250,8 @@ forced_rls_table_detail_count() {
         and ((.rls_forced // .forced // .force_rls // false) == true)
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [(.schema // .namespace // "public"), (.table // .table_name // .relation // .name)] | @tsv
+  ] | unique | length' "$1"
 }
 
 tenant_sample_count() {
@@ -820,7 +821,7 @@ artifact_issue() {
         return 0
       fi
       if [[ ! "$rls_table_detail_count" =~ ^[0-9]+$ || "$rls_table_detail_count" -lt "$rls_table_count" ]]; then
-        printf '%s forced_rls_table_detail_count=%s rls_table_count=%s' "$relative_path" "$rls_table_detail_count" "$rls_table_count"
+        printf '%s unique_forced_rls_table_detail_count=%s rls_table_count=%s' "$relative_path" "$rls_table_detail_count" "$rls_table_count"
         return 0
       fi
       if [[ ! "$cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_count" == "0" ]]; then
@@ -3837,6 +3838,56 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing forced-RLS table detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "rls_enforced": true,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-duplicate-rls-table-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-duplicate-rls-table-negative.out 2>/tmp/mandoforge-stage2-archive-tenant-duplicate-rls-table-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate forced-RLS table detail evidence to fail" >&2
     exit 1
   fi
 

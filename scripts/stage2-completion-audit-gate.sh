@@ -528,7 +528,8 @@ forced_rls_table_detail_count() {
         and ((.rls_forced // .forced // .force_rls // false) == true)
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [(.schema // .namespace // "public"), (.table // .table_name // .relation // .name)] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 tenant_sample_count() {
@@ -1430,7 +1431,7 @@ artifact_contract_issue() {
       return 0
     fi
     if [[ ! "$rls_table_detail_count" =~ ^[0-9]+$ || "$rls_table_detail_count" -lt "$rls_table_count" ]]; then
-      printf 'forced_rls_table_detail_count=%s rls_table_count=%s' "$rls_table_detail_count" "$rls_table_count"
+      printf 'unique_forced_rls_table_detail_count=%s rls_table_count=%s' "$rls_table_detail_count" "$rls_table_count"
       return 0
     fi
     if [[ "$tenant_context_validated" != "true" ]]; then

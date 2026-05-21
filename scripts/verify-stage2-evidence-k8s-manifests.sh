@@ -645,8 +645,8 @@ if ! grep -q "routing_tenant_sample_count" "$tenant_script" || ! grep -q "routin
   exit 1
 fi
 
-if ! grep -q "routing_rls_table_count" "$tenant_script" || ! grep -q "routing_rls_forced_table_count" "$tenant_script" || ! grep -q "routing_forced_rls_table_detail_count" "$tenant_script"; then
-  echo "Tenant isolation evidence script must require RLS table counts and forced-RLS table detail evidence" >&2
+if ! grep -q "routing_rls_table_count" "$tenant_script" || ! grep -q "routing_rls_forced_table_count" "$tenant_script" || ! grep -q "routing_forced_rls_table_detail_count" "$tenant_script" || ! grep -q "unique forced-RLS table details" "$tenant_script"; then
+  echo "Tenant isolation evidence script must require RLS table counts and unique forced-RLS table detail evidence" >&2
   exit 1
 fi
 
@@ -690,7 +690,7 @@ if ! grep -q "cross_tenant_negative_tests" scripts/stage2-completion-audit-gate.
   exit 1
 fi
 
-if ! grep -q "tenant_sample_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "tenant_sample_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "rls_forced_table_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "forced_rls_table_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" scripts/stage2-completion-audit-gate.sh; then
+if ! grep -q "tenant_sample_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "tenant_sample_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "rls_forced_table_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "unique_forced_rls_table_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require audited tenant samples, forced-RLS table details, and negative-test details" >&2
   exit 1
 fi
@@ -1915,7 +1915,7 @@ if ! grep -q "tenant routing evidence_status" scripts/stage2-completion-audit-ga
   exit 1
 fi
 
-if ! grep -q "tenant_sample_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "tenant_sample_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rls_forced_table_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "forced_rls_table_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" scripts/verify-stage2-evidence-archive.sh; then
+if ! grep -q "tenant_sample_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "tenant_sample_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rls_forced_table_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "unique_forced_rls_table_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive verifier must require audited tenant samples, forced-RLS table details, and negative-test details" >&2
   exit 1
 fi
@@ -1932,6 +1932,11 @@ fi
 
 if ! grep -q "missing forced-RLS table detail evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject tenant evidence without forced-RLS table details" >&2
+  exit 1
+fi
+
+if ! grep -q "duplicate forced-RLS table detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject duplicate forced-RLS table details" >&2
   exit 1
 fi
 
