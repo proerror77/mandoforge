@@ -353,6 +353,9 @@ verify_semantic_artifacts() {
   local issue_count=0
   local artifact
   local issue
+  local worker_cluster_id
+  local state_cluster_id
+  local sidecar_cluster_id
   local required_artifacts=(
     worker-load-validation-evidence.json
     remote-computer-state-sync-evidence.json
@@ -371,6 +374,16 @@ verify_semantic_artifacts() {
       echo "Stage 2 evidence archive semantic issue: $issue" >&2
     fi
   done
+
+  worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/worker-load-validation-evidence.json" 2>/dev/null || echo "")"
+  state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/remote-computer-state-sync-evidence.json" 2>/dev/null || echo "")"
+  sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$root/remote-computer-sidecar-recovery-evidence.json" 2>/dev/null || echo "")"
+  if [[ -n "$worker_cluster_id" && -n "$state_cluster_id" && -n "$sidecar_cluster_id" ]]; then
+    if ! [[ "$worker_cluster_id" == "$state_cluster_id" && "$worker_cluster_id" == "$sidecar_cluster_id" ]]; then
+      issue_count=$((issue_count + 1))
+      echo "Stage 2 evidence archive semantic issue: worker, state-sync, and sidecar evidence do not share one cluster id" >&2
+    fi
+  fi
 
   return "$issue_count"
 }
@@ -641,6 +654,46 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected non-ERP finance evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-export-delivery-observer.json" <<'JSON'
+{
+  "status": "ok",
+  "export_state": {
+    "delivery_mode": "netsuite",
+    "delivery_count": 1
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
+{
+  "response": {
+    "validation_result": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "different-prod-cluster",
+      "replacement_scope": "cluster"
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-cluster-mismatch.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-cluster-negative.out 2>/tmp/mandoforge-stage2-archive-cluster-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected cluster-mismatched evidence to fail" >&2
     exit 1
   fi
 }

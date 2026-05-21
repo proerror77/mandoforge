@@ -1403,6 +1403,11 @@ if ! grep -q "worker-load-validation-evidence.json" scripts/verify-stage2-eviden
   exit 1
 fi
 
+if ! grep -q "do not share one cluster id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must reject mixed-cluster worker/Remote Computer evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "delivery_mode=.* is not accounting/ERP" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject non-ERP finance delivery evidence" >&2
   exit 1
