@@ -6148,6 +6148,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "RUN_STAGE2_PRODUCTION_VALIDATIONS=1",
                 "MANDOFORGE_FINANCE_CLOSE_CONTROLLER_REQUIRED=true",
                 "MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_REQUIRED=true",
+                "FINANCE_EXPORT_DELIVERY_OBSERVER_URL=https://controller.example.com/mandoforge/finance/export/observer",
                 "RUN_STAGE2_FINANCE_CONTROLLERS=1",
                 "RUN_STAGE2_FINANCE_EXPORT=1",
             ],
@@ -6156,11 +6157,13 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "finance-reconciliation-evidence.json",
                 "usage-export-csv-evidence.json",
                 "finance-export-delivery-evidence.json",
+                "finance-export-delivery-observer.json",
             ],
             required_evidence: vec![
                 "usage rollup and export evidence is fresh",
                 "finance close controller confirms production close",
                 "accounting reconciliation controller confirms real target reconciliation when required",
+                "export delivery observer confirms a true accounting/ERP target rather than Feishu Drive artifact delivery",
             ],
         },
         Stage2EvidenceRequirementSpec {
@@ -38567,6 +38570,15 @@ Stage 2 is not complete.
             finance
                 .required_flags
                 .contains(&"RUN_STAGE2_FINANCE_EXPORT=1".to_string())
+        );
+        assert!(finance.required_flags.contains(
+            &"FINANCE_EXPORT_DELIVERY_OBSERVER_URL=https://controller.example.com/mandoforge/finance/export/observer"
+                .to_string()
+        ));
+        assert!(
+            finance
+                .required_artifacts
+                .contains(&"finance-export-delivery-observer.json".to_string())
         );
     }
 

@@ -12,6 +12,7 @@ TEAM_ID="${MANDOFORGE_STAGE2_TEAM_ID:-}"
 VERIFY_VALIDATION_COVERAGE="${VERIFY_STAGE2_VALIDATION_COVERAGE:-0}"
 RUN_COMPLETION_AUDIT="${RUN_STAGE2_COMPLETION_AUDIT:-1}"
 MAX_EVIDENCE_AGE_HOURS="${STAGE2_EVIDENCE_MAX_AGE_HOURS:-24}"
+FINANCE_DELIVERY_OBSERVER_URL="${FINANCE_EXPORT_DELIVERY_OBSERVER_URL:-}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -156,6 +157,23 @@ fetch_file() {
       http_status: $http_status,
       byte_count: $byte_count
     }' >"$metadata"
+  rm -f "$response_body"
+}
+
+capture_finance_delivery_observer_validation() {
+  local observer_url="$1"
+  local target="$EVIDENCE_DIR/finance-export-delivery-observer.json"
+  local response_body
+  local http_status
+  response_body="$(mktemp)"
+
+  http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "$observer_url")"
+  if [[ "$http_status" != 2* ]]; then
+    rm -f "$response_body"
+    return 0
+  fi
+
+  tee "$target" <"$response_body" >/dev/null
   rm -f "$response_body"
 }
 
@@ -957,6 +975,13 @@ run_controller_validations() {
   if [[ "${RUN_STAGE2_FINANCE_EXPORT:-0}" == "1" ]]; then
     fetch_file GET /api/usage/export.csv "$EVIDENCE_DIR/api-usage-export.csv" "$EVIDENCE_DIR/usage-export-csv-evidence.json"
     capture_finance_export_delivery_validation
+    if [[ -z "$FINANCE_DELIVERY_OBSERVER_URL" && -n "${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL:-}" ]]; then
+      FINANCE_DELIVERY_OBSERVER_URL="${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL%/finance/export}/healthz"
+      FINANCE_DELIVERY_OBSERVER_URL="${FINANCE_DELIVERY_OBSERVER_URL/host.docker.internal/172.17.0.1}"
+    fi
+    if [[ -n "$FINANCE_DELIVERY_OBSERVER_URL" ]]; then
+      capture_finance_delivery_observer_validation "$FINANCE_DELIVERY_OBSERVER_URL"
+    fi
   else
     echo "skipping finance export capture; set RUN_STAGE2_FINANCE_EXPORT=1 to include CSV and delivery evidence" >&2
   fi

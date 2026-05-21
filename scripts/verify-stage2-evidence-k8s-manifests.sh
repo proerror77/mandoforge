@@ -1223,6 +1223,26 @@ if ! grep -q "finance-export-delivery-evidence.json" scripts/stage2-production-e
   exit 1
 fi
 
+if ! grep -q "finance-export-delivery-observer.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Strict production evidence gate must write explicit finance export delivery observer evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-export-delivery-observer.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require finance export delivery observer evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" deploy/stage2-evidence/stage2-production-controllers.env.example; then
+  echo "Stage 2 controller env template must include finance export delivery observer URL" >&2
+  exit 1
+fi
+
+if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" deploy/stage2-evidence/stage2-controller-env-secret.example.yaml; then
+  echo "Stage 2 controller secret template must include finance export delivery observer URL" >&2
+  exit 1
+fi
+
 if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" "$finance_script"; then
   echo "finance evidence script must support export delivery observer evidence" >&2
   exit 1

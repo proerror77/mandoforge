@@ -142,6 +142,7 @@ required_evidence_artifacts_for_requirement() {
       echo "$SOURCE_EVIDENCE_DIR/finance-reconciliation-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/usage-export-csv-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/finance-export-delivery-evidence.json"
+      echo "$SOURCE_EVIDENCE_DIR/finance-export-delivery-observer.json"
       ;;
     ui-production-crud)
       echo "$SOURCE_EVIDENCE_DIR/local-script-scripts-verify-static-ui-actionbook.sh.json"
@@ -179,6 +180,38 @@ artifact_is_fresh() {
   mtime_epoch="$(file_mtime_epoch "$path")"
   max_age_seconds=$((MAX_EVIDENCE_AGE_HOURS * 3600))
   [[ $((now_epoch - mtime_epoch)) -le "$max_age_seconds" ]]
+}
+
+artifact_contract_issue() {
+  local req_id="$1"
+  local artifact="$2"
+  local artifact_name="${artifact##*/}"
+
+  if [[ "$req_id" == "finance-close" && "$artifact_name" == "finance-export-delivery-observer.json" ]]; then
+    local observer_status
+    local delivery_mode
+    local delivery_count
+
+    observer_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "invalid_json")"
+    delivery_mode="$(jq -r '.export_state.delivery_mode // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    delivery_count="$(jq -r '.export_state.delivery_count // 0' "$artifact" 2>/dev/null || echo "0")"
+
+    if [[ "$observer_status" != "ok" ]]; then
+      printf 'observer_status=%s' "$observer_status"
+      return 0
+    fi
+    if [[ ! "$delivery_count" =~ ^[0-9]+$ || "$delivery_count" == "0" ]]; then
+      printf 'delivery_count=%s' "$delivery_count"
+      return 0
+    fi
+    case "$delivery_mode" in
+      accounting*|erp*|netsuite|quickbooks|xero|sap|oracle_erp)
+        ;;
+      *)
+        printf 'delivery_mode=%s is not accounting/ERP' "$delivery_mode"
+        ;;
+    esac
+  fi
 }
 
 require_cmd curl
@@ -366,8 +399,14 @@ while IFS= read -r encoded; do
 
   while IFS= read -r artifact; do
     [[ -z "$artifact" ]] && continue
-    if artifact_is_fresh "$artifact"; then
+    artifact_issue=""
+    if [[ -s "$artifact" ]]; then
+      artifact_issue="$(artifact_contract_issue "$req_id" "$artifact")"
+    fi
+    if artifact_is_fresh "$artifact" && [[ -z "$artifact_issue" ]]; then
       echo "$artifact" >>"$present_required_evidence_artifacts"
+    elif [[ -s "$artifact" && -n "$artifact_issue" ]]; then
+      echo "$artifact ($artifact_issue)" >>"$missing_required_evidence_artifacts"
     elif [[ -s "$artifact" ]]; then
       echo "$artifact" >>"$stale_required_evidence_artifacts"
       echo "$artifact" >>"$missing_required_evidence_artifacts"
