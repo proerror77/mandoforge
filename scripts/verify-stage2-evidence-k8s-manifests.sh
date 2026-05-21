@@ -1390,13 +1390,13 @@ if ! grep -q "policy rollout validation evidence_status" scripts/stage2-completi
   exit 1
 fi
 
-if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "scanned_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "scan_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*scanned_at.*timestamp" scripts/stage2-completion-audit-gate.sh; then
+if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "scanned_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "scan_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "policy_controller_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "policy_deployment_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*scanned_at.*timestamp" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must contract-check policy rollout due-run evidence" >&2
   exit 1
 fi
 
-if ! grep -q "scanned_revisions: Vec<PolicyScheduledRolloutScanDetail>" crates/mandoforge-api/src/main.rs || ! grep -q "audit_id: audit_log.id" crates/mandoforge-api/src/main.rs; then
-  echo "Policy due-run API must return audited per-revision scan details for production evidence" >&2
+if ! grep -q "scanned_revisions: Vec<PolicyScheduledRolloutScanDetail>" crates/mandoforge-api/src/main.rs || ! grep -q "audit_id: audit_log.id" crates/mandoforge-api/src/main.rs || ! grep -q "latest_policy_rollout_controller_binding" crates/mandoforge-api/src/main.rs; then
+  echo "Policy due-run API must return audited per-revision scan details bound to production controller evidence" >&2
   exit 1
 fi
 
@@ -1440,7 +1440,7 @@ if ! grep -q "rollback_evidence_id" scripts/stage2-completion-audit-gate.sh || !
   exit 1
 fi
 
-if ! grep -q "policy-rollout-due-run-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "scanned_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "scan_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*scanned_at.*timestamp" scripts/verify-stage2-evidence-archive.sh; then
+if ! grep -q "policy-rollout-due-run-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "scanned_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "scan_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "policy_controller_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "policy_deployment_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*scanned_at.*timestamp" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must contract-check policy rollout due-run evidence" >&2
   exit 1
 fi
@@ -2142,6 +2142,11 @@ fi
 
 if ! grep -q "missing policy due-run scan audit evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject policy due-run scanned revisions without audit details" >&2
+  exit 1
+fi
+
+if ! grep -q "mismatched policy due-run scan binding evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject policy due-run scanned revisions bound to the wrong controller, store, or deployment" >&2
   exit 1
 fi
 

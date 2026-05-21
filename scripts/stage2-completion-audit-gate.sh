@@ -230,7 +230,11 @@ is_production_policy_rollout_scope() {
 }
 
 policy_due_run_scan_detail_count() {
-  jq -r '[
+  jq -r '
+    (.response.controller_id // "") as $root_controller_id
+    | (.response.policy_store_id // "") as $root_policy_store_id
+    | (.response.deployment_id // "") as $root_deployment_id
+    | [
     (
       .response.scanned_revisions[]?,
       .response.scanned_policies[]?,
@@ -240,6 +244,12 @@ policy_due_run_scan_detail_count() {
     )
     | select(
         type == "object"
+        and ($root_controller_id | length > 0)
+        and ($root_policy_store_id | length > 0)
+        and ($root_deployment_id | length > 0)
+        and ((.controller_id // .policy_controller_id // "") == $root_controller_id)
+        and ((.policy_store_id // .store_id // "") == $root_policy_store_id)
+        and ((.deployment_id // .policy_deployment_id // "") == $root_deployment_id)
         and ((.policy_id // .policy // .policy_key // .policy_name // "") | length > 0)
         and ((.revision_id // .revision // .policy_revision_id // .version // "") | length > 0)
         and ((.status // .result // .action // "") | ascii_downcase | IN("scanned", "checked", "skipped", "noop", "activated", "validated", "passed"))
@@ -1440,7 +1450,7 @@ artifact_contract_issue() {
       return 0
     fi
     if [[ ! "$scan_detail_count" =~ ^[0-9]+$ || "$scan_detail_count" -lt "$scanned_count" ]]; then
-      printf 'scan_detail_count=%s scanned_count=%s' "$scan_detail_count" "$scanned_count"
+      printf 'scan_detail_count=%s scanned_count=%s missing controller/policy store/deployment binding' "$scan_detail_count" "$scanned_count"
       return 0
     fi
     if [[ -z "$checked_at" ]]; then

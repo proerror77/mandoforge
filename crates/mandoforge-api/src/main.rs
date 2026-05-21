@@ -216,6 +216,9 @@ struct PolicyScheduledRolloutRun {
     status: String,
     activated_revision_id: Option<Uuid>,
     activated_revision: Option<PolicyRevision>,
+    controller_id: Option<String>,
+    policy_store_id: Option<String>,
+    deployment_id: Option<String>,
     scanned_count: usize,
     skipped_count: usize,
     scanned_revisions: Vec<PolicyScheduledRolloutScanDetail>,
@@ -228,9 +231,19 @@ struct PolicyScheduledRolloutScanDetail {
     policy_id: String,
     policy_name: String,
     revision_id: Uuid,
+    controller_id: Option<String>,
+    policy_store_id: Option<String>,
+    deployment_id: Option<String>,
     status: String,
     audit_id: Uuid,
     scanned_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct PolicyRolloutControllerBinding {
+    controller_id: String,
+    policy_store_id: String,
+    deployment_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18898,6 +18911,8 @@ async fn execute_due_policy_rollouts(
 ) -> Result<PolicyScheduledRolloutRun, AppError> {
     let now = Utc::now();
     let revisions = state.list_policy_revisions().await?;
+    let controller_binding =
+        latest_policy_rollout_controller_binding(&state.list_audit_logs(None).await?);
     let mut due_revisions = Vec::new();
     let mut skipped_count = 0usize;
     for revision in &revisions {
@@ -18919,6 +18934,15 @@ async fn execute_due_policy_rollouts(
             status: "activated".to_string(),
             activated_revision_id: Some(activated_revision.id),
             activated_revision: Some(activated_revision),
+            controller_id: controller_binding
+                .as_ref()
+                .map(|binding| binding.controller_id.clone()),
+            policy_store_id: controller_binding
+                .as_ref()
+                .map(|binding| binding.policy_store_id.clone()),
+            deployment_id: controller_binding
+                .as_ref()
+                .map(|binding| binding.deployment_id.clone()),
             scanned_count: revisions.len(),
             skipped_count,
             scanned_revisions: Vec::new(),
@@ -18930,6 +18954,15 @@ async fn execute_due_policy_rollouts(
             status: "noop".to_string(),
             activated_revision_id: None,
             activated_revision: None,
+            controller_id: controller_binding
+                .as_ref()
+                .map(|binding| binding.controller_id.clone()),
+            policy_store_id: controller_binding
+                .as_ref()
+                .map(|binding| binding.policy_store_id.clone()),
+            deployment_id: controller_binding
+                .as_ref()
+                .map(|binding| binding.deployment_id.clone()),
             scanned_count: revisions.len(),
             skipped_count,
             scanned_revisions: Vec::new(),
@@ -18961,6 +18994,15 @@ async fn execute_due_policy_rollouts(
                 policy_id: revision.name.clone(),
                 policy_name: revision.name.clone(),
                 revision_id: revision.id,
+                controller_id: controller_binding
+                    .as_ref()
+                    .map(|binding| binding.controller_id.clone()),
+                policy_store_id: controller_binding
+                    .as_ref()
+                    .map(|binding| binding.policy_store_id.clone()),
+                deployment_id: controller_binding
+                    .as_ref()
+                    .map(|binding| binding.deployment_id.clone()),
                 status: status.to_string(),
                 audit_id: audit_log.id,
                 scanned_at: now,
@@ -18971,6 +19013,9 @@ async fn execute_due_policy_rollouts(
         "subject": subject,
         "status": result.status,
         "activated_revision_id": result.activated_revision_id,
+        "controller_id": result.controller_id.clone(),
+        "policy_store_id": result.policy_store_id.clone(),
+        "deployment_id": result.deployment_id.clone(),
         "scanned_count": result.scanned_count,
         "skipped_count": result.skipped_count,
         "scanned_revisions": result.scanned_revisions,
@@ -19206,6 +19251,41 @@ fn policy_rollout_orchestration_execution_is_production_target(execution: &Value
             .get("rollback_supported")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+}
+
+fn nonempty_json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn latest_policy_rollout_controller_binding(
+    audit_logs: &[AuditLog],
+) -> Option<PolicyRolloutControllerBinding> {
+    let execution = audit_logs
+        .iter()
+        .filter(|log| log.action == "policy.rollout_orchestration_validation_run")
+        .filter(|log| log.details.get("status").and_then(Value::as_str) == Some("validated"))
+        .filter_map(|log| {
+            log.details
+                .get("controller_execution")
+                .map(|execution| (log, execution))
+        })
+        .filter(|(_, execution)| {
+            execution.get("status").and_then(Value::as_str) == Some("validated")
+                && policy_rollout_orchestration_execution_is_production_target(execution)
+        })
+        .max_by_key(|(log, _)| log.created_at)
+        .map(|(_, execution)| execution)?;
+
+    Some(PolicyRolloutControllerBinding {
+        controller_id: nonempty_json_string(execution, "controller_id")?,
+        policy_store_id: nonempty_json_string(execution, "policy_store_id")?,
+        deployment_id: nonempty_json_string(execution, "deployment_id")?,
+    })
 }
 
 async fn execute_policy_rollout_orchestration_controller<F>(

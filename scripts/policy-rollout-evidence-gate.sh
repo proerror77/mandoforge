@@ -73,7 +73,11 @@ is_production_identity() {
 }
 
 policy_due_run_scan_detail_count() {
-  jq -r '[
+  jq -r '
+    (.response.controller_id // "") as $root_controller_id
+    | (.response.policy_store_id // "") as $root_policy_store_id
+    | (.response.deployment_id // "") as $root_deployment_id
+    | [
     (
       .response.scanned_revisions[]?,
       .response.scanned_policies[]?,
@@ -83,6 +87,12 @@ policy_due_run_scan_detail_count() {
     )
     | select(
         type == "object"
+        and ($root_controller_id | length > 0)
+        and ($root_policy_store_id | length > 0)
+        and ($root_deployment_id | length > 0)
+        and ((.controller_id // .policy_controller_id // "") == $root_controller_id)
+        and ((.policy_store_id // .store_id // "") == $root_policy_store_id)
+        and ((.deployment_id // .policy_deployment_id // "") == $root_deployment_id)
         and ((.policy_id // .policy // .policy_key // .policy_name // "") | length > 0)
         and ((.revision_id // .revision // .policy_revision_id // .version // "") | length > 0)
         and ((.status // .result // .action // "") | ascii_downcase | IN("scanned", "checked", "skipped", "noop", "activated", "validated", "passed"))
@@ -510,6 +520,7 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/policy/rollout/orchestration/readiness >/dev/null
 
 if [[ "$RUN_POLICY_DUE_RUN" == "1" ]]; then
+  capture_policy_orchestration_validation_evidence
   capture_policy_due_run_evidence
 else
   echo "skipping policy rollout due-run; set RUN_STAGE2_POLICY_DUE_RUN=1 to include due-run evidence" >&2
