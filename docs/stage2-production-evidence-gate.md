@@ -279,6 +279,7 @@ accounting/ERP delivery mode such as `accounting_erp`, `erp`, `netsuite`,
 not satisfy the ERP proof. The observer must also report a stable system id through `system_id`,
 `erp_system_id`, `accounting_system_id`, or `target_id`, and ERP/accounting
 delivery receipts must include receipt id, system id, posted/accepted status,
+current export file name and byte count,
 record count, and audit id, run id, or posting timestamp detail. The system id must
 match `MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID` in the all-up archive manifest. The
 matching in-cluster template is

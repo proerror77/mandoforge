@@ -55,6 +55,8 @@ is_finance_system_identity() {
 finance_delivery_receipt_count() {
   jq -r '
     (.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // "") as $root_system_id
+    | (.export_state.latest_file_name // .export_state.file_name // .export_state.filename // "") as $root_file_name
+    | ((.export_state.latest_bytes // .export_state.bytes // .export_state.export_bytes // 0) | tonumber? // 0) as $root_byte_count
     | [
       (
         .export_state.delivery_receipts[]?,
@@ -66,6 +68,8 @@ finance_delivery_receipt_count() {
           {
             receipt_id: (.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id),
             system_id: $root_system_id,
+            file_name: $root_file_name,
+            byte_count: $root_byte_count,
             status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "delivered"),
             record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0),
             audit_id: (.export_state.latest_delivery_audit_id // .export_state.latest_audit_id // .export_state.audit_id),
@@ -78,6 +82,10 @@ finance_delivery_receipt_count() {
           type == "object"
           and ((.receipt_id // .receipt // .batch_id // .erp_batch_id // .delivery_id // .posting_id // "") | length > 0)
           and (((.system_id // .erp_system_id // .accounting_system_id // .target_id // "") as $receipt_system_id | ($receipt_system_id | length > 0) and $receipt_system_id == $root_system_id))
+          and ($root_file_name | length > 0)
+          and (((.file_name // .filename // .export_file_name // .csv_file_name // "") as $receipt_file_name | ($receipt_file_name | length > 0) and $receipt_file_name == $root_file_name))
+          and ($root_byte_count > 0)
+          and ((((.byte_count // .bytes // .export_bytes // .csv_bytes // 0) | tonumber? // 0) as $receipt_byte_count | $receipt_byte_count == $root_byte_count))
           and ((.status // .result // "") | ascii_downcase | IN("delivered", "posted", "accepted", "completed", "reconciled", "validated"))
           and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .posted_at // .delivered_at // .received_at // .accepted_at // .timestamp // "") | length > 0)
@@ -502,7 +510,7 @@ write_summary() {
       echo "- finance export delivery observer did not confirm delivery"
     fi
     if [[ ! "$export_delivery_receipt_count" =~ ^[0-9]+$ || ! "$export_delivery_count" =~ ^[0-9]+$ || "$export_delivery_receipt_count" -lt "$export_delivery_count" ]]; then
-      echo "- finance export delivery observer did not report ERP/accounting receipt details for every delivery: receipt_count=$export_delivery_receipt_count delivery_count=$export_delivery_count"
+      echo "- finance export delivery observer did not report ERP/accounting receipt details bound to the current export file for every delivery: receipt_count=$export_delivery_receipt_count delivery_count=$export_delivery_count"
     fi
     case "$export_delivery_mode" in
       accounting*|erp*|netsuite|quickbooks|xero|sap|oracle_erp)

@@ -459,6 +459,8 @@ is_finance_system_identity_value() {
 finance_delivery_receipt_count() {
   jq -r '
     (.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // "") as $root_system_id
+    | (.export_state.latest_file_name // .export_state.file_name // .export_state.filename // "") as $root_file_name
+    | ((.export_state.latest_bytes // .export_state.bytes // .export_state.export_bytes // 0) | tonumber? // 0) as $root_byte_count
     | [
       (
         .export_state.delivery_receipts[]?,
@@ -470,6 +472,8 @@ finance_delivery_receipt_count() {
           {
             receipt_id: (.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id),
             system_id: $root_system_id,
+            file_name: $root_file_name,
+            byte_count: $root_byte_count,
             status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "delivered"),
             record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0),
             audit_id: (.export_state.latest_delivery_audit_id // .export_state.latest_audit_id // .export_state.audit_id),
@@ -482,6 +486,10 @@ finance_delivery_receipt_count() {
           type == "object"
           and ((.receipt_id // .receipt // .batch_id // .erp_batch_id // .delivery_id // .posting_id // "") | length > 0)
           and (((.system_id // .erp_system_id // .accounting_system_id // .target_id // "") as $receipt_system_id | ($receipt_system_id | length > 0) and $receipt_system_id == $root_system_id))
+          and ($root_file_name | length > 0)
+          and (((.file_name // .filename // .export_file_name // .csv_file_name // "") as $receipt_file_name | ($receipt_file_name | length > 0) and $receipt_file_name == $root_file_name))
+          and ($root_byte_count > 0)
+          and ((((.byte_count // .bytes // .export_bytes // .csv_bytes // 0) | tonumber? // 0) as $receipt_byte_count | $receipt_byte_count == $root_byte_count))
           and ((.status // .result // "") | ascii_downcase | IN("delivered", "posted", "accepted", "completed", "reconciled", "validated"))
           and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .posted_at // .delivered_at // .received_at // .accepted_at // .timestamp // "") | length > 0)
@@ -1164,7 +1172,7 @@ artifact_issue() {
         return 0
       fi
       if [[ ! "$delivery_receipt_count" =~ ^[0-9]+$ || "$delivery_receipt_count" -lt "$delivery_count" ]]; then
-        printf '%s delivery_receipt_count=%s delivery_count=%s' "$relative_path" "$delivery_receipt_count" "$delivery_count"
+        printf '%s delivery_receipt_count=%s delivery_count=%s missing current export file binding' "$relative_path" "$delivery_receipt_count" "$delivery_count"
         return 0
       fi
       if ! is_accounting_or_erp_delivery_mode "$delivery_mode"; then
@@ -2301,9 +2309,11 @@ JSON
   "export_state": {
     "delivery_mode": "netsuite",
     "system_id": "netsuite-prod-1",
+    "latest_file_name": "mandoforge-usage-export.csv",
+    "latest_bytes": 128,
     "delivery_count": 1,
     "delivery_receipts": [
-      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "file_name": "mandoforge-usage-export.csv", "byte_count": 128, "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
     ]
   }
 }
@@ -3266,9 +3276,11 @@ JSON
   "export_state": {
     "delivery_mode": "netsuite",
     "system_id": "netsuite-prod-1",
+    "latest_file_name": "mandoforge-usage-export.csv",
+    "latest_bytes": 128,
     "delivery_count": 1,
     "delivery_receipts": [
-      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "status": "posted", "record_count": 1}
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "file_name": "mandoforge-usage-export.csv", "byte_count": 128, "status": "posted", "record_count": 1}
     ]
   }
 }
@@ -3297,9 +3309,11 @@ JSON
   "export_state": {
     "delivery_mode": "netsuite",
     "system_id": "netsuite-prod-1",
+    "latest_file_name": "mandoforge-usage-export.csv",
+    "latest_bytes": 128,
     "delivery_count": 1,
     "delivery_receipts": [
-      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "quickbooks-prod-2", "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "quickbooks-prod-2", "file_name": "mandoforge-usage-export.csv", "byte_count": 128, "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
     ]
   }
 }
@@ -3328,9 +3342,44 @@ JSON
   "export_state": {
     "delivery_mode": "netsuite",
     "system_id": "netsuite-prod-1",
+    "latest_file_name": "mandoforge-usage-export.csv",
+    "latest_bytes": 128,
     "delivery_count": 1,
     "delivery_receipts": [
-      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "file_name": "old-usage-export.csv", "byte_count": 64, "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-delivery-receipt-export-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-delivery-receipt-export.out 2>/tmp/mandoforge-stage2-archive-finance-delivery-receipt-export.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected mismatched finance delivery receipt export evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-export-delivery-observer.json" <<'JSON'
+{
+  "status": "ok",
+  "export_state": {
+    "delivery_mode": "netsuite",
+    "system_id": "netsuite-prod-1",
+    "latest_file_name": "mandoforge-usage-export.csv",
+    "latest_bytes": 128,
+    "delivery_count": 1,
+    "delivery_receipts": [
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "file_name": "mandoforge-usage-export.csv", "byte_count": 128, "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
     ]
   }
 }
