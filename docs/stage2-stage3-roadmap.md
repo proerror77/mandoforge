@@ -212,8 +212,10 @@ Scope:
   requires_action, rescheduling, and terminated semantics.
 - Preserve the session-loop event cursor: each job records its pending event
   sequence window and advances `processed_event_seq` on completion.
-- Harden `/api/sessions/:id/stream` into a live stream with cursor/reconnect
-  semantics instead of relying only on a point-in-time event snapshot.
+- Preserve `/api/sessions/:id/stream` reconnect semantics: emitted SSE ids are
+  session event sequences, and `?after_seq=` / `Last-Event-ID` replay only
+  events after the caller's cursor. The remaining hardening is true live
+  tailing through a broadcaster, DB tail, or poll-and-push loop.
 
 Acceptance criteria:
 

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::Request,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
@@ -787,6 +787,11 @@ struct AddMessage {
 struct SendSessionEvents {
     #[serde(default)]
     events: Vec<IncomingSessionEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamEventsQuery {
+    after_seq: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -14314,6 +14319,7 @@ fn value_is_empty_object(value: &Value) -> bool {
 async fn stream_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<StreamEventsQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>, AppError>
 {
@@ -14325,14 +14331,48 @@ async fn stream_events(
         Some(id),
     )
     .await?;
-    let events = state.list_events(id).await.unwrap_or_default();
+    let after_seq = stream_after_seq(&headers, query.after_seq)?;
+    let events = state
+        .list_events(id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|event| after_seq.map_or(true, |after_seq| event.seq > after_seq))
+        .collect::<Vec<_>>();
     let stream = futures_util::stream::iter(events.into_iter().map(|event| {
         Ok(Event::default()
             .event(event.event_type.clone())
+            .id(event.seq.to_string())
             .json_data(event)
             .unwrap_or_else(|_| Event::default().event("error").data("serialization failed")))
     }));
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+fn stream_after_seq(
+    headers: &HeaderMap,
+    query_after_seq: Option<i64>,
+) -> Result<Option<i64>, AppError> {
+    let after_seq = match query_after_seq {
+        Some(after_seq) => Some(after_seq),
+        None => {
+            let Some(raw) = header_value(headers, "last-event-id")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return Ok(None);
+            };
+            Some(raw.parse::<i64>().map_err(|_| {
+                AppError::bad_request("Last-Event-ID must be a session event sequence")
+            })?)
+        }
+    };
+    if after_seq.is_some_and(|seq| seq < 0) {
+        return Err(AppError::bad_request(
+            "stream cursor sequence must be non-negative",
+        ));
+    }
+    Ok(after_seq)
 }
 
 #[async_trait]
@@ -57267,6 +57307,18 @@ not json
         (status, value)
     }
 
+    async fn request_text(app: Router, request: Request<Body>) -> (StatusCode, String) {
+        let response = app.oneshot(request).await.expect("request succeeds");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        (
+            status,
+            String::from_utf8(body.to_vec()).expect("utf8 response body"),
+        )
+    }
+
     fn json_request(method: &str, uri: &str, body: Value) -> Request<Body> {
         Request::builder()
             .method(method)
@@ -57901,6 +57953,151 @@ not json
             event.event_type == "agent.custom_tool_result"
                 && event.payload["source_event_id"] == json!(custom_tool_events[0].id)
         }));
+    }
+
+    #[tokio::test]
+    async fn session_stream_replays_after_seq_cursor_with_sse_ids() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.name == "Generic Orchestrator Agent")
+            .expect("seeded generic orchestrator agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "stream cursor"
+                }),
+            ),
+        )
+        .await;
+
+        let user_events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "user.message",
+                        "payload": {"message": "first stream event"}
+                    }]
+                }),
+            ),
+        )
+        .await;
+        let custom_events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "user.custom_tool_result",
+                        "payload": {
+                            "custom_tool_call_id": "stream-custom-1",
+                            "result": {"status": "ok"}
+                        }
+                    }]
+                }),
+            ),
+        )
+        .await;
+
+        let (status, body) = request_text(
+            app,
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/stream?after_seq={}",
+                    session.id, user_events[0].seq
+                ))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains(&format!("id: {}\n", user_events[0].seq)));
+        assert!(body.contains(&format!("id: {}\n", custom_events[0].seq)));
+        assert!(body.contains("event: user.custom_tool_result\n"));
+        assert!(body.contains("event: agent.custom_tool_result\n"));
+    }
+
+    #[tokio::test]
+    async fn session_stream_uses_last_event_id_as_reconnect_cursor() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agents[0].id,
+                    "title": "last-event-id stream"
+                }),
+            ),
+        )
+        .await;
+        let first: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "user.message",
+                        "payload": {"message": "already seen"}
+                    }]
+                }),
+            ),
+        )
+        .await;
+        let second: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "user.message",
+                        "payload": {"message": "after reconnect"}
+                    }]
+                }),
+            ),
+        )
+        .await;
+
+        let (status, body) = request_text(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/stream", session.id))
+                .header("last-event-id", first[0].seq.to_string())
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("already seen"));
+        assert!(body.contains("after reconnect"));
+        assert!(body.contains(&format!("id: {}\n", second[0].seq)));
     }
 
     #[tokio::test]
