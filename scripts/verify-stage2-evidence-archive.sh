@@ -330,7 +330,11 @@ tenant_sample_detail_count() {
 }
 
 kms_rotation_detail_count() {
-  jq -r '[
+  jq -r '
+    (.response.external_execution.backend_id // "") as $root_backend_id
+    | (.response.external_execution.key_id // "") as $root_key_id
+    | (.response.external_execution.rotation_id // "") as $root_rotation_id
+    | [
     (
       .response.rotated_keys[]?,
       .response.rotation_details[]?,
@@ -341,8 +345,12 @@ kms_rotation_detail_count() {
     )
     | select(
         type == "object"
-        and ((.key_id // .key // .kms_key_id // "") | length > 0)
-        and ((.rotation_id // .rotation // .operation_id // "") | length > 0)
+        and ($root_backend_id | length > 0)
+        and ($root_key_id | length > 0)
+        and ($root_rotation_id | length > 0)
+        and ((.backend_id // .kms_backend_id // "") == $root_backend_id)
+        and ((.key_id // .key // .kms_key_id // "") == $root_key_id)
+        and ((.rotation_id // .rotation // .operation_id // "") == $root_rotation_id)
         and ((.catalog_updated // .catalog_update_confirmed // false) == true)
         and ((.status // .result // "") | ascii_downcase | IN("rotated", "validated", "completed", "passed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .rotated_at // .timestamp // "") | length > 0)
@@ -2179,7 +2187,7 @@ JSON
     "rotated_count": 1,
     "catalog_updated_count": 1,
     "rotation_details": [
-      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
+      {"backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
     ],
     "actions": ["external_kms_rotation_confirmed"]
   }
@@ -3461,7 +3469,7 @@ JSON
     "rotated_count": 1,
     "catalog_updated_count": 0,
     "rotation_details": [
-      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
+      {"backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
     ],
     "actions": ["external_kms_rotation_confirmed"]
   }
@@ -3503,7 +3511,7 @@ JSON
     "rotated_count": 0,
     "catalog_updated_count": 1,
     "rotation_details": [
-      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
+      {"backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
     ],
     "actions": ["external_kms_rotation_confirmed"]
   }
@@ -3584,7 +3592,7 @@ JSON
     "rotated_count": 1,
     "catalog_updated_count": 1,
     "rotation_details": [
-      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true}
+      {"backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true}
     ],
     "actions": ["external_kms_rotation_confirmed"]
   }
@@ -3626,7 +3634,7 @@ JSON
     "rotated_count": 1,
     "catalog_updated_count": 1,
     "rotation_details": [
-      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
+      {"backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
     ],
     "actions": ["rotation_audit_logged"]
   }
@@ -3668,7 +3676,7 @@ JSON
     "rotated_count": 1,
     "catalog_updated_count": 1,
     "rotation_details": [
-      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
+      {"backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
     ],
     "actions": ["external_kms_rotation_confirmed"]
   }
@@ -3710,7 +3718,7 @@ JSON
     "rotated_count": 1,
     "catalog_updated_count": 1,
     "rotation_details": [
-      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
+      {"backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"}
     ],
     "actions": ["external_kms_rotation_confirmed"]
   }

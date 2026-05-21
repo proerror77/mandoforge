@@ -241,7 +241,11 @@ write_summary() {
     rotation_id="$(jq -r '.response.external_execution.rotation_id // ""' "$rotation_evidence_file")"
     rotation_rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$rotation_evidence_file")"
     rotation_catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$rotation_evidence_file")"
-    rotation_detail_count="$(jq -r '[
+    rotation_detail_count="$(jq -r '
+      (.response.external_execution.backend_id // "") as $root_backend_id
+      | (.response.external_execution.key_id // "") as $root_key_id
+      | (.response.external_execution.rotation_id // "") as $root_rotation_id
+      | [
       (
         .response.rotated_keys[]?,
         .response.rotation_details[]?,
@@ -252,8 +256,12 @@ write_summary() {
       )
       | select(
           type == "object"
-          and ((.key_id // .key // .kms_key_id // "") | length > 0)
-          and ((.rotation_id // .rotation // .operation_id // "") | length > 0)
+          and ($root_backend_id | length > 0)
+          and ($root_key_id | length > 0)
+          and ($root_rotation_id | length > 0)
+          and ((.backend_id // .kms_backend_id // "") == $root_backend_id)
+          and ((.key_id // .key // .kms_key_id // "") == $root_key_id)
+          and ((.rotation_id // .rotation // .operation_id // "") == $root_rotation_id)
           and ((.catalog_updated // .catalog_update_confirmed // false) == true)
           and ((.status // .result // "") | ascii_downcase | IN("rotated", "validated", "completed", "passed"))
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .rotated_at // .timestamp // "") | length > 0)

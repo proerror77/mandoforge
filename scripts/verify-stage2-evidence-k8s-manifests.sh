@@ -855,8 +855,8 @@ if ! grep -q "MANDOFORGE_STAGE2_KMS_BACKEND_ID" "$vault_script" || ! grep -q "MA
   exit 1
 fi
 
-if ! grep -q "rotation_rotated_count" "$vault_script" || ! grep -q "rotation_catalog_updated_count" "$vault_script" || ! grep -q "rotation_detail_count" "$vault_script" || ! grep -q "rotation_id" "$vault_script"; then
-  echo "Vault evidence script must require audited KMS rotation id, rotated count, catalog update count, and key detail count" >&2
+if ! grep -q "rotation_rotated_count" "$vault_script" || ! grep -q "rotation_catalog_updated_count" "$vault_script" || ! grep -q "rotation_detail_count" "$vault_script" || ! grep -q "root_rotation_id" "$vault_script"; then
+  echo "Vault evidence script must require audited KMS rotation id, rotated count, catalog update count, and backend/key/rotation-bound key detail count" >&2
   exit 1
 fi
 
@@ -895,8 +895,8 @@ if ! grep -q "backend_id or key_id is pilot/mock/local" scripts/stage2-completio
   exit 1
 fi
 
-if ! grep -q "rotated_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "catalog_updated_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "rotation_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "recovery_target_kind" scripts/stage2-completion-audit-gate.sh; then
-  echo "Completion audit gate must require audited KMS rotation and recovery details" >&2
+if ! grep -q "rotated_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "catalog_updated_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "rotation_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "root_rotation_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "recovery_target_kind" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must require audited KMS rotation and recovery details bound to backend/key/rotation ids" >&2
   exit 1
 fi
 
@@ -915,8 +915,8 @@ if ! grep -q "external KMS rotation confirmation action missing" scripts/stage2-
   exit 1
 fi
 
-if ! grep -q "rotation_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "catalog_updated_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rotation_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "recovery_target_kind" scripts/verify-stage2-evidence-archive.sh; then
-  echo "Stage 2 archive verifier must require audited KMS rotation and recovery details" >&2
+if ! grep -q "root_rotation_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "catalog_updated_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rotation_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "recovery_target_kind" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require audited KMS rotation and recovery details bound to backend/key/rotation ids" >&2
   exit 1
 fi
 
