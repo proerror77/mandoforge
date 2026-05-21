@@ -255,7 +255,8 @@ policy_due_run_scan_detail_count() {
         and ((.status // .result // .action // "") | ascii_downcase | IN("scanned", "checked", "skipped", "noop", "activated", "validated", "passed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .scanned_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$root_controller_id, $root_policy_store_id, $root_deployment_id, (.policy_id // .policy // .policy_key // .policy_name // ""), (.revision_id // .revision // .policy_revision_id // .version // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 policy_rollout_step_detail_count() {
@@ -277,7 +278,8 @@ policy_rollout_step_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$root_controller_id, $root_policy_store_id, $root_deployment_id, (.name // .step // .kind // .action // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 normalize_kms_kind() {

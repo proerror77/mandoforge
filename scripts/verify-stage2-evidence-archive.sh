@@ -422,7 +422,8 @@ policy_due_run_scan_detail_count() {
         and ((.status // .result // .action // "") | ascii_downcase | IN("scanned", "checked", "skipped", "noop", "activated", "validated", "passed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .scanned_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$root_controller_id, $root_policy_store_id, $root_deployment_id, (.policy_id // .policy // .policy_key // .policy_name // ""), (.revision_id // .revision // .policy_revision_id // .version // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 policy_rollout_step_detail_count() {
@@ -444,7 +445,8 @@ policy_rollout_step_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$root_controller_id, $root_policy_store_id, $root_deployment_id, (.name // .step // .kind // .action // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 kms_recovery_step_detail_count() {
@@ -5291,6 +5293,49 @@ JSON
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
         {"name": "due-run-supervision", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "due-run-supervision", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-step-duplicate-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-step-duplicate-negative.out 2>/tmp/mandoforge-stage2-archive-policy-step-duplicate-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate policy rollout step evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/policy-rollout-orchestration-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "production_policy_controller",
+      "environment": "production",
+      "controller_id": "policy-controller-prod-1",
+      "rollout_scope": "global",
+      "production_policy_store": true,
+      "rollback_supported": true,
+      "rollback_plan_id": "policy-rollback-plan-prod-1",
+      "rollback_checked_at": "1970-01-01T00:00:00Z",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1",
+      "steps": [
+        {"name": "due-run-supervision", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
         {"name": "staged-runtime-clear", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
@@ -5358,6 +5403,42 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing policy due-run scan detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/policy-rollout-due-run-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "noop",
+    "controller_id": "policy-controller-prod-1",
+    "policy_store_id": "policy-store-prod-1",
+    "deployment_id": "policy-deployment-prod-1",
+    "scanned_count": 2,
+    "skipped_count": 0,
+    "scanned_revisions": [
+      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "scanned", "audit_id": "policy-due-run-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "scanned", "audit_id": "policy-due-run-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+    ],
+    "checked_at": "1970-01-01T00:00:00Z"
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-due-run-scan-duplicate-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-due-run-scan-duplicate-negative.out 2>/tmp/mandoforge-stage2-archive-policy-due-run-scan-duplicate-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate policy due-run scan detail evidence to fail" >&2
     exit 1
   fi
 

@@ -2160,6 +2160,11 @@ if ! grep -q "mismatched policy rollout step binding evidence" scripts/verify-st
   exit 1
 fi
 
+if ! grep -q "duplicate policy rollout step evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject duplicate policy rollout orchestration steps" >&2
+  exit 1
+fi
+
 if ! grep -q "zero policy due-run scan count" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject policy due-run evidence without scanned revisions" >&2
   exit 1
@@ -2167,6 +2172,11 @@ fi
 
 if ! grep -q "missing policy due-run scan detail evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject policy due-run evidence without scanned revision details" >&2
+  exit 1
+fi
+
+if ! grep -q "duplicate policy due-run scan detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject duplicate policy due-run scanned revisions" >&2
   exit 1
 fi
 

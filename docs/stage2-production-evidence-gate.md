@@ -215,9 +215,11 @@ production rollback plan/procedure/revision/run id with rollback audit or trace
 evidence, emits audited orchestration steps bound to the same controller id,
 policy store id, and deployment id with step names, passed/validated/completed
 status, and audit id, trace id, run id, or timestamp detail, and is paired with captured
-due-run evidence that scanned at least one policy revision, recorded
-`checked_at`, and included audit id, trace id, run id, or timestamp detail on
-each scanned revision. The matching in-cluster template
+due-run evidence that scanned at least one unique policy revision bound to the
+same controller id, policy store id, and deployment id, recorded `checked_at`,
+and included audit id, trace id, run id, or timestamp detail on each scanned
+revision. Duplicate orchestration step names or duplicate policy/revision scan
+rows do not satisfy the reported counts. The matching in-cluster template
 is `deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml`, which
 persists its output under the Stage 2 production evidence PVC.
 
