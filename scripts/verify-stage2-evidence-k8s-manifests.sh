@@ -1040,6 +1040,16 @@ if ! grep -q "required_evidence_artifacts_for_requirement" scripts/stage2-comple
   exit 1
 fi
 
+if ! grep -q "ui-production-polish)" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must map the UI production-polish requirement id to its evidence artifacts" >&2
+  exit 1
+fi
+
+if grep -q "ui-production-crud)" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate still contains the old UI production CRUD requirement id" >&2
+  exit 1
+fi
+
 if ! grep -q "missing_required_evidence_artifact_count" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit gate must report missing explicit evidence metadata artifacts" >&2
   exit 1

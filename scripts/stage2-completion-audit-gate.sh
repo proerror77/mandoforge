@@ -154,7 +154,7 @@ required_evidence_artifacts_for_requirement() {
       echo "$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
       echo "$SOURCE_EVIDENCE_DIR/managed-session-restart-resume-evidence.json"
       ;;
-    ui-production-crud)
+    ui-production-polish)
       echo "$SOURCE_EVIDENCE_DIR/local-script-scripts-verify-static-ui-actionbook.sh.json"
       echo "$SOURCE_EVIDENCE_DIR/local-script-scripts-verify-static-ui-assets.sh.json"
       ;;
