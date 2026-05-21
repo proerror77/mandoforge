@@ -210,9 +210,8 @@ Scope:
   and enqueues the session loop.
 - Replace demo-era persisted terminal completion with explicit idle, running,
   requires_action, rescheduling, and terminated semantics.
-- Add event-cursor or processed-sequence tracking so each session-loop job
-  consumes the intended unprocessed user, approval, and custom-tool-result
-  events.
+- Preserve the session-loop event cursor: each job records its pending event
+  sequence window and advances `processed_event_seq` on completion.
 - Harden `/api/sessions/:id/stream` into a live stream with cursor/reconnect
   semantics instead of relying only on a point-in-time event snapshot.
 
@@ -227,8 +226,8 @@ Acceptance criteria:
 
 Primary lanes: Lane C and Lane D.
 
-Status: session-loop jobs exist; environment placement and single-path
-continuation remain.
+Status: session-loop jobs exist with event cursor windows; environment placement
+and single-path continuation remain.
 
 Scope:
 

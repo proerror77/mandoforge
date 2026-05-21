@@ -15,6 +15,9 @@ use crate::{
 pub(crate) struct HarnessContext {
     pub(crate) session_id: Uuid,
     pub(crate) event_count: usize,
+    pub(crate) pending_event_seq_start: Option<i64>,
+    pub(crate) pending_event_seq_end: Option<i64>,
+    pub(crate) pending_event_count: usize,
     pub(crate) last_user_message: Option<String>,
     pub(crate) approved_tool_result_count: usize,
     pub(crate) custom_tool_result_count: usize,

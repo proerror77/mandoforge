@@ -8,7 +8,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -1929,6 +1929,16 @@ async fn execute_approved_remote_computer_agent_cli(
         Some(tool_call.id),
     )
     .await?;
+    let turn_recording = record_runtime_adapter_turn_metadata(
+        state,
+        approval.session_id,
+        &profile,
+        &profile_config,
+        &adapter_events,
+        &request.args,
+        Some(tool_call.id),
+    )
+    .await?;
     let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
     let event_type = if kubernetes_exec_status_succeeded(&status) {
         "agent_cli.task.completed"
@@ -1954,6 +1964,8 @@ async fn execute_approved_remote_computer_agent_cli(
                 "stdout_bytes": stdout.original_bytes,
                 "stderr_bytes": stderr.original_bytes,
                 "runtime_adapter_event_count": adapter_events.len(),
+                "runtime_turn_event_count": turn_recording.event_count,
+                "runtime_final_artifact_count": turn_recording.final_artifact_count,
                 "status": status,
                 "execution_enabled": true,
             }),
@@ -1983,6 +1995,8 @@ async fn execute_approved_remote_computer_agent_cli(
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 "runtime_adapter_event_count": adapter_events.len(),
+                "runtime_turn_event_count": turn_recording.event_count,
+                "runtime_final_artifact_count": turn_recording.final_artifact_count,
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": remote_computer.id,
                 "assignment_id": assignment.id,
@@ -2014,6 +2028,8 @@ async fn execute_approved_remote_computer_agent_cli(
             .and_then(Value::as_bool)
             .unwrap_or(false),
         "runtime_adapter_event_count": adapter_events.len(),
+        "runtime_turn_event_count": turn_recording.event_count,
+        "runtime_final_artifact_count": turn_recording.final_artifact_count,
     });
     state
         .append_event(
@@ -2709,7 +2725,8 @@ async fn run_agent_cli(
     for arg in &config.args {
         command.arg(arg);
     }
-    for arg in request.args {
+    let request_args = request.args.clone();
+    for arg in &request_args {
         command.arg(arg);
     }
     command.arg(&request.task);
@@ -2733,6 +2750,16 @@ async fn run_agent_cli(
     let adapter_events = parse_runtime_adapter_events(&runtime_type, &stdout_full);
     record_runtime_adapter_events(state, session_id, &profile, &config, &adapter_events, None)
         .await?;
+    let turn_recording = record_runtime_adapter_turn_metadata(
+        state,
+        session_id,
+        &profile,
+        &config,
+        &adapter_events,
+        &request_args,
+        None,
+    )
+    .await?;
     let limit = execution_output_limit_bytes();
     let stdout = truncate_output(&stdout_full, limit);
     let stderr = truncate_output(&stderr_full, limit);
@@ -2763,6 +2790,8 @@ async fn run_agent_cli(
                 "stderr_bytes": stderr.original_bytes,
                 "stderr_truncated": stderr.truncated,
                 "runtime_adapter_event_count": adapter_events.len(),
+                "runtime_turn_event_count": turn_recording.event_count,
+                "runtime_final_artifact_count": turn_recording.final_artifact_count,
                 "runner": "agent-cli"
             }),
         )
@@ -2786,7 +2815,9 @@ async fn run_agent_cli(
         "stderr": stderr.text,
         "stderr_bytes": stderr.original_bytes,
         "stderr_truncated": stderr.truncated,
-        "runtime_adapter_event_count": adapter_events.len()
+        "runtime_adapter_event_count": adapter_events.len(),
+        "runtime_turn_event_count": turn_recording.event_count,
+        "runtime_final_artifact_count": turn_recording.final_artifact_count
     }))
 }
 
@@ -3074,14 +3105,7 @@ fn redact_runtime_adapter_event(value: Value) -> Value {
                 .into_iter()
                 .map(|(key, value)| {
                     let lower = key.to_ascii_lowercase();
-                    if lower.contains("token")
-                        || lower.contains("secret")
-                        || lower.contains("password")
-                        || lower.contains("api_key")
-                        || lower.contains("apikey")
-                        || lower.contains("auth")
-                        || lower.contains("credential")
-                    {
+                    if runtime_adapter_redacts_key(&lower) {
                         (key, Value::String("[REDACTED]".to_string()))
                     } else {
                         (key, redact_runtime_adapter_event(value))
@@ -3097,6 +3121,32 @@ fn redact_runtime_adapter_event(value: Value) -> Value {
         ),
         value => value,
     }
+}
+
+fn runtime_adapter_redacts_key(lower_key: &str) -> bool {
+    if runtime_adapter_usage_counter_key(lower_key) {
+        return false;
+    }
+    lower_key.contains("token")
+        || lower_key.contains("secret")
+        || lower_key.contains("password")
+        || lower_key.contains("api_key")
+        || lower_key.contains("apikey")
+        || lower_key.contains("auth")
+        || lower_key.contains("credential")
+}
+
+fn runtime_adapter_usage_counter_key(lower_key: &str) -> bool {
+    matches!(
+        lower_key,
+        "input_tokens"
+            | "output_tokens"
+            | "prompt_tokens"
+            | "completion_tokens"
+            | "cached_input_tokens"
+            | "reasoning_output_tokens"
+            | "total_tokens"
+    )
 }
 
 async fn record_runtime_adapter_events(
@@ -3148,6 +3198,629 @@ async fn record_runtime_adapter_events(
             .await?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuntimeAdapterTurnRecording {
+    event_count: usize,
+    final_artifact_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeAdapterTurnMetadataValue {
+    event_index: usize,
+    value: Value,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuntimeAdapterTurnMetadata {
+    turn_id: Option<String>,
+    resume_handle: Option<Value>,
+    output_schema: Option<Value>,
+    output_schema_validation: Option<Value>,
+    usage: Option<Value>,
+    timing: Option<Value>,
+    duration_ms: Option<i64>,
+    status: Option<String>,
+    started_event_index: Option<usize>,
+    completed_event_index: Option<usize>,
+    final_message: Option<String>,
+    final_message_event_index: Option<usize>,
+    items: Vec<RuntimeAdapterTurnMetadataValue>,
+    tool_calls: Vec<RuntimeAdapterTurnMetadataValue>,
+    usage_events: Vec<RuntimeAdapterTurnMetadataValue>,
+}
+
+impl RuntimeAdapterTurnMetadata {
+    fn has_metadata(&self) -> bool {
+        self.started_event_index.is_some()
+            || self.completed_event_index.is_some()
+            || self.resume_handle.is_some()
+            || self.output_schema.is_some()
+            || self.output_schema_validation.is_some()
+            || self.usage.is_some()
+            || self.timing.is_some()
+            || self.final_message.is_some()
+            || !self.items.is_empty()
+            || !self.tool_calls.is_empty()
+            || !self.usage_events.is_empty()
+    }
+}
+
+async fn record_runtime_adapter_turn_metadata(
+    state: &AppState,
+    session_id: Uuid,
+    profile: &str,
+    config: &AgentCliProfileConfig,
+    events: &[RuntimeAdapterEvent],
+    request_args: &[String],
+    actor_id: Option<Uuid>,
+) -> Result<RuntimeAdapterTurnRecording, AppError> {
+    if !runtime_adapter_turn_metadata_supported(&config.runtime_type) {
+        return Ok(RuntimeAdapterTurnRecording::default());
+    }
+    let metadata = build_runtime_adapter_turn_metadata(events, request_args);
+    if !metadata.has_metadata() {
+        return Ok(RuntimeAdapterTurnRecording::default());
+    }
+
+    let mut recorded_event_count = 0;
+    let mut final_artifact_count = 0;
+    let mut final_artifact_id = None;
+
+    if let Some(started_event_index) = metadata.started_event_index {
+        state
+            .append_event(
+                "runtime_adapter",
+                actor_id,
+                session_id,
+                "runtime.turn.started",
+                json!({
+                    "profile": profile,
+                    "runtime_type": &config.runtime_type,
+                    "turn_id": &metadata.turn_id,
+                    "resume_handle": &metadata.resume_handle,
+                    "output_schema": &metadata.output_schema,
+                    "timing": &metadata.timing,
+                    "source_event_index": started_event_index,
+                }),
+            )
+            .await?;
+        recorded_event_count += 1;
+    }
+
+    for item in &metadata.items {
+        state
+            .append_event(
+                "runtime_adapter",
+                actor_id,
+                session_id,
+                "runtime.item",
+                json!({
+                    "profile": profile,
+                    "runtime_type": &config.runtime_type,
+                    "turn_id": &metadata.turn_id,
+                    "item": &item.value,
+                    "source_event_index": item.event_index,
+                }),
+            )
+            .await?;
+        recorded_event_count += 1;
+    }
+
+    for tool_call in &metadata.tool_calls {
+        state
+            .append_event(
+                "runtime_adapter",
+                actor_id,
+                session_id,
+                "runtime.tool_call",
+                json!({
+                    "profile": profile,
+                    "runtime_type": &config.runtime_type,
+                    "turn_id": &metadata.turn_id,
+                    "tool_call": &tool_call.value,
+                    "source_event_index": tool_call.event_index,
+                }),
+            )
+            .await?;
+        recorded_event_count += 1;
+    }
+
+    let usage_events = if metadata.usage_events.is_empty() {
+        metadata
+            .usage
+            .as_ref()
+            .map(|usage| {
+                vec![RuntimeAdapterTurnMetadataValue {
+                    event_index: metadata
+                        .completed_event_index
+                        .or(metadata.started_event_index)
+                        .unwrap_or_default(),
+                    value: usage.clone(),
+                }]
+            })
+            .unwrap_or_default()
+    } else {
+        metadata.usage_events.clone()
+    };
+    for usage in &usage_events {
+        state
+            .append_event(
+                "runtime_adapter",
+                actor_id,
+                session_id,
+                "runtime.usage",
+                json!({
+                    "profile": profile,
+                    "runtime_type": &config.runtime_type,
+                    "turn_id": &metadata.turn_id,
+                    "usage": &usage.value,
+                    "source_event_index": usage.event_index,
+                }),
+            )
+            .await?;
+        recorded_event_count += 1;
+    }
+
+    if let Some(final_message) = metadata.final_message.as_ref() {
+        let final_output = truncate_output(final_message, execution_output_limit_bytes());
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id,
+            artifact_type: "markdown".to_string(),
+            name: "runtime-final-message.md".to_string(),
+            path: Some("runtime-final-message.md".to_string()),
+            content: json!({
+                "markdown": final_output.text,
+                "markdown_bytes": final_output.original_bytes,
+                "markdown_truncated": final_output.truncated,
+                "profile": profile,
+                "runtime_type": &config.runtime_type,
+                "turn_id": &metadata.turn_id,
+                "source_event_index": metadata.final_message_event_index,
+            }),
+            created_at: Utc::now(),
+        };
+        let artifact = state.insert_artifact(artifact).await?;
+        final_artifact_id = Some(artifact.id);
+        final_artifact_count += 1;
+        state
+            .append_event(
+                "system",
+                Some(artifact.id),
+                session_id,
+                "artifact.created",
+                json!({
+                    "artifact_id": artifact.id,
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "source": "runtime.final",
+                    "turn_id": &metadata.turn_id,
+                }),
+            )
+            .await?;
+        state
+            .append_event(
+                "runtime_adapter",
+                actor_id,
+                session_id,
+                "runtime.final",
+                json!({
+                    "profile": profile,
+                    "runtime_type": &config.runtime_type,
+                    "turn_id": &metadata.turn_id,
+                    "final_message": final_message,
+                    "artifact_id": final_artifact_id,
+                    "source_event_index": metadata.final_message_event_index,
+                }),
+            )
+            .await?;
+        recorded_event_count += 1;
+    }
+
+    if let Some(completed_event_index) = metadata.completed_event_index {
+        state
+            .append_event(
+                "runtime_adapter",
+                actor_id,
+                session_id,
+                "runtime.turn.completed",
+                json!({
+                    "profile": profile,
+                    "runtime_type": &config.runtime_type,
+                    "turn_id": &metadata.turn_id,
+                    "status": &metadata.status,
+                    "duration_ms": metadata.duration_ms,
+                    "timing": &metadata.timing,
+                    "usage": &metadata.usage,
+                    "output_schema": &metadata.output_schema,
+                    "output_schema_validation": &metadata.output_schema_validation,
+                    "final_artifact_id": final_artifact_id,
+                    "item_count": metadata.items.len(),
+                    "tool_call_count": metadata.tool_calls.len(),
+                    "source_event_index": completed_event_index,
+                }),
+            )
+            .await?;
+        recorded_event_count += 1;
+    }
+
+    Ok(RuntimeAdapterTurnRecording {
+        event_count: recorded_event_count,
+        final_artifact_count,
+    })
+}
+
+fn runtime_adapter_turn_metadata_supported(runtime_type: &str) -> bool {
+    runtime_type == "codex_cli"
+}
+
+fn build_runtime_adapter_turn_metadata(
+    events: &[RuntimeAdapterEvent],
+    request_args: &[String],
+) -> RuntimeAdapterTurnMetadata {
+    let mut metadata = RuntimeAdapterTurnMetadata {
+        output_schema: runtime_adapter_output_schema_from_args(request_args),
+        ..RuntimeAdapterTurnMetadata::default()
+    };
+
+    for event in events {
+        let adapter_event_type = event.adapter_event_type.as_str();
+        if metadata.turn_id.is_none() {
+            metadata.turn_id = runtime_adapter_turn_id(adapter_event_type, &event.event);
+        }
+        if metadata.resume_handle.is_none() {
+            metadata.resume_handle =
+                runtime_adapter_resume_handle(adapter_event_type, &event.event);
+        }
+        if let Some(output_schema) = runtime_adapter_output_schema_from_event(&event.event) {
+            metadata.output_schema = Some(output_schema);
+        }
+        if let Some(output_schema_validation) =
+            runtime_adapter_output_schema_validation(&event.event)
+        {
+            metadata.output_schema_validation = Some(output_schema_validation);
+        }
+        if let Some(timing) = runtime_adapter_timing(&event.event) {
+            metadata.timing = Some(timing);
+        }
+        if let Some(duration_ms) = runtime_adapter_duration_ms(&event.event) {
+            metadata.duration_ms = Some(duration_ms);
+        }
+        if let Some(usage) = runtime_adapter_usage(&event.event) {
+            metadata.usage = Some(usage.clone());
+            if is_runtime_usage_event(adapter_event_type) {
+                metadata.usage_events.push(RuntimeAdapterTurnMetadataValue {
+                    event_index: event.index,
+                    value: usage,
+                });
+            }
+        }
+
+        if is_runtime_turn_started_event(adapter_event_type) {
+            metadata.started_event_index.get_or_insert(event.index);
+            metadata.status.get_or_insert_with(|| "running".to_string());
+        }
+        if is_runtime_item_event(adapter_event_type) {
+            metadata.items.push(RuntimeAdapterTurnMetadataValue {
+                event_index: event.index,
+                value: runtime_adapter_item_value(&event.event),
+            });
+        }
+        if is_runtime_tool_call_event(adapter_event_type) {
+            metadata.tool_calls.push(RuntimeAdapterTurnMetadataValue {
+                event_index: event.index,
+                value: runtime_adapter_tool_call_value(adapter_event_type, &event.event),
+            });
+        }
+        if let Some(final_message) = runtime_adapter_final_message(adapter_event_type, &event.event)
+        {
+            metadata.final_message = Some(final_message);
+            metadata.final_message_event_index = Some(event.index);
+        }
+        if is_runtime_turn_completed_event(adapter_event_type) {
+            metadata.completed_event_index = Some(event.index);
+            metadata.status = runtime_adapter_status(adapter_event_type, &event.event);
+        }
+    }
+
+    metadata
+}
+
+fn is_runtime_turn_started_event(adapter_event_type: &str) -> bool {
+    matches!(
+        adapter_event_type,
+        "turn.started" | "response.started" | "session.started" | "task.started"
+    )
+}
+
+fn is_runtime_turn_completed_event(adapter_event_type: &str) -> bool {
+    matches!(
+        adapter_event_type,
+        "turn.completed"
+            | "turn.failed"
+            | "response.completed"
+            | "response.failed"
+            | "session.completed"
+            | "session.failed"
+            | "task.completed"
+            | "task.failed"
+    )
+}
+
+fn is_runtime_item_event(adapter_event_type: &str) -> bool {
+    adapter_event_type.starts_with("item.")
+        || adapter_event_type.ends_with(".item")
+        || adapter_event_type == "item"
+}
+
+fn is_runtime_tool_call_event(adapter_event_type: &str) -> bool {
+    adapter_event_type.starts_with("tool_call.")
+        || adapter_event_type.starts_with("tool.call.")
+        || adapter_event_type == "tool_call"
+        || adapter_event_type == "tool.called"
+}
+
+fn is_runtime_usage_event(adapter_event_type: &str) -> bool {
+    adapter_event_type == "usage" || adapter_event_type.starts_with("usage.")
+}
+
+fn runtime_adapter_turn_id(adapter_event_type: &str, event: &Value) -> Option<String> {
+    string_value_at(event, &["turn_id"])
+        .or_else(|| string_value_at(event, &["turn", "id"]))
+        .or_else(|| {
+            if is_runtime_turn_started_event(adapter_event_type)
+                || is_runtime_turn_completed_event(adapter_event_type)
+            {
+                string_value_at(event, &["id"])
+            } else {
+                None
+            }
+        })
+}
+
+fn runtime_adapter_resume_handle(adapter_event_type: &str, event: &Value) -> Option<Value> {
+    event
+        .get("resume_handle")
+        .cloned()
+        .or_else(|| event.get("resume").cloned())
+        .or_else(|| {
+            if !is_runtime_turn_started_event(adapter_event_type) {
+                return None;
+            }
+            string_value_at(event, &["session_id"])
+                .or_else(|| string_value_at(event, &["conversation_id"]))
+                .or_else(|| string_value_at(event, &["thread_id"]))
+                .or_else(|| string_value_at(event, &["id"]))
+                .map(|session_id| {
+                    json!({
+                        "session_id": session_id,
+                        "source": "codex_event"
+                    })
+                })
+        })
+        .map(|value| runtime_adapter_value_with_source(value, "codex_event"))
+}
+
+fn runtime_adapter_output_schema_from_event(event: &Value) -> Option<Value> {
+    event
+        .get("output_schema")
+        .cloned()
+        .or_else(|| event.get("outputSchema").cloned())
+        .or_else(|| event.get("schema").cloned())
+        .map(|value| runtime_adapter_value_with_source(value, "codex_event"))
+}
+
+fn runtime_adapter_output_schema_from_args(args: &[String]) -> Option<Value> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--output-schema" {
+            return args.next().map(|path| {
+                json!({
+                    "path": path,
+                    "source": "cli_args"
+                })
+            });
+        }
+        if let Some(path) = arg.strip_prefix("--output-schema=") {
+            if !path.trim().is_empty() {
+                return Some(json!({
+                    "path": path,
+                    "source": "cli_args"
+                }));
+            }
+        }
+    }
+    None
+}
+
+fn runtime_adapter_output_schema_validation(event: &Value) -> Option<Value> {
+    event
+        .get("output_schema_validation")
+        .cloned()
+        .or_else(|| event.get("schema_validation").cloned())
+        .or_else(|| event.get("structured_output_validation").cloned())
+}
+
+fn runtime_adapter_usage(event: &Value) -> Option<Value> {
+    if let Some(usage) = event.get("usage") {
+        return Some(usage.clone());
+    }
+    let mut usage = Map::new();
+    for key in [
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_input_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    ] {
+        if let Some(value) = event.get(key) {
+            usage.insert(key.to_string(), value.clone());
+        }
+    }
+    if usage.is_empty() {
+        None
+    } else {
+        Some(Value::Object(usage))
+    }
+}
+
+fn runtime_adapter_timing(event: &Value) -> Option<Value> {
+    if let Some(timing) = event.get("timing") {
+        return Some(timing.clone());
+    }
+    let mut timing = Map::new();
+    for key in [
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "duration_seconds",
+        "elapsed_ms",
+    ] {
+        if let Some(value) = event.get(key) {
+            timing.insert(key.to_string(), value.clone());
+        }
+    }
+    if timing.is_empty() {
+        None
+    } else {
+        Some(Value::Object(timing))
+    }
+}
+
+fn runtime_adapter_duration_ms(event: &Value) -> Option<i64> {
+    event
+        .get("duration_ms")
+        .and_then(json_i64)
+        .or_else(|| {
+            event
+                .get("timing")
+                .and_then(|timing| timing.get("duration_ms"))
+                .and_then(json_i64)
+        })
+        .or_else(|| {
+            event.get("elapsed_ms").and_then(json_i64).or_else(|| {
+                event
+                    .get("timing")
+                    .and_then(|timing| timing.get("elapsed_ms"))
+                    .and_then(json_i64)
+            })
+        })
+}
+
+fn runtime_adapter_status(adapter_event_type: &str, event: &Value) -> Option<String> {
+    event
+        .get("status")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            if adapter_event_type.ends_with(".completed") {
+                Some("completed".to_string())
+            } else if adapter_event_type.ends_with(".failed") {
+                Some("failed".to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn runtime_adapter_item_value(event: &Value) -> Value {
+    event.get("item").cloned().unwrap_or_else(|| event.clone())
+}
+
+fn runtime_adapter_tool_call_value(adapter_event_type: &str, event: &Value) -> Value {
+    if let Some(tool_call) = event.get("tool_call") {
+        return tool_call.clone();
+    }
+    let mut tool_call = Map::new();
+    tool_call.insert(
+        "adapter_event_type".to_string(),
+        Value::String(adapter_event_type.to_string()),
+    );
+    for key in [
+        "call_id",
+        "id",
+        "tool",
+        "name",
+        "args",
+        "arguments",
+        "status",
+    ] {
+        if let Some(value) = event.get(key) {
+            tool_call.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(tool_call)
+}
+
+fn runtime_adapter_final_message(adapter_event_type: &str, event: &Value) -> Option<String> {
+    if !(is_runtime_turn_completed_event(adapter_event_type)
+        || matches!(
+            adapter_event_type,
+            "final" | "final.message" | "agent.message" | "message.output"
+        ))
+    {
+        return None;
+    }
+    for key in [
+        "final_message",
+        "last_message",
+        "message",
+        "text",
+        "content",
+        "output",
+    ] {
+        if let Some(value) = event.get(key) {
+            if let Some(message) = value.as_str() {
+                if !message.trim().is_empty() {
+                    return Some(message.to_string());
+                }
+            }
+            if let Some(message) = string_value_at(value, &["content"]) {
+                if !message.trim().is_empty() {
+                    return Some(message);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn runtime_adapter_value_with_source(value: Value, source: &str) -> Value {
+    match value {
+        Value::Object(mut object) => {
+            object
+                .entry("source".to_string())
+                .or_insert_with(|| Value::String(source.to_string()));
+            Value::Object(object)
+        }
+        Value::String(path) => json!({
+            "path": path,
+            "source": source
+        }),
+        value => json!({
+            "value": value,
+            "source": source
+        }),
+    }
+}
+
+fn string_value_at(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str().map(ToString::to_string)
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
 }
 
 fn runtime_adapter_event_limit() -> usize {

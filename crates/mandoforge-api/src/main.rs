@@ -855,6 +855,9 @@ struct SessionLoopJob {
     environment_id: Option<Uuid>,
     status: SessionLoopJobStatus,
     trigger_event_id: Option<Uuid>,
+    pending_event_seq_start: Option<i64>,
+    pending_event_seq_end: Option<i64>,
+    processed_event_seq: Option<i64>,
     reason: String,
     enqueued_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
@@ -12200,16 +12203,44 @@ async fn record_workflow_pack_profile_asset_bootstrap_audit(
 async fn build_harness_context(
     state: &AppState,
     session_id: Uuid,
+    pending_event_seq_start: Option<i64>,
+    pending_event_seq_end: Option<i64>,
 ) -> Result<HarnessContext, AppError> {
     let events = state.list_events(session_id).await?;
-    let last_user_message = events
+    let pending_events = events
         .iter()
-        .rev()
-        .find(|event| event.event_type == "user.message")
-        .and_then(|event| event.payload.get("message"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let approved_event_result_count = events
+        .filter(|event| {
+            pending_event_seq_start.is_some_and(|start| event.seq >= start)
+                && pending_event_seq_end.is_some_and(|end| event.seq <= end)
+        })
+        .collect::<Vec<_>>();
+    let context_events: Vec<&SessionEvent> =
+        if pending_event_seq_start.is_some() && pending_event_seq_end.is_some() {
+            pending_events.clone()
+        } else {
+            events.iter().collect()
+        };
+    let last_user_message = if context_events
+        .iter()
+        .any(|event| event.event_type == "user.message")
+    {
+        context_events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "user.message")
+            .and_then(|event| event.payload.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    } else {
+        events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "user.message")
+            .and_then(|event| event.payload.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let approved_event_result_count = context_events
         .iter()
         .filter(|event| {
             event.event_type == "tool.result"
@@ -12235,7 +12266,7 @@ async fn build_harness_context(
                     == Some("approved")
         })
         .count();
-    let recent_custom_tool_results = events
+    let recent_custom_tool_results = context_events
         .iter()
         .filter(|event| event.event_type == "user.custom_tool_result")
         .rev()
@@ -12251,6 +12282,9 @@ async fn build_harness_context(
     Ok(HarnessContext {
         session_id,
         event_count: events.len(),
+        pending_event_seq_start,
+        pending_event_seq_end,
+        pending_event_count: pending_events.len(),
         last_user_message,
         approved_tool_result_count: approved_event_result_count + approved_tool_call_result_count,
         custom_tool_result_count: recent_custom_tool_results.len(),
@@ -12263,8 +12297,16 @@ async fn run_provider_harness(
     session_id: Uuid,
     provider: &dyn ProviderClient,
     provider_label: &str,
+    pending_event_seq_start: Option<i64>,
+    pending_event_seq_end: Option<i64>,
 ) -> Result<ProviderResponse, AppError> {
-    let context = build_harness_context(state, session_id).await?;
+    let context = build_harness_context(
+        state,
+        session_id,
+        pending_event_seq_start,
+        pending_event_seq_end,
+    )
+    .await?;
     let span_id = Uuid::new_v4();
     state
         .append_event(
@@ -12590,7 +12632,8 @@ async fn continue_session_after_approved_execution(
     Ok(())
 }
 
-async fn run_session_loop(state: &AppState, id: Uuid) -> Result<Session, AppError> {
+async fn run_session_loop(state: &AppState, job: &SessionLoopJob) -> Result<Session, AppError> {
+    let id = job.session_id;
     if !session_accepts_worker_execution(state, id).await? {
         return Err(AppError::bad_request(
             "session is terminal and cannot run session loop work",
@@ -12611,8 +12654,15 @@ async fn run_session_loop(state: &AppState, id: Uuid) -> Result<Session, AppErro
         .await?;
 
     let (provider_label, provider) = provider_client_for_session(&state, id).await?;
-    let provider_response =
-        run_provider_harness(&state, id, provider.as_ref(), &provider_label).await?;
+    let provider_response = run_provider_harness(
+        &state,
+        id,
+        provider.as_ref(),
+        &provider_label,
+        job.pending_event_seq_start,
+        job.pending_event_seq_end,
+    )
+    .await?;
 
     state
         .append_event(
@@ -37370,7 +37420,7 @@ async fn run_session_loop_job_route(
             }),
         )
         .await?;
-    match run_session_loop(&state, running.session_id).await {
+    match run_session_loop(&state, &running).await {
         Ok(session) => {
             let completed = state
                 .complete_session_loop_job(running.id, worker_id)
@@ -37824,8 +37874,15 @@ async fn resume_provider_after_approval(
     )
     .await?;
     let (provider_label, provider) = provider_client_for_session(state, session_id).await?;
-    let provider_response =
-        run_provider_harness(state, session_id, provider.as_ref(), &provider_label).await?;
+    let provider_response = run_provider_harness(
+        state,
+        session_id,
+        provider.as_ref(),
+        &provider_label,
+        None,
+        None,
+    )
+    .await?;
     state
         .append_event(
             "agent",
@@ -44332,6 +44389,7 @@ not json
         assert!(names.contains(&"0038_environments.sql"));
         assert!(names.contains(&"0039_session_loop_jobs.sql"));
         assert!(names.contains(&"0040_session_threads.sql"));
+        assert!(names.contains(&"0041_session_loop_event_cursor.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -53382,7 +53440,7 @@ not json
         let shim_path = shim_dir.join("codex");
         fs::write(
             &shim_path,
-            "#!/usr/bin/env bash\nset -euo pipefail\necho '{\"type\":\"turn.started\",\"api_key\":\"secret\"}'\necho '{\"msg\":\"tool.completed\",\"tool\":\"shell.exec\"}'\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"argv=$*\"\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\necho '{\"type\":\"turn.started\",\"turn_id\":\"turn-1\",\"resume_handle\":{\"session_id\":\"codex-session-1\",\"command\":\"codex exec resume codex-session-1\"},\"output_schema\":{\"path\":\"/tmp/decision.schema.json\"},\"api_key\":\"secret\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"kind\":\"message\",\"text\":\"Collected note\"}}'\necho '{\"type\":\"tool_call.started\",\"call_id\":\"call-1\",\"tool\":\"shell.exec\",\"args\":{\"cmd\":\"pwd\"}}'\necho '{\"type\":\"usage\",\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"total_tokens\":18}}'\necho '{\"type\":\"turn.completed\",\"turn_id\":\"turn-1\",\"status\":\"completed\",\"duration_ms\":1200,\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"total_tokens\":18},\"output_schema_validation\":{\"status\":\"passed\"},\"final_message\":\"Structured final\"}'\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"argv=$*\"\n",
         )
         .expect("write fake codex CLI");
         #[cfg(unix)]
@@ -53452,7 +53510,7 @@ not json
                     "args": {
                         "profile": "codex-cli-worker",
                         "task": "Inspect workspace with Codex CLI",
-                        "args": ["--sandbox", "workspace-write"]
+                        "args": ["resume", "codex-session-1", "--output-schema", "/tmp/decision.schema.json", "--sandbox", "workspace-write"]
                     }
                 }),
             ),
@@ -53509,7 +53567,9 @@ not json
             .expect("agent CLI result");
         assert_eq!(result["profile"], "codex-cli-worker");
         assert_eq!(result["runtime_type"], "codex_cli");
-        assert_eq!(result["runtime_adapter_event_count"], 2);
+        assert_eq!(result["runtime_adapter_event_count"], 5);
+        assert_eq!(result["runtime_turn_event_count"], 6);
+        assert_eq!(result["runtime_final_artifact_count"], 1);
         assert!(
             result["stdout"]
                 .as_str()
@@ -53529,7 +53589,7 @@ not json
             .iter()
             .filter(|event| event.event_type == "runtime_adapter.event")
             .collect::<Vec<_>>();
-        assert_eq!(runtime_events.len(), 2);
+        assert_eq!(runtime_events.len(), 5);
         assert!(runtime_events.iter().any(|event| {
             event.payload["runtime_type"] == "codex_cli"
                 && event.payload["log_mode"] == "codex_jsonl"
@@ -53537,8 +53597,52 @@ not json
                 && event.payload["event"]["api_key"] == "[REDACTED]"
         }));
         assert!(runtime_events.iter().any(|event| {
-            event.payload["adapter_event_type"] == "tool.completed"
+            event.payload["adapter_event_type"] == "tool_call.started"
                 && event.payload["event"]["tool"] == "shell.exec"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.turn.started"
+                && event.payload["runtime_type"] == "codex_cli"
+                && event.payload["turn_id"] == "turn-1"
+                && event.payload["resume_handle"]["session_id"] == "codex-session-1"
+                && event.payload["output_schema"]["path"] == "/tmp/decision.schema.json"
+                && event.payload["output_schema"]["source"] == "codex_event"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.item"
+                && event.payload["turn_id"] == "turn-1"
+                && event.payload["item"]["id"] == "item-1"
+                && event.payload["item"]["text"] == "Collected note"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.tool_call"
+                && event.payload["turn_id"] == "turn-1"
+                && event.payload["tool_call"]["tool"] == "shell.exec"
+                && event.payload["tool_call"]["call_id"] == "call-1"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.usage"
+                && event.payload["turn_id"] == "turn-1"
+                && event.payload["usage"]["input_tokens"] == 11
+                && event.payload["usage"]["output_tokens"] == 7
+                && event.payload["usage"]["total_tokens"] == 18
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.final"
+                && event.payload["turn_id"] == "turn-1"
+                && event.payload["final_message"] == "Structured final"
+                && event.payload["artifact_id"].is_string()
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.turn.completed"
+                && event.payload["turn_id"] == "turn-1"
+                && event.payload["duration_ms"] == 1200
+                && event.payload["usage"]["total_tokens"] == 18
+                && event.payload["output_schema_validation"]["status"] == "passed"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "artifact.created"
+                && event.payload["name"] == "runtime-final-message.md"
         }));
     }
 
@@ -57386,10 +57490,26 @@ not json
             queued_jobs[0].trigger_event_id,
             Some(custom_tool_events[0].id)
         );
+        assert_eq!(
+            queued_jobs[0].pending_event_seq_start,
+            Some(stored_events[0].seq)
+        );
+        assert_eq!(
+            queued_jobs[0].pending_event_seq_end,
+            Some(custom_tool_events[0].seq)
+        );
+        assert_eq!(
+            queued_jobs[0].processed_event_seq,
+            Some(stored_events[0].seq - 1)
+        );
 
         let completed_loop =
             run_next_session_loop_job(app.clone(), session.id, "event-session-worker").await;
         assert_eq!(completed_loop.status, SessionLoopJobStatus::Completed);
+        assert_eq!(
+            completed_loop.processed_event_seq,
+            completed_loop.pending_event_seq_end
+        );
         let running: Session = request_json(
             app.clone(),
             Request::builder()
@@ -57431,6 +57551,11 @@ not json
         assert!(events.iter().any(|event| {
             event.event_type == "llm.request"
                 && event.payload["context"]["custom_tool_result_count"] == json!(1)
+                && event.payload["context"]["pending_event_seq_start"]
+                    == json!(stored_events[0].seq)
+                && event.payload["context"]["pending_event_seq_end"]
+                    == json!(custom_tool_events[0].seq)
+                && event.payload["context"]["pending_event_count"] == json!(3)
                 && event
                     .payload
                     .get("context")
@@ -57537,25 +57662,49 @@ not json
             .await
             .expect("create session");
 
+        let first_event = state
+            .append_event(
+                "user",
+                None,
+                session.id,
+                "user.message",
+                json!({"message": "first event"}),
+            )
+            .await
+            .expect("append first event");
         let first = state
-            .enqueue_session_loop_job(session.id, Some(Uuid::new_v4()), "user.message")
+            .enqueue_session_loop_job(session.id, Some(first_event.id), "user.message")
             .await
             .expect("enqueue first job");
+        assert_eq!(first.pending_event_seq_start, Some(first_event.seq));
+        assert_eq!(first.pending_event_seq_end, Some(first_event.seq));
         let running = state
             .start_session_loop_job(first.id, "loop-worker-a")
             .await
             .expect("start first job");
         assert_eq!(running.status, SessionLoopJobStatus::Running);
 
-        let second_trigger = Uuid::new_v4();
+        let second_event = state
+            .append_event(
+                "user",
+                None,
+                session.id,
+                "user.custom_tool_result",
+                json!({"custom_tool_call_id": "custom-while-running", "result": {"status": "ok"}}),
+            )
+            .await
+            .expect("append second event");
         let second = state
-            .enqueue_session_loop_job(session.id, Some(second_trigger), "user.custom_tool_result")
+            .enqueue_session_loop_job(session.id, Some(second_event.id), "user.custom_tool_result")
             .await
             .expect("enqueue second job while first is running");
         assert_ne!(second.id, running.id);
         assert_eq!(second.status, SessionLoopJobStatus::Queued);
         assert_eq!(second.reason, "user.custom_tool_result");
-        assert_eq!(second.trigger_event_id, Some(second_trigger));
+        assert_eq!(second.trigger_event_id, Some(second_event.id));
+        assert_eq!(second.pending_event_seq_start, Some(second_event.seq));
+        assert_eq!(second.pending_event_seq_end, Some(second_event.seq));
+        assert_eq!(second.processed_event_seq, Some(first_event.seq));
 
         let jobs = state
             .list_session_loop_jobs()
@@ -57596,6 +57745,7 @@ not json
             .await
             .expect("owning worker can complete loop job");
         assert_eq!(completed.status, SessionLoopJobStatus::Completed);
+        assert_eq!(completed.processed_event_seq, Some(first_event.seq));
     }
 
     #[tokio::test]

@@ -14,6 +14,21 @@ impl AppState {
         reason: &str,
     ) -> Result<SessionLoopJob, AppError> {
         let session = self.get_session(session_id).await?;
+        let pending_event_seq_end = self
+            .session_loop_trigger_event_seq(session_id, trigger_event_id)
+            .await?;
+        let cursor_high_watermark =
+            match self.session_loop_cursor_high_watermark(session_id).await? {
+                Some(seq) => Some(seq),
+                None => match pending_event_seq_end {
+                    Some(seq_end) => self.session_event_seq_before(session_id, seq_end).await?,
+                    None => None,
+                },
+            };
+        let pending_event_seq_start = pending_event_seq_end.and_then(|seq_end| {
+            let seq_start = cursor_high_watermark.unwrap_or(0) + 1;
+            (seq_start <= seq_end).then_some(seq_start)
+        });
         let now = Utc::now();
         let job = SessionLoopJob {
             id: Uuid::new_v4(),
@@ -21,6 +36,9 @@ impl AppState {
             environment_id: session.environment_id,
             status: SessionLoopJobStatus::Queued,
             trigger_event_id,
+            pending_event_seq_start,
+            pending_event_seq_end,
+            processed_event_seq: cursor_high_watermark,
             reason: reason.to_string(),
             enqueued_at: now,
             started_at: None,
@@ -39,6 +57,11 @@ impl AppState {
                         && existing.status == SessionLoopJobStatus::Queued
                 }) {
                     existing.trigger_event_id = trigger_event_id;
+                    if existing.pending_event_seq_start.is_none() {
+                        existing.pending_event_seq_start = pending_event_seq_start;
+                    }
+                    existing.pending_event_seq_end =
+                        max_optional_i64(existing.pending_event_seq_end, pending_event_seq_end);
                     existing.reason = reason.to_string();
                     return Ok(existing.clone());
                 }
@@ -48,15 +71,19 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "INSERT INTO session_loop_jobs
-                        (id, tenant_id, session_id, environment_id, status, trigger_event_id, reason,
+                        (id, tenant_id, session_id, environment_id, status, trigger_event_id,
+                         pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
                          enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                          attempt_count, max_attempts, last_error)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, NULL, NULL, $9, $10, NULL)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL, NULL, NULL, $12, $13, NULL)
                      ON CONFLICT (tenant_id, session_id)
                      WHERE status = 'queued'
                      DO UPDATE SET trigger_event_id = EXCLUDED.trigger_event_id,
+                                   pending_event_seq_start = COALESCE(session_loop_jobs.pending_event_seq_start, EXCLUDED.pending_event_seq_start),
+                                   pending_event_seq_end = NULLIF(GREATEST(COALESCE(session_loop_jobs.pending_event_seq_end, 0), COALESCE(EXCLUDED.pending_event_seq_end, 0)), 0),
                                    reason = EXCLUDED.reason
-                     RETURNING id, session_id, environment_id, status, trigger_event_id, reason,
+                     RETURNING id, session_id, environment_id, status, trigger_event_id,
+                               pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
                                enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                                attempt_count, max_attempts, last_error",
                 )
@@ -66,6 +93,9 @@ impl AppState {
                 .bind(job.environment_id)
                 .bind(job.status.as_str())
                 .bind(job.trigger_event_id)
+                .bind(job.pending_event_seq_start)
+                .bind(job.pending_event_seq_end)
+                .bind(job.processed_event_seq)
                 .bind(&job.reason)
                 .bind(job.enqueued_at)
                 .bind(job.attempt_count)
@@ -92,7 +122,8 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, session_id, environment_id, status, trigger_event_id, reason,
+                    "SELECT id, session_id, environment_id, status, trigger_event_id,
+                            pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
                             enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                             attempt_count, max_attempts, last_error
                      FROM session_loop_jobs
@@ -118,7 +149,8 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("session loop job not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, session_id, environment_id, status, trigger_event_id, reason,
+                    "SELECT id, session_id, environment_id, status, trigger_event_id,
+                            pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
                             enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                             attempt_count, max_attempts, last_error
                      FROM session_loop_jobs
@@ -212,7 +244,8 @@ impl AppState {
                          lease_expires_at = NULL,
                          last_error = $1
                      WHERE tenant_id = $2 AND id = $3 AND status IN ('queued', 'running')
-                     RETURNING id, session_id, environment_id, status, trigger_event_id, reason,
+                     RETURNING id, session_id, environment_id, status, trigger_event_id,
+                               pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
                                enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                                attempt_count, max_attempts, last_error",
                 )
@@ -307,7 +340,8 @@ impl AppState {
                                )
                                OR (status = 'running' AND lease_expires_at < now())
                            )
-                         RETURNING id, session_id, environment_id, status, trigger_event_id, reason,
+                         RETURNING id, session_id, environment_id, status, trigger_event_id,
+                                   pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
                                    enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                                    attempt_count, max_attempts, last_error",
                     )
@@ -321,9 +355,14 @@ impl AppState {
                          SET status = $1,
                              completed_at = COALESCE(completed_at, now()),
                              lease_expires_at = NULL,
+                             processed_event_seq = CASE
+                                 WHEN $1 = 'completed' THEN COALESCE(pending_event_seq_end, processed_event_seq)
+                                 ELSE processed_event_seq
+                             END,
                              last_error = COALESCE($2, last_error)
                          WHERE tenant_id = $3 AND id = $4 AND status = 'running' AND worker_id = $5
-                         RETURNING id, session_id, environment_id, status, trigger_event_id, reason,
+                         RETURNING id, session_id, environment_id, status, trigger_event_id,
+                                   pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
                                    enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                                    attempt_count, max_attempts, last_error",
                     )
@@ -343,7 +382,8 @@ impl AppState {
                              lease_expires_at = NULL,
                              last_error = NULL
                          WHERE tenant_id = $1 AND id = $2
-                         RETURNING id, session_id, environment_id, status, trigger_event_id, reason,
+                         RETURNING id, session_id, environment_id, status, trigger_event_id,
+                                   pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
                                    enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
                                    attempt_count, max_attempts, last_error",
                     )
@@ -384,9 +424,177 @@ fn apply_session_loop_job_status(
         SessionLoopJobStatus::Completed | SessionLoopJobStatus::Failed => {
             job.completed_at = Some(Utc::now());
             job.lease_expires_at = None;
+            if job.status == SessionLoopJobStatus::Completed {
+                job.processed_event_seq = job.pending_event_seq_end.or(job.processed_event_seq);
+            }
             if let Some(last_error) = last_error {
                 job.last_error = Some(last_error);
             }
         }
+    }
+}
+
+impl AppState {
+    async fn session_loop_trigger_event_seq(
+        &self,
+        session_id: Uuid,
+        trigger_event_id: Option<Uuid>,
+    ) -> Result<Option<i64>, AppError> {
+        if let Some(trigger_event_id) = trigger_event_id {
+            if let Some(seq) = self.session_event_seq(session_id, trigger_event_id).await? {
+                return Ok(Some(seq));
+            }
+        }
+        self.latest_session_event_seq(session_id).await
+    }
+
+    async fn session_event_seq(
+        &self,
+        session_id: Uuid,
+        event_id: Uuid,
+    ) -> Result<Option<i64>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                Ok(inner
+                    .read()
+                    .await
+                    .events
+                    .get(&session_id)
+                    .and_then(|events| {
+                        events
+                            .iter()
+                            .find(|event| event.id == event_id)
+                            .map(|event| event.seq)
+                    }))
+            }
+            StoreBackend::Postgres(pool) => {
+                let seq = sqlx::query_scalar::<_, i64>(
+                    "SELECT seq
+                     FROM session_events
+                     WHERE tenant_id = $1 AND session_id = $2 AND id = $3",
+                )
+                .bind(self.current_tenant_id())
+                .bind(session_id)
+                .bind(event_id)
+                .fetch_optional(pool)
+                .await?;
+                Ok(seq)
+            }
+        }
+    }
+
+    async fn latest_session_event_seq(&self, session_id: Uuid) -> Result<Option<i64>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => Ok(inner
+                .read()
+                .await
+                .events
+                .get(&session_id)
+                .and_then(|events| events.iter().map(|event| event.seq).max())),
+            StoreBackend::Postgres(pool) => {
+                let seq = sqlx::query_scalar::<_, Option<i64>>(
+                    "SELECT MAX(seq)
+                     FROM session_events
+                     WHERE tenant_id = $1 AND session_id = $2",
+                )
+                .bind(self.current_tenant_id())
+                .bind(session_id)
+                .fetch_one(pool)
+                .await?;
+                Ok(seq)
+            }
+        }
+    }
+
+    async fn session_event_seq_before(
+        &self,
+        session_id: Uuid,
+        seq: i64,
+    ) -> Result<Option<i64>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                Ok(inner
+                    .read()
+                    .await
+                    .events
+                    .get(&session_id)
+                    .and_then(|events| {
+                        events
+                            .iter()
+                            .filter(|event| event.seq < seq)
+                            .map(|event| event.seq)
+                            .max()
+                    }))
+            }
+            StoreBackend::Postgres(pool) => {
+                let previous_seq = sqlx::query_scalar::<_, Option<i64>>(
+                    "SELECT MAX(seq)
+                     FROM session_events
+                     WHERE tenant_id = $1 AND session_id = $2 AND seq < $3",
+                )
+                .bind(self.current_tenant_id())
+                .bind(session_id)
+                .bind(seq)
+                .fetch_one(pool)
+                .await?;
+                Ok(previous_seq)
+            }
+        }
+    }
+
+    async fn session_loop_cursor_high_watermark(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Option<i64>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => Ok(inner
+                .read()
+                .await
+                .session_loop_jobs
+                .values()
+                .filter(|job| job.session_id == session_id)
+                .filter_map(|job| {
+                    [
+                        job.processed_event_seq,
+                        job.pending_event_seq_end.filter(|_| {
+                            matches!(
+                                job.status,
+                                SessionLoopJobStatus::Queued | SessionLoopJobStatus::Running
+                            )
+                        }),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .max()
+                })
+                .max()),
+            StoreBackend::Postgres(pool) => {
+                let seq = sqlx::query_scalar::<_, Option<i64>>(
+                    "SELECT MAX(GREATEST(
+                         COALESCE(processed_event_seq, 0),
+                         CASE
+                             WHEN status IN ('queued', 'running') THEN COALESCE(pending_event_seq_end, 0)
+                             ELSE 0
+                         END
+                     ))
+                     FROM session_loop_jobs
+                     WHERE tenant_id = $1 AND session_id = $2",
+                )
+                .bind(self.current_tenant_id())
+                .bind(session_id)
+                .fetch_one(pool)
+                .await?
+                .filter(|seq| *seq > 0);
+                Ok(seq)
+            }
+        }
+    }
+}
+
+fn max_optional_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
