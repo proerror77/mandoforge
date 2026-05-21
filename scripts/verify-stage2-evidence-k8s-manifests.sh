@@ -1000,6 +1000,11 @@ if ! grep -q "non-production KMS recovery target evidence" scripts/verify-stage2
   exit 1
 fi
 
+if ! grep -q "mismatched KMS backend/key target evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject KMS backend/key target mismatches" >&2
+  exit 1
+fi
+
 if ! grep -q "approval-notification-evidence-gate.sh" deploy/stage2-evidence/approval-notification-evidence-job.example.yaml; then
   echo "Approval notification evidence Job does not run the dedicated evidence gate" >&2
   exit 1

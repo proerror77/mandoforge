@@ -179,7 +179,8 @@ controller evidence for the same class of production backend identity. Recovery
 evidence must also report a production recovery id, production recovery target
 kind, and unique audited recovery steps with step names, matching backend/key/recovery
 ids, passed/validated/completed status, and audit id, trace id, run id, or
-timestamp detail. The matching in-cluster
+timestamp detail. Backend and key ids must match `MANDOFORGE_STAGE2_KMS_BACKEND_ID`,
+`MANDOFORGE_KMS_KEY_ID`, and the all-up archive manifest's Vault/KMS target. The matching in-cluster
 template is `deploy/stage2-evidence/vault-evidence-job.example.yaml`, which
 persists its output under the Stage 2 production evidence PVC.
 
