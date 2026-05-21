@@ -27,6 +27,18 @@ if [[ "$allow_placeholders" != "1" ]]; then
     grep -nE '^(MANDOFORGE_KMS_KEY_ID|MANDOFORGE_STAGE2_(TENANT_DEPLOYMENT_ID|POLICY_CONTROLLER_ID|KMS_BACKEND_ID|PRODUCTION_CLUSTER_ID|FINANCE_SYSTEM_ID)|.*_TOKEN)=$' "$env_file" >&2
     exit 1
   fi
+
+  if grep -Ei '^MANDOFORGE_STAGE2_(TENANT_DEPLOYMENT_ID|POLICY_CONTROLLER_ID|KMS_BACKEND_ID|PRODUCTION_CLUSTER_ID|FINANCE_SYSTEM_ID)=.*(whiskey|pilot|mock|example|sample|demo|local|localhost)' "$env_file" >/dev/null; then
+    echo "Stage 2 controller env file still contains pilot/mock/local target identity values" >&2
+    grep -nEi '^MANDOFORGE_STAGE2_(TENANT_DEPLOYMENT_ID|POLICY_CONTROLLER_ID|KMS_BACKEND_ID|PRODUCTION_CLUSTER_ID|FINANCE_SYSTEM_ID)=.*(whiskey|pilot|mock|example|sample|demo|local|localhost)' "$env_file" >&2
+    exit 1
+  fi
+
+  if grep -Ei '^MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID=.*(feishu|lark|drive|file|artifact)' "$env_file" >/dev/null; then
+    echo "Stage 2 controller env file still points finance evidence at an artifact store identity" >&2
+    grep -nEi '^MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID=.*(feishu|lark|drive|file|artifact)' "$env_file" >&2
+    exit 1
+  fi
 fi
 
 kubectl create secret generic "$secret_name" \

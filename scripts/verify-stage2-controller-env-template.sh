@@ -218,6 +218,16 @@ if ! grep -q "whiskey" "$production_preflight_script"; then
   exit 1
 fi
 
+if ! grep -q "looks_production_identity" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must validate target identity values" >&2
+  exit 1
+fi
+
+if ! grep -q "pilot/mock/local target identity" "$render_secret_script"; then
+  echo "Stage 2 controller Secret render must reject pilot/mock/local target identity values" >&2
+  exit 1
+fi
+
 for flag in "${required_job_flags[@]}"; do
   if ! grep -q "name: ${flag}" "$job_manifest"; then
     echo "Stage 2 evidence Job is missing opt-in flag $flag" >&2

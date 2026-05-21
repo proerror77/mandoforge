@@ -1423,6 +1423,11 @@ if ! grep -q "finance ERP system id" scripts/verify-stage2-evidence-archive.sh; 
   exit 1
 fi
 
+if ! grep -q "pilot/mock/local identity" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must reject pilot/mock/local target identities" >&2
+  exit 1
+fi
+
 if ! grep -q "delivery_mode=.* is not accounting/ERP" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject non-ERP finance delivery evidence" >&2
   exit 1

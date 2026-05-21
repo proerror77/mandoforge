@@ -35,6 +35,8 @@ Do not commit real tokens, real production URLs, generated Secrets, or evidence 
 
 The controller matrix is the source of truth for Stage 2 production adoption wiring. Every row must either pass against a real target or remain listed in the residual adoption backlog.
 
+All declared target identities used by the strict all-up gate must name real production targets. The preflight, Secret render, and archive verifier reject Whiskey, pilot, mock, example, sample, demo, local, localhost, and loopback identities. Finance identities additionally reject Feishu/Lark/Drive/file/artifact targets because those prove artifact delivery, not accounting-system adoption.
+
 | Adoption area | Controller env and opt-in flags | Focused gate | Required proof |
 | --- | --- | --- | --- |
 | Tenant routing and RLS | `MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID`, `MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED=true`, `MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL`, `MANDOFORGE_TENANT_ROUTING_CONTROLLER_TOKEN` | `scripts/tenant-isolation-evidence-gate.sh` | Fresh routing validation against a broader multi-tenant deployment with tenant context, forced RLS, at least two tenants, and cross-tenant negative tests confirmed by the controller. The controller-reported deployment id must match the all-up run manifest. |

@@ -108,6 +108,21 @@ is_accounting_or_erp_delivery_mode() {
   esac
 }
 
+is_production_identity_value() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$value" ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
+}
+
+is_finance_system_identity_value() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  is_production_identity_value "$value" || return 1
+  [[ ! "$value" =~ (^|[./:_-])(feishu|lark|drive|file|artifact)([./:_-]|$) ]] || return 1
+}
+
 artifact_issue() {
   local root="$1"
   local relative_path="$2"
@@ -138,6 +153,10 @@ artifact_issue() {
         printf '%s cluster_id is missing' "$relative_path"
         return 0
       fi
+      if ! is_production_identity_value "$cluster_id"; then
+        printf '%s cluster_id=%s is a pilot/mock/local identity' "$relative_path" "$cluster_id"
+        return 0
+      fi
       ;;
     remote-computer-state-sync-evidence.json)
       local target_kind
@@ -162,6 +181,10 @@ artifact_issue() {
       fi
       if [[ -z "$cluster_id" ]]; then
         printf '%s cluster_id is missing' "$relative_path"
+        return 0
+      fi
+      if ! is_production_identity_value "$cluster_id"; then
+        printf '%s cluster_id=%s is a pilot/mock/local identity' "$relative_path" "$cluster_id"
         return 0
       fi
       ;;
@@ -196,6 +219,10 @@ artifact_issue() {
         printf '%s cluster_id is missing' "$relative_path"
         return 0
       fi
+      if ! is_production_identity_value "$cluster_id"; then
+        printf '%s cluster_id=%s is a pilot/mock/local identity' "$relative_path" "$cluster_id"
+        return 0
+      fi
       ;;
     tenant-routing-validation-evidence.json)
       local target_kind
@@ -203,11 +230,13 @@ artifact_issue() {
       local rls_enforced
       local tenant_context_validated
       local cross_tenant_negative_tests
+      local deployment_id
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
       tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$path")"
       rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$path")"
       tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$path")"
       cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$path")"
+      deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$path")"
       if ! is_multi_tenant_target_kind "$target_kind"; then
         printf '%s target_kind=%s is not broader multi-tenant' "$relative_path" "$target_kind"
         return 0
@@ -218,6 +247,10 @@ artifact_issue() {
       fi
       if [[ "$rls_enforced" != "true" || "$tenant_context_validated" != "true" || "$cross_tenant_negative_tests" != "true" ]]; then
         printf '%s tenant/RLS negative-test evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if ! is_production_identity_value "$deployment_id"; then
+        printf '%s deployment_id=%s is a pilot/mock/local identity' "$relative_path" "${deployment_id:-<empty>}"
         return 0
       fi
       ;;
@@ -252,6 +285,10 @@ artifact_issue() {
       fi
       if [[ -z "$controller_id" ]]; then
         printf '%s controller_id is missing' "$relative_path"
+        return 0
+      fi
+      if ! is_production_identity_value "$controller_id"; then
+        printf '%s controller_id=%s is a pilot/mock/local identity' "$relative_path" "$controller_id"
         return 0
       fi
       if ! is_production_rollout_scope "$rollout_scope"; then
@@ -294,6 +331,10 @@ artifact_issue() {
         printf '%s backend_id or key_id is missing' "$relative_path"
         return 0
       fi
+      if ! is_production_identity_value "$backend_id"; then
+        printf '%s backend_id=%s is a pilot/mock/local identity' "$relative_path" "$backend_id"
+        return 0
+      fi
       ;;
     vault-kms-recovery-evidence.json)
       local status
@@ -324,6 +365,10 @@ artifact_issue() {
         printf '%s backend_id or key_id is missing' "$relative_path"
         return 0
       fi
+      if ! is_production_identity_value "$backend_id"; then
+        printf '%s backend_id=%s is a pilot/mock/local identity' "$relative_path" "$backend_id"
+        return 0
+      fi
       ;;
     finance-export-delivery-observer.json)
       local status
@@ -350,6 +395,10 @@ artifact_issue() {
         printf '%s system_id is missing' "$relative_path"
         return 0
       fi
+      if ! is_finance_system_identity_value "$system_id"; then
+        printf '%s system_id=%s is not a true ERP/accounting system identity' "$relative_path" "$system_id"
+        return 0
+      fi
       ;;
   esac
 }
@@ -369,6 +418,28 @@ value_mismatch_issue() {
   fi
   if [[ "$expected" != "$actual" ]]; then
     printf '%s expected=%s actual=%s' "$label" "$expected" "$actual"
+    return 0
+  fi
+  return 0
+}
+
+target_identity_issue() {
+  local label="$1"
+  local value="$2"
+
+  if ! is_production_identity_value "$value"; then
+    printf '%s=%s is a pilot/mock/local identity' "$label" "${value:-<empty>}"
+    return 0
+  fi
+  return 0
+}
+
+finance_identity_issue() {
+  local label="$1"
+  local value="$2"
+
+  if ! is_finance_system_identity_value "$value"; then
+    printf '%s=%s is not a true ERP/accounting system identity' "$label" "${value:-<empty>}"
     return 0
   fi
   return 0
@@ -402,6 +473,11 @@ verify_run_manifest() {
   fi
 
   expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$manifest")"
+  issue="$(target_identity_issue "expected worker/Remote Computer cluster id" "$expected_cluster_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
   worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/worker-load-validation-evidence.json" 2>/dev/null || echo "")"
   state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/remote-computer-state-sync-evidence.json" 2>/dev/null || echo "")"
   sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$root/remote-computer-sidecar-recovery-evidence.json" 2>/dev/null || echo "")"
@@ -416,6 +492,11 @@ verify_run_manifest() {
   done
 
   expected_tenant_deployment_id="$(jq -r '.expected_targets.tenant_routing.deployment_id // ""' "$manifest")"
+  issue="$(target_identity_issue "expected tenant routing deployment id" "$expected_tenant_deployment_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
   tenant_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$root/tenant-routing-validation-evidence.json" 2>/dev/null || echo "")"
   issue="$(value_mismatch_issue "tenant routing deployment id" "$expected_tenant_deployment_id" "$tenant_deployment_id")"
   if [[ -n "$issue" ]]; then
@@ -424,6 +505,11 @@ verify_run_manifest() {
   fi
 
   expected_policy_controller_id="$(jq -r '.expected_targets.policy_rollout.controller_id // ""' "$manifest")"
+  issue="$(target_identity_issue "expected policy rollout controller id" "$expected_policy_controller_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
   policy_controller_id="$(jq -r '.response.controller_execution.controller_id // ""' "$root/policy-rollout-orchestration-validation-evidence.json" 2>/dev/null || echo "")"
   issue="$(value_mismatch_issue "policy rollout controller id" "$expected_policy_controller_id" "$policy_controller_id")"
   if [[ -n "$issue" ]]; then
@@ -433,6 +519,11 @@ verify_run_manifest() {
 
   expected_kms_backend_id="$(jq -r '.expected_targets.vault_kms.backend_id // ""' "$manifest")"
   expected_kms_key_id="$(jq -r '.expected_targets.vault_kms.key_id // ""' "$manifest")"
+  issue="$(target_identity_issue "expected KMS backend id" "$expected_kms_backend_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
   rotation_backend_id="$(jq -r '.response.external_execution.backend_id // ""' "$root/vault-kms-rotation-evidence.json" 2>/dev/null || echo "")"
   rotation_key_id="$(jq -r '.response.external_execution.key_id // ""' "$root/vault-kms-rotation-evidence.json" 2>/dev/null || echo "")"
   recovery_backend_id="$(jq -r '.response.controller_execution.backend_id // ""' "$root/vault-kms-recovery-evidence.json" 2>/dev/null || echo "")"
@@ -449,6 +540,11 @@ verify_run_manifest() {
   done
 
   expected_finance_system_id="$(jq -r '.expected_targets.finance.system_id // ""' "$manifest")"
+  issue="$(finance_identity_issue "expected finance ERP system id" "$expected_finance_system_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
   finance_system_id="$(jq -r '.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // ""' "$root/finance-export-delivery-observer.json" 2>/dev/null || echo "")"
   issue="$(value_mismatch_issue "finance ERP system id" "$expected_finance_system_id" "$finance_system_id")"
   if [[ -n "$issue" ]]; then
@@ -840,6 +936,84 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected cluster-mismatched evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/production-evidence-run.json" <<'JSON'
+{
+  "generated_at": "1970-01-01T00:00:00Z",
+  "source": "stage2-production-evidence-gate",
+  "expected_targets": {
+    "worker_remote_computer": {
+      "cluster_id": "whiskey-pilot-cluster"
+    },
+    "tenant_routing": {
+      "deployment_id": "tenant-routing-prod-1"
+    },
+    "policy_rollout": {
+      "controller_id": "policy-controller-prod-1"
+    },
+    "vault_kms": {
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1"
+    },
+    "finance": {
+      "system_id": "netsuite-prod-1"
+    }
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/worker-load-validation-evidence.json" <<'JSON'
+{
+  "response": {
+    "controller_execution": {
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "whiskey-pilot-cluster"
+    }
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/remote-computer-state-sync-evidence.json" <<'JSON'
+{
+  "response": {
+    "controller_execution": {
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "whiskey-pilot-cluster",
+      "distributed_state_backend": "juicefs"
+    }
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
+{
+  "response": {
+    "validation_result": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "whiskey-pilot-cluster",
+      "replacement_scope": "cluster"
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-pilot-identity.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-pilot-identity-negative.out 2>/tmp/mandoforge-stage2-archive-pilot-identity-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected pilot target identity evidence to fail" >&2
     exit 1
   fi
 }
