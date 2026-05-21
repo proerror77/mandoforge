@@ -415,6 +415,11 @@ if ! grep -q "is_real_cluster_kind" "$remote_computer_script" || ! grep -q "stat
   exit 1
 fi
 
+if ! grep -q "MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID" "$remote_computer_script" || ! grep -q "expected_production_cluster_id" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must bind state-sync and sidecar evidence to the declared production cluster id" >&2
+  exit 1
+fi
+
 if ! grep -q "is_distributed_state_backend" "$remote_computer_script" || ! grep -q "state_sync_backend" "$remote_computer_script"; then
   echo "Remote Computer evidence script must require distributed state backend evidence" >&2
   exit 1
@@ -547,6 +552,11 @@ fi
 
 if ! grep -q "same_cluster_target" "$worker_remote_computer_script"; then
   echo "Worker/Remote Computer evidence script must require worker and Remote Computer evidence from the same cluster" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID" "$worker_remote_computer_script" || ! grep -q "expected_production_cluster_id" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must bind combined evidence to the declared production cluster id" >&2
   exit 1
 fi
 

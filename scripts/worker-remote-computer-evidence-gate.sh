@@ -4,6 +4,7 @@ set -euo pipefail
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/worker-remote-computer-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_STAGE2_REMOTE_SIDECAR_RECOVERY="${RUN_STAGE2_REMOTE_SIDECAR_RECOVERY:-1}"
+PRODUCTION_CLUSTER_ID="${MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID:-}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -305,12 +306,19 @@ write_summary() {
   is_multi_node "$worker_node_count" || blocked_count=$((blocked_count + 1))
   is_production_identity "$worker_cluster_id" || blocked_count=$((blocked_count + 1))
   [[ "$worker_load_check_detail_count" =~ ^[0-9]+$ && "$worker_load_check_detail_count" -gt 0 ]] || blocked_count=$((blocked_count + 1))
+  if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
+    is_production_identity "$PRODUCTION_CLUSTER_ID" || blocked_count=$((blocked_count + 1))
+    [[ "$worker_cluster_id" == "$PRODUCTION_CLUSTER_ID" ]] || blocked_count=$((blocked_count + 1))
+  fi
   [[ "$remote_state_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_sync_evidence_status" == "captured" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_controller_fresh" == "true" ]] || blocked_count=$((blocked_count + 1))
   is_real_cluster_kind "$state_target_kind" || blocked_count=$((blocked_count + 1))
   is_multi_node "$state_node_count" || blocked_count=$((blocked_count + 1))
   is_production_identity "$state_cluster_id" || blocked_count=$((blocked_count + 1))
+  if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
+    [[ "$state_cluster_id" == "$PRODUCTION_CLUSTER_ID" ]] || blocked_count=$((blocked_count + 1))
+  fi
   is_distributed_state_backend "$state_backend" || blocked_count=$((blocked_count + 1))
   [[ -n "$state_claim" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_count" -gt 0 ]] || blocked_count=$((blocked_count + 1))
@@ -325,6 +333,9 @@ write_summary() {
     is_real_cluster_kind "$sidecar_target_kind" || blocked_count=$((blocked_count + 1))
     is_multi_node "$sidecar_node_count" || blocked_count=$((blocked_count + 1))
     is_production_identity "$sidecar_cluster_id" || blocked_count=$((blocked_count + 1))
+    if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
+      [[ "$sidecar_cluster_id" == "$PRODUCTION_CLUSTER_ID" ]] || blocked_count=$((blocked_count + 1))
+    fi
     [[ "$sidecar_replacement_scope" == "cluster" ]] || blocked_count=$((blocked_count + 1))
     [[ "$sidecar_replacement_pods_healthy" == "true" ]] || blocked_count=$((blocked_count + 1))
     [[ "$sidecar_checked_pod_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_count" -gt 0 ]] || blocked_count=$((blocked_count + 1))
@@ -334,6 +345,7 @@ write_summary() {
   jq -n \
     --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     --arg evidence_dir "$EVIDENCE_DIR" \
+    --arg expected_production_cluster_id "${PRODUCTION_CLUSTER_ID:-}" \
     --arg worker_readiness "$worker_readiness" \
     --arg worker_validation "$worker_validation" \
     --arg remote_readiness "$remote_readiness" \
@@ -386,6 +398,7 @@ write_summary() {
       status: (if $production_blocked then "blocked" else "ready" end),
       production_blocked: $production_blocked,
       production_blocked_count: $production_blocked_count,
+      expected_production_cluster_id: $expected_production_cluster_id,
       worker: {
         readiness_file: $worker_readiness,
         validation_file: $worker_validation,
@@ -445,6 +458,7 @@ write_summary() {
     jq -r '"worker_load_validated=\(.worker.load_validated)"' "$summary_json"
     jq -r '"worker_controller_evidence_fresh=\(.worker.controller_evidence_fresh)"' "$summary_json"
     jq -r '"worker_cluster_id=\(.worker.cluster_id)"' "$summary_json"
+    jq -r '"expected_production_cluster_id=\(if (.expected_production_cluster_id // "") | length > 0 then .expected_production_cluster_id else "<unset>" end)"' "$summary_json"
     jq -r '"worker_target_kind=\(.worker.target_kind)"' "$summary_json"
     jq -r '"worker_node_count=\(.worker.node_count)"' "$summary_json"
     jq -r '"worker_load_check_detail_count=\(.worker.load_check_detail_count)"' "$summary_json"
@@ -477,11 +491,18 @@ write_summary() {
     is_real_cluster_kind "$worker_target_kind" || echo "- worker load validation target is not a real cluster kind: $worker_target_kind"
     is_multi_node "$worker_node_count" || echo "- worker load validation did not report a multi-node cluster: node_count=$worker_node_count"
     is_production_identity "$worker_cluster_id" || echo "- worker load validation cluster id is pilot/mock/local: ${worker_cluster_id:-<empty>}"
+    if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
+      is_production_identity "$PRODUCTION_CLUSTER_ID" || echo "- configured MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID is pilot/mock/local: $PRODUCTION_CLUSTER_ID"
+      [[ "$worker_cluster_id" == "$PRODUCTION_CLUSTER_ID" ]] || echo "- worker load validation cluster id does not match MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID"
+    fi
     [[ "$worker_load_check_detail_count" =~ ^[0-9]+$ && "$worker_load_check_detail_count" -gt 0 ]] || echo "- worker load validation did not include worker-pool load check details"
     [[ "$state_sync_evidence_status" == "captured" ]] || echo "- Remote Computer state-sync evidence was not captured: $state_sync_evidence_status"
     is_real_cluster_kind "$state_target_kind" || echo "- Remote Computer state-sync target is not a real cluster kind: $state_target_kind"
     is_multi_node "$state_node_count" || echo "- Remote Computer state-sync did not report a multi-node cluster: node_count=$state_node_count"
     is_production_identity "$state_cluster_id" || echo "- Remote Computer state-sync cluster id is pilot/mock/local: ${state_cluster_id:-<empty>}"
+    if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
+      [[ "$state_cluster_id" == "$PRODUCTION_CLUSTER_ID" ]] || echo "- Remote Computer state-sync cluster id does not match MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID"
+    fi
     is_distributed_state_backend "$state_backend" || echo "- Remote Computer state backend is not a supported distributed filesystem: $state_backend"
     [[ -n "$state_claim" ]] || echo "- Remote Computer state-sync did not report a state claim"
     [[ "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_count" -gt 0 ]] || echo "- Remote Computer state-sync did not report any checked state contract paths: checked_path_count=$state_checked_path_count"
@@ -493,6 +514,9 @@ write_summary() {
       is_real_cluster_kind "$sidecar_target_kind" || echo "- sidecar replacement target is not a real cluster kind: $sidecar_target_kind"
       is_multi_node "$sidecar_node_count" || echo "- sidecar replacement did not report a multi-node cluster: node_count=$sidecar_node_count"
       is_production_identity "$sidecar_cluster_id" || echo "- sidecar replacement cluster id is pilot/mock/local: ${sidecar_cluster_id:-<empty>}"
+      if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
+        [[ "$sidecar_cluster_id" == "$PRODUCTION_CLUSTER_ID" ]] || echo "- sidecar replacement cluster id does not match MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID"
+      fi
       [[ "$sidecar_replacement_scope" == "cluster" ]] || echo "- sidecar replacement scope is not cluster-wide: $sidecar_replacement_scope"
       [[ "$sidecar_replacement_pods_healthy" == "true" ]] || echo "- sidecar replacement validation did not report healthy replacement Pods"
       [[ "$sidecar_checked_pod_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_count" -gt 0 ]] || echo "- sidecar replacement validation did not report any checked Pods: checked_pod_count=$sidecar_checked_pod_count"

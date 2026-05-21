@@ -7,6 +7,7 @@ ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/remote-computer-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_SIDECAR_RECOVERY="${RUN_STAGE2_REMOTE_SIDECAR_RECOVERY:-0}"
+PRODUCTION_CLUSTER_ID="${MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID:-}"
 AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
 
 auth_headers=(
@@ -250,6 +251,14 @@ write_summary() {
   if ! is_production_identity "$state_sync_cluster_id"; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
+    if ! is_production_identity "$PRODUCTION_CLUSTER_ID"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ "$state_sync_cluster_id" != "$PRODUCTION_CLUSTER_ID" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+  fi
   if ! is_distributed_state_backend "$state_sync_backend"; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -273,6 +282,9 @@ write_summary() {
       blocked_count="$((blocked_count + 1))"
     fi
     if ! is_production_identity "$sidecar_cluster_id"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ -n "$PRODUCTION_CLUSTER_ID" && "$sidecar_cluster_id" != "$PRODUCTION_CLUSTER_ID" ]]; then
       blocked_count="$((blocked_count + 1))"
     fi
     if [[ "$sidecar_replacement_scope" != "cluster" ]]; then
@@ -306,6 +318,7 @@ write_summary() {
     echo "state_sync_target_kind=$state_sync_target_kind"
     echo "state_sync_node_count=$state_sync_node_count"
     echo "state_sync_cluster_id=$state_sync_cluster_id"
+    echo "expected_production_cluster_id=${PRODUCTION_CLUSTER_ID:-<unset>}"
     echo "state_sync_backend=$state_sync_backend"
     echo "state_sync_state_claim=$state_sync_state_claim"
     echo "state_sync_checked_path_count=$state_sync_checked_path_count"
@@ -347,6 +360,14 @@ write_summary() {
     if ! is_production_identity "$state_sync_cluster_id"; then
       echo "- state-sync cluster id is pilot/mock/local: ${state_sync_cluster_id:-<empty>}"
     fi
+    if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
+      if ! is_production_identity "$PRODUCTION_CLUSTER_ID"; then
+        echo "- configured MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID is pilot/mock/local: $PRODUCTION_CLUSTER_ID"
+      fi
+      if [[ "$state_sync_cluster_id" != "$PRODUCTION_CLUSTER_ID" ]]; then
+        echo "- state-sync cluster id does not match MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID"
+      fi
+    fi
     if ! is_distributed_state_backend "$state_sync_backend"; then
       echo "- state-sync backend is not a supported distributed filesystem: $state_sync_backend"
     fi
@@ -371,6 +392,9 @@ write_summary() {
       fi
       if ! is_production_identity "$sidecar_cluster_id"; then
         echo "- sidecar recovery cluster id is pilot/mock/local: ${sidecar_cluster_id:-<empty>}"
+      fi
+      if [[ -n "$PRODUCTION_CLUSTER_ID" && "$sidecar_cluster_id" != "$PRODUCTION_CLUSTER_ID" ]]; then
+        echo "- sidecar recovery cluster id does not match MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID"
       fi
       if [[ "$sidecar_replacement_scope" != "cluster" ]]; then
         echo "- sidecar recovery replacement scope is not cluster-wide: $sidecar_replacement_scope"
