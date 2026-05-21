@@ -835,6 +835,11 @@ if ! grep -q "zero KMS rotated count" scripts/verify-stage2-evidence-archive.sh;
   exit 1
 fi
 
+if ! grep -q "non-production KMS backend evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject KMS rotation evidence from non-production backends" >&2
+  exit 1
+fi
+
 if ! grep -q "missing KMS recovery steps" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject KMS recovery evidence without audited steps" >&2
   exit 1
