@@ -65,7 +65,7 @@ After the strict evidence and completion-audit Jobs pass, archive the shared evi
 scripts/archive-stage2-production-evidence.sh .mandoforge/stage2-production-evidence-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
 ```
 
-The archive helper writes a `.sha256` checksum sidecar and `.manifest.txt` release manifest, then runs `scripts/verify-stage2-evidence-archive.sh` automatically by default. The verifier checks the tarball checksum and manifest, then extracts `completion-audit/checklist.json`. By default it fails if the checklist is still blocked or any endpoint, artifact, evidence script, evidence Job manifest, or required controller flag is missing. It also independently inspects the archived worker/Remote Computer, tenant routing, policy rollout, Vault/KMS, and finance artifacts so old pilot/mock/single-host/local-hostpath/non-ERP evidence cannot pass only because a checklist says ready. `ALLOW_BLOCKED=1` is only for inventory archive inspection, and `VERIFY_STAGE2_EVIDENCE_ARCHIVE=0` should only be used when debugging the archive helper itself.
+The archive helper writes a `.sha256` checksum sidecar and `.manifest.txt` release manifest, then runs `scripts/verify-stage2-evidence-archive.sh` automatically by default. The verifier checks the tarball checksum and manifest, then extracts `completion-audit/checklist.json`. By default it fails if the checklist is still blocked or any endpoint, artifact, evidence script, evidence Job manifest, or required controller flag is missing. It also requires the archived `production-evidence-run.json` identity manifest and cross-checks its declared cluster id, tenant deployment id, policy controller id, KMS backend/key id, and ERP/accounting system id against the worker/Remote Computer, tenant routing, policy rollout, Vault/KMS, and finance artifacts so old pilot/mock/single-host/local-hostpath/non-ERP or mixed-target evidence cannot pass only because a checklist says ready. `ALLOW_BLOCKED=1` is only for inventory archive inspection, and `VERIFY_STAGE2_EVIDENCE_ARCHIVE=0` should only be used when debugging the archive helper itself.
 
 For a narrower collector rollout proof, run the dedicated observability collector gate:
 
@@ -231,6 +231,9 @@ reconciliation is reconciled and fresh, the CSV is nonempty, delivery succeeded
 to a configured target, and the observer reports an accounting/ERP delivery mode
 such as `accounting_erp`, `erp`, `netsuite`, `quickbooks`, `xero`, `sap`, or
 `oracle_erp`; `lark_drive` and `accept_only` do not satisfy the ERP proof. The
+observer must also report a stable system id through `system_id`,
+`erp_system_id`, `accounting_system_id`, or `target_id`, and that value must
+match `MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID` in the all-up archive manifest. The
 matching in-cluster template is
 `deploy/stage2-evidence/finance-evidence-job.example.yaml`, which explicitly
 enables controller and export proof and persists its output under the Stage 2

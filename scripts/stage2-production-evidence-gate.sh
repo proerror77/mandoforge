@@ -13,6 +13,11 @@ VERIFY_VALIDATION_COVERAGE="${VERIFY_STAGE2_VALIDATION_COVERAGE:-0}"
 RUN_COMPLETION_AUDIT="${RUN_STAGE2_COMPLETION_AUDIT:-1}"
 MAX_EVIDENCE_AGE_HOURS="${STAGE2_EVIDENCE_MAX_AGE_HOURS:-24}"
 FINANCE_DELIVERY_OBSERVER_URL="${FINANCE_EXPORT_DELIVERY_OBSERVER_URL:-}"
+PRODUCTION_CLUSTER_ID="${MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID:-}"
+TENANT_DEPLOYMENT_ID="${MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID:-}"
+POLICY_CONTROLLER_ID="${MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID:-}"
+KMS_BACKEND_ID="${MANDOFORGE_STAGE2_KMS_BACKEND_ID:-}"
+FINANCE_SYSTEM_ID="${MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID:-}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -196,6 +201,47 @@ write_team_discovery() {
       team_id: (if $team_id == "" then null else $team_id end),
       organization_id: (if $organization_id == "" then null else $organization_id end),
       generated_at: $generated_at
+    }' >"$target"
+}
+
+write_production_evidence_run_manifest() {
+  local target="$EVIDENCE_DIR/production-evidence-run.json"
+
+  jq -n \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --arg base_url "$BASE_URL" \
+    --arg subject "$SUBJECT" \
+    --arg team_id "${TEAM_ID:-}" \
+    --arg production_cluster_id "$PRODUCTION_CLUSTER_ID" \
+    --arg tenant_deployment_id "$TENANT_DEPLOYMENT_ID" \
+    --arg policy_controller_id "$POLICY_CONTROLLER_ID" \
+    --arg kms_backend_id "$KMS_BACKEND_ID" \
+    --arg kms_key_id "${MANDOFORGE_KMS_KEY_ID:-}" \
+    --arg finance_system_id "$FINANCE_SYSTEM_ID" \
+    '{
+      generated_at: $generated_at,
+      source: "stage2-production-evidence-gate",
+      base_url: $base_url,
+      subject: $subject,
+      team_id: (if $team_id == "" then null else $team_id end),
+      expected_targets: {
+        worker_remote_computer: {
+          cluster_id: $production_cluster_id
+        },
+        tenant_routing: {
+          deployment_id: $tenant_deployment_id
+        },
+        policy_rollout: {
+          controller_id: $policy_controller_id
+        },
+        vault_kms: {
+          backend_id: $kms_backend_id,
+          key_id: $kms_key_id
+        },
+        finance: {
+          system_id: $finance_system_id
+        }
+      }
     }' >"$target"
 }
 
@@ -1190,6 +1236,7 @@ mkdir -p "$EVIDENCE_DIR"
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
 discover_team_id
+write_production_evidence_run_manifest
 collect_readiness
 verify_readiness_inventory_coverage
 write_endpoint_coverage "validation_endpoints" "validation" "0"

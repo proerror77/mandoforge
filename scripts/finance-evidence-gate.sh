@@ -10,6 +10,7 @@ RUN_FINANCE_CONTROLLERS="${RUN_STAGE2_FINANCE_CONTROLLERS:-1}"
 RUN_FINANCE_EXPORT="${RUN_STAGE2_FINANCE_EXPORT:-1}"
 DELIVERY_OBSERVER_URL="${FINANCE_EXPORT_DELIVERY_OBSERVER_URL:-}"
 AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
+EXPECTED_FINANCE_SYSTEM_ID="${MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID:-}"
 
 auth_headers=(
 )
@@ -168,6 +169,7 @@ write_summary() {
   local export_delivery_file_token
   local export_delivery_file_url
   local export_delivery_file_name
+  local export_delivery_system_id
   local blocked_count
 
   current_cost_cents="$(jq -r '.current_cost_cents // 0' "$finance_summary_file")"
@@ -206,6 +208,7 @@ write_summary() {
   export_delivery_file_token="none"
   export_delivery_file_url="none"
   export_delivery_file_name="none"
+  export_delivery_system_id=""
   if [[ -s "$reconciliation_evidence_file" ]]; then
     reconciliation_evidence_status="$(jq -r '.status // "unknown"' "$reconciliation_evidence_file")"
     reconciliation_run_status="$(jq -r '.response.status // "unknown"' "$reconciliation_evidence_file")"
@@ -229,6 +232,7 @@ write_summary() {
     export_delivery_file_token="$(jq -r '.export_state.latest_file_token // "none"' "$export_delivery_observer_file")"
     export_delivery_file_url="$(jq -r '.export_state.latest_file_url // "none"' "$export_delivery_observer_file")"
     export_delivery_file_name="$(jq -r '.export_state.latest_file_name // "none"' "$export_delivery_observer_file")"
+    export_delivery_system_id="$(jq -r '.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // ""' "$export_delivery_observer_file")"
   else
     export_delivery_count="0"
   fi
@@ -277,6 +281,11 @@ write_summary() {
       blocked_count="$((blocked_count + 1))"
       ;;
   esac
+  if [[ -z "$export_delivery_system_id" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  elif [[ -n "$EXPECTED_FINANCE_SYSTEM_ID" && "$export_delivery_system_id" != "$EXPECTED_FINANCE_SYSTEM_ID" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "current_cost_cents=$current_cost_cents"
@@ -319,6 +328,8 @@ write_summary() {
     echo "finance_export_delivery_file_token=$export_delivery_file_token"
     echo "finance_export_delivery_file_url=$export_delivery_file_url"
     echo "finance_export_delivery_file_name=$export_delivery_file_name"
+    echo "finance_export_delivery_system_id=$export_delivery_system_id"
+    echo "expected_finance_system_id=${EXPECTED_FINANCE_SYSTEM_ID:-<unset>}"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
     echo "finance_attention_items:"
@@ -366,6 +377,11 @@ write_summary() {
         echo "- finance export delivery mode is not an accounting/ERP target: $export_delivery_mode"
         ;;
     esac
+    if [[ -z "$export_delivery_system_id" ]]; then
+      echo "- finance export delivery observer did not report an ERP/accounting system id"
+    elif [[ -n "$EXPECTED_FINANCE_SYSTEM_ID" && "$export_delivery_system_id" != "$EXPECTED_FINANCE_SYSTEM_ID" ]]; then
+      echo "- finance export delivery system id does not match expected target: expected=$EXPECTED_FINANCE_SYSTEM_ID actual=$export_delivery_system_id"
+    fi
   } >"$summary_file"
 
   cat "$summary_file"

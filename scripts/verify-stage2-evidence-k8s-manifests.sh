@@ -1408,8 +1408,28 @@ if ! grep -q "do not share one cluster id" scripts/verify-stage2-evidence-archiv
   exit 1
 fi
 
+if ! grep -q "production-evidence-run.json" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must write a run identity manifest" >&2
+  exit 1
+fi
+
+if ! grep -q "production-evidence-run.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require the run identity manifest" >&2
+  exit 1
+fi
+
+if ! grep -q "finance ERP system id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must bind finance evidence to the declared ERP system id" >&2
+  exit 1
+fi
+
 if ! grep -q "delivery_mode=.* is not accounting/ERP" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject non-ERP finance delivery evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "finance_export_delivery_system_id" "$finance_script"; then
+  echo "finance evidence script must record the ERP/accounting system id" >&2
   exit 1
 fi
 

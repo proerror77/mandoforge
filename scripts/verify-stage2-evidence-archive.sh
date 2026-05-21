@@ -329,9 +329,11 @@ artifact_issue() {
       local status
       local delivery_mode
       local delivery_count
+      local system_id
       status="$(jq -r '.status // "unknown"' "$path")"
       delivery_mode="$(jq -r '.export_state.delivery_mode // "unknown"' "$path")"
       delivery_count="$(jq -r '.export_state.delivery_count // 0' "$path")"
+      system_id="$(jq -r '.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // ""' "$path")"
       if [[ "$status" != "ok" ]]; then
         printf '%s observer_status=%s' "$relative_path" "$status"
         return 0
@@ -344,8 +346,117 @@ artifact_issue() {
         printf '%s delivery_mode=%s is not accounting/ERP' "$relative_path" "$delivery_mode"
         return 0
       fi
+      if [[ -z "$system_id" ]]; then
+        printf '%s system_id is missing' "$relative_path"
+        return 0
+      fi
       ;;
   esac
+}
+
+value_mismatch_issue() {
+  local label="$1"
+  local expected="$2"
+  local actual="$3"
+
+  if [[ -z "$expected" ]]; then
+    printf '%s expected value is missing' "$label"
+    return 0
+  fi
+  if [[ -z "$actual" ]]; then
+    printf '%s actual value is missing' "$label"
+    return 0
+  fi
+  if [[ "$expected" != "$actual" ]]; then
+    printf '%s expected=%s actual=%s' "$label" "$expected" "$actual"
+    return 0
+  fi
+  return 0
+}
+
+verify_run_manifest() {
+  local root="$1"
+  local manifest="$root/production-evidence-run.json"
+  local issue_count=0
+  local issue
+  local expected_cluster_id
+  local worker_cluster_id
+  local state_cluster_id
+  local sidecar_cluster_id
+  local expected_tenant_deployment_id
+  local tenant_deployment_id
+  local expected_policy_controller_id
+  local policy_controller_id
+  local expected_kms_backend_id
+  local expected_kms_key_id
+  local rotation_backend_id
+  local rotation_key_id
+  local recovery_backend_id
+  local recovery_key_id
+  local expected_finance_system_id
+  local finance_system_id
+
+  if [[ ! -s "$manifest" ]]; then
+    echo "Stage 2 evidence archive semantic issue: production-evidence-run.json missing" >&2
+    return 1
+  fi
+
+  expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$manifest")"
+  worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/worker-load-validation-evidence.json" 2>/dev/null || echo "")"
+  state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/remote-computer-state-sync-evidence.json" 2>/dev/null || echo "")"
+  sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$root/remote-computer-sidecar-recovery-evidence.json" 2>/dev/null || echo "")"
+  for issue in \
+    "$(value_mismatch_issue "worker cluster id" "$expected_cluster_id" "$worker_cluster_id")" \
+    "$(value_mismatch_issue "remote state-sync cluster id" "$expected_cluster_id" "$state_cluster_id")" \
+    "$(value_mismatch_issue "remote sidecar cluster id" "$expected_cluster_id" "$sidecar_cluster_id")"; do
+    if [[ -n "$issue" ]]; then
+      issue_count=$((issue_count + 1))
+      echo "Stage 2 evidence archive semantic issue: $issue" >&2
+    fi
+  done
+
+  expected_tenant_deployment_id="$(jq -r '.expected_targets.tenant_routing.deployment_id // ""' "$manifest")"
+  tenant_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$root/tenant-routing-validation-evidence.json" 2>/dev/null || echo "")"
+  issue="$(value_mismatch_issue "tenant routing deployment id" "$expected_tenant_deployment_id" "$tenant_deployment_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
+
+  expected_policy_controller_id="$(jq -r '.expected_targets.policy_rollout.controller_id // ""' "$manifest")"
+  policy_controller_id="$(jq -r '.response.controller_execution.controller_id // ""' "$root/policy-rollout-orchestration-validation-evidence.json" 2>/dev/null || echo "")"
+  issue="$(value_mismatch_issue "policy rollout controller id" "$expected_policy_controller_id" "$policy_controller_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
+
+  expected_kms_backend_id="$(jq -r '.expected_targets.vault_kms.backend_id // ""' "$manifest")"
+  expected_kms_key_id="$(jq -r '.expected_targets.vault_kms.key_id // ""' "$manifest")"
+  rotation_backend_id="$(jq -r '.response.external_execution.backend_id // ""' "$root/vault-kms-rotation-evidence.json" 2>/dev/null || echo "")"
+  rotation_key_id="$(jq -r '.response.external_execution.key_id // ""' "$root/vault-kms-rotation-evidence.json" 2>/dev/null || echo "")"
+  recovery_backend_id="$(jq -r '.response.controller_execution.backend_id // ""' "$root/vault-kms-recovery-evidence.json" 2>/dev/null || echo "")"
+  recovery_key_id="$(jq -r '.response.controller_execution.key_id // ""' "$root/vault-kms-recovery-evidence.json" 2>/dev/null || echo "")"
+  for issue in \
+    "$(value_mismatch_issue "KMS rotation backend id" "$expected_kms_backend_id" "$rotation_backend_id")" \
+    "$(value_mismatch_issue "KMS rotation key id" "$expected_kms_key_id" "$rotation_key_id")" \
+    "$(value_mismatch_issue "KMS recovery backend id" "$expected_kms_backend_id" "$recovery_backend_id")" \
+    "$(value_mismatch_issue "KMS recovery key id" "$expected_kms_key_id" "$recovery_key_id")"; do
+    if [[ -n "$issue" ]]; then
+      issue_count=$((issue_count + 1))
+      echo "Stage 2 evidence archive semantic issue: $issue" >&2
+    fi
+  done
+
+  expected_finance_system_id="$(jq -r '.expected_targets.finance.system_id // ""' "$manifest")"
+  finance_system_id="$(jq -r '.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // ""' "$root/finance-export-delivery-observer.json" 2>/dev/null || echo "")"
+  issue="$(value_mismatch_issue "finance ERP system id" "$expected_finance_system_id" "$finance_system_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
+
+  return "$issue_count"
 }
 
 verify_semantic_artifacts() {
@@ -357,6 +468,7 @@ verify_semantic_artifacts() {
   local state_cluster_id
   local sidecar_cluster_id
   local required_artifacts=(
+    production-evidence-run.json
     worker-load-validation-evidence.json
     remote-computer-state-sync-evidence.json
     remote-computer-sidecar-recovery-evidence.json
@@ -384,6 +496,12 @@ verify_semantic_artifacts() {
       echo "Stage 2 evidence archive semantic issue: worker, state-sync, and sidecar evidence do not share one cluster id" >&2
     fi
   fi
+
+  set +e
+  verify_run_manifest "$root"
+  issue=$?
+  set -e
+  issue_count=$((issue_count + issue))
 
   return "$issue_count"
 }
@@ -527,6 +645,30 @@ JSON
   }
 }
 JSON
+  cat >"$tmpdir/evidence/production-evidence-run.json" <<'JSON'
+{
+  "generated_at": "1970-01-01T00:00:00Z",
+  "source": "stage2-production-evidence-gate",
+  "expected_targets": {
+    "worker_remote_computer": {
+      "cluster_id": "prod-cluster-1"
+    },
+    "tenant_routing": {
+      "deployment_id": "tenant-routing-prod-1"
+    },
+    "policy_rollout": {
+      "controller_id": "policy-controller-prod-1"
+    },
+    "vault_kms": {
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1"
+    },
+    "finance": {
+      "system_id": "netsuite-prod-1"
+    }
+  }
+}
+JSON
   cat >"$tmpdir/evidence/remote-computer-state-sync-evidence.json" <<'JSON'
 {
   "response": {
@@ -557,6 +699,7 @@ JSON
   "response": {
     "controller_execution": {
       "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "rls_enforced": true,
       "tenant_context_validated": true,
@@ -615,6 +758,7 @@ JSON
   "status": "ok",
   "export_state": {
     "delivery_mode": "netsuite",
+    "system_id": "netsuite-prod-1",
     "delivery_count": 1
   }
 }
@@ -635,6 +779,7 @@ JSON
   "status": "ok",
   "export_state": {
     "delivery_mode": "lark_drive",
+    "system_id": "lark-drive-whiskey",
     "delivery_count": 1
   }
 }
@@ -662,6 +807,7 @@ JSON
   "status": "ok",
   "export_state": {
     "delivery_mode": "netsuite",
+    "system_id": "netsuite-prod-1",
     "delivery_count": 1
   }
 }

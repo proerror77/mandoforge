@@ -181,6 +181,7 @@ check_global() {
 
 check_tenant() {
   local label="tenant-routing"
+  require_value MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID "$label"
   require_true MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED "$label"
   require_production_url MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL "$label"
   require_no_whiskey_url MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL "$label"
@@ -189,6 +190,7 @@ check_tenant() {
 
 check_policy() {
   local label="policy-rollout"
+  require_value MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID "$label"
   require_true MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_REQUIRED "$label"
   require_production_url MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL "$label"
   require_no_whiskey_url MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL "$label"
@@ -199,6 +201,7 @@ check_policy() {
 check_vault_kms() {
   local label="vault-kms"
   require_production_kms_provider
+  require_value MANDOFORGE_STAGE2_KMS_BACKEND_ID "$label"
   require_value MANDOFORGE_KMS_KEY_ID "$label"
   require_value MANDOFORGE_KMS_ROTATION_POLICY "$label"
   require_eq MANDOFORGE_KMS_VALIDATION_MODE external "$label"
@@ -214,6 +217,7 @@ check_vault_kms() {
 
 check_worker_remote_computer() {
   local label="worker-remote-computer"
+  require_value MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID "$label"
   require_true MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_REQUIRED "$label"
   require_production_url MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL "$label"
   require_no_whiskey_url MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL "$label"
@@ -232,6 +236,7 @@ check_worker_remote_computer() {
 
 check_finance() {
   local label="finance-erp"
+  require_value MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID "$label"
   require_true MANDOFORGE_FINANCE_CLOSE_CONTROLLER_REQUIRED "$label"
   require_production_url MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL "$label"
   require_no_whiskey_url MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL "$label"
