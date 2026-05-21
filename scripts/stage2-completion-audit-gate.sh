@@ -297,6 +297,34 @@ is_distributed_state_backend() {
   esac
 }
 
+remote_state_checked_path_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.checked_paths[]?,
+      .response.controller_execution.checked_state_paths[]?,
+      .response.controller_execution.path_checks[]?
+    )
+    | select(
+        (type == "string" and length > 0)
+        or (type == "object" and ((.path // .state_path // .name // "") | length > 0))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
+summary_checked_path_detail_count() {
+  jq -r '[
+    (
+      .remote_computer.checked_paths[]?,
+      .remote_computer.checked_state_paths[]?,
+      .remote_computer.path_checks[]?
+    )
+    | select(
+        (type == "string" and length > 0)
+        or (type == "object" and ((.path // .state_path // .name // "") | length > 0))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
@@ -355,6 +383,7 @@ artifact_contract_issue() {
     local state_backend
     local state_claim
     local state_checked_path_count
+    local state_checked_path_detail_count
     local sidecar_replacement_pods_healthy
     local sidecar_checked_pod_count
 
@@ -367,6 +396,7 @@ artifact_contract_issue() {
     state_backend="$(jq -r '.remote_computer.distributed_state_backend // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     state_claim="$(jq -r '.remote_computer.state_claim // ""' "$artifact" 2>/dev/null || echo "")"
     state_checked_path_count="$(jq -r '.remote_computer.checked_path_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    state_checked_path_detail_count="$(summary_checked_path_detail_count "$artifact")"
     sidecar_replacement_pods_healthy="$(jq -r '.remote_computer.replacement_pods_healthy // false' "$artifact" 2>/dev/null || echo "false")"
     sidecar_checked_pod_count="$(jq -r '.remote_computer.checked_pod_count // 0' "$artifact" 2>/dev/null || echo "0")"
 
@@ -392,6 +422,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$state_checked_path_count" =~ ^[0-9]+$ || "$state_checked_path_count" == "0" ]]; then
       printf 'worker/Remote Computer checked_path_count=%s' "$state_checked_path_count"
+      return 0
+    fi
+    if [[ ! "$state_checked_path_detail_count" =~ ^[0-9]+$ || "$state_checked_path_detail_count" -lt "$state_checked_path_count" ]]; then
+      printf 'worker/Remote Computer checked_path_detail_count=%s checked_path_count=%s' "$state_checked_path_detail_count" "$state_checked_path_count"
       return 0
     fi
     if [[ "$sidecar_replacement_pods_healthy" != "true" ]]; then
@@ -689,6 +723,7 @@ artifact_contract_issue() {
     local cluster_id
     local state_claim
     local checked_path_count
+    local checked_path_detail_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -698,6 +733,7 @@ artifact_contract_issue() {
     cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
     state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$artifact" 2>/dev/null || echo "")"
     checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    checked_path_detail_count="$(remote_state_checked_path_detail_count "$artifact")"
 
     if [[ "$evidence_status" != "captured" ]]; then
       printf 'state-sync evidence_status=%s' "$evidence_status"
@@ -729,6 +765,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$checked_path_count" =~ ^[0-9]+$ || "$checked_path_count" == "0" ]]; then
       printf 'checked_path_count=%s' "$checked_path_count"
+      return 0
+    fi
+    if [[ ! "$checked_path_detail_count" =~ ^[0-9]+$ || "$checked_path_detail_count" -lt "$checked_path_count" ]]; then
+      printf 'checked_path_detail_count=%s checked_path_count=%s' "$checked_path_detail_count" "$checked_path_count"
       return 0
     fi
   fi

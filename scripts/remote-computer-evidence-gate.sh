@@ -128,6 +128,7 @@ write_summary() {
   local state_sync_backend
   local state_sync_state_claim
   local state_sync_checked_path_count
+  local state_sync_checked_path_detail_count
   local sidecar_recovery_evidence_status
   local sidecar_recovery_run_status
   local sidecar_validation_status
@@ -163,6 +164,7 @@ write_summary() {
   state_sync_backend="unknown"
   state_sync_state_claim=""
   state_sync_checked_path_count="0"
+  state_sync_checked_path_detail_count="0"
   if [[ -s "$state_sync_evidence_file" ]]; then
     state_sync_controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$state_sync_evidence_file")"
     state_sync_target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$state_sync_evidence_file")"
@@ -171,6 +173,17 @@ write_summary() {
     state_sync_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // "unknown"' "$state_sync_evidence_file")"
     state_sync_state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$state_sync_evidence_file")"
     state_sync_checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$state_sync_evidence_file")"
+    state_sync_checked_path_detail_count="$(jq -r '[
+      (
+        .response.controller_execution.checked_paths[]?,
+        .response.controller_execution.checked_state_paths[]?,
+        .response.controller_execution.path_checks[]?
+      )
+      | select(
+          (type == "string" and length > 0)
+          or (type == "object" and ((.path // .state_path // .name // "") | length > 0))
+        )
+    ] | length' "$state_sync_evidence_file")"
   fi
   sidecar_recovery_evidence_status="not_requested"
   sidecar_recovery_run_status="not_run"
@@ -223,6 +236,9 @@ write_summary() {
   if [[ ! "$state_sync_checked_path_count" =~ ^[0-9]+$ || "$state_sync_checked_path_count" == "0" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ ! "$state_sync_checked_path_detail_count" =~ ^[0-9]+$ || ! "$state_sync_checked_path_count" =~ ^[0-9]+$ || "$state_sync_checked_path_detail_count" -lt "$state_sync_checked_path_count" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$RUN_SIDECAR_RECOVERY" == "1" ]]; then
     if [[ "$sidecar_validation_status" != "validated" ]]; then
       blocked_count="$((blocked_count + 1))"
@@ -267,6 +283,7 @@ write_summary() {
     echo "state_sync_backend=$state_sync_backend"
     echo "state_sync_state_claim=$state_sync_state_claim"
     echo "state_sync_checked_path_count=$state_sync_checked_path_count"
+    echo "state_sync_checked_path_detail_count=$state_sync_checked_path_detail_count"
     echo "sidecar_recovery_evidence_status=$sidecar_recovery_evidence_status"
     echo "sidecar_recovery_run_status=$sidecar_recovery_run_status"
     echo "sidecar_validation_status=$sidecar_validation_status"
@@ -311,6 +328,9 @@ write_summary() {
     fi
     if [[ ! "$state_sync_checked_path_count" =~ ^[0-9]+$ || "$state_sync_checked_path_count" == "0" ]]; then
       echo "- state-sync controller did not report any checked state contract paths: checked_path_count=$state_sync_checked_path_count"
+    fi
+    if [[ ! "$state_sync_checked_path_detail_count" =~ ^[0-9]+$ || ! "$state_sync_checked_path_count" =~ ^[0-9]+$ || "$state_sync_checked_path_detail_count" -lt "$state_sync_checked_path_count" ]]; then
+      echo "- state-sync controller did not include checked path details for every counted path: checked_path_detail_count=$state_sync_checked_path_detail_count checked_path_count=$state_sync_checked_path_count"
     fi
     if [[ "$RUN_SIDECAR_RECOVERY" == "1" ]]; then
       if [[ "$sidecar_validation_status" != "validated" ]]; then

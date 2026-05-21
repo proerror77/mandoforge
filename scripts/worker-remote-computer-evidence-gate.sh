@@ -153,6 +153,8 @@ write_summary() {
   local state_backend
   local state_claim
   local state_checked_path_count
+  local state_checked_path_detail_count
+  local state_checked_paths_json
   local state_cluster_profile
   local sidecar_cluster_id
   local sidecar_target_kind
@@ -183,6 +185,18 @@ write_summary() {
   state_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // "unknown"' "$state_sync")"
   state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$state_sync")"
   state_checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$state_sync")"
+  state_checked_paths_json="$(jq -c '[
+    (
+      .response.controller_execution.checked_paths[]?,
+      .response.controller_execution.checked_state_paths[]?,
+      .response.controller_execution.path_checks[]?
+    )
+    | select(
+        (type == "string" and length > 0)
+        or (type == "object" and ((.path // .state_path // .name // "") | length > 0))
+      )
+  ]' "$state_sync")"
+  state_checked_path_detail_count="$(jq -r 'length' <<<"$state_checked_paths_json")"
   state_cluster_profile="$(jq -r '.response.controller_execution.cluster_profile // "unknown"' "$state_sync")"
   sidecar_recovery_ready="$(jq -r '.sidecar_recovery.status == "ready"' "$remote_readiness")"
   sidecar_recovery_evidence_status="not_requested"
@@ -231,6 +245,7 @@ write_summary() {
   is_distributed_state_backend "$state_backend" || blocked_count=$((blocked_count + 1))
   [[ -n "$state_claim" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_count" -gt 0 ]] || blocked_count=$((blocked_count + 1))
+  [[ "$state_checked_path_detail_count" =~ ^[0-9]+$ && "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_detail_count" -ge "$state_checked_path_count" ]] || blocked_count=$((blocked_count + 1))
   [[ "$same_cluster_target" == "true" ]] || blocked_count=$((blocked_count + 1))
   [[ "$runner_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
   if [[ "$RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" == "1" ]]; then
@@ -270,6 +285,7 @@ write_summary() {
     --arg state_claim "$state_claim" \
     --arg state_checked_path_count "$state_checked_path_count" \
     --arg state_cluster_profile "$state_cluster_profile" \
+    --argjson state_checked_paths "$state_checked_paths_json" \
     --arg sidecar_recovery_response_status "$sidecar_recovery_response_status" \
     --arg sidecar_recovery_evidence_status "$sidecar_recovery_evidence_status" \
     --arg sidecar_validation_status "$sidecar_validation_status" \
@@ -327,6 +343,7 @@ write_summary() {
         distributed_state_backend: $state_backend,
         state_claim: $state_claim,
         checked_path_count: ($state_checked_path_count | tonumber),
+        checked_paths: $state_checked_paths,
         runner_ready: $remote_runner_ready,
         sidecar_recovery_required: $sidecar_recovery_required,
         sidecar_recovery_ready: $sidecar_recovery_ready,
@@ -363,6 +380,7 @@ write_summary() {
     jq -r '"distributed_state_backend=\(.remote_computer.distributed_state_backend)"' "$summary_json"
     jq -r '"remote_state_claim=\(.remote_computer.state_claim)"' "$summary_json"
     jq -r '"remote_state_checked_path_count=\(.remote_computer.checked_path_count)"' "$summary_json"
+    jq -r '"remote_state_checked_path_detail_count=\(.remote_computer.checked_paths | length)"' "$summary_json"
     jq -r '"remote_runner_ready=\(.remote_computer.runner_ready)"' "$summary_json"
     jq -r '"sidecar_recovery_required=\(.remote_computer.sidecar_recovery_required)"' "$summary_json"
     jq -r '"sidecar_recovery_ready=\(.remote_computer.sidecar_recovery_ready)"' "$summary_json"
@@ -388,6 +406,7 @@ write_summary() {
     is_distributed_state_backend "$state_backend" || echo "- Remote Computer state backend is not a supported distributed filesystem: $state_backend"
     [[ -n "$state_claim" ]] || echo "- Remote Computer state-sync did not report a state claim"
     [[ "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_count" -gt 0 ]] || echo "- Remote Computer state-sync did not report any checked state contract paths: checked_path_count=$state_checked_path_count"
+    [[ "$state_checked_path_detail_count" =~ ^[0-9]+$ && "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_detail_count" -ge "$state_checked_path_count" ]] || echo "- Remote Computer state-sync did not include checked path details for every counted path: checked_path_detail_count=$state_checked_path_detail_count checked_path_count=$state_checked_path_count"
     [[ "$same_cluster_target" == "true" ]] || echo "- worker, state-sync, and sidecar evidence do not share the same cluster id"
     if [[ "$RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" == "1" ]]; then
       [[ "$sidecar_recovery_evidence_status" == "captured" ]] || echo "- sidecar replacement evidence was not captured: $sidecar_recovery_evidence_status"

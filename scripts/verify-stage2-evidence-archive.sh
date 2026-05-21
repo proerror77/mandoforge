@@ -49,6 +49,34 @@ is_distributed_state_backend() {
   esac
 }
 
+remote_state_checked_path_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.checked_paths[]?,
+      .response.controller_execution.checked_state_paths[]?,
+      .response.controller_execution.path_checks[]?
+    )
+    | select(
+        (type == "string" and length > 0)
+        or (type == "object" and ((.path // .state_path // .name // "") | length > 0))
+      )
+  ] | length' "$1"
+}
+
+summary_checked_path_detail_count() {
+  jq -r '[
+    (
+      .remote_computer.checked_paths[]?,
+      .remote_computer.checked_state_paths[]?,
+      .remote_computer.path_checks[]?
+    )
+    | select(
+        (type == "string" and length > 0)
+        or (type == "object" and ((.path // .state_path // .name // "") | length > 0))
+      )
+  ] | length' "$1"
+}
+
 is_production_policy_controller_kind() {
   case "$1" in
     production_policy_controller|enterprise_policy_controller|external_policy_controller|policy_controller_cluster)
@@ -191,6 +219,7 @@ artifact_issue() {
       local cluster_id
       local state_claim
       local checked_path_count
+      local checked_path_detail_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
@@ -199,6 +228,7 @@ artifact_issue() {
       cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$path")"
       state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$path")"
       checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$path")"
+      checked_path_detail_count="$(remote_state_checked_path_detail_count "$path")"
       if [[ "$evidence_status" != "captured" ]]; then
         printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
         return 0
@@ -233,6 +263,10 @@ artifact_issue() {
       fi
       if [[ ! "$checked_path_count" =~ ^[0-9]+$ || "$checked_path_count" == "0" ]]; then
         printf '%s checked_path_count=%s' "$relative_path" "$checked_path_count"
+        return 0
+      fi
+      if [[ ! "$checked_path_detail_count" =~ ^[0-9]+$ || "$checked_path_detail_count" -lt "$checked_path_count" ]]; then
+        printf '%s checked_path_detail_count=%s checked_path_count=%s' "$relative_path" "$checked_path_detail_count" "$checked_path_count"
         return 0
       fi
       ;;
@@ -300,6 +334,7 @@ artifact_issue() {
       local state_backend
       local state_claim
       local state_checked_path_count
+      local state_checked_path_detail_count
       local sidecar_replacement_pods_healthy
       local sidecar_checked_pod_count
       summary_status="$(jq -r '.status // "unknown"' "$path")"
@@ -311,6 +346,7 @@ artifact_issue() {
       state_backend="$(jq -r '.remote_computer.distributed_state_backend // "unknown"' "$path")"
       state_claim="$(jq -r '.remote_computer.state_claim // ""' "$path")"
       state_checked_path_count="$(jq -r '.remote_computer.checked_path_count // 0' "$path")"
+      state_checked_path_detail_count="$(summary_checked_path_detail_count "$path")"
       sidecar_replacement_pods_healthy="$(jq -r '.remote_computer.replacement_pods_healthy // false' "$path")"
       sidecar_checked_pod_count="$(jq -r '.remote_computer.checked_pod_count // 0' "$path")"
       if [[ "$summary_status" != "ready" || "$production_blocked" != "false" ]]; then
@@ -335,6 +371,10 @@ artifact_issue() {
       fi
       if [[ ! "$state_checked_path_count" =~ ^[0-9]+$ || "$state_checked_path_count" == "0" ]]; then
         printf '%s checked_path_count=%s' "$relative_path" "$state_checked_path_count"
+        return 0
+      fi
+      if [[ ! "$state_checked_path_detail_count" =~ ^[0-9]+$ || "$state_checked_path_detail_count" -lt "$state_checked_path_count" ]]; then
+        printf '%s checked_path_detail_count=%s checked_path_count=%s' "$relative_path" "$state_checked_path_detail_count" "$state_checked_path_count"
         return 0
       fi
       if [[ "$sidecar_replacement_pods_healthy" != "true" ]]; then
@@ -1283,7 +1323,15 @@ JSON
       "cluster_id": "prod-cluster-1",
       "distributed_state_backend": "juicefs",
       "state_claim": "mandoforge-remote-computer-state",
-      "checked_path_count": 6
+      "checked_path_count": 6,
+      "checked_paths": [
+        "/agent-state/session-events",
+        "/agent-state/runtime-turns",
+        "/agent-state/artifacts",
+        "/agent-state/audit-log",
+        "/agent-state/leases",
+        "/agent-state/checkpoints"
+      ]
     }
   }
 }
@@ -1320,6 +1368,14 @@ JSON
     "distributed_state_backend": "juicefs",
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
+    "checked_paths": [
+      "/agent-state/session-events",
+      "/agent-state/runtime-turns",
+      "/agent-state/artifacts",
+      "/agent-state/audit-log",
+      "/agent-state/leases",
+      "/agent-state/checkpoints"
+    ],
     "replacement_pods_healthy": true,
     "checked_pod_count": 1
   }
@@ -1974,7 +2030,15 @@ JSON
       "cluster_id": "prod-cluster-1",
       "distributed_state_backend": "hostpath",
       "state_claim": "mandoforge-remote-computer-state",
-      "checked_path_count": 6
+      "checked_path_count": 6,
+      "checked_paths": [
+        "/agent-state/session-events",
+        "/agent-state/runtime-turns",
+        "/agent-state/artifacts",
+        "/agent-state/audit-log",
+        "/agent-state/leases",
+        "/agent-state/checkpoints"
+      ]
     }
   }
 }
@@ -2008,7 +2072,15 @@ JSON
       "cluster_id": "prod-cluster-1",
       "distributed_state_backend": "juicefs",
       "state_claim": "",
-      "checked_path_count": 6
+      "checked_path_count": 6,
+      "checked_paths": [
+        "/agent-state/session-events",
+        "/agent-state/runtime-turns",
+        "/agent-state/artifacts",
+        "/agent-state/audit-log",
+        "/agent-state/leases",
+        "/agent-state/checkpoints"
+      ]
     }
   }
 }
@@ -2028,6 +2100,40 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing Remote Computer state claim evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/remote-computer-state-sync-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "distributed_state_backend": "juicefs",
+      "state_claim": "mandoforge-remote-computer-state",
+      "checked_path_count": 6
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-remote-state-path-details-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-remote-state-path-details-negative.out 2>/tmp/mandoforge-stage2-archive-remote-state-path-details-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing Remote Computer checked path detail evidence to fail" >&2
     exit 1
   fi
 
@@ -2076,7 +2182,15 @@ JSON
       "cluster_id": "prod-cluster-1",
       "distributed_state_backend": "juicefs",
       "state_claim": "mandoforge-remote-computer-state",
-      "checked_path_count": 6
+      "checked_path_count": 6,
+      "checked_paths": [
+        "/agent-state/session-events",
+        "/agent-state/runtime-turns",
+        "/agent-state/artifacts",
+        "/agent-state/audit-log",
+        "/agent-state/leases",
+        "/agent-state/checkpoints"
+      ]
     }
   }
 }
@@ -3099,6 +3213,14 @@ JSON
     "distributed_state_backend": "juicefs",
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
+    "checked_paths": [
+      "/agent-state/session-events",
+      "/agent-state/runtime-turns",
+      "/agent-state/artifacts",
+      "/agent-state/audit-log",
+      "/agent-state/leases",
+      "/agent-state/checkpoints"
+    ],
     "replacement_pods_healthy": true,
     "checked_pod_count": 1
   }
@@ -3137,6 +3259,14 @@ JSON
     "distributed_state_backend": "juicefs",
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
+    "checked_paths": [
+      "/agent-state/session-events",
+      "/agent-state/runtime-turns",
+      "/agent-state/artifacts",
+      "/agent-state/audit-log",
+      "/agent-state/leases",
+      "/agent-state/checkpoints"
+    ],
     "replacement_pods_healthy": true,
     "checked_pod_count": 1
   }
@@ -3175,6 +3305,14 @@ JSON
     "distributed_state_backend": "juicefs",
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
+    "checked_paths": [
+      "/agent-state/session-events",
+      "/agent-state/runtime-turns",
+      "/agent-state/artifacts",
+      "/agent-state/audit-log",
+      "/agent-state/leases",
+      "/agent-state/checkpoints"
+    ],
     "replacement_pods_healthy": true,
     "checked_pod_count": 1
   }
@@ -3234,7 +3372,15 @@ JSON
       "cluster_id": "whiskey-pilot-cluster",
       "distributed_state_backend": "juicefs",
       "state_claim": "mandoforge-remote-computer-state",
-      "checked_path_count": 6
+      "checked_path_count": 6,
+      "checked_paths": [
+        "/agent-state/session-events",
+        "/agent-state/runtime-turns",
+        "/agent-state/artifacts",
+        "/agent-state/audit-log",
+        "/agent-state/leases",
+        "/agent-state/checkpoints"
+      ]
     }
   }
 }
