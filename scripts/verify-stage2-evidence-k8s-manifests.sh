@@ -795,6 +795,11 @@ if ! grep -q "rotation_rotated_count" "$vault_script" || ! grep -q "rotation_cat
   exit 1
 fi
 
+if ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*executed_at.*rotated_at.*timestamp" "$vault_script"; then
+  echo "Vault evidence script must require KMS rotation key details with audit or timestamp evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "recovery_id" "$vault_script" || ! grep -q "recovery_target_kind" "$vault_script" || ! grep -q "recovery_step_count" "$vault_script" || ! grep -q "kms_recovery_step_detail_count" "$vault_script"; then
   echo "Vault evidence script must require audited KMS recovery id, target kind, and recovery step details" >&2
   exit 1
@@ -825,6 +830,11 @@ if ! grep -q "rotated_count" scripts/stage2-completion-audit-gate.sh || ! grep -
   exit 1
 fi
 
+if ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*executed_at.*rotated_at.*timestamp" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must require KMS rotation key details with audit or timestamp evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "KMS rotation evidence_status" scripts/stage2-completion-audit-gate.sh || ! grep -q "KMS recovery evidence_status" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must require captured KMS rotation and recovery evidence" >&2
   exit 1
@@ -837,6 +847,11 @@ fi
 
 if ! grep -q "rotation_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "catalog_updated_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rotation_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "recovery_target_kind" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require audited KMS rotation and recovery details" >&2
+  exit 1
+fi
+
+if ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*executed_at.*rotated_at.*timestamp" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require KMS rotation key details with audit or timestamp evidence" >&2
   exit 1
 fi
 
@@ -857,6 +872,11 @@ fi
 
 if ! grep -q "missing KMS rotation key detail evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject KMS rotation evidence without key-level detail records" >&2
+  exit 1
+fi
+
+if ! grep -q "missing KMS rotation audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject KMS rotation key details without audit evidence" >&2
   exit 1
 fi
 

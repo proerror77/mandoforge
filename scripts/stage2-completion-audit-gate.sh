@@ -607,6 +607,7 @@ kms_rotation_detail_count() {
         and ((.rotation_id // .rotation // .operation_id // "") | length > 0)
         and ((.catalog_updated // .catalog_update_confirmed // false) == true)
         and ((.status // .result // "") | ascii_downcase | IN("rotated", "validated", "completed", "passed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .rotated_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1" 2>/dev/null || echo "0"
 }
