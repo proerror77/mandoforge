@@ -65,6 +65,17 @@ is_false() {
   esac
 }
 
+is_distributed_state_backend() {
+  case "$(normalize_kind "$1")" in
+    juicefs|cephfs|longhorn_rwx)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 require_value() {
   local key="$1"
   local label="$2"
@@ -101,6 +112,18 @@ require_production_identity() {
     record_pass "$label: $key names a non-pilot target identity"
   else
     record_fail "$label: $key must name a real non-pilot target identity"
+  fi
+}
+
+require_distributed_state_backend() {
+  local key="$1"
+  local label="$2"
+  local value
+  value="$(trim "$(env_value "$key")")"
+  if is_distributed_state_backend "$value"; then
+    record_pass "$label: $key names a supported distributed state backend"
+  else
+    record_fail "$label: $key must be juicefs, cephfs, or longhorn-rwx"
   fi
 }
 
@@ -259,6 +282,7 @@ check_worker_remote_computer() {
   require_production_identity MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID "$label"
   require_production_identity MANDOFORGE_STAGE2_WORKER_POOL "$label"
   require_production_identity MANDOFORGE_STAGE2_REMOTE_STATE_CLAIM "$label"
+  require_distributed_state_backend MANDOFORGE_STAGE2_REMOTE_STATE_BACKEND "$label"
   require_true MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_REQUIRED "$label"
   require_production_url MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL "$label"
   require_no_whiskey_url MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL "$label"

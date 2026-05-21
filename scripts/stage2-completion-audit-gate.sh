@@ -1775,25 +1775,31 @@ requirement_cross_artifact_issue() {
     local summary_worker_cluster_id
     local expected_worker_pool
     local expected_state_claim
+    local expected_state_backend
     local worker_pool
     local summary_worker_pool
     local summary_state_cluster_id
     local state_claim
+    local state_backend
     local summary_state_claim
+    local summary_state_backend
     local summary_sidecar_cluster_id
 
     expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$run_manifest" 2>/dev/null || echo "")"
     expected_worker_pool="$(jq -r '.expected_targets.worker_remote_computer.worker_pool // .expected_targets.worker_remote_computer.pool // .expected_targets.worker_remote_computer.queue // ""' "$run_manifest" 2>/dev/null || echo "")"
     expected_state_claim="$(jq -r '.expected_targets.worker_remote_computer.state_claim // .expected_targets.worker_remote_computer.claim // .expected_targets.worker_remote_computer.pvc // ""' "$run_manifest" 2>/dev/null || echo "")"
+    expected_state_backend="$(jq -r '.expected_targets.worker_remote_computer.state_backend // .expected_targets.worker_remote_computer.distributed_state_backend // .expected_targets.worker_remote_computer.storage_backend // ""' "$run_manifest" 2>/dev/null || echo "")"
     worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$worker_artifact" 2>/dev/null || echo "")"
     worker_pool="$(jq -r '.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // ""' "$worker_artifact" 2>/dev/null || echo "")"
     state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$state_artifact" 2>/dev/null || echo "")"
     state_claim="$(jq -r '.response.controller_execution.state_claim // .response.controller_execution.claim // .response.controller_execution.pvc // .response.controller_execution.persistent_volume_claim // ""' "$state_artifact" 2>/dev/null || echo "")"
+    state_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // ""' "$state_artifact" 2>/dev/null || echo "")"
     sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$sidecar_artifact" 2>/dev/null || echo "")"
     summary_worker_cluster_id="$(jq -r '.worker.cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
     summary_worker_pool="$(jq -r '.worker.worker_pool // .worker.pool_id // .worker.queue // .worker.queue_name // ""' "$summary_artifact" 2>/dev/null || echo "")"
     summary_state_cluster_id="$(jq -r '.remote_computer.state_sync_cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
     summary_state_claim="$(jq -r '.remote_computer.state_claim // .remote_computer.claim // .remote_computer.pvc // .remote_computer.persistent_volume_claim // ""' "$summary_artifact" 2>/dev/null || echo "")"
+    summary_state_backend="$(jq -r '.remote_computer.distributed_state_backend // .remote_computer.state_backend // .remote_computer.storage_backend // ""' "$summary_artifact" 2>/dev/null || echo "")"
     summary_sidecar_cluster_id="$(jq -r '.remote_computer.sidecar_cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
 
     if [[ -n "$expected_cluster_id" && -n "$worker_cluster_id" && "$expected_cluster_id" != "$worker_cluster_id" ]]; then
@@ -1852,6 +1858,18 @@ requirement_cross_artifact_issue() {
     fi
     if [[ -n "$state_claim" && -n "$summary_state_claim" && "$state_claim" != "$summary_state_claim" ]]; then
       printf 'worker/Remote Computer summary state claim does not match state-sync evidence'
+      return 0
+    fi
+    if [[ -n "$expected_state_backend" && -n "$state_backend" && "$expected_state_backend" != "$state_backend" ]]; then
+      printf 'Remote Computer state backend does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_state_backend" && -n "$summary_state_backend" && "$expected_state_backend" != "$summary_state_backend" ]]; then
+      printf 'worker/Remote Computer summary state backend does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$state_backend" && -n "$summary_state_backend" && "$state_backend" != "$summary_state_backend" ]]; then
+      printf 'worker/Remote Computer summary state backend does not match state-sync evidence'
       return 0
     fi
     if [[ -n "$state_cluster_id" && -n "$summary_state_cluster_id" && "$state_cluster_id" != "$summary_state_cluster_id" ]]; then

@@ -49,6 +49,7 @@ required_template_vars=(
   MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID
   MANDOFORGE_STAGE2_WORKER_POOL
   MANDOFORGE_STAGE2_REMOTE_STATE_CLAIM
+  MANDOFORGE_STAGE2_REMOTE_STATE_BACKEND
   MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_REQUIRED
   MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL
   MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_TOKEN
@@ -214,6 +215,11 @@ fi
 
 if ! grep -q "MANDOFORGE_STAGE2_REMOTE_STATE_CLAIM" "$production_preflight_script"; then
   echo "Stage 2 production evidence preflight must require a Remote Computer state claim target identity" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_STAGE2_REMOTE_STATE_BACKEND" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must require a Remote Computer state backend target" >&2
   exit 1
 fi
 

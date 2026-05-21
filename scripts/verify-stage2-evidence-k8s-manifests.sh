@@ -2260,6 +2260,11 @@ if ! grep -q "summary state claim does not match production-evidence-run.json" s
   exit 1
 fi
 
+if ! grep -q "summary state backend does not match production-evidence-run.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must bind combined worker/Remote Computer state backends to the run manifest" >&2
+  exit 1
+fi
+
 if ! grep -q "do not share one cluster id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject mixed-cluster worker/Remote Computer evidence" >&2
   exit 1
@@ -2287,6 +2292,11 @@ fi
 
 if ! grep -q "summary checked path claim mismatch" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject combined worker/Remote Computer summaries with mismatched checked path claims" >&2
+  exit 1
+fi
+
+if ! grep -q "summary state backend mismatch" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject combined worker/Remote Computer summaries with mismatched state backends" >&2
   exit 1
 fi
 
