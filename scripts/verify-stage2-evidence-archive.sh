@@ -88,7 +88,7 @@ summary_worker_load_check_detail_count() {
 }
 
 remote_state_checked_path_detail_count() {
-  jq -r '[
+  jq -r '(.response.controller_execution.state_claim // "") as $state_claim | [
     (
       .response.controller_execution.checked_paths[]?,
       .response.controller_execution.checked_state_paths[]?,
@@ -96,7 +96,9 @@ remote_state_checked_path_detail_count() {
     )
     | select(
         type == "object"
+        and ($state_claim | length > 0)
         and ((.path // .state_path // .name // "") | length > 0)
+        and ((.state_claim // .claim // .pvc // .persistent_volume_claim // "") == $state_claim)
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -104,7 +106,7 @@ remote_state_checked_path_detail_count() {
 }
 
 summary_checked_path_detail_count() {
-  jq -r '[
+  jq -r '(.remote_computer.state_claim // "") as $state_claim | [
     (
       .remote_computer.checked_paths[]?,
       .remote_computer.checked_state_paths[]?,
@@ -112,7 +114,9 @@ summary_checked_path_detail_count() {
     )
     | select(
         type == "object"
+        and ($state_claim | length > 0)
         and ((.path // .state_path // .name // "") | length > 0)
+        and ((.state_claim // .claim // .pvc // .persistent_volume_claim // "") == $state_claim)
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -1762,12 +1766,12 @@ JSON
       "state_claim": "mandoforge-remote-computer-state",
       "checked_path_count": 6,
       "checked_paths": [
-        {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -1813,12 +1817,12 @@ JSON
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
     "checked_paths": [
-      {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+      {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
     ],
     "replacement_pods_healthy": true,
     "checked_pod_count": 1,
@@ -2666,12 +2670,12 @@ JSON
       "state_claim": "mandoforge-remote-computer-state",
       "checked_path_count": 6,
       "checked_paths": [
-        {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -2708,12 +2712,12 @@ JSON
       "state_claim": "",
       "checked_path_count": 6,
       "checked_paths": [
-        {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -2734,6 +2738,43 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing Remote Computer state claim evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/remote-computer-state-sync-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "distributed_state_backend": "juicefs",
+      "state_claim": "mandoforge-remote-computer-state",
+      "checked_path_count": 1,
+      "checked_paths": [
+        {"path": "/agent-state/session-events", "status": "validated", "state_claim": "different-prod-state-claim", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-remote-state-path-claim-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-remote-state-path-claim-negative.out 2>/tmp/mandoforge-stage2-archive-remote-state-path-claim-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected mismatched Remote Computer checked path claim evidence to fail" >&2
     exit 1
   fi
 
@@ -2784,7 +2825,7 @@ JSON
       "state_claim": "mandoforge-remote-computer-state",
       "checked_path_count": 1,
       "checked_paths": [
-        {"path": "/agent-state/session-events"}
+        {"path": "/agent-state/session-events", "state_claim": "mandoforge-remote-computer-state"}
       ]
     }
   }
@@ -2821,7 +2862,7 @@ JSON
       "state_claim": "mandoforge-remote-computer-state",
       "checked_path_count": 1,
       "checked_paths": [
-        {"path": "/agent-state/session-events", "status": "validated"}
+        {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state"}
       ]
     }
   }
@@ -2892,12 +2933,12 @@ JSON
       "state_claim": "mandoforge-remote-computer-state",
       "checked_path_count": 6,
       "checked_paths": [
-        {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4744,12 +4785,12 @@ JSON
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
     "checked_paths": [
-      {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+      {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
     ],
     "replacement_pods_healthy": true,
     "checked_pod_count": 1,
@@ -4797,12 +4838,12 @@ JSON
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
     "checked_paths": [
-      {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+      {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
     ],
     "replacement_pods_healthy": true,
     "checked_pod_count": 1,
@@ -4838,6 +4879,54 @@ JSON
   "same_cluster_target": true,
   "worker": {
     "cluster_id": "prod-cluster-1",
+    "load_check_detail_count": 1,
+    "load_checks": [
+      {"name": "queue-isolated", "worker_pool": "prod-workers", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ]
+  },
+  "remote_computer": {
+    "state_sync_cluster_id": "prod-cluster-1",
+    "sidecar_cluster_id": "prod-cluster-1",
+    "distributed_state_backend": "juicefs",
+    "state_claim": "mandoforge-remote-computer-state",
+    "checked_path_count": 1,
+    "checked_paths": [
+      {"path": "/agent-state/session-events", "status": "validated", "state_claim": "different-prod-state-claim", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ],
+    "replacement_pods_healthy": true,
+    "checked_pod_count": 1,
+    "checked_pods": [
+      {"pod": "remote-computer-sidecar-prod-1", "status": "running", "audit_id": "sidecar-pod-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-summary-path-claim-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-summary-path-claim-negative.out 2>/tmp/mandoforge-stage2-archive-summary-path-claim-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected summary checked path claim mismatch to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/worker-remote-computer/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "production_blocked": false,
+  "production_blocked_count": 0,
+  "same_cluster_target": true,
+  "worker": {
+    "cluster_id": "prod-cluster-1",
     "load_check_detail_count": 1
   },
   "remote_computer": {
@@ -4847,12 +4936,12 @@ JSON
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
     "checked_paths": [
-      {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+      {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
     ],
     "replacement_pods_healthy": true,
     "checked_pod_count": 1,
@@ -4900,12 +4989,12 @@ JSON
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
     "checked_paths": [
-      {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+      {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
     ],
     "replacement_pods_healthy": true,
     "checked_pod_count": 1,
@@ -4971,12 +5060,12 @@ JSON
       "state_claim": "mandoforge-remote-computer-state",
       "checked_path_count": 6,
       "checked_paths": [
-        {"path": "/agent-state/session-events", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/runtime-turns", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/artifacts", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/audit-log", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/leases", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"path": "/agent-state/checkpoints", "status": "validated", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/artifacts", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/audit-log", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/leases", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"path": "/agent-state/checkpoints", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }

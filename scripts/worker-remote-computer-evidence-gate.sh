@@ -225,7 +225,7 @@ write_summary() {
   state_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // "unknown"' "$state_sync")"
   state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$state_sync")"
   state_checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$state_sync")"
-  state_checked_paths_json="$(jq -c '[
+  state_checked_paths_json="$(jq -c '(.response.controller_execution.state_claim // "") as $state_claim | [
     (
       .response.controller_execution.checked_paths[]?,
       .response.controller_execution.checked_state_paths[]?,
@@ -233,7 +233,9 @@ write_summary() {
     )
     | select(
         type == "object"
+        and ($state_claim | length > 0)
         and ((.path // .state_path // .name // "") | length > 0)
+        and ((.state_claim // .claim // .pvc // .persistent_volume_claim // "") == $state_claim)
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )

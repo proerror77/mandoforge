@@ -83,7 +83,7 @@ RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 \
 ./scripts/remote-computer-evidence-gate.sh
 ```
 
-That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The state-sync controller must validate the shared state claim, report a real multi-node cluster target, identify a supported distributed state backend such as JuiceFS, CephFS, or Longhorn RWX, and report a nonzero checked state-contract path count with per-path passed/validated/ready status detail. When sidecar recovery is enabled, the sidecar validation controller must confirm real cluster-wide replacement evidence, healthy replacement Pods, and a nonzero checked Pod count. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The state-sync controller must validate the shared state claim, report a real multi-node cluster target, identify a supported distributed state backend such as JuiceFS, CephFS, or Longhorn RWX, and report a nonzero checked state-contract path count with per-path passed/validated/ready status detail. Each checked path detail must identify the same `state_claim`, `claim`, `pvc`, or `persistent_volume_claim` as the controller-level state claim so the evidence proves the paths belong to the reported shared state volume. When sidecar recovery is enabled, the sidecar validation controller must confirm real cluster-wide replacement evidence, healthy replacement Pods, and a nonzero checked Pod count. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
 For the current Whiskey pilot blocker, run the combined worker/Remote Computer
 gate:
@@ -110,7 +110,8 @@ pool or queue, passed/validated/completed status, and audit id, trace id, run id
 or timestamp detail;
 the standalone worker gate also rejects mismatches with
 `MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID`. State-sync evidence must name the
-state claim plus checked state-contract paths with passed statuses and audit id,
+state claim plus checked state-contract paths with matching per-path state-claim
+identity, passed statuses, and audit id,
 trace id, run id, or timestamp detail, and sidecar validation must report
 healthy replacement Pods plus checked Pod counts with the same audit detail; single-host, local-hostpath,
 or shape-only controller evidence does not satisfy this proof.
