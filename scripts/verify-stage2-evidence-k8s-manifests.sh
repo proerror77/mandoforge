@@ -1365,6 +1365,11 @@ if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-completion-au
   exit 1
 fi
 
+if ! grep -q "scanned_revisions: Vec<PolicyScheduledRolloutScanDetail>" crates/mandoforge-api/src/main.rs || ! grep -q "audit_id: audit_log.id" crates/mandoforge-api/src/main.rs; then
+  echo "Policy due-run API must return audited per-revision scan details for production evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "invalid policy rollout step status count" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must reject failed policy rollout orchestration steps" >&2
   exit 1

@@ -218,8 +218,19 @@ struct PolicyScheduledRolloutRun {
     activated_revision: Option<PolicyRevision>,
     scanned_count: usize,
     skipped_count: usize,
+    scanned_revisions: Vec<PolicyScheduledRolloutScanDetail>,
     checked_at: DateTime<Utc>,
     reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyScheduledRolloutScanDetail {
+    policy_id: String,
+    policy_name: String,
+    revision_id: Uuid,
+    status: String,
+    audit_id: Uuid,
+    scanned_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18886,7 +18897,7 @@ async fn execute_due_policy_rollouts(
             .unwrap_or(revision.created_at)
     });
 
-    let result = if let Some(revision) = due_revisions.into_iter().next() {
+    let mut result = if let Some(revision) = due_revisions.into_iter().next() {
         let activated_revision = activate_policy_revision_for_runtime(&state, revision.id).await?;
         PolicyScheduledRolloutRun {
             status: "activated".to_string(),
@@ -18894,6 +18905,7 @@ async fn execute_due_policy_rollouts(
             activated_revision: Some(activated_revision),
             scanned_count: revisions.len(),
             skipped_count,
+            scanned_revisions: Vec::new(),
             checked_at: now,
             reason: "activated the earliest due policy revision".to_string(),
         }
@@ -18904,29 +18916,51 @@ async fn execute_due_policy_rollouts(
             activated_revision: None,
             scanned_count: revisions.len(),
             skipped_count,
+            scanned_revisions: Vec::new(),
             checked_at: now,
             reason: "no passed draft policy revision is inside its activation window".to_string(),
         }
     };
 
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            actor_type,
-            None,
-            "policy.rollout_due_run",
-            "policy",
-            result.activated_revision_id,
-            json!({
-                "subject": subject,
-                "status": result.status,
-                "activated_revision_id": result.activated_revision_id,
-                "scanned_count": result.scanned_count,
-                "skipped_count": result.skipped_count,
-                "checked_at": result.checked_at
-            }),
-        ))
-        .await?;
+    let mut audit_log = new_audit_log(
+        None,
+        actor_type,
+        None,
+        "policy.rollout_due_run",
+        "policy",
+        result.activated_revision_id,
+        json!({}),
+    );
+    result.scanned_revisions = revisions
+        .iter()
+        .map(|revision| {
+            let status = if Some(revision.id) == result.activated_revision_id {
+                "activated"
+            } else if policy_revision_is_due_for_scheduled_activation(revision, now) {
+                "scanned"
+            } else {
+                "skipped"
+            };
+            PolicyScheduledRolloutScanDetail {
+                policy_id: revision.name.clone(),
+                policy_name: revision.name.clone(),
+                revision_id: revision.id,
+                status: status.to_string(),
+                audit_id: audit_log.id,
+                scanned_at: now,
+            }
+        })
+        .collect();
+    audit_log.details = json!({
+        "subject": subject,
+        "status": result.status,
+        "activated_revision_id": result.activated_revision_id,
+        "scanned_count": result.scanned_count,
+        "skipped_count": result.skipped_count,
+        "scanned_revisions": result.scanned_revisions,
+        "checked_at": result.checked_at
+    });
+    state.append_audit_log(audit_log).await?;
     Ok(result)
 }
 
@@ -51255,6 +51289,16 @@ not json
             scheduled_run.activated_revision_id,
             Some(scheduled_revision.id)
         );
+        assert_eq!(
+            scheduled_run.scanned_count,
+            scheduled_run.scanned_revisions.len()
+        );
+        assert!(scheduled_run.scanned_revisions.iter().any(|revision| {
+            revision.revision_id == scheduled_revision.id
+                && revision.status == "activated"
+                && revision.policy_id == "scheduled-due-policy"
+                && revision.audit_id != Uuid::nil()
+        }));
 
         let scheduled_http: Value = request_json(
             app.clone(),
