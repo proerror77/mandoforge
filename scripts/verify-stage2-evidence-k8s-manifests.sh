@@ -1260,6 +1260,11 @@ if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-completion-au
   exit 1
 fi
 
+if ! grep -q "invalid policy rollout step status count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must reject failed policy rollout orchestration steps" >&2
+  exit 1
+fi
+
 if ! grep -q "policy due-run evidence_status" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must require captured policy due-run evidence" >&2
   exit 1
@@ -1812,6 +1817,11 @@ fi
 
 if ! grep -q "missing policy rollout steps" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject policy rollout evidence without audited steps" >&2
+  exit 1
+fi
+
+if ! grep -q "invalid policy rollout step status evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject failed policy rollout orchestration steps" >&2
   exit 1
 fi
 

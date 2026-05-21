@@ -425,6 +425,7 @@ artifact_issue() {
       local policy_store_id
       local deployment_id
       local step_count
+      local invalid_step_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       status="$(jq -r '.response.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
@@ -437,6 +438,7 @@ artifact_issue() {
       policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$path")"
       deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$path")"
       step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$path")"
+      invalid_step_count="$(jq -r '[.response.controller_execution.steps[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$path")"
       if [[ "$evidence_status" != "captured" ]]; then
         printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
         return 0
@@ -479,6 +481,10 @@ artifact_issue() {
       fi
       if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
         printf '%s step_count=%s' "$relative_path" "$step_count"
+        return 0
+      fi
+      if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then
+        printf '%s invalid policy rollout step status count=%s' "$relative_path" "$invalid_step_count"
         return 0
       fi
       ;;
@@ -2775,6 +2781,46 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing policy rollout steps to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/policy-rollout-orchestration-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "production_policy_controller",
+      "environment": "production",
+      "controller_id": "policy-controller-prod-1",
+      "rollout_scope": "global",
+      "production_policy_store": true,
+      "rollback_supported": true,
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1",
+      "steps": [
+        {"name": "due-run-supervision", "status": "failed"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-step-status-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-step-status-negative.out 2>/tmp/mandoforge-stage2-archive-policy-step-status-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected invalid policy rollout step status evidence to fail" >&2
     exit 1
   fi
 
