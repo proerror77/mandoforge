@@ -218,6 +218,35 @@ is_production_policy_rollout_scope() {
   esac
 }
 
+normalize_kms_kind() {
+  printf '%s' "$1" | tr '[:upper:]-' '[:lower:]_'
+}
+
+is_production_kms_backend_kind() {
+  local value
+  value="$(normalize_kms_kind "$1")"
+  case "$value" in
+    external_kms|aws_kms|gcp_kms|azure_key_vault|hashicorp_vault_transit|vault_transit|hsm|cloudhsm|pkcs11_hsm)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_production_kms_environment() {
+  local value="$1"
+  case "$value" in
+    production|prod)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
@@ -337,6 +366,86 @@ artifact_contract_issue() {
     fi
     if [[ "$cross_tenant_negative_tests" != "true" ]]; then
       printf 'cross_tenant_negative_tests=%s' "$cross_tenant_negative_tests"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "vault-kms" && "$artifact_name" == "vault-kms-rotation-evidence.json" ]]; then
+    local rotation_status
+    local execution_status
+    local production_backend
+    local backend_kind
+    local environment
+    local backend_id
+    local key_id
+
+    rotation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    execution_status="$(jq -r '.response.external_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    production_backend="$(jq -r '.response.external_execution.production_backend // false' "$artifact" 2>/dev/null || echo "false")"
+    backend_kind="$(jq -r '.response.external_execution.backend_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    environment="$(jq -r '.response.external_execution.environment // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    backend_id="$(jq -r '.response.external_execution.backend_id // ""' "$artifact" 2>/dev/null || echo "")"
+    key_id="$(jq -r '.response.external_execution.key_id // ""' "$artifact" 2>/dev/null || echo "")"
+
+    if [[ "$rotation_status" != "validated" ]]; then
+      printf 'rotation_status=%s' "$rotation_status"
+      return 0
+    fi
+    if [[ "$execution_status" != "validated" ]]; then
+      printf 'external_execution_status=%s' "$execution_status"
+      return 0
+    fi
+    if [[ "$production_backend" != "true" ]]; then
+      printf 'production_backend=%s' "$production_backend"
+      return 0
+    fi
+    if ! is_production_kms_backend_kind "$backend_kind"; then
+      printf 'backend_kind=%s is not production KMS/HSM' "$backend_kind"
+      return 0
+    fi
+    if ! is_production_kms_environment "$environment"; then
+      printf 'environment=%s is not production' "$environment"
+      return 0
+    fi
+    if [[ -z "$backend_id" || -z "$key_id" ]]; then
+      printf 'backend_id or key_id is missing'
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "vault-kms" && "$artifact_name" == "vault-kms-recovery-evidence.json" ]]; then
+    local recovery_status
+    local controller_status
+    local backend_kind
+    local environment
+    local backend_id
+    local key_id
+
+    recovery_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    backend_kind="$(jq -r '.response.controller_execution.backend_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    backend_id="$(jq -r '.response.controller_execution.backend_id // ""' "$artifact" 2>/dev/null || echo "")"
+    key_id="$(jq -r '.response.controller_execution.key_id // ""' "$artifact" 2>/dev/null || echo "")"
+
+    if [[ "$recovery_status" != "validated" ]]; then
+      printf 'recovery_status=%s' "$recovery_status"
+      return 0
+    fi
+    if [[ "$controller_status" != "validated" ]]; then
+      printf 'controller_status=%s' "$controller_status"
+      return 0
+    fi
+    if ! is_production_kms_backend_kind "$backend_kind"; then
+      printf 'backend_kind=%s is not production KMS/HSM' "$backend_kind"
+      return 0
+    fi
+    if ! is_production_kms_environment "$environment"; then
+      printf 'environment=%s is not production' "$environment"
+      return 0
+    fi
+    if [[ -z "$backend_id" || -z "$key_id" ]]; then
+      printf 'backend_id or key_id is missing'
       return 0
     fi
   fi

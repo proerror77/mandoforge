@@ -27,6 +27,48 @@ require_cmd() {
   fi
 }
 
+normalize_kms_kind() {
+  printf '%s' "$1" | tr '[:upper:]-' '[:lower:]_'
+}
+
+is_production_kms_provider() {
+  local value
+  value="$(normalize_kms_kind "$1")"
+  case "$value" in
+    external|external_kms|aws_kms|gcp_kms|azure_key_vault|hashicorp_vault_transit|vault_transit|hsm|cloudhsm|pkcs11_hsm)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_production_kms_backend_kind() {
+  local value
+  value="$(normalize_kms_kind "$1")"
+  case "$value" in
+    external_kms|aws_kms|gcp_kms|azure_key_vault|hashicorp_vault_transit|vault_transit|hsm|cloudhsm|pkcs11_hsm)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_production_environment() {
+  local value="$1"
+  case "$value" in
+    production|prod)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -82,10 +124,20 @@ write_summary() {
   local recovery_validation_status
   local recovery_controller_fresh
   local recovery_controller_validated
+  local recovery_controller_production_backend
   local recovery_rotation_validated
   local recovery_controller_age_hours
+  local recovery_backend_kind
+  local recovery_environment
+  local recovery_backend_id
+  local recovery_key_id
   local rotation_evidence_status
   local rotation_run_status
+  local rotation_production_backend
+  local rotation_backend_kind
+  local rotation_environment
+  local rotation_backend_id
+  local rotation_key_id
   local blocked_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
@@ -100,19 +152,38 @@ write_summary() {
   recovery_status="$(jq -r '.production_recovery.status // "unknown"' "$readiness_file")"
   recovery_controller_fresh="$(jq -r '.production_recovery.controller_evidence_fresh // false' "$readiness_file")"
   recovery_controller_validated="$(jq -r '.production_recovery.latest_controller_validated // false' "$readiness_file")"
+  recovery_controller_production_backend="$(jq -r '.production_recovery.latest_controller_production_backend // false' "$readiness_file")"
   recovery_rotation_validated="$(jq -r '.production_recovery.latest_rotation_validated // false' "$readiness_file")"
   recovery_controller_age_hours="$(jq -r '.production_recovery.latest_controller_age_hours // "none"' "$readiness_file")"
   recovery_evidence_status="missing"
   recovery_validation_status="unknown"
+  recovery_backend_kind="unknown"
+  recovery_environment="unknown"
+  recovery_backend_id=""
+  recovery_key_id=""
   if [[ -s "$recovery_evidence_file" ]]; then
     recovery_evidence_status="$(jq -r '.status // "unknown"' "$recovery_evidence_file")"
     recovery_validation_status="$(jq -r '.response.status // "unknown"' "$recovery_evidence_file")"
+    recovery_backend_kind="$(jq -r '.response.controller_execution.backend_kind // "unknown"' "$recovery_evidence_file")"
+    recovery_environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$recovery_evidence_file")"
+    recovery_backend_id="$(jq -r '.response.controller_execution.backend_id // ""' "$recovery_evidence_file")"
+    recovery_key_id="$(jq -r '.response.controller_execution.key_id // ""' "$recovery_evidence_file")"
   fi
   rotation_evidence_status="not_requested"
   rotation_run_status="not_run"
+  rotation_production_backend="false"
+  rotation_backend_kind="unknown"
+  rotation_environment="unknown"
+  rotation_backend_id=""
+  rotation_key_id=""
   if [[ -s "$rotation_evidence_file" ]]; then
     rotation_evidence_status="$(jq -r '.status // "unknown"' "$rotation_evidence_file")"
     rotation_run_status="$(jq -r '.response.status // "unknown"' "$rotation_evidence_file")"
+    rotation_production_backend="$(jq -r '.response.external_execution.production_backend // false' "$rotation_evidence_file")"
+    rotation_backend_kind="$(jq -r '.response.external_execution.backend_kind // "unknown"' "$rotation_evidence_file")"
+    rotation_environment="$(jq -r '.response.external_execution.environment // "unknown"' "$rotation_evidence_file")"
+    rotation_backend_id="$(jq -r '.response.external_execution.backend_id // ""' "$rotation_evidence_file")"
+    rotation_key_id="$(jq -r '.response.external_execution.key_id // ""' "$rotation_evidence_file")"
   fi
   blocked_count="$(jq -r '[
       .production_rotation.production_blocked,
@@ -125,8 +196,12 @@ write_summary() {
       (.production_rotation.latest_rotation_validated != true),
       (.production_recovery.latest_rotation_validated != true),
       (.production_recovery.latest_controller_validated != true),
+      (.production_recovery.latest_controller_production_backend != true),
       (.production_recovery.controller_evidence_fresh != true)
     ] | map(select(. == true)) | length' "$readiness_file")"
+  if ! is_production_kms_provider "$kms_provider"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$health_status" != "ready" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -145,6 +220,30 @@ write_summary() {
   if [[ "$rotation_run_status" != "validated" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ "$rotation_production_backend" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_kms_backend_kind "$rotation_backend_kind"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_environment "$rotation_environment"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ -z "$rotation_backend_id" || -z "$rotation_key_id" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$recovery_controller_production_backend" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_kms_backend_kind "$recovery_backend_kind"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_environment "$recovery_environment"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ -z "$recovery_backend_id" || -z "$recovery_key_id" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "vault_readiness_status=$status"
@@ -161,10 +260,20 @@ write_summary() {
     echo "recovery_validation_status=$recovery_validation_status"
     echo "recovery_controller_evidence_fresh=$recovery_controller_fresh"
     echo "recovery_controller_validated=$recovery_controller_validated"
+    echo "recovery_controller_production_backend=$recovery_controller_production_backend"
     echo "recovery_rotation_validated=$recovery_rotation_validated"
     echo "recovery_controller_age_hours=$recovery_controller_age_hours"
+    echo "recovery_backend_kind=$recovery_backend_kind"
+    echo "recovery_environment=$recovery_environment"
+    echo "recovery_backend_id=$recovery_backend_id"
+    echo "recovery_key_id=$recovery_key_id"
     echo "rotation_evidence_status=$rotation_evidence_status"
     echo "rotation_run_status=$rotation_run_status"
+    echo "rotation_production_backend=$rotation_production_backend"
+    echo "rotation_backend_kind=$rotation_backend_kind"
+    echo "rotation_environment=$rotation_environment"
+    echo "rotation_backend_id=$rotation_backend_id"
+    echo "rotation_key_id=$rotation_key_id"
     echo "production_blocked_count=$blocked_count"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "secret_lifecycle_run=$RUN_SECRET_LIFECYCLE"
@@ -183,6 +292,9 @@ write_summary() {
     if [[ "$kms_provider" == "reserved" || "$kms_status" != "ready" || "$kms_configured" != "true" || "$kms_endpoint_configured" != "true" ]]; then
       echo "- external KMS/HSM backend is not fully configured: provider=$kms_provider status=$kms_status configured=$kms_configured endpoint=$kms_endpoint_configured"
     fi
+    if ! is_production_kms_provider "$kms_provider"; then
+      echo "- KMS/HSM provider is not a production backend: $kms_provider"
+    fi
     if [[ "$RUN_SECRET_LIFECYCLE" != "1" ]]; then
       echo "- KMS rotation evidence capture is disabled"
     fi
@@ -191,6 +303,18 @@ write_summary() {
     fi
     if [[ "$rotation_run_status" != "validated" ]]; then
       echo "- KMS rotation status is not validated: $rotation_run_status"
+    fi
+    if [[ "$rotation_production_backend" != "true" ]]; then
+      echo "- KMS rotation did not confirm a production backend"
+    fi
+    if ! is_production_kms_backend_kind "$rotation_backend_kind"; then
+      echo "- KMS rotation backend kind is not production: $rotation_backend_kind"
+    fi
+    if ! is_production_environment "$rotation_environment"; then
+      echo "- KMS rotation environment is not production: $rotation_environment"
+    fi
+    if [[ -z "$rotation_backend_id" || -z "$rotation_key_id" ]]; then
+      echo "- KMS rotation did not report backend_id and key_id"
     fi
     echo
     echo "recovery_blocking_reasons:"
@@ -206,6 +330,18 @@ write_summary() {
     fi
     if [[ "$recovery_controller_validated" != "true" ]]; then
       echo "- KMS recovery controller evidence is not validated"
+    fi
+    if [[ "$recovery_controller_production_backend" != "true" ]]; then
+      echo "- KMS recovery controller did not confirm a production backend"
+    fi
+    if ! is_production_kms_backend_kind "$recovery_backend_kind"; then
+      echo "- KMS recovery backend kind is not production: $recovery_backend_kind"
+    fi
+    if ! is_production_environment "$recovery_environment"; then
+      echo "- KMS recovery environment is not production: $recovery_environment"
+    fi
+    if [[ -z "$recovery_backend_id" || -z "$recovery_key_id" ]]; then
+      echo "- KMS recovery did not report backend_id and key_id"
     fi
     if [[ "$recovery_controller_fresh" != "true" ]]; then
       echo "- KMS recovery controller evidence is not fresh"

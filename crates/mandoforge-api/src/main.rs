@@ -4072,6 +4072,12 @@ struct VaultKmsRecoveryReadiness {
     latest_controller_age_hours: Option<i64>,
     controller_evidence_fresh: bool,
     latest_controller_validated: bool,
+    latest_controller_production_backend: bool,
+    latest_controller_backend_kind: Option<String>,
+    latest_controller_environment: Option<String>,
+    latest_controller_backend_id: Option<String>,
+    latest_controller_key_id: Option<String>,
+    latest_controller_hsm_provider: Option<String>,
     latest_rotation_validated: bool,
     blocking_reasons: Vec<String>,
     message: String,
@@ -19651,13 +19657,18 @@ async fn validate_vault_kms_recovery(
             Ok(execution) => {
                 if execution.get("status").and_then(Value::as_str) != Some("validated") {
                     issues.push("vault KMS recovery controller did not validate".to_string());
-                } else {
+                } else if kms_controller_execution_is_production_backend(&execution) {
                     // The current drill is the evidence for these readiness blockers.
                     issues.retain(|issue| {
                         issue != "no validated KMS recovery drill evidence exists"
                             && issue
                                 != "vault KMS recovery controller evidence is missing or not validated"
                     });
+                } else {
+                    issues.push(
+                        "vault KMS recovery controller did not identify a real production KMS/HSM backend"
+                            .to_string(),
+                    );
                 }
                 controller_execution = execution;
             }
@@ -20049,26 +20060,48 @@ where
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let mut summary = json!({
+        "attempted": true,
+        "status": if validated { "validated" } else { "blocked" },
+        "http_status": http_status.as_u16(),
+        "provider_status": response_status,
+        "backend_kind": response_body.get("backend_kind").and_then(Value::as_str),
+        "backend_id": response_body.get("backend_id").and_then(Value::as_str),
+        "key_id": response_body
+            .get("key_id")
+            .and_then(Value::as_str)
+            .or(Some(key_id.as_str())),
+        "environment": response_body.get("environment").and_then(Value::as_str),
+        "hsm_provider": response_body.get("hsm_provider").and_then(Value::as_str),
+        "rotation_id": response_body.get("rotation_id").and_then(Value::as_str),
+        "rotated_count": rotated_count,
+        "returned_rotated_secret_record_ids": response_body
+            .get("rotated_secret_record_ids")
+            .and_then(Value::as_array)
+            .map(|ids| ids.len())
+            .unwrap_or(0),
+        "message": response_body.get("message").and_then(Value::as_str),
+        "endpoint_configured": true,
+    });
+    let production_backend = kms_controller_execution_is_production_backend(&summary);
+    summary["status"] = json!(if validated && production_backend {
+        "validated"
+    } else {
+        "blocked"
+    });
+    summary["production_backend"] = json!(production_backend);
 
     Ok(ExternalKmsRotationOutcome {
-        status: if validated { "validated" } else { "blocked" }.to_string(),
+        status: if validated && production_backend {
+            "validated"
+        } else {
+            "blocked"
+        }
+        .to_string(),
         rotated_count,
         rotated_secret_record_ids,
         actions,
-        summary: json!({
-            "attempted": true,
-            "status": if validated { "validated" } else { "blocked" },
-            "http_status": http_status.as_u16(),
-            "provider_status": response_status,
-            "rotated_count": rotated_count,
-            "returned_rotated_secret_record_ids": response_body
-                .get("rotated_secret_record_ids")
-                .and_then(Value::as_array)
-                .map(|ids| ids.len())
-                .unwrap_or(0),
-            "message": response_body.get("message").and_then(Value::as_str),
-            "endpoint_configured": true,
-        }),
+        summary,
     })
 }
 
@@ -22876,12 +22909,38 @@ fn build_vault_kms_recovery_readiness(
         .and_then(|execution| execution.get("status"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let latest_controller_execution =
+        latest_recovery.and_then(|log| log.details.get("controller_execution"));
+    let latest_controller_backend_kind = latest_controller_execution
+        .and_then(|execution| execution.get("backend_kind"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_environment = latest_controller_execution
+        .and_then(|execution| execution.get("environment"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_backend_id = latest_controller_execution
+        .and_then(|execution| execution.get("backend_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_key_id = latest_controller_execution
+        .and_then(|execution| execution.get("key_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_hsm_provider = latest_controller_execution
+        .and_then(|execution| execution.get("hsm_provider"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let latest_controller_age_hours = latest_recovery
         .filter(|_| latest_controller_status.is_some())
         .map(|log| (generated_at - log.created_at).num_hours());
     let controller_evidence_fresh =
         latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
-    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
+    let latest_controller_production_backend =
+        latest_controller_execution.is_some_and(kms_controller_execution_is_production_backend);
+    let latest_controller_validated = latest_recovery_status.as_deref() == Some("validated")
+        && latest_controller_status.as_deref() == Some("validated")
+        && latest_controller_production_backend;
     let mut blocking_reasons = Vec::new();
     if kms.status != "ready" || !kms.configured {
         blocking_reasons
@@ -22899,9 +22958,21 @@ fn build_vault_kms_recovery_readiness(
         blocking_reasons
             .push("vault KMS recovery controller is required but not configured".to_string());
     }
-    if controller_required && controller_configured && !latest_controller_validated {
+    if controller_required
+        && controller_configured
+        && latest_controller_status.as_deref() != Some("validated")
+    {
         blocking_reasons
             .push("vault KMS recovery controller evidence is missing or not validated".to_string());
+    }
+    if controller_required
+        && latest_controller_status.as_deref() == Some("validated")
+        && !latest_controller_production_backend
+    {
+        blocking_reasons.push(
+            "vault KMS recovery controller did not identify a real production KMS/HSM backend"
+                .to_string(),
+        );
     }
     if controller_required && latest_controller_validated && !controller_evidence_fresh {
         blocking_reasons.push("vault KMS recovery controller evidence is stale".to_string());
@@ -22932,6 +23003,12 @@ fn build_vault_kms_recovery_readiness(
         latest_controller_age_hours,
         controller_evidence_fresh,
         latest_controller_validated,
+        latest_controller_production_backend,
+        latest_controller_backend_kind,
+        latest_controller_environment,
+        latest_controller_backend_id,
+        latest_controller_key_id,
+        latest_controller_hsm_provider,
         latest_rotation_validated,
         blocking_reasons,
         message,
@@ -23047,9 +23124,71 @@ where
         "http_status": http_status.as_u16(),
         "provider_status": provider_status,
         "recovery_id": body.get("recovery_id").and_then(Value::as_str),
+        "backend_kind": body.get("backend_kind").and_then(Value::as_str),
+        "backend_id": body.get("backend_id").and_then(Value::as_str),
+        "key_id": body.get("key_id").and_then(Value::as_str),
+        "environment": body.get("environment").and_then(Value::as_str),
+        "hsm_provider": body.get("hsm_provider").and_then(Value::as_str),
+        "recovery_target_kind": body.get("recovery_target_kind").and_then(Value::as_str),
         "message": body.get("message").and_then(Value::as_str),
         "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
     }))
+}
+
+fn normalized_kms_kind(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn is_production_kms_provider(value: &str) -> bool {
+    matches!(
+        normalized_kms_kind(value).as_str(),
+        "external"
+            | "external_kms"
+            | "aws_kms"
+            | "gcp_kms"
+            | "azure_key_vault"
+            | "hashicorp_vault_transit"
+            | "vault_transit"
+            | "hsm"
+            | "cloudhsm"
+            | "pkcs11_hsm"
+    )
+}
+
+fn is_production_kms_backend_kind(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            normalized_kms_kind(value).as_str(),
+            "external_kms"
+                | "aws_kms"
+                | "gcp_kms"
+                | "azure_key_vault"
+                | "hashicorp_vault_transit"
+                | "vault_transit"
+                | "hsm"
+                | "cloudhsm"
+                | "pkcs11_hsm"
+        )
+    })
+}
+
+fn is_production_kms_environment(value: Option<&str>) -> bool {
+    matches!(value, Some("production" | "prod"))
+}
+
+fn kms_controller_execution_is_production_backend(execution: &Value) -> bool {
+    let backend_id_present = execution
+        .get("backend_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let key_id_present = execution
+        .get("key_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    is_production_kms_backend_kind(execution.get("backend_kind").and_then(Value::as_str))
+        && is_production_kms_environment(execution.get("environment").and_then(Value::as_str))
+        && backend_id_present
+        && key_id_present
 }
 
 fn kms_readiness_from_lookup<F>(lookup: &F) -> VaultKmsReadiness
@@ -23073,13 +23212,21 @@ where
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "health-check".to_string());
+    let production_provider = is_production_kms_provider(&provider);
+    let external_validation = validation_mode.trim().eq_ignore_ascii_case("external");
     let configured = provider != "reserved"
+        && production_provider
         && key_id_configured
         && rotation_policy_configured
-        && endpoint_configured;
+        && endpoint_configured
+        && external_validation;
     let mut issues = Vec::new();
     if provider == "reserved" {
         issues.push("external KMS/HSM provider is not configured".to_string());
+    } else if !production_provider {
+        issues.push(format!(
+            "KMS/HSM provider is not a production backend: {provider}"
+        ));
     }
     if !key_id_configured {
         issues.push("MANDOFORGE_KMS_KEY_ID is not configured".to_string());
@@ -23090,6 +23237,11 @@ where
     if !endpoint_configured {
         issues.push(
             "MANDOFORGE_KMS_ENDPOINT is not configured for external KMS validation".to_string(),
+        );
+    }
+    if !external_validation {
+        issues.push(
+            "MANDOFORGE_KMS_VALIDATION_MODE must be external for production evidence".to_string(),
         );
     }
     VaultKmsReadiness {
@@ -51975,7 +52127,7 @@ not json
             headers
                 .get("x-mandoforge-kms-provider")
                 .and_then(|value| value.to_str().ok()),
-            Some("mock-kms")
+            Some("aws_kms")
         );
         assert_eq!(
             headers
@@ -51992,6 +52144,11 @@ not json
         payloads.lock().await.push(payload);
         Json(json!({
             "status": "rotated",
+            "backend_kind": "aws_kms",
+            "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+            "key_id": "key-1",
+            "environment": "production",
+            "rotation_id": "kms-rotation-1",
             "rotated_count": 1,
             "rotated_secret_record_ids": [first_secret_record_id],
             "actions": ["external_kms_rotation_confirmed"]
@@ -52014,6 +52171,11 @@ not json
         Json(json!({
             "status": "validated",
             "recovery_id": "kms-recovery-1",
+            "backend_kind": "aws_kms",
+            "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+            "key_id": "key-1",
+            "environment": "production",
+            "recovery_target_kind": "production_kms_backend",
             "message": "KMS recovery drill validated",
             "steps": [
                 {"name": "restore-key-material", "status": "validated"},
@@ -52330,9 +52492,10 @@ not json
             "MANDOFORGE_VAULT_ADDR" => Some(format!("http://{vault_addr}")),
             "MANDOFORGE_VAULT_MOUNT" => Some("kv".to_string()),
             "MANDOFORGE_VAULT_TOKEN" => Some("test-vault-token".to_string()),
-            "MANDOFORGE_KMS_PROVIDER" => Some("mock-kms".to_string()),
+            "MANDOFORGE_KMS_PROVIDER" => Some("aws_kms".to_string()),
             "MANDOFORGE_KMS_KEY_ID" => Some("key-1".to_string()),
             "MANDOFORGE_KMS_ROTATION_POLICY" => Some("manual-confirmed".to_string()),
+            "MANDOFORGE_KMS_VALIDATION_MODE" => Some("external".to_string()),
             "MANDOFORGE_KMS_ENDPOINT" => Some(format!("http://{kms_addr}/rotate")),
             "MANDOFORGE_KMS_TOKEN" => Some("test-kms-token".to_string()),
             _ => None,
@@ -52369,7 +52532,7 @@ not json
         let payloads = kms_payloads.lock().await;
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0]["type"], "mandoforge.kms_rotation_validation");
-        assert_eq!(payloads[0]["provider"], "mock-kms");
+        assert_eq!(payloads[0]["provider"], "aws_kms");
         assert_eq!(payloads[0]["key_id"], "key-1");
         assert!(
             payloads[0]
@@ -52384,6 +52547,7 @@ not json
                 && log.details["rotated_count"] == 1
                 && log.details["catalog_updated_count"] == 1
                 && log.details["external_execution"]["status"] == "validated"
+                && log.details["external_execution"]["production_backend"] == true
         }));
 
         vault_server.abort();
@@ -52394,13 +52558,13 @@ not json
     async fn vault_kms_recovery_controller_executes_external_boundary() {
         let generated_at = Utc::now();
         let kms = VaultKmsReadiness {
-            provider: "mock-kms".to_string(),
+            provider: "aws_kms".to_string(),
             status: "ready".to_string(),
             configured: true,
             key_id_configured: true,
             rotation_policy_configured: true,
             endpoint_configured: true,
-            validation_mode: "health-check".to_string(),
+            validation_mode: "external".to_string(),
             issues: Vec::new(),
         };
         let secret_record = SecretRecord {
@@ -52424,8 +52588,15 @@ not json
             None,
             json!({
                 "status": "validated",
-                "kms_provider": "mock-kms",
-                "external_execution": {"status": "validated"}
+                "kms_provider": "aws_kms",
+                "external_execution": {
+                    "status": "validated",
+                    "production_backend": true,
+                    "backend_kind": "aws_kms",
+                    "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+                    "key_id": "key-1",
+                    "environment": "production"
+                }
             }),
         );
         let readiness = build_vault_kms_recovery_readiness(
@@ -52474,11 +52645,14 @@ not json
 
         assert_eq!(execution["status"], "validated");
         assert_eq!(execution["recovery_id"], "kms-recovery-1");
+        assert_eq!(execution["backend_kind"], "aws_kms");
+        assert_eq!(execution["environment"], "production");
+        assert_eq!(execution["key_id"], "key-1");
         let payloads = payloads.lock().await;
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0]["type"], "mandoforge.kms_recovery_validation");
         assert_eq!(payloads[0]["subject"], "admin-1");
-        assert_eq!(payloads[0]["kms"]["provider"], "mock-kms");
+        assert_eq!(payloads[0]["kms"]["provider"], "aws_kms");
         assert_eq!(
             payloads[0]["secret_refs"][0]["id"],
             secret_record.id.to_string()
@@ -52497,7 +52671,11 @@ not json
                 "controller_execution": {
                     "attempted": true,
                     "status": "validated",
-                    "recovery_id": "kms-recovery-1"
+                    "recovery_id": "kms-recovery-1",
+                    "backend_kind": "aws_kms",
+                    "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+                    "key_id": "key-1",
+                    "environment": "production"
                 }
             }),
         );
@@ -52511,6 +52689,7 @@ not json
         );
         assert_eq!(ready.status, "ready");
         assert!(ready.latest_controller_validated);
+        assert!(ready.latest_controller_production_backend);
         assert!(ready.controller_evidence_fresh);
         assert_eq!(ready.latest_controller_age_hours, Some(0));
 
@@ -52526,7 +52705,11 @@ not json
                 "controller_execution": {
                     "attempted": true,
                     "status": "validated",
-                    "recovery_id": "kms-recovery-1"
+                    "recovery_id": "kms-recovery-1",
+                    "backend_kind": "aws_kms",
+                    "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+                    "key_id": "key-1",
+                    "environment": "production"
                 }
             }),
         );
@@ -52550,6 +52733,114 @@ not json
         );
 
         recovery_server.abort();
+    }
+
+    #[test]
+    fn kms_readiness_rejects_mock_provider_for_production_evidence() {
+        let mock_lookup = |key: &str| match key {
+            "MANDOFORGE_KMS_PROVIDER" => Some("mock-kms".to_string()),
+            "MANDOFORGE_KMS_KEY_ID" => Some("key-1".to_string()),
+            "MANDOFORGE_KMS_ROTATION_POLICY" => Some("manual-confirmed".to_string()),
+            "MANDOFORGE_KMS_VALIDATION_MODE" => Some("external".to_string()),
+            "MANDOFORGE_KMS_ENDPOINT" => Some("http://kms.example/rotate".to_string()),
+            _ => None,
+        };
+        let mock = kms_readiness_from_lookup(&mock_lookup);
+        assert_eq!(mock.status, "reserved");
+        assert!(!mock.configured);
+        assert!(
+            mock.issues
+                .iter()
+                .any(|issue| { issue == "KMS/HSM provider is not a production backend: mock-kms" })
+        );
+
+        let production_lookup = |key: &str| match key {
+            "MANDOFORGE_KMS_PROVIDER" => Some("aws_kms".to_string()),
+            "MANDOFORGE_KMS_KEY_ID" => Some("key-1".to_string()),
+            "MANDOFORGE_KMS_ROTATION_POLICY" => Some("manual-confirmed".to_string()),
+            "MANDOFORGE_KMS_VALIDATION_MODE" => Some("external".to_string()),
+            "MANDOFORGE_KMS_ENDPOINT" => Some("http://kms.example/rotate".to_string()),
+            _ => None,
+        };
+        let production = kms_readiness_from_lookup(&production_lookup);
+        assert_eq!(production.status, "ready");
+        assert!(production.configured);
+        assert!(production.issues.is_empty());
+    }
+
+    #[test]
+    fn vault_kms_recovery_readiness_rejects_pilot_backend_identity() {
+        let generated_at = Utc::now();
+        let kms = VaultKmsReadiness {
+            provider: "aws_kms".to_string(),
+            status: "ready".to_string(),
+            configured: true,
+            key_id_configured: true,
+            rotation_policy_configured: true,
+            endpoint_configured: true,
+            validation_mode: "external".to_string(),
+            issues: Vec::new(),
+        };
+        let rotation_audit = new_audit_log(
+            None,
+            "system",
+            None,
+            "vault.kms_rotation_run",
+            "vault",
+            None,
+            json!({
+                "status": "validated",
+                "kms_provider": "aws_kms",
+                "external_execution": {
+                    "status": "validated",
+                    "production_backend": true,
+                    "backend_kind": "aws_kms",
+                    "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+                    "key_id": "key-1",
+                    "environment": "production"
+                }
+            }),
+        );
+        let mut pilot_recovery = new_audit_log(
+            None,
+            "user",
+            None,
+            "vault.kms_recovery_validation",
+            "vault",
+            None,
+            json!({
+                "status": "validated",
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "recovery_id": "kms-recovery-pilot",
+                    "backend_kind": "mock_kms",
+                    "backend_id": "whiskey-pilot-kms",
+                    "key_id": "pilot-key",
+                    "environment": "whiskey"
+                }
+            }),
+        );
+        pilot_recovery.created_at = generated_at;
+
+        let readiness = build_vault_kms_recovery_readiness(
+            &kms,
+            &[rotation_audit, pilot_recovery],
+            generated_at,
+            true,
+            true,
+        );
+
+        assert_eq!(readiness.status, "blocked");
+        assert_eq!(
+            readiness.latest_controller_status.as_deref(),
+            Some("validated")
+        );
+        assert!(!readiness.latest_controller_validated);
+        assert!(!readiness.latest_controller_production_backend);
+        assert!(readiness.blocking_reasons.iter().any(|reason| {
+            reason == "vault KMS recovery controller did not identify a real production KMS/HSM backend"
+        }));
     }
 
     #[tokio::test]

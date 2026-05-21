@@ -653,6 +653,26 @@ if ! grep -q "recovery_controller_validated" "$vault_script"; then
   exit 1
 fi
 
+if ! grep -q "is_production_kms_provider" "$vault_script"; then
+  echo "Vault evidence script must reject mock or pilot KMS providers" >&2
+  exit 1
+fi
+
+if ! grep -q "rotation_production_backend" "$vault_script"; then
+  echo "Vault evidence script must require production rotation backend identity" >&2
+  exit 1
+fi
+
+if ! grep -q "recovery_controller_production_backend" "$vault_script"; then
+  echo "Vault evidence script must require production recovery backend identity" >&2
+  exit 1
+fi
+
+if ! grep -q "backend_kind=.*is not production KMS/HSM" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must reject non-production KMS/HSM backend evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "approval-notification-evidence-gate.sh" deploy/stage2-evidence/approval-notification-evidence-job.example.yaml; then
   echo "Approval notification evidence Job does not run the dedicated evidence gate" >&2
   exit 1
