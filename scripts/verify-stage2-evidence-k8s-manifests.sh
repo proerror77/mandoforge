@@ -400,7 +400,7 @@ if ! grep -q "runner_ready" "$remote_computer_script"; then
   exit 1
 fi
 
-if ! grep -q "state_sync_checked_path_count" "$remote_computer_script" || ! grep -q "state_sync_checked_path_detail_count" "$remote_computer_script" || ! grep -q "state_sync_state_claim" "$remote_computer_script"; then
+if ! grep -q "state_sync_checked_path_count" "$remote_computer_script" || ! grep -q "state_sync_checked_path_detail_count" "$remote_computer_script" || ! grep -q "state_sync_state_claim" "$remote_computer_script" || ! grep -q "passed.*validated.*completed.*ready.*exists.*mounted.*available.*ok.*healthy.*accessible.*readable.*writable" "$remote_computer_script"; then
   echo "Remote Computer evidence script must require audited state claim and checked state contract path detail evidence" >&2
   exit 1
 fi
@@ -550,7 +550,7 @@ if ! grep -q "juicefs|cephfs|longhorn-rwx" "$worker_remote_computer_script"; the
   exit 1
 fi
 
-if ! grep -q "state_checked_path_count" "$worker_remote_computer_script" || ! grep -q "state_checked_path_detail_count" "$worker_remote_computer_script" || ! grep -q "sidecar_checked_pod_detail_count" "$worker_remote_computer_script"; then
+if ! grep -q "state_checked_path_count" "$worker_remote_computer_script" || ! grep -q "state_checked_path_detail_count" "$worker_remote_computer_script" || ! grep -q "sidecar_checked_pod_detail_count" "$worker_remote_computer_script" || ! grep -q "passed.*validated.*completed.*ready.*exists.*mounted.*available.*ok.*healthy.*accessible.*readable.*writable" "$worker_remote_computer_script"; then
   echo "Worker/Remote Computer evidence script must require checked state path and sidecar Pod details" >&2
   exit 1
 fi
@@ -1730,7 +1730,7 @@ if ! grep -q "worker-load-validation-evidence.json" scripts/verify-stage2-eviden
   exit 1
 fi
 
-if ! grep -q "load_validated" scripts/verify-stage2-evidence-archive.sh || ! grep -q "load_check_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_path_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_pod_detail_count" scripts/verify-stage2-evidence-archive.sh; then
+if ! grep -q "load_validated" scripts/verify-stage2-evidence-archive.sh || ! grep -q "load_check_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_path_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_pod_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "passed.*validated.*completed.*ready.*exists.*mounted.*available.*ok.*healthy.*accessible.*readable.*writable" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require audited worker load, state-contract path detail, and sidecar replacement Pod detail evidence" >&2
   exit 1
 fi
@@ -1775,12 +1775,17 @@ if ! grep -q "missing Remote Computer checked path detail evidence" scripts/veri
   exit 1
 fi
 
+if ! grep -q "missing Remote Computer checked path status evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject Remote Computer state-sync evidence without checked path statuses" >&2
+  exit 1
+fi
+
 if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must inspect worker real-cluster evidence" >&2
   exit 1
 fi
 
-if ! grep -q "load_validated" scripts/stage2-completion-audit-gate.sh || ! grep -q "load_check_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_path_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_pod_detail_count" scripts/stage2-completion-audit-gate.sh; then
+if ! grep -q "load_validated" scripts/stage2-completion-audit-gate.sh || ! grep -q "load_check_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_path_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_pod_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "passed.*validated.*completed.*ready.*exists.*mounted.*available.*ok.*healthy.*accessible.*readable.*writable" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require audited worker load, state-contract path detail, and sidecar replacement Pod detail evidence" >&2
   exit 1
 fi

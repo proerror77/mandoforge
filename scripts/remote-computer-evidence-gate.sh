@@ -181,8 +181,9 @@ write_summary() {
         .response.controller_execution.path_checks[]?
       )
       | select(
-          (type == "string" and length > 0)
-          or (type == "object" and ((.path // .state_path // .name // "") | length > 0))
+          type == "object"
+          and ((.path // .state_path // .name // "") | length > 0)
+          and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
         )
     ] | length' "$state_sync_evidence_file")"
   fi

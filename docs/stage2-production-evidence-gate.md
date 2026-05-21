@@ -83,7 +83,7 @@ RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 \
 ./scripts/remote-computer-evidence-gate.sh
 ```
 
-That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The state-sync controller must validate the shared state claim, report a real multi-node cluster target, identify a supported distributed state backend such as JuiceFS, CephFS, or Longhorn RWX, and report a nonzero checked state-contract path count. When sidecar recovery is enabled, the sidecar validation controller must confirm real cluster-wide replacement evidence, healthy replacement Pods, and a nonzero checked Pod count. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The state-sync controller must validate the shared state claim, report a real multi-node cluster target, identify a supported distributed state backend such as JuiceFS, CephFS, or Longhorn RWX, and report a nonzero checked state-contract path count with per-path passed/validated/ready status detail. When sidecar recovery is enabled, the sidecar validation controller must confirm real cluster-wide replacement evidence, healthy replacement Pods, and a nonzero checked Pod count. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
 For the current Whiskey pilot blocker, run the combined worker/Remote Computer
 gate:
@@ -107,7 +107,7 @@ validated controller execution, real cluster target kind, production cluster id,
 `node_count >= 2`, load validation, and isolated worker-pool configuration;
 the standalone worker gate also rejects mismatches with
 `MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID`. State-sync evidence must name the
-state claim plus checked state-contract paths, and sidecar validation must report
+state claim plus checked state-contract paths with passed statuses, and sidecar validation must report
 healthy replacement Pods plus checked Pod counts; single-host, local-hostpath,
 or shape-only controller evidence does not satisfy this proof.
 The matching in-cluster template is
