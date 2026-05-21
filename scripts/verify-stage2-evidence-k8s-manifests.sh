@@ -405,6 +405,11 @@ if ! grep -q "state_sync_checked_path_count" "$remote_computer_script" || ! grep
   exit 1
 fi
 
+if ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*validated_at.*timestamp" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must require audited checked state path and sidecar Pod details" >&2
+  exit 1
+fi
+
 if ! grep -q "is_real_cluster_kind" "$remote_computer_script" || ! grep -q "state_sync_node_count" "$remote_computer_script" || ! grep -q "state_sync_cluster_id" "$remote_computer_script"; then
   echo "Remote Computer evidence script must require real multi-node state-sync cluster evidence" >&2
   exit 1
@@ -557,6 +562,11 @@ fi
 
 if ! grep -q "state_checked_path_count" "$worker_remote_computer_script" || ! grep -q "state_checked_path_detail_count" "$worker_remote_computer_script" || ! grep -q "sidecar_checked_pod_detail_count" "$worker_remote_computer_script" || ! grep -q "passed.*validated.*completed.*ready.*exists.*mounted.*available.*ok.*healthy.*accessible.*readable.*writable" "$worker_remote_computer_script"; then
   echo "Worker/Remote Computer evidence script must require checked state path and sidecar Pod details" >&2
+  exit 1
+fi
+
+if ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*validated_at.*timestamp" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must require audited checked state path and sidecar Pod details" >&2
   exit 1
 fi
 
@@ -1817,6 +1827,16 @@ fi
 
 if ! grep -q "missing Remote Computer checked path status evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject Remote Computer state-sync evidence without checked path statuses" >&2
+  exit 1
+fi
+
+if ! grep -q "missing Remote Computer checked path audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject Remote Computer state-sync evidence without checked path audit details" >&2
+  exit 1
+fi
+
+if ! grep -q "missing sidecar checked Pod audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject sidecar replacement evidence without checked Pod audit details" >&2
   exit 1
 fi
 

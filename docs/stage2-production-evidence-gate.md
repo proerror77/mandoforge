@@ -109,8 +109,9 @@ worker-pool load-check details with check name, worker pool or queue,
 passed/validated/completed status, and audit id, trace id, run id, or timestamp detail;
 the standalone worker gate also rejects mismatches with
 `MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID`. State-sync evidence must name the
-state claim plus checked state-contract paths with passed statuses, and sidecar validation must report
-healthy replacement Pods plus checked Pod counts; single-host, local-hostpath,
+state claim plus checked state-contract paths with passed statuses and audit id,
+trace id, run id, or timestamp detail, and sidecar validation must report
+healthy replacement Pods plus checked Pod counts with the same audit detail; single-host, local-hostpath,
 or shape-only controller evidence does not satisfy this proof.
 The matching in-cluster template is
 `deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml`.

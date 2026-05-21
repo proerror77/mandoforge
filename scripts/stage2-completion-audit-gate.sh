@@ -413,6 +413,7 @@ remote_state_checked_path_detail_count() {
         type == "object"
         and ((.path // .state_path // .name // "") | length > 0)
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1" 2>/dev/null || echo "0"
 }
@@ -428,6 +429,7 @@ summary_checked_path_detail_count() {
         type == "object"
         and ((.path // .state_path // .name // "") | length > 0)
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1" 2>/dev/null || echo "0"
 }
@@ -443,6 +445,7 @@ sidecar_checked_pod_detail_count() {
         type == "object"
         and ((.pod // .pod_name // .name // "") | length > 0)
         and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1" 2>/dev/null || echo "0"
 }
@@ -458,6 +461,7 @@ summary_sidecar_checked_pod_detail_count() {
         type == "object"
         and ((.pod // .pod_name // .name // "") | length > 0)
         and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1" 2>/dev/null || echo "0"
 }

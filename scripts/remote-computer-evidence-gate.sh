@@ -184,6 +184,7 @@ write_summary() {
           type == "object"
           and ((.path // .state_path // .name // "") | length > 0)
           and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
+          and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
         )
     ] | length' "$state_sync_evidence_file")"
   fi
@@ -217,6 +218,7 @@ write_summary() {
           type == "object"
           and ((.pod // .pod_name // .name // "") | length > 0)
           and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
+          and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
         )
     ] | length' "$sidecar_recovery_evidence_file")"
   fi
