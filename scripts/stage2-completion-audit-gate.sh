@@ -182,6 +182,42 @@ artifact_is_fresh() {
   [[ $((now_epoch - mtime_epoch)) -le "$max_age_seconds" ]]
 }
 
+is_production_policy_controller_kind() {
+  local value="$1"
+  case "$value" in
+    production_policy_controller|enterprise_policy_controller|external_policy_controller|policy_controller_cluster)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_production_policy_environment() {
+  local value="$1"
+  case "$value" in
+    production|prod)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_production_policy_rollout_scope() {
+  local value="$1"
+  case "$value" in
+    production|global|enterprise|multi_tenant)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
@@ -211,6 +247,59 @@ artifact_contract_issue() {
         printf 'delivery_mode=%s is not accounting/ERP' "$delivery_mode"
         ;;
     esac
+  fi
+
+  if [[ "$req_id" == "policy-rollout" && "$artifact_name" == "policy-rollout-orchestration-validation-evidence.json" ]]; then
+    local validation_status
+    local controller_status
+    local target_kind
+    local environment
+    local controller_id
+    local rollout_scope
+    local production_policy_store
+    local rollback_supported
+
+    validation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    controller_id="$(jq -r '.response.controller_execution.controller_id // ""' "$artifact" 2>/dev/null || echo "")"
+    rollout_scope="$(jq -r '.response.controller_execution.rollout_scope // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    production_policy_store="$(jq -r '.response.controller_execution.production_policy_store // false' "$artifact" 2>/dev/null || echo "false")"
+    rollback_supported="$(jq -r '.response.controller_execution.rollback_supported // false' "$artifact" 2>/dev/null || echo "false")"
+
+    if [[ "$validation_status" != "validated" ]]; then
+      printf 'validation_status=%s' "$validation_status"
+      return 0
+    fi
+    if [[ "$controller_status" != "validated" ]]; then
+      printf 'controller_status=%s' "$controller_status"
+      return 0
+    fi
+    if ! is_production_policy_controller_kind "$target_kind"; then
+      printf 'target_kind=%s is not production policy controller' "$target_kind"
+      return 0
+    fi
+    if ! is_production_policy_environment "$environment"; then
+      printf 'environment=%s is not production' "$environment"
+      return 0
+    fi
+    if [[ -z "$controller_id" ]]; then
+      printf 'controller_id is missing'
+      return 0
+    fi
+    if ! is_production_policy_rollout_scope "$rollout_scope"; then
+      printf 'rollout_scope=%s is not production-grade' "$rollout_scope"
+      return 0
+    fi
+    if [[ "$production_policy_store" != "true" ]]; then
+      printf 'production_policy_store=%s' "$production_policy_store"
+      return 0
+    fi
+    if [[ "$rollback_supported" != "true" ]]; then
+      printf 'rollback_supported=%s' "$rollback_supported"
+      return 0
+    fi
   fi
 
   if [[ "$req_id" == "tenant-routing" && "$artifact_name" == "tenant-routing-validation-evidence.json" ]]; then

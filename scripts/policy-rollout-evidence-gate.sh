@@ -27,6 +27,42 @@ require_cmd() {
   fi
 }
 
+is_production_policy_controller_kind() {
+  local value="$1"
+  case "$value" in
+    production_policy_controller|enterprise_policy_controller|external_policy_controller|policy_controller_cluster)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_production_environment() {
+  local value="$1"
+  case "$value" in
+    production|prod)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_production_rollout_scope() {
+  local value="$1"
+  case "$value" in
+    production|global|enterprise|multi_tenant)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -84,14 +120,33 @@ write_summary() {
   local latest_controller_validated
   local controller_fresh
   local controller_age_hours
+  local controller_production_target
+  local controller_target_kind
+  local controller_environment
+  local controller_id
+  local controller_rollout_scope
+  local controller_production_policy_store
+  local controller_rollback_supported
   local blocked_count
 
   readiness_status="$(jq -r '.status // "unknown"' "$readiness_file")"
   validation_status="unknown"
   validation_evidence_status="missing"
+  controller_target_kind="unknown"
+  controller_environment="unknown"
+  controller_id=""
+  controller_rollout_scope="unknown"
+  controller_production_policy_store="false"
+  controller_rollback_supported="false"
   if [[ -s "$validation_evidence_file" ]]; then
     validation_evidence_status="$(jq -r '.status // "unknown"' "$validation_evidence_file")"
     validation_status="$(jq -r '.response.status // "unknown"' "$validation_evidence_file")"
+    controller_target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$validation_evidence_file")"
+    controller_environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$validation_evidence_file")"
+    controller_id="$(jq -r '.response.controller_execution.controller_id // ""' "$validation_evidence_file")"
+    controller_rollout_scope="$(jq -r '.response.controller_execution.rollout_scope // "unknown"' "$validation_evidence_file")"
+    controller_production_policy_store="$(jq -r '.response.controller_execution.production_policy_store // false' "$validation_evidence_file")"
+    controller_rollback_supported="$(jq -r '.response.controller_execution.rollback_supported // false' "$validation_evidence_file")"
   fi
   due_run_evidence_status="not_requested"
   due_run_status="not_run"
@@ -111,11 +166,13 @@ write_summary() {
   latest_controller_validated="$(jq -r '.latest_controller_validated // false' "$readiness_file")"
   controller_fresh="$(jq -r '.controller_evidence_fresh // false' "$readiness_file")"
   controller_age_hours="$(jq -r '.latest_controller_age_hours // "none"' "$readiness_file")"
+  controller_production_target="$(jq -r '.latest_controller_production_target // false' "$readiness_file")"
   blocked_count="$(jq -r '[
       .production_blocked,
       (.controller_required != true),
       (.controller_configured != true),
       (.latest_controller_validated != true),
+      (.latest_controller_production_target != true),
       (.controller_evidence_fresh != true),
       (.due_run_fresh != true),
       (.rollout_active == true),
@@ -125,6 +182,24 @@ write_summary() {
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ "$validation_status" != "validated" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_policy_controller_kind "$controller_target_kind"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_environment "$controller_environment"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ -z "$controller_id" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_rollout_scope "$controller_rollout_scope"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$controller_production_policy_store" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$controller_rollback_supported" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ "$RUN_POLICY_DUE_RUN" != "1" ]]; then
@@ -156,6 +231,13 @@ write_summary() {
     echo "latest_controller_validated=$latest_controller_validated"
     echo "controller_evidence_fresh=$controller_fresh"
     echo "controller_age_hours=$controller_age_hours"
+    echo "controller_production_target=$controller_production_target"
+    echo "controller_target_kind=$controller_target_kind"
+    echo "controller_environment=$controller_environment"
+    echo "controller_id=$controller_id"
+    echo "controller_rollout_scope=$controller_rollout_scope"
+    echo "controller_production_policy_store=$controller_production_policy_store"
+    echo "controller_rollback_supported=$controller_rollback_supported"
     echo "policy_due_run=$RUN_POLICY_DUE_RUN"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
@@ -172,6 +254,27 @@ write_summary() {
     fi
     if [[ "$controller_fresh" != "true" ]]; then
       echo "- policy rollout orchestration controller evidence is not fresh"
+    fi
+    if [[ "$controller_production_target" != "true" ]]; then
+      echo "- policy rollout readiness has not recorded a real production policy controller target"
+    fi
+    if ! is_production_policy_controller_kind "$controller_target_kind"; then
+      echo "- policy rollout controller target kind is not production: $controller_target_kind"
+    fi
+    if ! is_production_environment "$controller_environment"; then
+      echo "- policy rollout controller environment is not production: $controller_environment"
+    fi
+    if [[ -z "$controller_id" ]]; then
+      echo "- policy rollout controller did not report a controller_id"
+    fi
+    if ! is_production_rollout_scope "$controller_rollout_scope"; then
+      echo "- policy rollout controller scope is not production-grade: $controller_rollout_scope"
+    fi
+    if [[ "$controller_production_policy_store" != "true" ]]; then
+      echo "- policy rollout controller did not confirm a production policy store"
+    fi
+    if [[ "$controller_rollback_supported" != "true" ]]; then
+      echo "- policy rollout controller did not confirm rollback support"
     fi
     if [[ "$validation_status" != "validated" ]]; then
       echo "- policy rollout orchestration validation status is not validated: $validation_status"

@@ -973,6 +973,26 @@ if ! grep -q "latest_controller_validated" "$policy_rollout_script"; then
   exit 1
 fi
 
+if ! grep -q "latest_controller_production_target" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must verify production controller target identity" >&2
+  exit 1
+fi
+
+if ! grep -q "production_policy_store" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must require production policy store evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "policy-rollout-orchestration-validation-evidence.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must contract-check policy rollout validation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "is not production policy controller" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must reject non-production policy controller evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "codex-app-server-evidence-gate.sh" deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml; then
   echo "Codex App Server evidence Job does not run the dedicated evidence gate" >&2
   exit 1

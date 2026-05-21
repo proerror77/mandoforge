@@ -239,6 +239,13 @@ struct PolicyRolloutOrchestrationReadiness {
     latest_controller_age_hours: Option<i64>,
     controller_evidence_fresh: bool,
     latest_controller_validated: bool,
+    latest_controller_production_target: bool,
+    latest_controller_target_kind: Option<String>,
+    latest_controller_environment: Option<String>,
+    latest_controller_id: Option<String>,
+    latest_controller_rollout_scope: Option<String>,
+    latest_controller_production_policy_store: Option<bool>,
+    latest_controller_rollback_supported: Option<bool>,
     controller_required: bool,
     controller_configured: bool,
     blocking_reasons: Vec<String>,
@@ -18563,6 +18570,14 @@ async fn validate_policy_rollout_orchestration(
                         "policy rollout orchestration controller did not validate".to_string(),
                     );
                 }
+                if execution.get("status").and_then(Value::as_str) == Some("validated")
+                    && !policy_rollout_orchestration_execution_is_production_target(&execution)
+                {
+                    issues.push(
+                        "policy rollout orchestration controller did not identify a real production policy controller target"
+                            .to_string(),
+                    );
+                }
                 controller_execution = execution;
             }
             Err(error) => {
@@ -18794,17 +18809,45 @@ fn build_policy_rollout_orchestration_readiness(
         .and_then(|log| log.details.get("status"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let latest_controller_execution =
+        latest_validation.and_then(|log| log.details.get("controller_execution"));
     let latest_controller_status = latest_validation
-        .and_then(|log| log.details.get("controller_execution"))
+        .and_then(|_| latest_controller_execution)
         .and_then(|execution| execution.get("status"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let latest_controller_target_kind = latest_controller_execution
+        .and_then(|execution| execution.get("target_kind"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_environment = latest_controller_execution
+        .and_then(|execution| execution.get("environment"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_id = latest_controller_execution
+        .and_then(|execution| execution.get("controller_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_rollout_scope = latest_controller_execution
+        .and_then(|execution| execution.get("rollout_scope"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let latest_controller_production_policy_store = latest_controller_execution
+        .and_then(|execution| execution.get("production_policy_store"))
+        .and_then(Value::as_bool);
+    let latest_controller_rollback_supported = latest_controller_execution
+        .and_then(|execution| execution.get("rollback_supported"))
+        .and_then(Value::as_bool);
     let latest_controller_age_hours = latest_validation
         .filter(|_| latest_controller_status.is_some())
         .map(|log| (generated_at - log.created_at).num_hours());
     let controller_evidence_fresh =
         latest_controller_age_hours.is_some_and(|age_hours| age_hours < 24);
-    let latest_controller_validated = latest_controller_status.as_deref() == Some("validated");
+    let latest_controller_production_target = latest_controller_execution
+        .is_some_and(policy_rollout_orchestration_execution_is_production_target);
+    let latest_controller_validated = latest_validation_status.as_deref() == Some("validated")
+        && latest_controller_status.as_deref() == Some("validated")
+        && latest_controller_production_target;
     let mut blocking_reasons = Vec::new();
 
     if runtime.active_revision_id.is_none() {
@@ -18828,9 +18871,21 @@ fn build_policy_rollout_orchestration_readiness(
             "policy rollout orchestration controller is required but not configured".to_string(),
         );
     }
-    if controller_required && controller_configured && !latest_controller_validated {
+    if controller_required
+        && controller_configured
+        && latest_controller_status.as_deref() != Some("validated")
+    {
         blocking_reasons.push(
             "policy rollout orchestration controller evidence is missing or not validated"
+                .to_string(),
+        );
+    }
+    if controller_required
+        && latest_controller_status.as_deref() == Some("validated")
+        && !latest_controller_production_target
+    {
+        blocking_reasons.push(
+            "policy rollout orchestration controller did not identify a real production policy controller target"
                 .to_string(),
         );
     }
@@ -18871,6 +18926,13 @@ fn build_policy_rollout_orchestration_readiness(
         latest_controller_age_hours,
         controller_evidence_fresh,
         latest_controller_validated,
+        latest_controller_production_target,
+        latest_controller_target_kind,
+        latest_controller_environment,
+        latest_controller_id,
+        latest_controller_rollout_scope,
+        latest_controller_production_policy_store,
+        latest_controller_rollback_supported,
         controller_required,
         controller_configured,
         blocking_reasons,
@@ -18899,6 +18961,52 @@ where
     lookup("MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
+}
+
+fn is_production_policy_rollout_target_kind(value: Option<&str>) -> bool {
+    matches!(
+        value,
+        Some(
+            "production_policy_controller"
+                | "enterprise_policy_controller"
+                | "external_policy_controller"
+                | "policy_controller_cluster"
+        )
+    )
+}
+
+fn is_production_policy_rollout_environment(value: Option<&str>) -> bool {
+    matches!(value, Some("production" | "prod"))
+}
+
+fn is_production_policy_rollout_scope(value: Option<&str>) -> bool {
+    matches!(
+        value,
+        Some("production" | "global" | "enterprise" | "multi_tenant")
+    )
+}
+
+fn policy_rollout_orchestration_execution_is_production_target(execution: &Value) -> bool {
+    let controller_id_present = execution
+        .get("controller_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    is_production_policy_rollout_target_kind(execution.get("target_kind").and_then(Value::as_str))
+        && is_production_policy_rollout_environment(
+            execution.get("environment").and_then(Value::as_str),
+        )
+        && is_production_policy_rollout_scope(
+            execution.get("rollout_scope").and_then(Value::as_str),
+        )
+        && controller_id_present
+        && execution
+            .get("production_policy_store")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        && execution
+            .get("rollback_supported")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
 }
 
 async fn execute_policy_rollout_orchestration_controller<F>(
@@ -18971,6 +19079,14 @@ where
         "http_status": http_status.as_u16(),
         "provider_status": provider_status,
         "orchestration_id": body.get("orchestration_id").and_then(Value::as_str),
+        "controller_id": body.get("controller_id").and_then(Value::as_str),
+        "target_kind": body.get("target_kind").and_then(Value::as_str),
+        "environment": body.get("environment").and_then(Value::as_str),
+        "rollout_scope": body.get("rollout_scope").and_then(Value::as_str),
+        "production_policy_store": body.get("production_policy_store").and_then(Value::as_bool),
+        "rollback_supported": body.get("rollback_supported").and_then(Value::as_bool),
+        "policy_store_id": body.get("policy_store_id").and_then(Value::as_str),
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
         "message": body.get("message").and_then(Value::as_str),
         "steps": body.get("steps").cloned().unwrap_or_else(|| json!([])),
     }))
@@ -49077,6 +49193,12 @@ not json
 
         assert_eq!(execution["status"], "validated");
         assert_eq!(execution["orchestration_id"], "policy-orchestration-1");
+        assert_eq!(execution["controller_id"], "policy-controller-prod-1");
+        assert_eq!(execution["target_kind"], "production_policy_controller");
+        assert_eq!(execution["environment"], "production");
+        assert_eq!(execution["rollout_scope"], "global");
+        assert_eq!(execution["production_policy_store"], true);
+        assert_eq!(execution["rollback_supported"], true);
         let payloads = payloads.lock().await;
         assert_eq!(payloads.len(), 1);
         assert_eq!(
@@ -49152,7 +49274,13 @@ not json
                 "controller_execution": {
                     "attempted": true,
                     "status": "validated",
-                    "orchestration_id": "policy-orchestration-1"
+                    "orchestration_id": "policy-orchestration-1",
+                    "controller_id": "policy-controller-prod-1",
+                    "target_kind": "production_policy_controller",
+                    "environment": "production",
+                    "rollout_scope": "global",
+                    "production_policy_store": true,
+                    "rollback_supported": true
                 }
             }),
         );
@@ -49168,6 +49296,11 @@ not json
         assert!(!ready.production_blocked);
         assert_eq!(ready.latest_controller_status.as_deref(), Some("validated"));
         assert!(ready.latest_controller_validated);
+        assert!(ready.latest_controller_production_target);
+        assert_eq!(
+            ready.latest_controller_target_kind.as_deref(),
+            Some("production_policy_controller")
+        );
         assert!(ready.controller_evidence_fresh);
         assert_eq!(ready.latest_controller_age_hours, Some(0));
 
@@ -49185,7 +49318,13 @@ not json
                 "controller_execution": {
                     "attempted": true,
                     "status": "validated",
-                    "orchestration_id": "policy-orchestration-stale"
+                    "orchestration_id": "policy-orchestration-stale",
+                    "controller_id": "policy-controller-prod-1",
+                    "target_kind": "production_policy_controller",
+                    "environment": "production",
+                    "rollout_scope": "global",
+                    "production_policy_store": true,
+                    "rollback_supported": true
                 }
             }),
         );
@@ -49217,6 +49356,76 @@ not json
         assert_eq!(stale.latest_controller_age_hours, Some(25));
         assert!(stale.blocking_reasons.iter().any(|reason| {
             reason == "policy rollout orchestration controller evidence is stale"
+        }));
+    }
+
+    #[test]
+    fn policy_rollout_orchestration_readiness_rejects_pilot_controller_identity() {
+        let generated_at = Utc::now();
+        let active_revision_id = Uuid::new_v4();
+        let runtime = PolicyRuntimeStatus {
+            active_revision_id: Some(active_revision_id),
+            staged_revision_id: None,
+            staged_rollout_percent: None,
+            rollout_active: false,
+        };
+        let due_run = new_audit_log(
+            None,
+            "system",
+            None,
+            "policy.rollout_due_run",
+            "policy",
+            Some(active_revision_id),
+            json!({
+                "status": "noop",
+                "scanned_count": 1,
+                "skipped_count": 1,
+            }),
+        );
+        let mut pilot_validation = new_audit_log(
+            None,
+            "user",
+            None,
+            "policy.rollout_orchestration_validation_run",
+            "policy",
+            Some(active_revision_id),
+            json!({
+                "status": "validated",
+                "controller_required": true,
+                "controller_configured": true,
+                "controller_execution": {
+                    "attempted": true,
+                    "status": "validated",
+                    "orchestration_id": "policy-orchestration-pilot",
+                    "controller_id": "whiskey-pilot-controller",
+                    "target_kind": "pilot",
+                    "environment": "whiskey",
+                    "rollout_scope": "pilot",
+                    "production_policy_store": false,
+                    "rollback_supported": false
+                }
+            }),
+        );
+        pilot_validation.created_at = generated_at;
+
+        let readiness = build_policy_rollout_orchestration_readiness(
+            &runtime,
+            &[due_run, pilot_validation],
+            generated_at,
+            true,
+            true,
+        );
+
+        assert_eq!(readiness.status, "blocked");
+        assert!(readiness.production_blocked);
+        assert_eq!(
+            readiness.latest_controller_status.as_deref(),
+            Some("validated")
+        );
+        assert!(!readiness.latest_controller_validated);
+        assert!(!readiness.latest_controller_production_target);
+        assert!(readiness.blocking_reasons.iter().any(|reason| {
+            reason == "policy rollout orchestration controller did not identify a real production policy controller target"
         }));
     }
 
@@ -51351,6 +51560,13 @@ not json
         Json(json!({
             "status": "validated",
             "orchestration_id": "policy-orchestration-1",
+            "controller_id": "policy-controller-prod-1",
+            "target_kind": "production_policy_controller",
+            "environment": "production",
+            "rollout_scope": "global",
+            "production_policy_store": true,
+            "rollback_supported": true,
+            "policy_store_id": "policy-store-prod-1",
             "message": "policy rollout orchestration validated",
             "steps": [
                 {"name": "due-run-supervision", "status": "passed"},
