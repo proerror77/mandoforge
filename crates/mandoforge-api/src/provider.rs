@@ -19,9 +19,11 @@ pub(crate) struct HarnessContext {
     pub(crate) pending_event_seq_end: Option<i64>,
     pub(crate) pending_event_count: usize,
     pub(crate) last_user_message: Option<String>,
+    pub(crate) latest_goal_event: Option<Value>,
     pub(crate) approved_tool_result_count: usize,
     pub(crate) custom_tool_result_count: usize,
     pub(crate) recent_custom_tool_results: Vec<Value>,
+    pub(crate) recent_goal_events: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

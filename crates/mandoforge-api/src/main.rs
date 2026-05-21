@@ -9474,7 +9474,7 @@ async fn send_session_events(
     let mut session_loop_reason = None;
     for event in input.events {
         let stored = append_incoming_session_event(&state, id, event).await?;
-        if stored.event_type == "user.message" || stored.event_type == "user.custom_tool_result" {
+        if session_event_triggers_loop(&stored.event_type) {
             session_loop_trigger_event_id = Some(stored.id);
             session_loop_reason = Some(stored.event_type.clone());
         }
@@ -9527,6 +9527,15 @@ async fn append_incoming_session_event(
                 .await?;
             Ok(stored)
         }
+        "session.goal.created"
+        | "session.goal.updated"
+        | "session.goal.completed"
+        | "session.goal.blocked" => {
+            validate_session_goal_event_payload(&event.event_type, &event.payload)?;
+            state
+                .append_event("user", None, session_id, &event.event_type, event.payload)
+                .await
+        }
         "user.interrupt" => {
             let stored = state
                 .append_event("user", None, session_id, &event.event_type, event.payload)
@@ -9556,6 +9565,59 @@ async fn append_incoming_session_event(
             "unsupported session event type {other}"
         ))),
     }
+}
+
+fn session_event_triggers_loop(event_type: &str) -> bool {
+    matches!(event_type, "user.message" | "user.custom_tool_result")
+        || is_session_goal_event(event_type)
+}
+
+fn is_session_goal_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "session.goal.created"
+            | "session.goal.updated"
+            | "session.goal.completed"
+            | "session.goal.blocked"
+    )
+}
+
+fn validate_session_goal_event_payload(event_type: &str, payload: &Value) -> Result<(), AppError> {
+    let objective = payload
+        .get("objective")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let goal_id = payload
+        .get("goal_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+
+    if event_type == "session.goal.created" && objective.is_empty() {
+        return Err(AppError::bad_request(
+            "session.goal.created event requires payload.objective",
+        ));
+    }
+    if event_type != "session.goal.created" && objective.is_empty() && goal_id.is_empty() {
+        return Err(AppError::bad_request(format!(
+            "{event_type} event requires payload.goal_id or payload.objective"
+        )));
+    }
+    if event_type == "session.goal.blocked" {
+        let reason = payload
+            .get("reason")
+            .or_else(|| payload.get("blocking_reason"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if reason.is_empty() {
+            return Err(AppError::bad_request(
+                "session.goal.blocked event requires payload.reason or payload.blocking_reason",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn append_user_message_event(
@@ -12352,6 +12414,21 @@ async fn build_harness_context(
             })
         })
         .collect::<Vec<_>>();
+    let recent_goal_events = context_events
+        .iter()
+        .filter(|event| is_session_goal_event(&event.event_type))
+        .rev()
+        .take(10)
+        .map(|event| {
+            json!({
+                "event_id": event.id,
+                "event_type": event.event_type,
+                "created_at": event.created_at,
+                "payload": event.payload,
+            })
+        })
+        .collect::<Vec<_>>();
+    let latest_goal_event = recent_goal_events.first().cloned();
     Ok(HarnessContext {
         session_id,
         event_count: events.len(),
@@ -12359,9 +12436,11 @@ async fn build_harness_context(
         pending_event_seq_end,
         pending_event_count: pending_events.len(),
         last_user_message,
+        latest_goal_event,
         approved_tool_result_count: approved_event_result_count + approved_tool_call_result_count,
         custom_tool_result_count: recent_custom_tool_results.len(),
         recent_custom_tool_results,
+        recent_goal_events,
     })
 }
 
@@ -58925,6 +59004,85 @@ not json
         assert!(events.iter().any(|event| {
             event.event_type == "agent.custom_tool_result"
                 && event.payload["source_event_id"] == json!(custom_tool_events[0].id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn session_goal_events_are_durable_loop_inputs() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.name == "Generic Orchestrator Agent")
+            .expect("seeded generic orchestrator agent");
+
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "goal-driven session loop"}),
+            ),
+        )
+        .await;
+        let goal_events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [{
+                        "type": "session.goal.created",
+                        "payload": {
+                            "objective": "Finish the managed-agent production evidence plan",
+                            "status": "active"
+                        }
+                    }]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(goal_events.len(), 1);
+        assert_eq!(goal_events[0].event_type, "session.goal.created");
+
+        let jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].reason, "session.goal.created");
+        assert_eq!(jobs[0].trigger_event_id, Some(goal_events[0].id));
+        assert_eq!(jobs[0].pending_event_seq_start, Some(goal_events[0].seq));
+        assert_eq!(jobs[0].pending_event_seq_end, Some(goal_events[0].seq));
+
+        let completed_loop =
+            run_next_session_loop_job(app.clone(), session.id, "goal-session-worker").await;
+        assert_eq!(completed_loop.status, SessionLoopJobStatus::Completed);
+        assert_eq!(
+            completed_loop.processed_event_seq,
+            completed_loop.pending_event_seq_end
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "llm.request"
+                && event.payload["context"]["latest_goal_event"]["event_type"]
+                    == json!("session.goal.created")
+                && event.payload["context"]["latest_goal_event"]["payload"]["objective"]
+                    == json!("Finish the managed-agent production evidence plan")
+                && event.payload["context"]["pending_event_count"] == json!(1)
         }));
     }
 
