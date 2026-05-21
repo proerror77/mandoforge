@@ -405,6 +405,16 @@ if ! grep -q "state_sync_checked_path_count" "$remote_computer_script" || ! grep
   exit 1
 fi
 
+if ! grep -q "is_real_cluster_kind" "$remote_computer_script" || ! grep -q "state_sync_node_count" "$remote_computer_script" || ! grep -q "state_sync_cluster_id" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must require real multi-node state-sync cluster evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "is_distributed_state_backend" "$remote_computer_script" || ! grep -q "state_sync_backend" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must require distributed state backend evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "remote-computer-state-sync-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit Remote Computer state-sync evidence metadata" >&2
   exit 1
@@ -427,6 +437,11 @@ fi
 
 if ! grep -q "sidecar_replacement_pods_healthy" "$remote_computer_script" || ! grep -q "sidecar_checked_pod_count" "$remote_computer_script"; then
   echo "Remote Computer evidence script must require healthy replacement Pod evidence and checked Pod counts" >&2
+  exit 1
+fi
+
+if ! grep -q "sidecar_target_kind" "$remote_computer_script" || ! grep -q "sidecar_node_count" "$remote_computer_script" || ! grep -q "sidecar_replacement_scope" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must require real cluster-wide sidecar replacement evidence" >&2
   exit 1
 fi
 

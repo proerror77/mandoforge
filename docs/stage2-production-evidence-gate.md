@@ -83,7 +83,7 @@ RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 \
 ./scripts/remote-computer-evidence-gate.sh
 ```
 
-That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The state-sync controller must validate the shared state claim and report a nonzero checked state-contract path count. When sidecar recovery is enabled, the sidecar validation controller must confirm healthy replacement Pods and a nonzero checked Pod count. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The state-sync controller must validate the shared state claim, report a real multi-node cluster target, identify a supported distributed state backend such as JuiceFS, CephFS, or Longhorn RWX, and report a nonzero checked state-contract path count. When sidecar recovery is enabled, the sidecar validation controller must confirm real cluster-wide replacement evidence, healthy replacement Pods, and a nonzero checked Pod count. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
 For the current Whiskey pilot blocker, run the combined worker/Remote Computer
 gate:

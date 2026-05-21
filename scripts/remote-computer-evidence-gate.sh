@@ -27,6 +27,43 @@ require_cmd() {
   fi
 }
 
+is_multi_node() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ && "$value" -ge 2 ]]
+}
+
+is_real_cluster_kind() {
+  local value="$1"
+  case "$value" in
+    k8s_cluster|kubernetes_cluster|production_cluster|real_cluster)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_distributed_state_backend() {
+  local value="$1"
+  case "$value" in
+    juicefs|cephfs|longhorn-rwx)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_production_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$value" ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -85,11 +122,19 @@ write_summary() {
   local state_sync_controller_status
   local state_sync_controller_fresh
   local state_sync_controller_age_hours
+  local state_sync_target_kind
+  local state_sync_node_count
+  local state_sync_cluster_id
+  local state_sync_backend
   local state_sync_state_claim
   local state_sync_checked_path_count
   local sidecar_recovery_evidence_status
   local sidecar_recovery_run_status
   local sidecar_validation_status
+  local sidecar_target_kind
+  local sidecar_node_count
+  local sidecar_cluster_id
+  local sidecar_replacement_scope
   local sidecar_replacement_pods_healthy
   local sidecar_checked_pod_count
   local blocked_count
@@ -112,22 +157,38 @@ write_summary() {
     state_sync_validation_status="$(jq -r '.response.status // "unknown"' "$state_sync_evidence_file")"
   fi
   state_sync_controller_status="unknown"
+  state_sync_target_kind="unknown"
+  state_sync_node_count="0"
+  state_sync_cluster_id=""
+  state_sync_backend="unknown"
   state_sync_state_claim=""
   state_sync_checked_path_count="0"
   if [[ -s "$state_sync_evidence_file" ]]; then
     state_sync_controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$state_sync_evidence_file")"
+    state_sync_target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$state_sync_evidence_file")"
+    state_sync_node_count="$(jq -r '.response.controller_execution.node_count // 0' "$state_sync_evidence_file")"
+    state_sync_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$state_sync_evidence_file")"
+    state_sync_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // "unknown"' "$state_sync_evidence_file")"
     state_sync_state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$state_sync_evidence_file")"
     state_sync_checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$state_sync_evidence_file")"
   fi
   sidecar_recovery_evidence_status="not_requested"
   sidecar_recovery_run_status="not_run"
   sidecar_validation_status="not_requested"
+  sidecar_target_kind="unknown"
+  sidecar_node_count="0"
+  sidecar_cluster_id=""
+  sidecar_replacement_scope="unknown"
   sidecar_replacement_pods_healthy="false"
   sidecar_checked_pod_count="0"
   if [[ -s "$sidecar_recovery_evidence_file" ]]; then
     sidecar_recovery_evidence_status="$(jq -r '.status // "unknown"' "$sidecar_recovery_evidence_file")"
     sidecar_recovery_run_status="$(jq -r '.response.status // "unknown"' "$sidecar_recovery_evidence_file")"
     sidecar_validation_status="$(jq -r '.response.validation_result.status // "unknown"' "$sidecar_recovery_evidence_file")"
+    sidecar_target_kind="$(jq -r '.response.validation_result.target_kind // "unknown"' "$sidecar_recovery_evidence_file")"
+    sidecar_node_count="$(jq -r '.response.validation_result.node_count // 0' "$sidecar_recovery_evidence_file")"
+    sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$sidecar_recovery_evidence_file")"
+    sidecar_replacement_scope="$(jq -r '.response.validation_result.replacement_scope // "unknown"' "$sidecar_recovery_evidence_file")"
     sidecar_replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$sidecar_recovery_evidence_file")"
     sidecar_checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$sidecar_recovery_evidence_file")"
   fi
@@ -141,6 +202,21 @@ write_summary() {
   if [[ "$state_sync_controller_status" != "validated" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ "$state_sync_validation_status" != "validated" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_real_cluster_kind "$state_sync_target_kind"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_multi_node "$state_sync_node_count"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_identity "$state_sync_cluster_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_distributed_state_backend "$state_sync_backend"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ -z "$state_sync_state_claim" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -149,6 +225,18 @@ write_summary() {
   fi
   if [[ "$RUN_SIDECAR_RECOVERY" == "1" ]]; then
     if [[ "$sidecar_validation_status" != "validated" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if ! is_real_cluster_kind "$sidecar_target_kind"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if ! is_multi_node "$sidecar_node_count"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if ! is_production_identity "$sidecar_cluster_id"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ "$sidecar_replacement_scope" != "cluster" ]]; then
       blocked_count="$((blocked_count + 1))"
     fi
     if [[ "$sidecar_replacement_pods_healthy" != "true" ]]; then
@@ -173,11 +261,19 @@ write_summary() {
     echo "state_sync_controller_status=$state_sync_controller_status"
     echo "state_sync_controller_evidence_fresh=$state_sync_controller_fresh"
     echo "state_sync_controller_age_hours=$state_sync_controller_age_hours"
+    echo "state_sync_target_kind=$state_sync_target_kind"
+    echo "state_sync_node_count=$state_sync_node_count"
+    echo "state_sync_cluster_id=$state_sync_cluster_id"
+    echo "state_sync_backend=$state_sync_backend"
     echo "state_sync_state_claim=$state_sync_state_claim"
     echo "state_sync_checked_path_count=$state_sync_checked_path_count"
     echo "sidecar_recovery_evidence_status=$sidecar_recovery_evidence_status"
     echo "sidecar_recovery_run_status=$sidecar_recovery_run_status"
     echo "sidecar_validation_status=$sidecar_validation_status"
+    echo "sidecar_target_kind=$sidecar_target_kind"
+    echo "sidecar_node_count=$sidecar_node_count"
+    echo "sidecar_cluster_id=$sidecar_cluster_id"
+    echo "sidecar_replacement_scope=$sidecar_replacement_scope"
     echo "sidecar_replacement_pods_healthy=$sidecar_replacement_pods_healthy"
     echo "sidecar_checked_pod_count=$sidecar_checked_pod_count"
     echo "production_blocked_count=$blocked_count"
@@ -195,6 +291,21 @@ write_summary() {
     if [[ "$state_sync_controller_status" != "validated" ]]; then
       echo "- state-sync controller did not validate the distributed state contract: $state_sync_controller_status"
     fi
+    if [[ "$state_sync_validation_status" != "validated" ]]; then
+      echo "- state-sync validation response is not validated: $state_sync_validation_status"
+    fi
+    if ! is_real_cluster_kind "$state_sync_target_kind"; then
+      echo "- state-sync target is not a real cluster kind: $state_sync_target_kind"
+    fi
+    if ! is_multi_node "$state_sync_node_count"; then
+      echo "- state-sync did not report a multi-node cluster: node_count=$state_sync_node_count"
+    fi
+    if ! is_production_identity "$state_sync_cluster_id"; then
+      echo "- state-sync cluster id is pilot/mock/local: ${state_sync_cluster_id:-<empty>}"
+    fi
+    if ! is_distributed_state_backend "$state_sync_backend"; then
+      echo "- state-sync backend is not a supported distributed filesystem: $state_sync_backend"
+    fi
     if [[ -z "$state_sync_state_claim" ]]; then
       echo "- state-sync controller did not report a state claim"
     fi
@@ -204,6 +315,18 @@ write_summary() {
     if [[ "$RUN_SIDECAR_RECOVERY" == "1" ]]; then
       if [[ "$sidecar_validation_status" != "validated" ]]; then
         echo "- sidecar recovery validation controller did not validate replacement: $sidecar_validation_status"
+      fi
+      if ! is_real_cluster_kind "$sidecar_target_kind"; then
+        echo "- sidecar recovery target is not a real cluster kind: $sidecar_target_kind"
+      fi
+      if ! is_multi_node "$sidecar_node_count"; then
+        echo "- sidecar recovery did not report a multi-node cluster: node_count=$sidecar_node_count"
+      fi
+      if ! is_production_identity "$sidecar_cluster_id"; then
+        echo "- sidecar recovery cluster id is pilot/mock/local: ${sidecar_cluster_id:-<empty>}"
+      fi
+      if [[ "$sidecar_replacement_scope" != "cluster" ]]; then
+        echo "- sidecar recovery replacement scope is not cluster-wide: $sidecar_replacement_scope"
       fi
       if [[ "$sidecar_replacement_pods_healthy" != "true" ]]; then
         echo "- sidecar recovery validation did not report healthy replacement Pods"
