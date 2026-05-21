@@ -23,6 +23,64 @@ is_production_identity() {
   [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
 }
 
+is_nonnegative_integer() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+is_positive_integer() {
+  [[ "$1" =~ ^[0-9]+$ && "$1" -gt 0 ]]
+}
+
+managed_session_detail_issue() {
+  local artifact="$1"
+  local pending_start
+  local pending_end
+  local processed_before
+  local processed_after
+  local original_thread_id
+  local resumed_thread_id
+  local active_worker_lease_id
+  local stale_worker_lease_id
+  local stale_rejection_reason
+  local runtime_turn_id
+  local final_message_evidence
+
+  pending_start="$(jq -r '.session_loop.pending_event_seq_start // .session_loop.event_window.start // .session_loop.sequence_range.start // ""' "$artifact")"
+  pending_end="$(jq -r '.session_loop.pending_event_seq_end // .session_loop.event_window.end // .session_loop.sequence_range.end // ""' "$artifact")"
+  processed_before="$(jq -r '.resume.processed_event_seq_before_restart // .resume.processed_event_seq_before // ""' "$artifact")"
+  processed_after="$(jq -r '.resume.processed_event_seq_after_resume // .resume.processed_event_seq_after // .resume.processed_event_seq // ""' "$artifact")"
+  original_thread_id="$(jq -r '.thread_lineage.original_thread_id // .thread_lineage.before_restart_thread_id // ""' "$artifact")"
+  resumed_thread_id="$(jq -r '.thread_lineage.resumed_thread_id // .thread_lineage.after_restart_thread_id // ""' "$artifact")"
+  active_worker_lease_id="$(jq -r '.lease_fencing.active_worker_lease_id // .lease_fencing.valid_worker_lease_id // ""' "$artifact")"
+  stale_worker_lease_id="$(jq -r '.lease_fencing.stale_worker_lease_id // .lease_fencing.rejected_worker_lease_id // ""' "$artifact")"
+  stale_rejection_reason="$(jq -r '.lease_fencing.stale_rejection_reason // .lease_fencing.rejection_reason // ""' "$artifact")"
+  runtime_turn_id="$(jq -r '.runtime_turn.turn_id // .runtime_turn.id // ""' "$artifact")"
+  final_message_evidence="$(jq -r '.runtime_turn.final_message // .runtime_turn.final_message_text // .runtime_turn.final_message_artifact_id // .runtime_turn.final_artifact_id // ""' "$artifact")"
+
+  if ! is_positive_integer "$pending_start" || ! is_positive_integer "$pending_end" || [[ "$pending_start" -gt "$pending_end" ]]; then
+    printf 'session-loop event cursor window evidence incomplete'
+    return 0
+  fi
+  if ! is_nonnegative_integer "$processed_before" || ! is_nonnegative_integer "$processed_after" || [[ "$processed_after" -lt "$processed_before" || "$processed_after" -lt "$pending_end" ]]; then
+    printf 'processed event cursor sequence evidence incomplete'
+    return 0
+  fi
+  if [[ -z "$original_thread_id" || -z "$resumed_thread_id" || "$original_thread_id" != "$resumed_thread_id" ]]; then
+    printf 'thread lineage id evidence incomplete'
+    return 0
+  fi
+  if [[ -z "$active_worker_lease_id" || -z "$stale_worker_lease_id" || "$active_worker_lease_id" == "$stale_worker_lease_id" || -z "$stale_rejection_reason" ]]; then
+    printf 'lease fencing id evidence incomplete'
+    return 0
+  fi
+  if [[ -z "$runtime_turn_id" || -z "$final_message_evidence" ]]; then
+    printf 'runtime turn final message detail evidence incomplete'
+    return 0
+  fi
+
+  return 1
+}
+
 capture_controller_evidence() {
   local target="$1"
   local response_body
@@ -68,6 +126,8 @@ validate_evidence() {
   local stale_worker_rejected
   local runtime_turn_completed
   local final_message_preserved
+  local managed_session_detail_status
+  local managed_session_detail_issue_text
 
   status="$(jq -r '.status // "unknown"' "$artifact")"
   target_id="$(jq -r '.target.id // .target.cluster_id // .target.deployment_id // ""' "$artifact")"
@@ -83,6 +143,11 @@ validate_evidence() {
   stale_worker_rejected="$(jq -r '.lease_fencing.stale_worker_rejected // false' "$artifact")"
   runtime_turn_completed="$(jq -r '.runtime_turn.completed // false' "$artifact")"
   final_message_preserved="$(jq -r '.runtime_turn.final_message_preserved // false' "$artifact")"
+  managed_session_detail_status="complete"
+  managed_session_detail_issue_text=""
+  if managed_session_detail_issue_text="$(managed_session_detail_issue "$artifact")"; then
+    managed_session_detail_status="blocked"
+  fi
 
   local blocked_count=0
   [[ "$status" == "validated" || "$status" == "completed" || "$status" == "ready" ]] || blocked_count=$((blocked_count + 1))
@@ -100,6 +165,7 @@ validate_evidence() {
   [[ "$stale_worker_rejected" == "true" ]] || blocked_count=$((blocked_count + 1))
   [[ "$runtime_turn_completed" == "true" ]] || blocked_count=$((blocked_count + 1))
   [[ "$final_message_preserved" == "true" ]] || blocked_count=$((blocked_count + 1))
+  [[ "$managed_session_detail_status" == "complete" ]] || blocked_count=$((blocked_count + 1))
 
   local gate_status="ready"
   if [[ "$blocked_count" != "0" ]]; then
@@ -125,6 +191,8 @@ validate_evidence() {
     --argjson stale_worker_rejected "$stale_worker_rejected" \
     --argjson runtime_turn_completed "$runtime_turn_completed" \
     --argjson final_message_preserved "$final_message_preserved" \
+    --arg managed_session_detail_status "$managed_session_detail_status" \
+    --arg managed_session_detail_issue "$managed_session_detail_issue_text" \
     '{
       generated_at: $generated_at,
       status: $status,
@@ -146,7 +214,9 @@ validate_evidence() {
         finalization_fenced: $finalization_fenced,
         stale_worker_rejected: $stale_worker_rejected,
         runtime_turn_completed: $runtime_turn_completed,
-        final_message_preserved: $final_message_preserved
+        final_message_preserved: $final_message_preserved,
+        structured_restart_resume_details: $managed_session_detail_status,
+        structured_restart_resume_issue: (if $managed_session_detail_issue == "" then null else $managed_session_detail_issue end)
       }
     }' >"$summary_json"
 
@@ -155,6 +225,10 @@ validate_evidence() {
     echo "target_id=$target_id"
     echo "target_kind=$target_kind"
     echo "blocked_count=$blocked_count"
+    echo "structured_restart_resume_details=$managed_session_detail_status"
+    if [[ -n "$managed_session_detail_issue_text" ]]; then
+      echo "structured_restart_resume_issue=$managed_session_detail_issue_text"
+    fi
   } >"$summary_txt"
 
   if [[ "$blocked_count" != "0" && "$ALLOW_BLOCKED" != "1" ]]; then

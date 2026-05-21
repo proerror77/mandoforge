@@ -125,6 +125,64 @@ summary_sidecar_checked_pod_detail_count() {
   ] | length' "$1"
 }
 
+is_nonnegative_integer() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+is_positive_integer() {
+  [[ "$1" =~ ^[0-9]+$ && "$1" -gt 0 ]]
+}
+
+managed_session_detail_issue() {
+  local artifact="$1"
+  local pending_start
+  local pending_end
+  local processed_before
+  local processed_after
+  local original_thread_id
+  local resumed_thread_id
+  local active_worker_lease_id
+  local stale_worker_lease_id
+  local stale_rejection_reason
+  local runtime_turn_id
+  local final_message_evidence
+
+  pending_start="$(jq -r '.session_loop.pending_event_seq_start // .session_loop.event_window.start // .session_loop.sequence_range.start // ""' "$artifact")"
+  pending_end="$(jq -r '.session_loop.pending_event_seq_end // .session_loop.event_window.end // .session_loop.sequence_range.end // ""' "$artifact")"
+  processed_before="$(jq -r '.resume.processed_event_seq_before_restart // .resume.processed_event_seq_before // ""' "$artifact")"
+  processed_after="$(jq -r '.resume.processed_event_seq_after_resume // .resume.processed_event_seq_after // .resume.processed_event_seq // ""' "$artifact")"
+  original_thread_id="$(jq -r '.thread_lineage.original_thread_id // .thread_lineage.before_restart_thread_id // ""' "$artifact")"
+  resumed_thread_id="$(jq -r '.thread_lineage.resumed_thread_id // .thread_lineage.after_restart_thread_id // ""' "$artifact")"
+  active_worker_lease_id="$(jq -r '.lease_fencing.active_worker_lease_id // .lease_fencing.valid_worker_lease_id // ""' "$artifact")"
+  stale_worker_lease_id="$(jq -r '.lease_fencing.stale_worker_lease_id // .lease_fencing.rejected_worker_lease_id // ""' "$artifact")"
+  stale_rejection_reason="$(jq -r '.lease_fencing.stale_rejection_reason // .lease_fencing.rejection_reason // ""' "$artifact")"
+  runtime_turn_id="$(jq -r '.runtime_turn.turn_id // .runtime_turn.id // ""' "$artifact")"
+  final_message_evidence="$(jq -r '.runtime_turn.final_message // .runtime_turn.final_message_text // .runtime_turn.final_message_artifact_id // .runtime_turn.final_artifact_id // ""' "$artifact")"
+
+  if ! is_positive_integer "$pending_start" || ! is_positive_integer "$pending_end" || [[ "$pending_start" -gt "$pending_end" ]]; then
+    printf 'session-loop event cursor window evidence incomplete'
+    return 0
+  fi
+  if ! is_nonnegative_integer "$processed_before" || ! is_nonnegative_integer "$processed_after" || [[ "$processed_after" -lt "$processed_before" || "$processed_after" -lt "$pending_end" ]]; then
+    printf 'processed event cursor sequence evidence incomplete'
+    return 0
+  fi
+  if [[ -z "$original_thread_id" || -z "$resumed_thread_id" || "$original_thread_id" != "$resumed_thread_id" ]]; then
+    printf 'thread lineage id evidence incomplete'
+    return 0
+  fi
+  if [[ -z "$active_worker_lease_id" || -z "$stale_worker_lease_id" || "$active_worker_lease_id" == "$stale_worker_lease_id" || -z "$stale_rejection_reason" ]]; then
+    printf 'lease fencing id evidence incomplete'
+    return 0
+  fi
+  if [[ -z "$runtime_turn_id" || -z "$final_message_evidence" ]]; then
+    printf 'runtime turn final message detail evidence incomplete'
+    return 0
+  fi
+
+  return 1
+}
+
 tenant_negative_test_detail_count() {
   jq -r '[
     (
@@ -1056,6 +1114,7 @@ artifact_issue() {
       local stale_worker_rejected
       local runtime_turn_completed
       local final_message_preserved
+      local detail_issue
       status="$(jq -r '.status // "unknown"' "$path")"
       target_id="$(jq -r '.target.id // .target.cluster_id // .target.deployment_id // ""' "$path")"
       target_kind="$(jq -r '.target.kind // "unknown"' "$path")"
@@ -1070,6 +1129,11 @@ artifact_issue() {
       stale_worker_rejected="$(jq -r '.lease_fencing.stale_worker_rejected // false' "$path")"
       runtime_turn_completed="$(jq -r '.runtime_turn.completed // false' "$path")"
       final_message_preserved="$(jq -r '.runtime_turn.final_message_preserved // false' "$path")"
+      detail_issue=""
+      if detail_issue="$(managed_session_detail_issue "$path")"; then
+        printf '%s %s' "$relative_path" "$detail_issue"
+        return 0
+      fi
       if ! [[ "$status" == "validated" || "$status" == "completed" || "$status" == "ready" ]]; then
         printf '%s status=%s' "$relative_path" "$status"
         return 0
@@ -1979,7 +2043,9 @@ JSON
   },
   "session_loop": {
     "enqueue_event_persisted": true,
-    "worker_drain_observed": true
+    "worker_drain_observed": true,
+    "pending_event_seq_start": 41,
+    "pending_event_seq_end": 42
   },
   "restart": {
     "api_restarted": true,
@@ -1987,18 +2053,27 @@ JSON
   },
   "resume": {
     "session_state_resumed": true,
-    "processed_event_seq_preserved": true
+    "processed_event_seq_preserved": true,
+    "processed_event_seq_before_restart": 42,
+    "processed_event_seq_after_resume": 42
   },
   "thread_lineage": {
-    "preserved": true
+    "preserved": true,
+    "original_thread_id": "thread-prod-1",
+    "resumed_thread_id": "thread-prod-1"
   },
   "lease_fencing": {
     "finalization_fenced": true,
-    "stale_worker_rejected": true
+    "stale_worker_rejected": true,
+    "active_worker_lease_id": "lease-active-prod-1",
+    "stale_worker_lease_id": "lease-stale-prod-1",
+    "stale_rejection_reason": "stale lease generation rejected"
   },
   "runtime_turn": {
     "completed": true,
-    "final_message_preserved": true
+    "final_message_preserved": true,
+    "turn_id": "turn-prod-1",
+    "final_message": "managed session restart resume validated"
   }
 }
 JSON
@@ -2063,7 +2138,9 @@ JSON
   },
   "session_loop": {
     "enqueue_event_persisted": true,
-    "worker_drain_observed": true
+    "worker_drain_observed": true,
+    "pending_event_seq_start": 41,
+    "pending_event_seq_end": 42
   },
   "restart": {
     "api_restarted": true,
@@ -2113,7 +2190,9 @@ JSON
   },
   "session_loop": {
     "enqueue_event_persisted": true,
-    "worker_drain_observed": true
+    "worker_drain_observed": true,
+    "pending_event_seq_start": 41,
+    "pending_event_seq_end": 42
   },
   "restart": {
     "api_restarted": true,
@@ -2121,18 +2200,27 @@ JSON
   },
   "resume": {
     "session_state_resumed": true,
-    "processed_event_seq_preserved": true
+    "processed_event_seq_preserved": true,
+    "processed_event_seq_before_restart": 42,
+    "processed_event_seq_after_resume": 42
   },
   "thread_lineage": {
-    "preserved": true
+    "preserved": true,
+    "original_thread_id": "thread-prod-1",
+    "resumed_thread_id": "thread-prod-1"
   },
   "lease_fencing": {
     "finalization_fenced": true,
-    "stale_worker_rejected": true
+    "stale_worker_rejected": true,
+    "active_worker_lease_id": "lease-active-prod-1",
+    "stale_worker_lease_id": "lease-stale-prod-1",
+    "stale_rejection_reason": "stale lease generation rejected"
   },
   "runtime_turn": {
     "completed": true,
-    "final_message_preserved": true
+    "final_message_preserved": true,
+    "turn_id": "turn-prod-1",
+    "final_message": "managed session restart resume validated"
   }
 }
 JSON

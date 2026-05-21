@@ -456,6 +456,64 @@ forced_rls_table_detail_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+is_nonnegative_integer() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+is_positive_integer() {
+  [[ "$1" =~ ^[0-9]+$ && "$1" -gt 0 ]]
+}
+
+managed_session_detail_issue() {
+  local artifact="$1"
+  local pending_start
+  local pending_end
+  local processed_before
+  local processed_after
+  local original_thread_id
+  local resumed_thread_id
+  local active_worker_lease_id
+  local stale_worker_lease_id
+  local stale_rejection_reason
+  local runtime_turn_id
+  local final_message_evidence
+
+  pending_start="$(jq -r '.session_loop.pending_event_seq_start // .session_loop.event_window.start // .session_loop.sequence_range.start // ""' "$artifact" 2>/dev/null || echo "")"
+  pending_end="$(jq -r '.session_loop.pending_event_seq_end // .session_loop.event_window.end // .session_loop.sequence_range.end // ""' "$artifact" 2>/dev/null || echo "")"
+  processed_before="$(jq -r '.resume.processed_event_seq_before_restart // .resume.processed_event_seq_before // ""' "$artifact" 2>/dev/null || echo "")"
+  processed_after="$(jq -r '.resume.processed_event_seq_after_resume // .resume.processed_event_seq_after // .resume.processed_event_seq // ""' "$artifact" 2>/dev/null || echo "")"
+  original_thread_id="$(jq -r '.thread_lineage.original_thread_id // .thread_lineage.before_restart_thread_id // ""' "$artifact" 2>/dev/null || echo "")"
+  resumed_thread_id="$(jq -r '.thread_lineage.resumed_thread_id // .thread_lineage.after_restart_thread_id // ""' "$artifact" 2>/dev/null || echo "")"
+  active_worker_lease_id="$(jq -r '.lease_fencing.active_worker_lease_id // .lease_fencing.valid_worker_lease_id // ""' "$artifact" 2>/dev/null || echo "")"
+  stale_worker_lease_id="$(jq -r '.lease_fencing.stale_worker_lease_id // .lease_fencing.rejected_worker_lease_id // ""' "$artifact" 2>/dev/null || echo "")"
+  stale_rejection_reason="$(jq -r '.lease_fencing.stale_rejection_reason // .lease_fencing.rejection_reason // ""' "$artifact" 2>/dev/null || echo "")"
+  runtime_turn_id="$(jq -r '.runtime_turn.turn_id // .runtime_turn.id // ""' "$artifact" 2>/dev/null || echo "")"
+  final_message_evidence="$(jq -r '.runtime_turn.final_message // .runtime_turn.final_message_text // .runtime_turn.final_message_artifact_id // .runtime_turn.final_artifact_id // ""' "$artifact" 2>/dev/null || echo "")"
+
+  if ! is_positive_integer "$pending_start" || ! is_positive_integer "$pending_end" || [[ "$pending_start" -gt "$pending_end" ]]; then
+    printf 'session-loop event cursor window evidence incomplete'
+    return 0
+  fi
+  if ! is_nonnegative_integer "$processed_before" || ! is_nonnegative_integer "$processed_after" || [[ "$processed_after" -lt "$processed_before" || "$processed_after" -lt "$pending_end" ]]; then
+    printf 'processed event cursor sequence evidence incomplete'
+    return 0
+  fi
+  if [[ -z "$original_thread_id" || -z "$resumed_thread_id" || "$original_thread_id" != "$resumed_thread_id" ]]; then
+    printf 'thread lineage id evidence incomplete'
+    return 0
+  fi
+  if [[ -z "$active_worker_lease_id" || -z "$stale_worker_lease_id" || "$active_worker_lease_id" == "$stale_worker_lease_id" || -z "$stale_rejection_reason" ]]; then
+    printf 'lease fencing id evidence incomplete'
+    return 0
+  fi
+  if [[ -z "$runtime_turn_id" || -z "$final_message_evidence" ]]; then
+    printf 'runtime turn final message detail evidence incomplete'
+    return 0
+  fi
+
+  return 1
+}
+
 kms_rotation_detail_count() {
   jq -r '[
     (
@@ -772,6 +830,7 @@ artifact_contract_issue() {
     local stale_worker_rejected
     local runtime_turn_completed
     local final_message_preserved
+    local detail_issue
 
     status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_id="$(jq -r '.target.id // .target.cluster_id // .target.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
@@ -787,6 +846,11 @@ artifact_contract_issue() {
     stale_worker_rejected="$(jq -r '.lease_fencing.stale_worker_rejected // false' "$artifact" 2>/dev/null || echo "false")"
     runtime_turn_completed="$(jq -r '.runtime_turn.completed // false' "$artifact" 2>/dev/null || echo "false")"
     final_message_preserved="$(jq -r '.runtime_turn.final_message_preserved // false' "$artifact" 2>/dev/null || echo "false")"
+    detail_issue=""
+    if detail_issue="$(managed_session_detail_issue "$artifact")"; then
+      printf '%s' "$detail_issue"
+      return 0
+    fi
 
     if ! [[ "$status" == "validated" || "$status" == "completed" || "$status" == "ready" ]]; then
       printf 'status=%s' "$status"

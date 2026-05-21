@@ -1985,6 +1985,16 @@ if ! grep -q "managed-session runtime target id" scripts/verify-stage2-evidence-
   exit 1
 fi
 
+if ! grep -q "managed_session_detail_issue" scripts/managed-session-runtime-evidence-gate.sh || ! grep -q "pending_event_seq_start" scripts/managed-session-runtime-evidence-gate.sh || ! grep -q "processed_event_seq_before_restart" scripts/managed-session-runtime-evidence-gate.sh; then
+  echo "Managed-session runtime evidence gate must require structured cursor, lineage, lease, and final-message details" >&2
+  exit 1
+fi
+
+if ! grep -q "managed_session_detail_issue" scripts/stage2-completion-audit-gate.sh || ! grep -q "managed_session_detail_issue" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 audit and archive verifier must reject managed-session evidence without structured restart/resume details" >&2
+  exit 1
+fi
+
 if ! grep -q "missing managed-session processed cursor evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject managed-session restart/resume evidence without processed cursor preservation" >&2
   exit 1
