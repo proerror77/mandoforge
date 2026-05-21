@@ -247,6 +247,18 @@ policy_due_run_scan_detail_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+policy_rollout_step_detail_count() {
+  jq -r '[
+    .response.controller_execution.steps[]?
+    | select(
+        type == "object"
+        and ((.name // .step // .kind // .action // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 normalize_kms_kind() {
   printf '%s' "$1" | tr '[:upper:]-' '[:lower:]_'
 }
@@ -1078,6 +1090,7 @@ artifact_contract_issue() {
     local policy_store_id
     local deployment_id
     local step_count
+    local step_detail_count
     local invalid_step_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -1092,6 +1105,7 @@ artifact_contract_issue() {
     policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$artifact" 2>/dev/null || echo "")"
     deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
     step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+    step_detail_count="$(policy_rollout_step_detail_count "$artifact")"
     invalid_step_count="$(jq -r '[.response.controller_execution.steps[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$evidence_status" != "captured" ]]; then
@@ -1144,6 +1158,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
       printf 'step_count=%s' "$step_count"
+      return 0
+    fi
+    if [[ ! "$step_detail_count" =~ ^[0-9]+$ || "$step_detail_count" -lt "$step_count" ]]; then
+      printf 'step_detail_count=%s step_count=%s' "$step_detail_count" "$step_count"
       return 0
     fi
     if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then

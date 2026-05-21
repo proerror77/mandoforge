@@ -194,8 +194,9 @@ external-controller boundary, and runs due-rollout supervision evidence into
 controller is required, configured, validated, fresh, identifies a production
 policy-controller target, confirms a production policy store plus rollback
 support, reports production policy store and deployment ids, emits audited
-orchestration steps, and is paired with captured due-run evidence that scanned
-at least one policy revision and recorded `checked_at`. The matching in-cluster template
+orchestration steps with step names, passed/validated/completed status, and
+audit id, trace id, run id, or timestamp detail, and is paired with captured
+due-run evidence that scanned at least one policy revision and recorded `checked_at`. The matching in-cluster template
 is `deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml`, which
 persists its output under the Stage 2 production evidence PVC.
 
