@@ -286,6 +286,7 @@ check_finance() {
   require_value MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_TOKEN "$label"
   require_production_url FINANCE_EXPORT_DELIVERY_OBSERVER_URL "$label"
   require_no_whiskey_url FINANCE_EXPORT_DELIVERY_OBSERVER_URL "$label"
+  require_value FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN "$label"
   require_true RUN_STAGE2_FINANCE_CONTROLLERS "$label"
   require_true RUN_STAGE2_FINANCE_EXPORT "$label"
 }

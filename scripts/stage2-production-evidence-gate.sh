@@ -13,6 +13,7 @@ VERIFY_VALIDATION_COVERAGE="${VERIFY_STAGE2_VALIDATION_COVERAGE:-0}"
 RUN_COMPLETION_AUDIT="${RUN_STAGE2_COMPLETION_AUDIT:-1}"
 MAX_EVIDENCE_AGE_HOURS="${STAGE2_EVIDENCE_MAX_AGE_HOURS:-24}"
 FINANCE_DELIVERY_OBSERVER_URL="${FINANCE_EXPORT_DELIVERY_OBSERVER_URL:-}"
+FINANCE_DELIVERY_OBSERVER_TOKEN="${FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN:-}"
 PRODUCTION_CLUSTER_ID="${MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID:-}"
 TENANT_DEPLOYMENT_ID="${MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID:-}"
 POLICY_CONTROLLER_ID="${MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID:-}"
@@ -34,6 +35,12 @@ auth_headers=(
 
 if [[ -n "$SCHEDULER_TOKEN" ]]; then
   auth_headers+=(-H "x-mandoforge-scheduler-token: $SCHEDULER_TOKEN")
+fi
+
+finance_observer_headers=(
+)
+if [[ -n "$FINANCE_DELIVERY_OBSERVER_TOKEN" ]]; then
+  finance_observer_headers+=(-H "authorization: Bearer $FINANCE_DELIVERY_OBSERVER_TOKEN")
 fi
 
 slugify() {
@@ -176,7 +183,7 @@ capture_finance_delivery_observer_validation() {
   local http_status
   response_body="$(mktemp)"
 
-  http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "$observer_url")"
+  http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "${finance_observer_headers[@]}" "$observer_url")"
   if [[ "$http_status" != 2* ]]; then
     rm -f "$response_body"
     return 0

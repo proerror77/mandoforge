@@ -1695,18 +1695,23 @@ if ! grep -q "true ERP/accounting system identity" scripts/stage2-completion-aud
   exit 1
 fi
 
-if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" deploy/stage2-evidence/stage2-production-controllers.env.example; then
-  echo "Stage 2 controller env template must include finance export delivery observer URL" >&2
+if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" deploy/stage2-evidence/stage2-production-controllers.env.example || ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN" deploy/stage2-evidence/stage2-production-controllers.env.example; then
+  echo "Stage 2 controller env template must include finance export delivery observer URL and token" >&2
   exit 1
 fi
 
-if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" deploy/stage2-evidence/stage2-controller-env-secret.example.yaml; then
-  echo "Stage 2 controller secret template must include finance export delivery observer URL" >&2
+if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" deploy/stage2-evidence/stage2-controller-env-secret.example.yaml || ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN" deploy/stage2-evidence/stage2-controller-env-secret.example.yaml; then
+  echo "Stage 2 controller secret template must include finance export delivery observer URL and token" >&2
   exit 1
 fi
 
-if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" "$finance_script"; then
-  echo "finance evidence script must support export delivery observer evidence" >&2
+if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" "$finance_script" || ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN" "$finance_script"; then
+  echo "finance evidence script must support authenticated export delivery observer evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must support authenticated finance export delivery observer evidence" >&2
   exit 1
 fi
 

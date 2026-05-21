@@ -118,6 +118,8 @@ required_template_vars=(
   MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_REQUIRED
   MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL
   MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_TOKEN
+  FINANCE_EXPORT_DELIVERY_OBSERVER_URL
+  FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN
   RUN_STAGE2_FINANCE_CONTROLLERS
   RUN_STAGE2_FINANCE_EXPORT
 )
@@ -203,8 +205,8 @@ if ! grep -q "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED" "$producti
   exit 1
 fi
 
-if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" "$production_preflight_script"; then
-  echo "Stage 2 production evidence preflight must require finance ERP observer evidence" >&2
+if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" "$production_preflight_script" || ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must require authenticated finance ERP observer evidence" >&2
   exit 1
 fi
 

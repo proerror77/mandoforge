@@ -9,6 +9,7 @@ ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_FINANCE_CONTROLLERS="${RUN_STAGE2_FINANCE_CONTROLLERS:-1}"
 RUN_FINANCE_EXPORT="${RUN_STAGE2_FINANCE_EXPORT:-1}"
 DELIVERY_OBSERVER_URL="${FINANCE_EXPORT_DELIVERY_OBSERVER_URL:-}"
+DELIVERY_OBSERVER_TOKEN="${FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN:-}"
 AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
 EXPECTED_FINANCE_SYSTEM_ID="${MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID:-}"
 
@@ -21,6 +22,12 @@ else
     -H "x-mandoforge-subject: $SUBJECT"
     -H "x-mandoforge-roles: $ROLES"
   )
+fi
+
+observer_headers=(
+)
+if [[ -n "$DELIVERY_OBSERVER_TOKEN" ]]; then
+  observer_headers+=(-H "authorization: Bearer $DELIVERY_OBSERVER_TOKEN")
 fi
 
 require_cmd() {
@@ -183,7 +190,7 @@ capture_delivery_observer() {
   local http_status
   response_body="$(mktemp)"
 
-  http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "$observer_url")"
+  http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "${observer_headers[@]}" "$observer_url")"
   if [[ "$http_status" != 2* ]]; then
     rm -f "$response_body"
     return 0
