@@ -555,8 +555,23 @@ if ! grep -q "routing_tenant_count" "$tenant_script"; then
   exit 1
 fi
 
+if ! grep -q "routing_tenant_sample_count" "$tenant_script"; then
+  echo "Tenant isolation evidence script must require audited tenant sample evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "routing_rls_table_count" "$tenant_script" || ! grep -q "routing_rls_forced_table_count" "$tenant_script"; then
+  echo "Tenant isolation evidence script must require RLS table and forced-RLS coverage counts" >&2
+  exit 1
+fi
+
 if ! grep -q "routing_cross_tenant_negative_tests" "$tenant_script"; then
   echo "Tenant isolation evidence script must require cross-tenant negative-test evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "routing_cross_tenant_negative_test_count" "$tenant_script"; then
+  echo "Tenant isolation evidence script must require audited cross-tenant negative-test counts" >&2
   exit 1
 fi
 
@@ -582,6 +597,11 @@ fi
 
 if ! grep -q "cross_tenant_negative_tests" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require tenant cross-tenant negative-test evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "tenant_sample_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "rls_forced_table_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "cross_tenant_negative_test_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require audited tenant samples, forced-RLS counts, and negative-test counts" >&2
   exit 1
 fi
 
@@ -1462,6 +1482,11 @@ fi
 
 if ! grep -q "tenant-routing-validation-evidence.json" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require tenant routing validation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "tenant_sample_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rls_forced_table_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cross_tenant_negative_test_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive verifier must require audited tenant samples, forced-RLS counts, and negative-test counts" >&2
   exit 1
 fi
 

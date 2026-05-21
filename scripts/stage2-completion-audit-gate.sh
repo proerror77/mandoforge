@@ -597,16 +597,24 @@ artifact_contract_issue() {
   if [[ "$req_id" == "tenant-routing" && "$artifact_name" == "tenant-routing-validation-evidence.json" ]]; then
     local target_kind
     local tenant_count
+    local tenant_sample_count
     local rls_enforced
+    local rls_table_count
+    local rls_forced_table_count
     local tenant_context_validated
     local cross_tenant_negative_tests
+    local cross_tenant_negative_test_count
     local deployment_id
 
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
     rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$artifact" 2>/dev/null || echo "false")"
+    rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
     tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$artifact" 2>/dev/null || echo "false")"
     cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$artifact" 2>/dev/null || echo "false")"
+    cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$artifact" 2>/dev/null || echo "0")"
     deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
 
     case "$target_kind" in
@@ -621,8 +629,20 @@ artifact_contract_issue() {
       printf 'tenant_count=%s is not multi-tenant' "$tenant_count"
       return 0
     fi
+    if [[ ! "$tenant_sample_count" =~ ^[0-9]+$ || "$tenant_sample_count" -lt 2 ]]; then
+      printf 'tenant_sample_count=%s is not an audited multi-tenant sample' "$tenant_sample_count"
+      return 0
+    fi
     if [[ "$rls_enforced" != "true" ]]; then
       printf 'rls_enforced=%s' "$rls_enforced"
+      return 0
+    fi
+    if [[ ! "$rls_table_count" =~ ^[0-9]+$ || "$rls_table_count" == "0" ]]; then
+      printf 'rls_table_count=%s' "$rls_table_count"
+      return 0
+    fi
+    if [[ ! "$rls_forced_table_count" =~ ^[0-9]+$ || ! "$rls_table_count" =~ ^[0-9]+$ || "$rls_forced_table_count" -lt "$rls_table_count" ]]; then
+      printf 'rls_forced_table_count=%s is less than rls_table_count=%s' "$rls_forced_table_count" "$rls_table_count"
       return 0
     fi
     if [[ "$tenant_context_validated" != "true" ]]; then
@@ -631,6 +651,10 @@ artifact_contract_issue() {
     fi
     if [[ "$cross_tenant_negative_tests" != "true" ]]; then
       printf 'cross_tenant_negative_tests=%s' "$cross_tenant_negative_tests"
+      return 0
+    fi
+    if [[ ! "$cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_count" == "0" ]]; then
+      printf 'cross_tenant_negative_test_count=%s' "$cross_tenant_negative_test_count"
       return 0
     fi
     if ! is_production_identity "$deployment_id"; then

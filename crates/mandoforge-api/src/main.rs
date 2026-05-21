@@ -15837,11 +15837,28 @@ where
         "deployment_id": body.get("deployment_id").and_then(Value::as_str),
         "environment": body.get("environment").and_then(Value::as_str),
         "tenant_count": body.get("tenant_count").and_then(Value::as_u64),
+        "tenant_samples": body
+            .get("tenant_samples")
+            .or_else(|| body.get("tenant_ids_sample"))
+            .cloned()
+            .unwrap_or_else(|| json!([])),
         "rls_enforced": body.get("rls_enforced").and_then(Value::as_bool),
+        "rls_table_count": body
+            .get("rls_table_count")
+            .or_else(|| body.get("rls_enabled_table_count"))
+            .and_then(Value::as_u64),
+        "rls_forced_table_count": body
+            .get("rls_forced_table_count")
+            .or_else(|| body.get("forced_rls_table_count"))
+            .and_then(Value::as_u64),
         "tenant_context_validated": body.get("tenant_context_validated").and_then(Value::as_bool),
         "cross_tenant_negative_tests": body
             .get("cross_tenant_negative_tests")
             .and_then(Value::as_bool),
+        "cross_tenant_negative_test_count": body
+            .get("cross_tenant_negative_test_count")
+            .or_else(|| body.get("negative_test_count"))
+            .and_then(Value::as_u64),
         "checks": body.get("checks").cloned().unwrap_or_else(|| json!([])),
     }))
 }
@@ -39929,9 +39946,13 @@ not json
         assert_eq!(execution["validation_id"], "tenant-routing-1");
         assert_eq!(execution["target_kind"], "multi_tenant_deployment");
         assert_eq!(execution["tenant_count"], 3);
+        assert_eq!(execution["tenant_samples"], json!(["tenant-a", "tenant-b"]));
         assert_eq!(execution["rls_enforced"], true);
+        assert_eq!(execution["rls_table_count"], 12);
+        assert_eq!(execution["rls_forced_table_count"], 12);
         assert_eq!(execution["tenant_context_validated"], true);
         assert_eq!(execution["cross_tenant_negative_tests"], true);
+        assert_eq!(execution["cross_tenant_negative_test_count"], 3);
         let payloads = payloads.lock().await;
         assert_eq!(payloads.len(), 1);
         assert_eq!(
@@ -52112,9 +52133,13 @@ not json
             "deployment_id": "tenant-routing-deployment-1",
             "environment": "enterprise-prod",
             "tenant_count": 3,
+            "tenant_samples": ["tenant-a", "tenant-b"],
             "rls_enforced": true,
+            "rls_table_count": 12,
+            "rls_forced_table_count": 12,
             "tenant_context_validated": true,
             "cross_tenant_negative_tests": true,
+            "cross_tenant_negative_test_count": 3,
             "checks": [
                 {"name": "runtime_routing", "status": "passed"},
                 {"name": "header_fail_closed", "status": "passed"},

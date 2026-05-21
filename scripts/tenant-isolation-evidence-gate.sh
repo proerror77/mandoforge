@@ -103,9 +103,13 @@ write_summary() {
   local routing_deployment_id
   local routing_environment
   local routing_tenant_count
+  local routing_tenant_sample_count
   local routing_rls_enforced
+  local routing_rls_table_count
+  local routing_rls_forced_table_count
   local routing_tenant_context_validated
   local routing_cross_tenant_negative_tests
+  local routing_cross_tenant_negative_test_count
   local rls_enabled
   local rls_forced
   local tenant_context
@@ -124,9 +128,13 @@ write_summary() {
   routing_deployment_id=""
   routing_environment="unknown"
   routing_tenant_count="0"
+  routing_tenant_sample_count="0"
   routing_rls_enforced="false"
+  routing_rls_table_count="0"
+  routing_rls_forced_table_count="0"
   routing_tenant_context_validated="false"
   routing_cross_tenant_negative_tests="false"
+  routing_cross_tenant_negative_test_count="0"
   if [[ -s "$validation_evidence_file" ]]; then
     routing_validation_evidence_status="$(jq -r '.status // "unknown"' "$validation_evidence_file")"
     routing_validation_status="$(jq -r '.response.status // "unknown"' "$validation_evidence_file")"
@@ -134,9 +142,13 @@ write_summary() {
     routing_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$validation_evidence_file")"
     routing_environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$validation_evidence_file")"
     routing_tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$validation_evidence_file")"
+    routing_tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$validation_evidence_file")"
     routing_rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$validation_evidence_file")"
+    routing_rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$validation_evidence_file")"
+    routing_rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$validation_evidence_file")"
     routing_tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$validation_evidence_file")"
     routing_cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$validation_evidence_file")"
+    routing_cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$validation_evidence_file")"
   fi
   rls_enabled="$(jq -r '.rls.enabled // false' "$readiness_file")"
   rls_forced="$(jq -r '.rls.forced // false' "$readiness_file")"
@@ -165,13 +177,25 @@ write_summary() {
   if ! has_multiple_tenants "$routing_tenant_count"; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! has_multiple_tenants "$routing_tenant_sample_count"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$routing_rls_enforced" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_rls_table_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$routing_rls_forced_table_count" =~ ^[0-9]+$ || ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_rls_forced_table_count" -lt "$routing_rls_table_count" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ "$routing_tenant_context_validated" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ "$routing_cross_tenant_negative_tests" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$routing_cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$routing_cross_tenant_negative_test_count" == "0" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
 
@@ -189,9 +213,13 @@ write_summary() {
     echo "routing_deployment_id=$routing_deployment_id"
     echo "routing_environment=$routing_environment"
     echo "routing_tenant_count=$routing_tenant_count"
+    echo "routing_tenant_sample_count=$routing_tenant_sample_count"
     echo "routing_rls_enforced=$routing_rls_enforced"
+    echo "routing_rls_table_count=$routing_rls_table_count"
+    echo "routing_rls_forced_table_count=$routing_rls_forced_table_count"
     echo "routing_tenant_context_validated=$routing_tenant_context_validated"
     echo "routing_cross_tenant_negative_tests=$routing_cross_tenant_negative_tests"
+    echo "routing_cross_tenant_negative_test_count=$routing_cross_tenant_negative_test_count"
     echo "rls_enabled=$rls_enabled"
     echo "rls_forced=$rls_forced"
     echo "tenant_context_configured=$tenant_context"
@@ -224,14 +252,26 @@ write_summary() {
     if ! has_multiple_tenants "$routing_tenant_count"; then
       echo "- tenant routing controller did not report multiple tenants: tenant_count=$routing_tenant_count"
     fi
+    if ! has_multiple_tenants "$routing_tenant_sample_count"; then
+      echo "- tenant routing controller did not report at least two audited tenant samples: sample_count=$routing_tenant_sample_count"
+    fi
     if [[ "$routing_rls_enforced" != "true" ]]; then
       echo "- tenant routing controller did not confirm RLS enforcement"
+    fi
+    if [[ ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_rls_table_count" == "0" ]]; then
+      echo "- tenant routing controller did not report RLS table coverage"
+    fi
+    if [[ ! "$routing_rls_forced_table_count" =~ ^[0-9]+$ || ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_rls_forced_table_count" -lt "$routing_rls_table_count" ]]; then
+      echo "- tenant routing controller did not confirm forced RLS for every reported table: forced=$routing_rls_forced_table_count total=$routing_rls_table_count"
     fi
     if [[ "$routing_tenant_context_validated" != "true" ]]; then
       echo "- tenant routing controller did not confirm tenant context propagation"
     fi
     if [[ "$routing_cross_tenant_negative_tests" != "true" ]]; then
       echo "- tenant routing controller did not confirm cross-tenant negative tests"
+    fi
+    if [[ ! "$routing_cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$routing_cross_tenant_negative_test_count" == "0" ]]; then
+      echo "- tenant routing controller did not report any audited cross-tenant negative test count"
     fi
     if [[ "$rls_enabled" != "true" || "$rls_forced" != "true" || "$tenant_context" != "true" ]]; then
       echo "- RLS is not fully enabled, forced, and tenant-context configured"

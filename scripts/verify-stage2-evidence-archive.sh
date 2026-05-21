@@ -227,15 +227,23 @@ artifact_issue() {
     tenant-routing-validation-evidence.json)
       local target_kind
       local tenant_count
+      local tenant_sample_count
       local rls_enforced
+      local rls_table_count
+      local rls_forced_table_count
       local tenant_context_validated
       local cross_tenant_negative_tests
+      local cross_tenant_negative_test_count
       local deployment_id
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
       tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$path")"
+      tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$path")"
       rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$path")"
+      rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$path")"
+      rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$path")"
       tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$path")"
       cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$path")"
+      cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$path")"
       deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$path")"
       if ! is_multi_tenant_target_kind "$target_kind"; then
         printf '%s target_kind=%s is not broader multi-tenant' "$relative_path" "$target_kind"
@@ -245,8 +253,24 @@ artifact_issue() {
         printf '%s tenant_count=%s is not multi-tenant' "$relative_path" "$tenant_count"
         return 0
       fi
+      if [[ ! "$tenant_sample_count" =~ ^[0-9]+$ || "$tenant_sample_count" -lt 2 ]]; then
+        printf '%s tenant_sample_count=%s is not an audited multi-tenant sample' "$relative_path" "$tenant_sample_count"
+        return 0
+      fi
       if [[ "$rls_enforced" != "true" || "$tenant_context_validated" != "true" || "$cross_tenant_negative_tests" != "true" ]]; then
         printf '%s tenant/RLS negative-test evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if [[ ! "$rls_table_count" =~ ^[0-9]+$ || "$rls_table_count" == "0" ]]; then
+        printf '%s rls_table_count=%s' "$relative_path" "$rls_table_count"
+        return 0
+      fi
+      if [[ ! "$rls_forced_table_count" =~ ^[0-9]+$ || ! "$rls_table_count" =~ ^[0-9]+$ || "$rls_forced_table_count" -lt "$rls_table_count" ]]; then
+        printf '%s rls_forced_table_count=%s is less than rls_table_count=%s' "$relative_path" "$rls_forced_table_count" "$rls_table_count"
+        return 0
+      fi
+      if [[ ! "$cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_count" == "0" ]]; then
+        printf '%s cross_tenant_negative_test_count=%s' "$relative_path" "$cross_tenant_negative_test_count"
         return 0
       fi
       if ! is_production_identity_value "$deployment_id"; then
@@ -886,9 +910,13 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
+      "tenant_samples": ["tenant-a", "tenant-b"],
       "rls_enforced": true,
+      "rls_table_count": 12,
+      "rls_forced_table_count": 12,
       "tenant_context_validated": true,
-      "cross_tenant_negative_tests": true
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 3
     }
   }
 }

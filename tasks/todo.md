@@ -210,7 +210,7 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [x] Run provider gate, rollout, and rollback evidence against the real DeepSeek provider deployment target on Whiskey.
 - [x] Run approval notification delivery evidence against a real Feishu/Lark IM target.
 - [x] Run finance close, export delivery, and reconciliation evidence against a real Feishu Drive export target.
-- [ ] Run tenant routing evidence against a broader real multi-tenant deployment with RLS enabled, forced, and tenant context configured beyond the current Whiskey tenant-routed pilot.
+- [ ] Run tenant routing evidence against a broader real multi-tenant deployment with RLS enabled, forced for every reported RLS table, tenant context configured, at least two audited tenant samples, and a nonzero audited cross-tenant negative-test count beyond the current Whiskey tenant-routed pilot.
 - [ ] Run policy rollout orchestration against a real production policy controller target instead of the current Whiskey pilot controller.
 - [ ] Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend instead of the current Whiskey pilot KMS/Vault boundary.
 - [x] Promote the `whiskey-docs` connector from authenticated private GitHub repo contents to a broader Lark docs/wiki or other enterprise knowledge target.
