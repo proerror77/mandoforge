@@ -1543,6 +1543,57 @@ JSON
 }
 JSON
 
+  cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "validation_result": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "replacement_scope": "cluster",
+      "replacement_pods_healthy": true,
+      "checked_pod_count": 0
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-sidecar-pod-count-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-sidecar-pod-count-negative.out 2>/tmp/mandoforge-stage2-archive-sidecar-pod-count-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected zero sidecar checked Pod count to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "validation_result": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "replacement_scope": "cluster",
+      "replacement_pods_healthy": true,
+      "checked_pod_count": 1
+    }
+  }
+}
+JSON
+
   cat >"$tmpdir/evidence/finance-export-delivery-observer.json" <<'JSON'
 {
   "status": "ok",
