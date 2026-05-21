@@ -10,7 +10,7 @@ use crate::{
     MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
     ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
     SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Team, TenantInvitation,
-    ToolCall, UsageRollup, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    ToolCall, UsageRollup, WorkItem, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
@@ -600,6 +600,26 @@ pub(crate) fn project_from_row(row: PgRow) -> Result<Project, AppError> {
         name: row.try_get("name")?,
         slug: row.try_get("slug")?,
         created_at: row.try_get("created_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn work_item_from_row(row: PgRow) -> Result<WorkItem, AppError> {
+    Ok(WorkItem {
+        id: row.try_get("id")?,
+        organization_id: row.try_get("organization_id")?,
+        team_id: row.try_get("team_id")?,
+        project_id: row.try_get("project_id")?,
+        title: row.try_get("title")?,
+        description: row.try_get("description")?,
+        source: row.try_get("source")?,
+        source_url: row.try_get("source_url")?,
+        status: row.try_get("status")?,
+        priority: row.try_get("priority")?,
+        assignee: row.try_get("assignee")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
         archived_at: row.try_get("archived_at")?,
     })
 }

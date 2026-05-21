@@ -3626,6 +3626,50 @@ struct CreateProject {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkItem {
+    id: Uuid,
+    organization_id: Option<Uuid>,
+    team_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    title: String,
+    description: Option<String>,
+    source: String,
+    source_url: Option<String>,
+    status: String,
+    priority: String,
+    assignee: Option<String>,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkItem {
+    #[serde(default)]
+    organization_id: Option<Uuid>,
+    #[serde(default)]
+    team_id: Option<Uuid>,
+    #[serde(default)]
+    project_id: Option<Uuid>,
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default = "default_work_item_source")]
+    source: String,
+    #[serde(default)]
+    source_url: Option<String>,
+    #[serde(default = "default_work_item_status")]
+    status: String,
+    #[serde(default = "default_work_item_priority")]
+    priority: String,
+    #[serde(default)]
+    assignee: Option<String>,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Membership {
     id: Uuid,
     user_id: String,
@@ -5092,6 +5136,10 @@ fn build_router(state: AppState) -> Router {
             patch(update_project).delete(delete_project),
         )
         .route("/api/projects/{id}/archive", post(archive_project))
+        .route(
+            "/api/work-items",
+            get(list_work_items).post(create_work_item),
+        )
         .route(
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
@@ -16660,6 +16708,58 @@ async fn delete_project(
         ))
         .await?;
     Ok(Json(project))
+}
+
+async fn list_work_items(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkItem>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "work_items",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_work_items().await?))
+}
+
+async fn create_work_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateWorkItem>,
+) -> Result<Json<WorkItem>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::SessionsWrite,
+        resource_type: "work_item".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    let work_item = state.create_work_item(input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "work_item.created",
+            "work_item",
+            Some(work_item.id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": work_item.organization_id,
+                "team_id": work_item.team_id,
+                "project_id": work_item.project_id,
+                "title": work_item.title,
+                "source": work_item.source,
+                "status": work_item.status,
+                "priority": work_item.priority
+            }),
+        ))
+        .await?;
+    Ok(Json(work_item))
 }
 
 async fn list_memberships(
@@ -38807,6 +38907,18 @@ fn default_agent_release_state() -> String {
 
 fn default_enabled_status() -> String {
     "enabled".to_string()
+}
+
+fn default_work_item_source() -> String {
+    "manual".to_string()
+}
+
+fn default_work_item_status() -> String {
+    "open".to_string()
+}
+
+fn default_work_item_priority() -> String {
+    "normal".to_string()
 }
 
 fn default_semantic_source_status() -> String {
@@ -63317,6 +63429,164 @@ not json
             error["error"]
                 .as_str()
                 .is_some_and(|message| message.contains("run_window_end"))
+        );
+    }
+
+    #[tokio::test]
+    async fn work_items_create_list_and_audit_collaboration_intake() {
+        let app = test_app().await;
+        let payload = json!({
+            "title": "Investigate managed session restart evidence",
+            "description": "Convert operator request into a tracked collaboration object.",
+            "source": "github",
+            "source_url": "https://github.com/proerror77/mandoforge/issues/agent-os-runtime",
+            "priority": "high",
+            "metadata": {"layer": "collaboration", "runtime_evidence_required": true}
+        });
+
+        let (status, created) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/work-items")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(payload.to_string()))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(created["title"], payload["title"]);
+        assert_eq!(created["source"], json!("github"));
+        assert_eq!(created["status"], json!("open"));
+        assert_eq!(created["priority"], json!("high"));
+        let work_item_id = created["id"].as_str().expect("work item id");
+
+        let work_items: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/work-items")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(work_items.iter().any(|item| {
+            item["id"] == json!(work_item_id)
+                && item["title"] == payload["title"]
+                && item["metadata"]["runtime_evidence_required"] == json!(true)
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "work_item.created"
+                && log.resource_type == "work_item"
+                && log.resource_id == Some(Uuid::parse_str(work_item_id).expect("uuid"))
+                && log.details["source"] == json!("github")
+                && log.details["subject"] == json!("admin-1")
+        }));
+    }
+
+    #[tokio::test]
+    async fn work_items_reject_mismatched_collaboration_scope() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+
+        let first_org: Organization = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/organizations",
+                json!({"name": "Collaboration Org One", "slug": "collab-one"}),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let second_org: Organization = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/organizations",
+                json!({"name": "Collaboration Org Two", "slug": "collab-two"}),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let second_team: Team = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/organizations/{}/teams", second_org.id),
+                json!({"name": "Other Runtime Team", "slug": "other-runtime"}),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let second_project: Project = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/teams/{}/projects", second_team.id),
+                json!({"name": "Other Kernel Pilot", "slug": "other-kernel"}),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "organization_id": first_org.id,
+                    "team_id": second_team.id,
+                    "title": "Mismatched team scope"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("team not found for organization"))
+        );
+
+        let (status, error) = request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "organization_id": first_org.id,
+                    "project_id": second_project.id,
+                    "title": "Mismatched project scope"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("project not found for organization"))
         );
     }
 

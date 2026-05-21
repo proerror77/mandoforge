@@ -36,6 +36,7 @@ bash -n scripts/smoke.sh
 bash -n scripts/stage1-demo.sh
 bash -n scripts/agent-os-core-evidence-gate.sh
 bash -n scripts/managed-session-restart-resume-core-gate.sh
+bash -n scripts/work-item-collaboration-evidence-gate.sh
 bash -n scripts/verify-runtime-adapter-turn-metadata.sh
 bash -n scripts/seed-platform-events.sh
 bash -n scripts/verify-postgres-sql-query.sh
@@ -105,6 +106,7 @@ if [[ "$RUN_LIVE" != "1" ]]; then
       "PATH=$FAKE_CODEX_DIR:$PATH"
 
     BASE_URL="$GATE_BASE_URL" MANDOFORGE_WORKSPACE_ROOT="$GATE_WORKSPACE_ROOT" ./scripts/agent-os-core-evidence-gate.sh
+    BASE_URL="$GATE_BASE_URL" EVIDENCE_DIR="$GATE_WORKSPACE_ROOT/work-item-collaboration-evidence" ./scripts/work-item-collaboration-evidence-gate.sh
     BASE_URL="$GATE_BASE_URL" ./scripts/verify-codex-exec-adapter.sh
   fi
 
@@ -145,6 +147,7 @@ fi
 curl -fsS "$BASE_URL/healthz" >/dev/null
 
 BASE_URL="$BASE_URL" MANDOFORGE_WORKSPACE_ROOT="$GATE_WORKSPACE_ROOT" ./scripts/agent-os-core-evidence-gate.sh
+BASE_URL="$BASE_URL" EVIDENCE_DIR="$GATE_WORKSPACE_ROOT/work-item-collaboration-evidence" ./scripts/work-item-collaboration-evidence-gate.sh
 if [[ "$START_LIVE_STACK" == "1" || "${RUN_CODEX_VERIFY:-0}" == "1" ]]; then
   BASE_URL="$BASE_URL" ./scripts/verify-codex-exec-adapter.sh
 fi

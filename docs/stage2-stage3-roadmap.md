@@ -55,6 +55,13 @@ The Managed Runtime Layer has a strong baseline:
 - Session-first UI shell for Agent, Environment, Event Stream, Blocking
   Actions, Artifacts, and Threads.
 
+The first Collaboration Layer slice is now in place:
+
+- `/api/work-items` creates and lists first-class WorkItems.
+- WorkItem creation persists source, priority, status, scope, and metadata.
+- WorkItem intake writes `work_item.created` audit evidence and is covered by
+  `scripts/work-item-collaboration-evidence-gate.sh`.
+
 ## Near-Term Priority
 
 The next product slice is to preserve Agent OS runtime correctness while moving

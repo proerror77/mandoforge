@@ -7,12 +7,13 @@ use crate::store_backend::StoreBackend;
 use crate::store_rows::{
     mcp_server_from_row, membership_from_row, organization_from_row, project_from_row,
     provider_access_from_row, provider_record_from_row, team_from_row, tenant_invitation_from_row,
+    work_item_from_row,
 };
 use crate::{
     AppError, AppState, CreateMcpServerRecord, CreateMembership, CreateOrganization, CreateProject,
-    CreateProviderAccess, CreateProviderRecord, CreateTeam, CreateTenantInvitation,
+    CreateProviderAccess, CreateProviderRecord, CreateTeam, CreateTenantInvitation, CreateWorkItem,
     McpServerRecord, Membership, Organization, Project, ProviderAccess, ProviderRecord, Role, Team,
-    TenantInvitation, UpdateMcpServerRecord, UpdateProviderAccess,
+    TenantInvitation, UpdateMcpServerRecord, UpdateProviderAccess, WorkItem,
 };
 
 impl AppState {
@@ -369,6 +370,129 @@ impl AppState {
                 project_from_row(row)
             }
         }
+    }
+
+    pub(crate) async fn list_work_items(&self) -> Result<Vec<WorkItem>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut work_items: Vec<_> =
+                    inner.read().await.work_items.values().cloned().collect();
+                work_items.sort_by_key(|work_item| work_item.created_at);
+                work_items.reverse();
+                Ok(work_items)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, organization_id, team_id, project_id, title, description, source,
+                            source_url, status, priority, assignee, metadata, created_at, updated_at,
+                            archived_at
+                     FROM work_items
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.current_tenant_id())
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(work_item_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_work_item(
+        &self,
+        input: CreateWorkItem,
+    ) -> Result<WorkItem, AppError> {
+        self.validate_work_item_scope(&input).await?;
+        let title = required_text(input.title, "work item title")?;
+        let source = required_text(input.source, "work item source")?;
+        let status = normalize_work_item_status(&input.status)?;
+        let priority = normalize_work_item_priority(&input.priority)?;
+        let now = Utc::now();
+        let work_item = WorkItem {
+            id: Uuid::new_v4(),
+            organization_id: input.organization_id,
+            team_id: input.team_id,
+            project_id: input.project_id,
+            title,
+            description: input.description.and_then(optional_text),
+            source,
+            source_url: input.source_url.and_then(optional_text),
+            status,
+            priority,
+            assignee: input.assignee.and_then(optional_text),
+            metadata: input.metadata,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .work_items
+                    .insert(work_item.id, work_item.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO work_items
+                         (id, tenant_id, organization_id, team_id, project_id, title, description,
+                          source, source_url, status, priority, assignee, metadata, created_at,
+                          updated_at, archived_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+                )
+                .bind(work_item.id)
+                .bind(self.current_tenant_id())
+                .bind(work_item.organization_id)
+                .bind(work_item.team_id)
+                .bind(work_item.project_id)
+                .bind(&work_item.title)
+                .bind(&work_item.description)
+                .bind(&work_item.source)
+                .bind(&work_item.source_url)
+                .bind(&work_item.status)
+                .bind(&work_item.priority)
+                .bind(&work_item.assignee)
+                .bind(&work_item.metadata)
+                .bind(work_item.created_at)
+                .bind(work_item.updated_at)
+                .bind(work_item.archived_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(work_item)
+    }
+
+    async fn validate_work_item_scope(&self, input: &CreateWorkItem) -> Result<(), AppError> {
+        if let Some(organization_id) = input.organization_id {
+            self.ensure_organization_exists(organization_id).await?;
+        }
+        if let Some(team_id) = input.team_id {
+            match input.organization_id {
+                Some(organization_id) => {
+                    self.ensure_team_belongs_to_organization(team_id, organization_id)
+                        .await?;
+                }
+                None => self.ensure_team_exists(team_id).await?,
+            }
+        }
+        if let Some(project_id) = input.project_id {
+            match input.team_id {
+                Some(team_id) => {
+                    self.ensure_project_belongs_to_team(project_id, team_id)
+                        .await?;
+                }
+                None => match input.organization_id {
+                    Some(organization_id) => {
+                        self.ensure_project_belongs_to_organization(project_id, organization_id)
+                            .await?;
+                    }
+                    None => self.ensure_project_exists(project_id).await?,
+                },
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn archive_organization(
@@ -1347,6 +1471,51 @@ impl AppState {
         }
     }
 
+    async fn ensure_team_belongs_to_organization(
+        &self,
+        team_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<(), AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                let belongs = store.teams.get(&team_id).is_some_and(|team| {
+                    team.organization_id == organization_id
+                        && team.archived_at.is_none()
+                        && store
+                            .organizations
+                            .get(&organization_id)
+                            .is_some_and(|organization| organization.archived_at.is_none())
+                });
+                if belongs {
+                    Ok(())
+                } else {
+                    Err(AppError::not_found("team not found for organization"))
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let exists: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1
+                     FROM teams t
+                     JOIN organizations o ON o.id = t.organization_id AND o.tenant_id = $1
+                     WHERE t.tenant_id = $1
+                       AND t.id = $2
+                       AND t.organization_id = $3
+                       AND t.archived_at IS NULL
+                       AND o.archived_at IS NULL",
+                )
+                .bind(self.current_tenant_id())
+                .bind(team_id)
+                .bind(organization_id)
+                .fetch_optional(pool)
+                .await?;
+                exists
+                    .map(|_| ())
+                    .ok_or_else(|| AppError::not_found("team not found for organization"))
+            }
+        }
+    }
+
     pub(crate) async fn ensure_project_belongs_to_team(
         &self,
         project_id: Uuid,
@@ -1393,6 +1562,99 @@ impl AppState {
                 exists
                     .map(|_| ())
                     .ok_or_else(|| AppError::not_found("project not found for team"))
+            }
+        }
+    }
+
+    async fn ensure_project_belongs_to_organization(
+        &self,
+        project_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<(), AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                let belongs = store.projects.get(&project_id).is_some_and(|project| {
+                    project.archived_at.is_none()
+                        && store.teams.get(&project.team_id).is_some_and(|team| {
+                            team.organization_id == organization_id
+                                && team.archived_at.is_none()
+                                && store
+                                    .organizations
+                                    .get(&organization_id)
+                                    .is_some_and(|organization| organization.archived_at.is_none())
+                        })
+                });
+                if belongs {
+                    Ok(())
+                } else {
+                    Err(AppError::not_found("project not found for organization"))
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let exists: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1
+                     FROM projects p
+                     JOIN teams t ON t.id = p.team_id AND t.tenant_id = $1
+                     JOIN organizations o ON o.id = t.organization_id AND o.tenant_id = $1
+                     WHERE p.tenant_id = $1
+                       AND p.id = $2
+                       AND t.organization_id = $3
+                       AND p.archived_at IS NULL
+                       AND t.archived_at IS NULL
+                       AND o.archived_at IS NULL",
+                )
+                .bind(self.current_tenant_id())
+                .bind(project_id)
+                .bind(organization_id)
+                .fetch_optional(pool)
+                .await?;
+                exists
+                    .map(|_| ())
+                    .ok_or_else(|| AppError::not_found("project not found for organization"))
+            }
+        }
+    }
+
+    async fn ensure_project_exists(&self, project_id: Uuid) -> Result<(), AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                let active = store.projects.get(&project_id).is_some_and(|project| {
+                    project.archived_at.is_none()
+                        && store.teams.get(&project.team_id).is_some_and(|team| {
+                            team.archived_at.is_none()
+                                && store
+                                    .organizations
+                                    .get(&team.organization_id)
+                                    .is_some_and(|organization| organization.archived_at.is_none())
+                        })
+                });
+                if active {
+                    Ok(())
+                } else {
+                    Err(AppError::not_found("active project not found"))
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let exists: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1
+                     FROM projects p
+                     JOIN teams t ON t.id = p.team_id AND t.tenant_id = $1
+                     JOIN organizations o ON o.id = t.organization_id AND o.tenant_id = $1
+                     WHERE p.tenant_id = $1
+                       AND p.id = $2
+                       AND p.archived_at IS NULL
+                       AND t.archived_at IS NULL
+                       AND o.archived_at IS NULL",
+                )
+                .bind(self.current_tenant_id())
+                .bind(project_id)
+                .fetch_optional(pool)
+                .await?;
+                exists
+                    .map(|_| ())
+                    .ok_or_else(|| AppError::not_found("active project not found"))
             }
         }
     }
@@ -2113,6 +2375,43 @@ impl AppState {
                 "MCP tool {tool_name} is not allowed for server {server_name}"
             )))
         }
+    }
+}
+
+fn required_text(value: String, field: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::bad_request(format!("{field} is required")));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn optional_text(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_work_item_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "open" | "in_progress" | "blocked" | "review" | "done" | "canceled" => Ok(normalized),
+        other => Err(AppError::bad_request(format!(
+            "unsupported work item status value: {other}"
+        ))),
+    }
+}
+
+fn normalize_work_item_priority(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "low" | "normal" | "high" | "urgent" => Ok(normalized),
+        other => Err(AppError::bad_request(format!(
+            "unsupported work item priority value: {other}"
+        ))),
     }
 }
 
