@@ -371,6 +371,79 @@ artifact_contract_issue() {
     fi
   fi
 
+  if [[ "$req_id" == "managed-session-restart-resume" && "$artifact_name" == "managed-session-restart-resume-evidence.json" ]]; then
+    local status
+    local target_id
+    local target_kind
+    local enqueue_event_persisted
+    local worker_drain_observed
+    local api_restarted
+    local worker_restarted
+    local session_state_resumed
+    local processed_event_seq_preserved
+    local thread_lineage_preserved
+    local finalization_fenced
+    local stale_worker_rejected
+    local runtime_turn_completed
+    local final_message_preserved
+
+    status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    target_id="$(jq -r '.target.id // .target.cluster_id // .target.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
+    target_kind="$(jq -r '.target.kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    enqueue_event_persisted="$(jq -r '.session_loop.enqueue_event_persisted // false' "$artifact" 2>/dev/null || echo "false")"
+    worker_drain_observed="$(jq -r '.session_loop.worker_drain_observed // false' "$artifact" 2>/dev/null || echo "false")"
+    api_restarted="$(jq -r '.restart.api_restarted // false' "$artifact" 2>/dev/null || echo "false")"
+    worker_restarted="$(jq -r '.restart.worker_restarted // false' "$artifact" 2>/dev/null || echo "false")"
+    session_state_resumed="$(jq -r '.resume.session_state_resumed // false' "$artifact" 2>/dev/null || echo "false")"
+    processed_event_seq_preserved="$(jq -r '.resume.processed_event_seq_preserved // false' "$artifact" 2>/dev/null || echo "false")"
+    thread_lineage_preserved="$(jq -r '.thread_lineage.preserved // false' "$artifact" 2>/dev/null || echo "false")"
+    finalization_fenced="$(jq -r '.lease_fencing.finalization_fenced // false' "$artifact" 2>/dev/null || echo "false")"
+    stale_worker_rejected="$(jq -r '.lease_fencing.stale_worker_rejected // false' "$artifact" 2>/dev/null || echo "false")"
+    runtime_turn_completed="$(jq -r '.runtime_turn.completed // false' "$artifact" 2>/dev/null || echo "false")"
+    final_message_preserved="$(jq -r '.runtime_turn.final_message_preserved // false' "$artifact" 2>/dev/null || echo "false")"
+
+    if ! [[ "$status" == "validated" || "$status" == "completed" || "$status" == "ready" ]]; then
+      printf 'status=%s' "$status"
+      return 0
+    fi
+    if ! is_production_identity "$target_id"; then
+      printf 'target_id=%s is pilot/mock/local' "${target_id:-<empty>}"
+      return 0
+    fi
+    case "$target_kind" in
+      managed_session_runtime|production_runtime_cluster|managed_agent_cluster)
+        ;;
+      *)
+        printf 'target_kind=%s is not managed-session production runtime' "$target_kind"
+        return 0
+        ;;
+    esac
+    if [[ "$enqueue_event_persisted" != "true" || "$worker_drain_observed" != "true" ]]; then
+      printf 'session-loop enqueue/drain evidence incomplete'
+      return 0
+    fi
+    if [[ "$api_restarted" != "true" || "$worker_restarted" != "true" ]]; then
+      printf 'API/worker restart evidence incomplete'
+      return 0
+    fi
+    if [[ "$session_state_resumed" != "true" || "$processed_event_seq_preserved" != "true" ]]; then
+      printf 'session resume or processed cursor evidence incomplete'
+      return 0
+    fi
+    if [[ "$thread_lineage_preserved" != "true" ]]; then
+      printf 'thread lineage evidence incomplete'
+      return 0
+    fi
+    if [[ "$finalization_fenced" != "true" || "$stale_worker_rejected" != "true" ]]; then
+      printf 'lease fencing evidence incomplete'
+      return 0
+    fi
+    if [[ "$runtime_turn_completed" != "true" || "$final_message_preserved" != "true" ]]; then
+      printf 'runtime turn finalization evidence incomplete'
+      return 0
+    fi
+  fi
+
   if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "worker-load-validation-evidence.json" ]]; then
     local target_kind
     local node_count

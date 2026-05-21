@@ -260,7 +260,7 @@ Remaining alignment work:
 | Runtime adapters preserve structured turn state. | Codex CLI JSONL is normalized into runtime turn records for resume handles, structured output schema metadata, timing, usage, collected items, tool calls, final messages, and final-message artifacts. Claude Code stream-json maps `system`, `assistant`, and terminal `result` events into the same turn-start, item, usage, final, and completed taxonomy. Codex App Server turn create/poll/finalize paths now emit the same turn-start, item, final, artifact, and completed records with thread/turn lineage. Session-loop cursors make resumable event windows explicit. | Extend the normalized turn metadata model to future hosted runtimes and richer App Server native event payloads. |
 | Streaming is live progress. | `/api/sessions/:id/stream` exposes session events through SSE, emits each event sequence as the SSE `id`, supports reconnect replay with `?after_seq=` or `Last-Event-ID`, and now keeps the connection subscribed to newly appended session events after the replay snapshot. | Add production-scale fan-out/backpressure evidence for many concurrent streams. |
 | Thread APIs show each participating session's thread view. | Primary and specialist thread rows are durable, and lifecycle events are emitted. | Ensure specialist sessions can enumerate their own child thread membership, not only receive thread lifecycle events. |
-| Production readiness proves restart/resume behavior. | Stage 2 evidence gates cover many external controllers and readiness endpoints. | Add managed-session runtime evidence: enqueue events, drain jobs, restart API/worker, prove resumed session state, thread lineage, and lease-fenced finalization. |
+| Production readiness proves restart/resume behavior. | Stage 2 evidence gates cover many external controllers and readiness endpoints, and the managed-session restart/resume evidence gate now requires enqueue, worker-drain, API/worker restart, resumed cursor state, thread lineage, runtime finalization, and lease-fencing proof. | Run that managed-session restart/resume gate against a real production target and archive the evidence with the rest of the Stage 2 production adoption bundle. |
 
 ## Revised Implementation Order
 
@@ -278,7 +278,8 @@ Remaining alignment work:
 7. Promote managed CLI execution from the `agent_cli.exec` compatibility facade
    into Environment-owned runtime adapters.
 8. Harden live event streaming and thread membership views.
-9. Add production evidence gates for managed-session restart and recovery.
+9. Run the managed-session restart and recovery evidence gate against a real
+   production target.
 10. Then expand Workflow Packs, scheduler, Codex traces, and production Remote
    Computer execution on top of the managed-session runtime.
 

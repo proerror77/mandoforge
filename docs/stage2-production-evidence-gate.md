@@ -22,7 +22,7 @@ MANDOFORGE_STAGE2_TEAM_ID=<team_uuid> \
 ./scripts/stage2-production-evidence-gate.sh
 ```
 
-This mode calls the bounded validation endpoints for tenant routing, provider deployment, policy rollout orchestration, Vault recovery, worker load validation, Remote Computer state sync, approval notifications, Codex App Server, agent release deployment/orchestration, observability collector deployment/cluster rollout, and team-scoped MCP connector rollout.
+This mode calls the bounded validation endpoints for tenant routing, provider deployment, policy rollout orchestration, Vault recovery, worker load validation, Remote Computer state sync, approval notifications, Codex App Server, managed-session restart/resume, agent release deployment/orchestration, observability collector deployment/cluster rollout, and team-scoped MCP connector rollout.
 
 Use `deploy/stage2-evidence/stage2-production-controllers.env.example` as the operator checklist for the external controller URLs, required flags, and opt-in validation switches. `deploy/stage2-evidence/stage2-controller-env-secret.example.yaml` shows the matching Kubernetes Secret shape, and `deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml` shows the strict production-validation Job that consumes that Secret through `envFrom`. These are templates only; real URLs and tokens belong in your secret manager, CI environment, or Kubernetes Secret generation pipeline.
 
@@ -193,6 +193,15 @@ RUN_STAGE2_CODEX_STALE_POLL=1 \
 
 That gate collects Codex App Server health, control-plane summary, run/trace inventory, deployment validation, ops validation, and optional stale-poll evidence into `.mandoforge/codex-app-server-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For a narrower managed-session restart/resume proof, run:
+
+```bash
+RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME=1 \
+./scripts/managed-session-runtime-evidence-gate.sh
+```
+
+That gate requires `MANAGED_SESSION_RESTART_RESUME_CONTROLLER_URL` or `MANAGED_SESSION_RESTART_RESUME_EVIDENCE_FILE` and writes `managed-session-restart-resume-evidence.json`. It fails closed unless the evidence proves a session event was enqueued, a worker drained the loop, API and worker processes restarted, the session resumed with its processed event cursor preserved, thread lineage survived, the runtime turn finalized with the final message intact, and stale-worker lease fencing rejected old finalization attempts. The matching in-cluster template is `deploy/stage2-evidence/managed-session-runtime-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+
 For a narrower MCP Gateway proof, run:
 
 ```bash
@@ -246,6 +255,7 @@ The script deliberately skips higher-impact production actions unless explicitly
 - `RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1` runs the Remote Computer sidecar recovery endpoint.
 - `RUN_STAGE2_APPROVAL_DELIVERY=1` runs approval notification delivery.
 - `RUN_STAGE2_CODEX_STALE_POLL=1` runs Codex App Server stale-run supervision.
+- `RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME=1` runs the managed-session restart/resume proof.
 - `RUN_STAGE2_MCP_DUE_RUN=1` runs MCP connector due-rollout supervision.
 - `RUN_STAGE2_MCP_ROLLBACK=1` runs MCP connector rollback proof.
 - `RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1` bootstraps the Stage 2 regression suite and runs due release automation.

@@ -6073,6 +6073,28 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             ],
         },
         Stage2EvidenceRequirementSpec {
+            id: "managed-session-restart-resume",
+            title: "Managed-session restart and resume proof",
+            production_target: "Real API and worker restart drill proving session-loop recovery, thread lineage, and lease fencing",
+            evidence_scripts: vec!["./scripts/managed-session-runtime-evidence-gate.sh"],
+            evidence_job_manifests: vec![
+                "deploy/stage2-evidence/managed-session-runtime-evidence-job.example.yaml",
+            ],
+            readiness_endpoints: vec!["/api/stage2/readiness"],
+            validation_endpoints: vec!["./scripts/managed-session-runtime-evidence-gate.sh"],
+            required_flags: vec![
+                "RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME=1",
+                "MANAGED_SESSION_RESTART_RESUME_CONTROLLER_URL=https://controller.example.com/mandoforge/managed-sessions/restart-resume/validate",
+            ],
+            required_artifacts: vec!["managed-session-restart-resume-evidence.json"],
+            required_evidence: vec![
+                "session event enqueue and worker drain are observed before restart",
+                "API and worker are restarted during the drill",
+                "resumed session state preserves processed event cursor, thread lineage, final runtime turn, and final message",
+                "lease fencing rejects stale workers and finalizes through the active lease only",
+            ],
+        },
+        Stage2EvidenceRequirementSpec {
             id: "eval-release",
             title: "Eval and release rollout orchestration",
             production_target: "Real production agent release target",
@@ -38791,7 +38813,7 @@ Stage 2 is not complete.
         assert_eq!(gaps[1], "Second controller-backed blocker.");
 
         let readiness = build_stage2_completion_readiness();
-        assert_eq!(readiness.evidence_requirements.len(), 12);
+        assert_eq!(readiness.evidence_requirements.len(), 13);
         assert_eq!(readiness.evidence_requirements[0].id, "tenant-routing");
         assert!(
             readiness.evidence_requirements[0]
@@ -38851,6 +38873,22 @@ Stage 2 is not complete.
             eval_release
                 .required_flags
                 .contains(&"RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1".to_string())
+        );
+
+        let managed_session = readiness
+            .evidence_requirements
+            .iter()
+            .find(|requirement| requirement.id == "managed-session-restart-resume")
+            .expect("missing managed-session restart/resume evidence requirement");
+        assert!(
+            managed_session
+                .required_flags
+                .contains(&"RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME=1".to_string())
+        );
+        assert!(
+            managed_session
+                .required_artifacts
+                .contains(&"managed-session-restart-resume-evidence.json".to_string())
         );
 
         let finance = readiness

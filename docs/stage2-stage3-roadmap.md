@@ -402,8 +402,8 @@ Acceptance criteria:
    queue binding.
 5. Harden live streaming, specialist thread membership, and lease-fenced job
    finalization.
-6. Add managed-session runtime evidence gates for API/worker restart and
-   recovery.
+6. Run the managed-session runtime evidence gate for API/worker restart and
+   recovery against a real production target.
 7. Then expand WorkflowPack, scheduler, Codex traces, and production Remote
    Computer execution on top of the managed-session runtime.
 

@@ -61,6 +61,9 @@ local_validation_endpoint_enabled() {
     ./scripts/verify-static-ui-assets.sh)
       [[ "${RUN_STAGE2_UI_STATIC_ASSETS:-0}" == "1" ]]
       ;;
+    ./scripts/managed-session-runtime-evidence-gate.sh)
+      [[ "${RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME:-0}" == "1" ]]
+      ;;
     *)
       return 0
       ;;
@@ -359,6 +362,12 @@ run_local_validations() {
     run_local_script_validation ./scripts/verify-static-ui-assets.sh
   else
     echo "skipping static UI asset validation; set RUN_STAGE2_UI_STATIC_ASSETS=1 to include browserless UI asset evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME:-0}" == "1" ]]; then
+    run_local_script_validation ./scripts/managed-session-runtime-evidence-gate.sh
+  else
+    echo "skipping managed-session restart/resume drill; set RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME=1 to include runtime recovery evidence" >&2
   fi
 }
 

@@ -400,6 +400,76 @@ artifact_issue() {
         return 0
       fi
       ;;
+    managed-session-restart-resume-evidence.json)
+      local status
+      local target_id
+      local target_kind
+      local enqueue_event_persisted
+      local worker_drain_observed
+      local api_restarted
+      local worker_restarted
+      local session_state_resumed
+      local processed_event_seq_preserved
+      local thread_lineage_preserved
+      local finalization_fenced
+      local stale_worker_rejected
+      local runtime_turn_completed
+      local final_message_preserved
+      status="$(jq -r '.status // "unknown"' "$path")"
+      target_id="$(jq -r '.target.id // .target.cluster_id // .target.deployment_id // ""' "$path")"
+      target_kind="$(jq -r '.target.kind // "unknown"' "$path")"
+      enqueue_event_persisted="$(jq -r '.session_loop.enqueue_event_persisted // false' "$path")"
+      worker_drain_observed="$(jq -r '.session_loop.worker_drain_observed // false' "$path")"
+      api_restarted="$(jq -r '.restart.api_restarted // false' "$path")"
+      worker_restarted="$(jq -r '.restart.worker_restarted // false' "$path")"
+      session_state_resumed="$(jq -r '.resume.session_state_resumed // false' "$path")"
+      processed_event_seq_preserved="$(jq -r '.resume.processed_event_seq_preserved // false' "$path")"
+      thread_lineage_preserved="$(jq -r '.thread_lineage.preserved // false' "$path")"
+      finalization_fenced="$(jq -r '.lease_fencing.finalization_fenced // false' "$path")"
+      stale_worker_rejected="$(jq -r '.lease_fencing.stale_worker_rejected // false' "$path")"
+      runtime_turn_completed="$(jq -r '.runtime_turn.completed // false' "$path")"
+      final_message_preserved="$(jq -r '.runtime_turn.final_message_preserved // false' "$path")"
+      if ! [[ "$status" == "validated" || "$status" == "completed" || "$status" == "ready" ]]; then
+        printf '%s status=%s' "$relative_path" "$status"
+        return 0
+      fi
+      if ! is_production_identity_value "$target_id"; then
+        printf '%s target_id=%s is a pilot/mock/local identity' "$relative_path" "${target_id:-<empty>}"
+        return 0
+      fi
+      case "$target_kind" in
+        managed_session_runtime|production_runtime_cluster|managed_agent_cluster)
+          ;;
+        *)
+          printf '%s target_kind=%s is not managed-session production runtime' "$relative_path" "$target_kind"
+          return 0
+          ;;
+      esac
+      if [[ "$enqueue_event_persisted" != "true" || "$worker_drain_observed" != "true" ]]; then
+        printf '%s session-loop enqueue/drain evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if [[ "$api_restarted" != "true" || "$worker_restarted" != "true" ]]; then
+        printf '%s API/worker restart evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if [[ "$session_state_resumed" != "true" || "$processed_event_seq_preserved" != "true" ]]; then
+        printf '%s session resume or processed cursor evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if [[ "$thread_lineage_preserved" != "true" ]]; then
+        printf '%s thread lineage evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if [[ "$finalization_fenced" != "true" || "$stale_worker_rejected" != "true" ]]; then
+        printf '%s lease fencing evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if [[ "$runtime_turn_completed" != "true" || "$final_message_preserved" != "true" ]]; then
+        printf '%s runtime turn finalization evidence incomplete' "$relative_path"
+        return 0
+      fi
+      ;;
   esac
 }
 
@@ -573,6 +643,7 @@ verify_semantic_artifacts() {
     vault-kms-rotation-evidence.json
     vault-kms-recovery-evidence.json
     finance-export-delivery-observer.json
+    managed-session-restart-resume-evidence.json
   )
 
   for artifact in "${required_artifacts[@]}"; do
@@ -856,6 +927,38 @@ JSON
     "delivery_mode": "netsuite",
     "system_id": "netsuite-prod-1",
     "delivery_count": 1
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/managed-session-restart-resume-evidence.json" <<'JSON'
+{
+  "status": "validated",
+  "target": {
+    "id": "managed-session-runtime-prod-1",
+    "kind": "managed_session_runtime"
+  },
+  "session_loop": {
+    "enqueue_event_persisted": true,
+    "worker_drain_observed": true
+  },
+  "restart": {
+    "api_restarted": true,
+    "worker_restarted": true
+  },
+  "resume": {
+    "session_state_resumed": true,
+    "processed_event_seq_preserved": true
+  },
+  "thread_lineage": {
+    "preserved": true
+  },
+  "lease_fencing": {
+    "finalization_fenced": true,
+    "stale_worker_rejected": true
+  },
+  "runtime_turn": {
+    "completed": true,
+    "final_message_preserved": true
   }
 }
 JSON

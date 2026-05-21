@@ -23,6 +23,7 @@ manifests=(
   deploy/stage2-evidence/scheduler-evidence-job.example.yaml
   deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml
   deploy/stage2-evidence/codex-app-server-evidence-job.example.yaml
+  deploy/stage2-evidence/managed-session-runtime-evidence-job.example.yaml
   deploy/stage2-evidence/mcp-gateway-evidence-job.example.yaml
   deploy/stage2-evidence/eval-release-evidence-job.example.yaml
   deploy/stage2-evidence/finance-evidence-job.example.yaml
@@ -39,6 +40,7 @@ worker_script="scripts/worker-evidence-gate.sh"
 scheduler_script="scripts/scheduler-evidence-gate.sh"
 policy_rollout_script="scripts/policy-rollout-evidence-gate.sh"
 codex_app_server_script="scripts/codex-app-server-evidence-gate.sh"
+managed_session_runtime_script="scripts/managed-session-runtime-evidence-gate.sh"
 mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
 eval_release_script="scripts/eval-release-evidence-gate.sh"
 finance_script="scripts/finance-evidence-gate.sh"
@@ -120,6 +122,11 @@ fi
 
 if [[ ! -x "$codex_app_server_script" ]]; then
   echo "missing Codex App Server evidence script: $codex_app_server_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$managed_session_runtime_script" ]]; then
+  echo "missing managed-session runtime evidence script: $managed_session_runtime_script" >&2
   exit 1
 fi
 
@@ -1480,6 +1487,21 @@ fi
 
 if ! grep -q "production-evidence-run.json" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require the run identity manifest" >&2
+  exit 1
+fi
+
+if ! grep -q "managed-session-restart-resume-evidence.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require managed-session restart/resume evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "managed-session-restart-resume-evidence.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must inspect managed-session restart/resume evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must know how to run managed-session restart/resume evidence" >&2
   exit 1
 fi
 
