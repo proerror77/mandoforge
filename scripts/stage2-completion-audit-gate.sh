@@ -1214,6 +1214,8 @@ artifact_contract_issue() {
     local rollout_scope
     local production_policy_store
     local rollback_supported
+    local rollback_evidence_id
+    local rollback_audit_evidence
     local policy_store_id
     local deployment_id
     local step_count
@@ -1229,6 +1231,8 @@ artifact_contract_issue() {
     rollout_scope="$(jq -r '.response.controller_execution.rollout_scope // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     production_policy_store="$(jq -r '.response.controller_execution.production_policy_store // false' "$artifact" 2>/dev/null || echo "false")"
     rollback_supported="$(jq -r '.response.controller_execution.rollback_supported // false' "$artifact" 2>/dev/null || echo "false")"
+    rollback_evidence_id="$(jq -r '.response.controller_execution.rollback_plan_id // .response.controller_execution.rollback_procedure_id // .response.controller_execution.rollback_strategy_id // .response.controller_execution.rollback_revision_id // .response.controller_execution.rollback_run_id // ""' "$artifact" 2>/dev/null || echo "")"
+    rollback_audit_evidence="$(jq -r '.response.controller_execution.rollback_audit_id // .response.controller_execution.rollback_trace_id // .response.controller_execution.rollback_run_audit_id // .response.controller_execution.rollback_checked_at // .response.controller_execution.rollback_validated_at // ""' "$artifact" 2>/dev/null || echo "")"
     policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$artifact" 2>/dev/null || echo "")"
     deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
     step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
@@ -1273,6 +1277,14 @@ artifact_contract_issue() {
     fi
     if [[ "$rollback_supported" != "true" ]]; then
       printf 'rollback_supported=%s' "$rollback_supported"
+      return 0
+    fi
+    if ! is_production_identity "$rollback_evidence_id"; then
+      printf 'rollback_evidence_id=%s is pilot/mock/local' "${rollback_evidence_id:-<empty>}"
+      return 0
+    fi
+    if [[ -z "$rollback_audit_evidence" ]]; then
+      printf 'rollback audit or trace evidence is missing'
       return 0
     fi
     if ! is_production_identity "$policy_store_id"; then

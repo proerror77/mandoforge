@@ -204,9 +204,11 @@ external-controller boundary, and runs due-rollout supervision evidence into
 `.mandoforge/policy-rollout-evidence/`. It fails closed unless the production
 controller is required, configured, validated, fresh, identifies a production
 policy-controller target, confirms a production policy store plus rollback
-support, reports production policy store and deployment ids, emits audited
-orchestration steps with step names, passed/validated/completed status, and
-audit id, trace id, run id, or timestamp detail, and is paired with captured
+support, reports production policy store and deployment ids, reports a
+production rollback plan/procedure/revision/run id with rollback audit or trace
+evidence, emits audited orchestration steps with step names,
+passed/validated/completed status, and audit id, trace id, run id, or timestamp
+detail, and is paired with captured
 due-run evidence that scanned at least one policy revision, recorded
 `checked_at`, and included audit id, trace id, run id, or timestamp detail on
 each scanned revision. The matching in-cluster template

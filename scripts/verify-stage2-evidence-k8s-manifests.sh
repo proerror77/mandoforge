@@ -1310,6 +1310,11 @@ if ! grep -q "production_policy_store" "$policy_rollout_script"; then
   exit 1
 fi
 
+if ! grep -q "controller_rollback_evidence_id" "$policy_rollout_script" || ! grep -q "controller_rollback_audit_evidence" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must require rollback evidence id and audit evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "controller_policy_store_id" "$policy_rollout_script" || ! grep -q "controller_deployment_id" "$policy_rollout_script" || ! grep -q "controller_step_count" "$policy_rollout_script"; then
   echo "Policy rollout evidence script must require policy store id, deployment id, and audited orchestration steps" >&2
   exit 1
@@ -1352,6 +1357,11 @@ fi
 
 if ! grep -q "policy_store_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "deployment_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "step_count" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must require policy store id, deployment id, and audited orchestration steps" >&2
+  exit 1
+fi
+
+if ! grep -q "rollback_evidence_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "rollback_audit_evidence" scripts/stage2-completion-audit-gate.sh || ! grep -q "rollback_evidence_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rollback_audit_evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Completion audit and archive verifier must require policy rollback evidence id and audit evidence" >&2
   exit 1
 fi
 
@@ -1977,6 +1987,16 @@ fi
 
 if ! grep -q "policy rollout without rollback support" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject policy rollout evidence without rollback support" >&2
+  exit 1
+fi
+
+if ! grep -q "missing policy rollback evidence id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject policy rollout evidence without rollback evidence id" >&2
+  exit 1
+fi
+
+if ! grep -q "missing policy rollback audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject policy rollout evidence without rollback audit evidence" >&2
   exit 1
 fi
 

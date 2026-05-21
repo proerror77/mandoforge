@@ -169,6 +169,8 @@ write_summary() {
   local controller_rollout_scope
   local controller_production_policy_store
   local controller_rollback_supported
+  local controller_rollback_evidence_id
+  local controller_rollback_audit_evidence
   local controller_policy_store_id
   local controller_deployment_id
   local controller_step_count
@@ -184,6 +186,8 @@ write_summary() {
   controller_rollout_scope="unknown"
   controller_production_policy_store="false"
   controller_rollback_supported="false"
+  controller_rollback_evidence_id=""
+  controller_rollback_audit_evidence=""
   controller_policy_store_id=""
   controller_deployment_id=""
   controller_step_count="0"
@@ -197,6 +201,8 @@ write_summary() {
     controller_rollout_scope="$(jq -r '.response.controller_execution.rollout_scope // "unknown"' "$validation_evidence_file")"
     controller_production_policy_store="$(jq -r '.response.controller_execution.production_policy_store // false' "$validation_evidence_file")"
     controller_rollback_supported="$(jq -r '.response.controller_execution.rollback_supported // false' "$validation_evidence_file")"
+    controller_rollback_evidence_id="$(jq -r '.response.controller_execution.rollback_plan_id // .response.controller_execution.rollback_procedure_id // .response.controller_execution.rollback_strategy_id // .response.controller_execution.rollback_revision_id // .response.controller_execution.rollback_run_id // ""' "$validation_evidence_file")"
+    controller_rollback_audit_evidence="$(jq -r '.response.controller_execution.rollback_audit_id // .response.controller_execution.rollback_trace_id // .response.controller_execution.rollback_run_audit_id // .response.controller_execution.rollback_checked_at // .response.controller_execution.rollback_validated_at // ""' "$validation_evidence_file")"
     controller_policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$validation_evidence_file")"
     controller_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$validation_evidence_file")"
     controller_step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$validation_evidence_file")"
@@ -265,6 +271,12 @@ write_summary() {
   if [[ "$controller_rollback_supported" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! is_production_identity "$controller_rollback_evidence_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ -z "$controller_rollback_audit_evidence" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if ! is_production_identity "$controller_policy_store_id"; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -325,6 +337,8 @@ write_summary() {
     echo "controller_rollout_scope=$controller_rollout_scope"
     echo "controller_production_policy_store=$controller_production_policy_store"
     echo "controller_rollback_supported=$controller_rollback_supported"
+    echo "controller_rollback_evidence_id=$controller_rollback_evidence_id"
+    echo "controller_rollback_audit_evidence=$controller_rollback_audit_evidence"
     echo "controller_policy_store_id=$controller_policy_store_id"
     echo "controller_deployment_id=$controller_deployment_id"
     echo "controller_step_count=$controller_step_count"
@@ -369,6 +383,12 @@ write_summary() {
     fi
     if [[ "$controller_rollback_supported" != "true" ]]; then
       echo "- policy rollout controller did not confirm rollback support"
+    fi
+    if ! is_production_identity "$controller_rollback_evidence_id"; then
+      echo "- policy rollout controller rollback evidence id is pilot/mock/local: ${controller_rollback_evidence_id:-<empty>}"
+    fi
+    if [[ -z "$controller_rollback_audit_evidence" ]]; then
+      echo "- policy rollout controller did not report rollback audit or trace evidence"
     fi
     if ! is_production_identity "$controller_policy_store_id"; then
       echo "- policy rollout controller policy_store_id is pilot/mock/local: ${controller_policy_store_id:-<empty>}"

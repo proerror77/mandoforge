@@ -840,6 +840,8 @@ artifact_issue() {
       local rollout_scope
       local production_policy_store
       local rollback_supported
+      local rollback_evidence_id
+      local rollback_audit_evidence
       local policy_store_id
       local deployment_id
       local step_count
@@ -854,6 +856,8 @@ artifact_issue() {
       rollout_scope="$(jq -r '.response.controller_execution.rollout_scope // "unknown"' "$path")"
       production_policy_store="$(jq -r '.response.controller_execution.production_policy_store // false' "$path")"
       rollback_supported="$(jq -r '.response.controller_execution.rollback_supported // false' "$path")"
+      rollback_evidence_id="$(jq -r '.response.controller_execution.rollback_plan_id // .response.controller_execution.rollback_procedure_id // .response.controller_execution.rollback_strategy_id // .response.controller_execution.rollback_revision_id // .response.controller_execution.rollback_run_id // ""' "$path")"
+      rollback_audit_evidence="$(jq -r '.response.controller_execution.rollback_audit_id // .response.controller_execution.rollback_trace_id // .response.controller_execution.rollback_run_audit_id // .response.controller_execution.rollback_checked_at // .response.controller_execution.rollback_validated_at // ""' "$path")"
       policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$path")"
       deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$path")"
       step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$path")"
@@ -889,6 +893,14 @@ artifact_issue() {
       fi
       if [[ "$production_policy_store" != "true" || "$rollback_supported" != "true" ]]; then
         printf '%s policy store or rollback evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if ! is_production_identity_value "$rollback_evidence_id"; then
+        printf '%s rollback_evidence_id=%s is a pilot/mock/local identity' "$relative_path" "${rollback_evidence_id:-<empty>}"
+        return 0
+      fi
+      if [[ -z "$rollback_audit_evidence" ]]; then
+        printf '%s rollback audit or trace evidence is missing' "$relative_path"
         return 0
       fi
       if ! is_production_identity_value "$policy_store_id"; then
@@ -1859,6 +1871,8 @@ JSON
       "rollout_scope": "global",
       "production_policy_store": true,
       "rollback_supported": true,
+      "rollback_plan_id": "policy-rollback-plan-prod-1",
+      "rollback_checked_at": "1970-01-01T00:00:00Z",
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
@@ -4274,6 +4288,91 @@ JSON
       "rollback_supported": true,
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
+      "steps": [
+        {"name": "due-run-supervision", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "staged-runtime-clear", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-rollback-id-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-rollback-id-negative.out 2>/tmp/mandoforge-stage2-archive-policy-rollback-id-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing policy rollback evidence id to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/policy-rollout-orchestration-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "production_policy_controller",
+      "environment": "production",
+      "controller_id": "policy-controller-prod-1",
+      "rollout_scope": "global",
+      "production_policy_store": true,
+      "rollback_supported": true,
+      "rollback_plan_id": "policy-rollback-plan-prod-1",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1",
+      "steps": [
+        {"name": "due-run-supervision", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "staged-runtime-clear", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-rollback-audit-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-rollback-audit-negative.out 2>/tmp/mandoforge-stage2-archive-policy-rollback-audit-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing policy rollback audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/policy-rollout-orchestration-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "production_policy_controller",
+      "environment": "production",
+      "controller_id": "policy-controller-prod-1",
+      "rollout_scope": "global",
+      "production_policy_store": true,
+      "rollback_supported": true,
+      "rollback_plan_id": "policy-rollback-plan-prod-1",
+      "rollback_checked_at": "1970-01-01T00:00:00Z",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1",
       "steps": []
     }
   }
@@ -4310,6 +4409,8 @@ JSON
       "rollout_scope": "global",
       "production_policy_store": true,
       "rollback_supported": true,
+      "rollback_plan_id": "policy-rollback-plan-prod-1",
+      "rollback_checked_at": "1970-01-01T00:00:00Z",
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
@@ -4350,6 +4451,8 @@ JSON
       "rollout_scope": "global",
       "production_policy_store": true,
       "rollback_supported": true,
+      "rollback_plan_id": "policy-rollback-plan-prod-1",
+      "rollback_checked_at": "1970-01-01T00:00:00Z",
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
@@ -4390,6 +4493,8 @@ JSON
       "rollout_scope": "global",
       "production_policy_store": true,
       "rollback_supported": true,
+      "rollback_plan_id": "policy-rollback-plan-prod-1",
+      "rollback_checked_at": "1970-01-01T00:00:00Z",
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
