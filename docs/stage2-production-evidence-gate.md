@@ -288,7 +288,8 @@ not satisfy the ERP proof. The observer must also report a stable system id thro
 delivery receipts must include unique receipt id, system id, posted/accepted status,
 current export file name and byte count,
 record count, and audit id, run id, or posting timestamp detail. The system id must
-match `MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID` in the all-up archive manifest. The
+match `MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID` when that direct gate target is set
+and the all-up archive manifest's finance target. The
 matching in-cluster template is
 `deploy/stage2-evidence/finance-evidence-job.example.yaml`, which explicitly
 enables controller and export proof and persists its output under the Stage 2

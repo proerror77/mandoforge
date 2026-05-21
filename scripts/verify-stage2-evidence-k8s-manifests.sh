@@ -2390,6 +2390,11 @@ if ! grep -q "unconfigured finance delivery target" scripts/verify-stage2-eviden
   exit 1
 fi
 
+if ! grep -q "mismatched finance ERP system id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject finance system id mismatches" >&2
+  exit 1
+fi
+
 if ! grep -q "finance-close-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "usage_finance_close_controller_executed" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must contract-check finance close controller evidence" >&2
   exit 1
@@ -2477,6 +2482,11 @@ fi
 
 if ! grep -q "finance_export_delivery_system_id" "$finance_script"; then
   echo "finance evidence script must record the ERP/accounting system id" >&2
+  exit 1
+fi
+
+if ! grep -q "expected_finance_system_id" "$finance_script" || ! grep -q "finance export delivery system id does not match expected target" "$finance_script"; then
+  echo "finance evidence script must bind observer receipts to the expected ERP/accounting system id" >&2
   exit 1
 fi
 
