@@ -90,6 +90,14 @@ is_distributed_state_backend() {
   esac
 }
 
+is_production_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$value" ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
+}
+
 write_summary() {
   local worker_dir="$EVIDENCE_DIR/worker"
   local remote_dir="$EVIDENCE_DIR/remote-computer"
@@ -198,10 +206,12 @@ write_summary() {
   [[ "$worker_validation_status" == "captured" ]] || blocked_count=$((blocked_count + 1))
   is_real_cluster_kind "$worker_target_kind" || blocked_count=$((blocked_count + 1))
   is_multi_node "$worker_node_count" || blocked_count=$((blocked_count + 1))
+  is_production_identity "$worker_cluster_id" || blocked_count=$((blocked_count + 1))
   [[ "$remote_state_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_controller_fresh" == "true" ]] || blocked_count=$((blocked_count + 1))
   is_real_cluster_kind "$state_target_kind" || blocked_count=$((blocked_count + 1))
   is_multi_node "$state_node_count" || blocked_count=$((blocked_count + 1))
+  is_production_identity "$state_cluster_id" || blocked_count=$((blocked_count + 1))
   is_distributed_state_backend "$state_backend" || blocked_count=$((blocked_count + 1))
   [[ "$same_cluster_target" == "true" ]] || blocked_count=$((blocked_count + 1))
   [[ "$runner_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
@@ -211,6 +221,7 @@ write_summary() {
     [[ "$sidecar_validation_status" == "validated" ]] || blocked_count=$((blocked_count + 1))
     is_real_cluster_kind "$sidecar_target_kind" || blocked_count=$((blocked_count + 1))
     is_multi_node "$sidecar_node_count" || blocked_count=$((blocked_count + 1))
+    is_production_identity "$sidecar_cluster_id" || blocked_count=$((blocked_count + 1))
     [[ "$sidecar_replacement_scope" == "cluster" ]] || blocked_count=$((blocked_count + 1))
   fi
 
@@ -330,14 +341,17 @@ write_summary() {
     echo "real_cluster_blocking_reasons:"
     is_real_cluster_kind "$worker_target_kind" || echo "- worker load validation target is not a real cluster kind: $worker_target_kind"
     is_multi_node "$worker_node_count" || echo "- worker load validation did not report a multi-node cluster: node_count=$worker_node_count"
+    is_production_identity "$worker_cluster_id" || echo "- worker load validation cluster id is pilot/mock/local: ${worker_cluster_id:-<empty>}"
     is_real_cluster_kind "$state_target_kind" || echo "- Remote Computer state-sync target is not a real cluster kind: $state_target_kind"
     is_multi_node "$state_node_count" || echo "- Remote Computer state-sync did not report a multi-node cluster: node_count=$state_node_count"
+    is_production_identity "$state_cluster_id" || echo "- Remote Computer state-sync cluster id is pilot/mock/local: ${state_cluster_id:-<empty>}"
     is_distributed_state_backend "$state_backend" || echo "- Remote Computer state backend is not a supported distributed filesystem: $state_backend"
     [[ "$same_cluster_target" == "true" ]] || echo "- worker, state-sync, and sidecar evidence do not share the same cluster id"
     if [[ "$RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" == "1" ]]; then
       [[ "$sidecar_validation_status" == "validated" ]] || echo "- sidecar replacement validation controller did not validate replacement: $sidecar_validation_status"
       is_real_cluster_kind "$sidecar_target_kind" || echo "- sidecar replacement target is not a real cluster kind: $sidecar_target_kind"
       is_multi_node "$sidecar_node_count" || echo "- sidecar replacement did not report a multi-node cluster: node_count=$sidecar_node_count"
+      is_production_identity "$sidecar_cluster_id" || echo "- sidecar replacement cluster id is pilot/mock/local: ${sidecar_cluster_id:-<empty>}"
       [[ "$sidecar_replacement_scope" == "cluster" ]] || echo "- sidecar replacement scope is not cluster-wide: $sidecar_replacement_scope"
     fi
     jq -r '"evidence_dir=\(.evidence_dir)"' "$summary_json"

@@ -30,6 +30,21 @@ require_cmd() {
   fi
 }
 
+is_production_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$value" ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
+}
+
+is_finance_system_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  is_production_identity "$value" || return 1
+  [[ ! "$value" =~ (^|[./:_-])(feishu|lark|drive|file|artifact)([./:_-]|$) ]] || return 1
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -283,6 +298,8 @@ write_summary() {
   esac
   if [[ -z "$export_delivery_system_id" ]]; then
     blocked_count="$((blocked_count + 1))"
+  elif ! is_finance_system_identity "$export_delivery_system_id"; then
+    blocked_count="$((blocked_count + 1))"
   elif [[ -n "$EXPECTED_FINANCE_SYSTEM_ID" && "$export_delivery_system_id" != "$EXPECTED_FINANCE_SYSTEM_ID" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -379,6 +396,8 @@ write_summary() {
     esac
     if [[ -z "$export_delivery_system_id" ]]; then
       echo "- finance export delivery observer did not report an ERP/accounting system id"
+    elif ! is_finance_system_identity "$export_delivery_system_id"; then
+      echo "- finance export delivery system id is not a true ERP/accounting system identity: $export_delivery_system_id"
     elif [[ -n "$EXPECTED_FINANCE_SYSTEM_ID" && "$export_delivery_system_id" != "$EXPECTED_FINANCE_SYSTEM_ID" ]]; then
       echo "- finance export delivery system id does not match expected target: expected=$EXPECTED_FINANCE_SYSTEM_ID actual=$export_delivery_system_id"
     fi

@@ -63,6 +63,14 @@ is_production_rollout_scope() {
   esac
 }
 
+is_production_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$value" ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -193,6 +201,9 @@ write_summary() {
   if [[ -z "$controller_id" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! is_production_identity "$controller_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if ! is_production_rollout_scope "$controller_rollout_scope"; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -266,6 +277,9 @@ write_summary() {
     fi
     if [[ -z "$controller_id" ]]; then
       echo "- policy rollout controller did not report a controller_id"
+    fi
+    if ! is_production_identity "$controller_id"; then
+      echo "- policy rollout controller id is pilot/mock/local: ${controller_id:-<empty>}"
     fi
     if ! is_production_rollout_scope "$controller_rollout_scope"; then
       echo "- policy rollout controller scope is not production-grade: $controller_rollout_scope"

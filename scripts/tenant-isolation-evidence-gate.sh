@@ -43,6 +43,14 @@ has_multiple_tenants() {
   [[ "$value" =~ ^[0-9]+$ && "$value" -ge 2 ]]
 }
 
+is_production_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$value" ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -92,6 +100,7 @@ write_summary() {
   local routing_validation_evidence_status
   local routing_validation_status
   local routing_target_kind
+  local routing_deployment_id
   local routing_environment
   local routing_tenant_count
   local routing_rls_enforced
@@ -112,6 +121,7 @@ write_summary() {
   routing_validation_evidence_status="missing"
   routing_validation_status="unknown"
   routing_target_kind="unknown"
+  routing_deployment_id=""
   routing_environment="unknown"
   routing_tenant_count="0"
   routing_rls_enforced="false"
@@ -121,6 +131,7 @@ write_summary() {
     routing_validation_evidence_status="$(jq -r '.status // "unknown"' "$validation_evidence_file")"
     routing_validation_status="$(jq -r '.response.status // "unknown"' "$validation_evidence_file")"
     routing_target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$validation_evidence_file")"
+    routing_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$validation_evidence_file")"
     routing_environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$validation_evidence_file")"
     routing_tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$validation_evidence_file")"
     routing_rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$validation_evidence_file")"
@@ -148,6 +159,9 @@ write_summary() {
   if ! is_multi_tenant_target_kind "$routing_target_kind"; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! is_production_identity "$routing_deployment_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if ! has_multiple_tenants "$routing_tenant_count"; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -172,6 +186,7 @@ write_summary() {
     echo "routing_validation_evidence_status=$routing_validation_evidence_status"
     echo "routing_validation_status=$routing_validation_status"
     echo "routing_target_kind=$routing_target_kind"
+    echo "routing_deployment_id=$routing_deployment_id"
     echo "routing_environment=$routing_environment"
     echo "routing_tenant_count=$routing_tenant_count"
     echo "routing_rls_enforced=$routing_rls_enforced"
@@ -202,6 +217,9 @@ write_summary() {
     fi
     if ! is_multi_tenant_target_kind "$routing_target_kind"; then
       echo "- tenant routing controller target is not a broader multi-tenant deployment: $routing_target_kind"
+    fi
+    if ! is_production_identity "$routing_deployment_id"; then
+      echo "- tenant routing deployment id is pilot/mock/local: ${routing_deployment_id:-<empty>}"
     fi
     if ! has_multiple_tenants "$routing_tenant_count"; then
       echo "- tenant routing controller did not report multiple tenants: tenant_count=$routing_tenant_count"

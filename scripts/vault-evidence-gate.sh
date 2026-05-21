@@ -69,6 +69,14 @@ is_production_environment() {
   esac
 }
 
+is_production_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$value" ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -232,6 +240,9 @@ write_summary() {
   if [[ -z "$rotation_backend_id" || -z "$rotation_key_id" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! is_production_identity "$rotation_backend_id" || ! is_production_identity "$rotation_key_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$recovery_controller_production_backend" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -242,6 +253,9 @@ write_summary() {
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ -z "$recovery_backend_id" || -z "$recovery_key_id" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_identity "$recovery_backend_id" || ! is_production_identity "$recovery_key_id"; then
     blocked_count="$((blocked_count + 1))"
   fi
 
@@ -316,6 +330,9 @@ write_summary() {
     if [[ -z "$rotation_backend_id" || -z "$rotation_key_id" ]]; then
       echo "- KMS rotation did not report backend_id and key_id"
     fi
+    if ! is_production_identity "$rotation_backend_id" || ! is_production_identity "$rotation_key_id"; then
+      echo "- KMS rotation backend_id or key_id is pilot/mock/local: backend_id=${rotation_backend_id:-<empty>} key_id=${rotation_key_id:-<empty>}"
+    fi
     echo
     echo "recovery_blocking_reasons:"
     jq -r '.production_recovery.blocking_reasons[]? | "- \(.)"' "$readiness_file"
@@ -342,6 +359,9 @@ write_summary() {
     fi
     if [[ -z "$recovery_backend_id" || -z "$recovery_key_id" ]]; then
       echo "- KMS recovery did not report backend_id and key_id"
+    fi
+    if ! is_production_identity "$recovery_backend_id" || ! is_production_identity "$recovery_key_id"; then
+      echo "- KMS recovery backend_id or key_id is pilot/mock/local: backend_id=${recovery_backend_id:-<empty>} key_id=${recovery_key_id:-<empty>}"
     fi
     if [[ "$recovery_controller_fresh" != "true" ]]; then
       echo "- KMS recovery controller evidence is not fresh"

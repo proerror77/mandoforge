@@ -458,6 +458,11 @@ if ! grep -q "same_cluster_target" "$worker_remote_computer_script"; then
   exit 1
 fi
 
+if ! grep -q "pilot/mock/local" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must reject pilot/mock/local cluster ids" >&2
+  exit 1
+fi
+
 if ! grep -q "is_real_cluster_kind" "$worker_remote_computer_script"; then
   echo "Worker/Remote Computer evidence script must distinguish real cluster evidence from local/single-host evidence" >&2
   exit 1
@@ -545,6 +550,11 @@ fi
 
 if ! grep -q "routing_cross_tenant_negative_tests" "$tenant_script"; then
   echo "Tenant isolation evidence script must require cross-tenant negative-test evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "routing_deployment_id" "$tenant_script" || ! grep -q "pilot/mock/local" "$tenant_script"; then
+  echo "Tenant isolation evidence script must reject pilot/mock/local tenant deployment ids" >&2
   exit 1
 fi
 
@@ -665,6 +675,11 @@ fi
 
 if ! grep -q "recovery_controller_production_backend" "$vault_script"; then
   echo "Vault evidence script must require production recovery backend identity" >&2
+  exit 1
+fi
+
+if ! grep -q "backend_id or key_id is pilot/mock/local" "$vault_script"; then
+  echo "Vault evidence script must reject pilot/mock/local backend and key ids" >&2
   exit 1
 fi
 
@@ -995,6 +1010,11 @@ fi
 
 if ! grep -q "latest_controller_production_target" "$policy_rollout_script"; then
   echo "Policy rollout evidence script must verify production controller target identity" >&2
+  exit 1
+fi
+
+if ! grep -q "controller id is pilot/mock/local" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must reject pilot/mock/local controller ids" >&2
   exit 1
 fi
 
@@ -1435,6 +1455,11 @@ fi
 
 if ! grep -q "finance_export_delivery_system_id" "$finance_script"; then
   echo "finance evidence script must record the ERP/accounting system id" >&2
+  exit 1
+fi
+
+if ! grep -q "true ERP/accounting system identity" "$finance_script"; then
+  echo "finance evidence script must reject artifact-store ERP/accounting system ids" >&2
   exit 1
 fi
 
