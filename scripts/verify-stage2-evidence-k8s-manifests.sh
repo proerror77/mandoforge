@@ -533,6 +533,36 @@ if ! grep -q "tenant-routing-validation-evidence.json" "$tenant_script"; then
   exit 1
 fi
 
+if ! grep -q "is_multi_tenant_target_kind" "$tenant_script"; then
+  echo "Tenant isolation evidence script must distinguish broader multi-tenant deployment targets" >&2
+  exit 1
+fi
+
+if ! grep -q "routing_tenant_count" "$tenant_script"; then
+  echo "Tenant isolation evidence script must require reported tenant count evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "routing_cross_tenant_negative_tests" "$tenant_script"; then
+  echo "Tenant isolation evidence script must require cross-tenant negative-test evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "routing_rls_enforced" "$tenant_script"; then
+  echo "Tenant isolation evidence script must require controller-confirmed RLS enforcement" >&2
+  exit 1
+fi
+
+if ! grep -q "target_kind=.*broader multi-tenant" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must reject tenant routing evidence without broader multi-tenant target identity" >&2
+  exit 1
+fi
+
+if ! grep -q "cross_tenant_negative_tests" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require tenant cross-tenant negative-test evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "tenant-routing-validation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit tenant routing validation evidence metadata" >&2
   exit 1

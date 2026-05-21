@@ -124,7 +124,12 @@ validation evidence into `.mandoforge/tenant-isolation-evidence/`, including an
 explicit `tenant-routing-validation-evidence.json` wrapper. It fails closed
 unless the target reports `tenant_routed` runtime mode, cross-tenant routing
 support, fresh controller evidence, validated routing evidence, and RLS enabled,
-forced, and tenant-context configured. The matching in-cluster template is
+forced, and tenant-context configured. The routing controller response must also
+identify a broader multi-tenant deployment (`multi_tenant_deployment`,
+`enterprise_multi_tenant`, or `production_multi_tenant`), report at least two
+tenants, and confirm RLS enforcement, tenant context propagation, and
+cross-tenant negative tests; a single-tenant or Whiskey-only pilot target is
+inventory evidence, not completion proof. The matching in-cluster template is
 `deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml`, which
 persists its output under the Stage 2 production evidence PVC.
 

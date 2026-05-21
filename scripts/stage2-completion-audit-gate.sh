@@ -212,6 +212,45 @@ artifact_contract_issue() {
         ;;
     esac
   fi
+
+  if [[ "$req_id" == "tenant-routing" && "$artifact_name" == "tenant-routing-validation-evidence.json" ]]; then
+    local target_kind
+    local tenant_count
+    local rls_enforced
+    local tenant_context_validated
+    local cross_tenant_negative_tests
+
+    target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$artifact" 2>/dev/null || echo "false")"
+    tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$artifact" 2>/dev/null || echo "false")"
+    cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$artifact" 2>/dev/null || echo "false")"
+
+    case "$target_kind" in
+      multi_tenant_deployment|enterprise_multi_tenant|production_multi_tenant)
+        ;;
+      *)
+        printf 'target_kind=%s is not broader multi-tenant' "$target_kind"
+        return 0
+        ;;
+    esac
+    if [[ ! "$tenant_count" =~ ^[0-9]+$ || "$tenant_count" -lt 2 ]]; then
+      printf 'tenant_count=%s is not multi-tenant' "$tenant_count"
+      return 0
+    fi
+    if [[ "$rls_enforced" != "true" ]]; then
+      printf 'rls_enforced=%s' "$rls_enforced"
+      return 0
+    fi
+    if [[ "$tenant_context_validated" != "true" ]]; then
+      printf 'tenant_context_validated=%s' "$tenant_context_validated"
+      return 0
+    fi
+    if [[ "$cross_tenant_negative_tests" != "true" ]]; then
+      printf 'cross_tenant_negative_tests=%s' "$cross_tenant_negative_tests"
+      return 0
+    fi
+  fi
 }
 
 require_cmd curl

@@ -26,6 +26,23 @@ require_cmd() {
   fi
 }
 
+is_multi_tenant_target_kind() {
+  local value="$1"
+  case "$value" in
+    multi_tenant_deployment|enterprise_multi_tenant|production_multi_tenant)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+has_multiple_tenants() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ && "$value" -ge 2 ]]
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -74,6 +91,12 @@ write_summary() {
   local routing_controller_age_hours
   local routing_validation_evidence_status
   local routing_validation_status
+  local routing_target_kind
+  local routing_environment
+  local routing_tenant_count
+  local routing_rls_enforced
+  local routing_tenant_context_validated
+  local routing_cross_tenant_negative_tests
   local rls_enabled
   local rls_forced
   local tenant_context
@@ -88,9 +111,21 @@ write_summary() {
   routing_controller_age_hours="$(jq -r '.production_routing.latest_controller_age_hours // "none"' "$readiness_file")"
   routing_validation_evidence_status="missing"
   routing_validation_status="unknown"
+  routing_target_kind="unknown"
+  routing_environment="unknown"
+  routing_tenant_count="0"
+  routing_rls_enforced="false"
+  routing_tenant_context_validated="false"
+  routing_cross_tenant_negative_tests="false"
   if [[ -s "$validation_evidence_file" ]]; then
     routing_validation_evidence_status="$(jq -r '.status // "unknown"' "$validation_evidence_file")"
     routing_validation_status="$(jq -r '.response.status // "unknown"' "$validation_evidence_file")"
+    routing_target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$validation_evidence_file")"
+    routing_environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$validation_evidence_file")"
+    routing_tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$validation_evidence_file")"
+    routing_rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$validation_evidence_file")"
+    routing_tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$validation_evidence_file")"
+    routing_cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$validation_evidence_file")"
   fi
   rls_enabled="$(jq -r '.rls.enabled // false' "$readiness_file")"
   rls_forced="$(jq -r '.rls.forced // false' "$readiness_file")"
@@ -110,6 +145,21 @@ write_summary() {
   if [[ "$routing_validation_status" != "validated" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! is_multi_tenant_target_kind "$routing_target_kind"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! has_multiple_tenants "$routing_tenant_count"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$routing_rls_enforced" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$routing_tenant_context_validated" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$routing_cross_tenant_negative_tests" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "tenant_isolation_status=$status"
@@ -121,6 +171,12 @@ write_summary() {
     echo "production_routing_controller_age_hours=$routing_controller_age_hours"
     echo "routing_validation_evidence_status=$routing_validation_evidence_status"
     echo "routing_validation_status=$routing_validation_status"
+    echo "routing_target_kind=$routing_target_kind"
+    echo "routing_environment=$routing_environment"
+    echo "routing_tenant_count=$routing_tenant_count"
+    echo "routing_rls_enforced=$routing_rls_enforced"
+    echo "routing_tenant_context_validated=$routing_tenant_context_validated"
+    echo "routing_cross_tenant_negative_tests=$routing_cross_tenant_negative_tests"
     echo "rls_enabled=$rls_enabled"
     echo "rls_forced=$rls_forced"
     echo "tenant_context_configured=$tenant_context"
@@ -143,6 +199,21 @@ write_summary() {
     fi
     if [[ "$routing_validation_status" != "validated" ]]; then
       echo "- tenant routing validation status is not validated: $routing_validation_status"
+    fi
+    if ! is_multi_tenant_target_kind "$routing_target_kind"; then
+      echo "- tenant routing controller target is not a broader multi-tenant deployment: $routing_target_kind"
+    fi
+    if ! has_multiple_tenants "$routing_tenant_count"; then
+      echo "- tenant routing controller did not report multiple tenants: tenant_count=$routing_tenant_count"
+    fi
+    if [[ "$routing_rls_enforced" != "true" ]]; then
+      echo "- tenant routing controller did not confirm RLS enforcement"
+    fi
+    if [[ "$routing_tenant_context_validated" != "true" ]]; then
+      echo "- tenant routing controller did not confirm tenant context propagation"
+    fi
+    if [[ "$routing_cross_tenant_negative_tests" != "true" ]]; then
+      echo "- tenant routing controller did not confirm cross-tenant negative tests"
     fi
     if [[ "$rls_enabled" != "true" || "$rls_forced" != "true" || "$tenant_context" != "true" ]]; then
       echo "- RLS is not fully enabled, forced, and tenant-context configured"

@@ -15776,6 +15776,15 @@ where
         "provider_status": controller_status,
         "validation_id": body.get("validation_id").and_then(Value::as_str),
         "message": body.get("message").and_then(Value::as_str),
+        "target_kind": body.get("target_kind").and_then(Value::as_str),
+        "deployment_id": body.get("deployment_id").and_then(Value::as_str),
+        "environment": body.get("environment").and_then(Value::as_str),
+        "tenant_count": body.get("tenant_count").and_then(Value::as_u64),
+        "rls_enforced": body.get("rls_enforced").and_then(Value::as_bool),
+        "tenant_context_validated": body.get("tenant_context_validated").and_then(Value::as_bool),
+        "cross_tenant_negative_tests": body
+            .get("cross_tenant_negative_tests")
+            .and_then(Value::as_bool),
         "checks": body.get("checks").cloned().unwrap_or_else(|| json!([])),
     }))
 }
@@ -39584,6 +39593,11 @@ not json
 
         assert_eq!(execution["status"], "validated");
         assert_eq!(execution["validation_id"], "tenant-routing-1");
+        assert_eq!(execution["target_kind"], "multi_tenant_deployment");
+        assert_eq!(execution["tenant_count"], 3);
+        assert_eq!(execution["rls_enforced"], true);
+        assert_eq!(execution["tenant_context_validated"], true);
+        assert_eq!(execution["cross_tenant_negative_tests"], true);
         let payloads = payloads.lock().await;
         assert_eq!(payloads.len(), 1);
         assert_eq!(
@@ -51638,6 +51652,13 @@ not json
             "status": "validated",
             "validation_id": "tenant-routing-1",
             "message": "tenant routing target validated",
+            "target_kind": "multi_tenant_deployment",
+            "deployment_id": "tenant-routing-deployment-1",
+            "environment": "enterprise-prod",
+            "tenant_count": 3,
+            "rls_enforced": true,
+            "tenant_context_validated": true,
+            "cross_tenant_negative_tests": true,
             "checks": [
                 {"name": "runtime_routing", "status": "passed"},
                 {"name": "header_fail_closed", "status": "passed"},
