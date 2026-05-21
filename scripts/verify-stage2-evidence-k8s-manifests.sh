@@ -858,6 +858,21 @@ if ! grep -q "RUN_STAGE2_POLICY_DUE_RUN" "$policy_rollout_script"; then
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_POLICY_DUE_RUN.*:-1" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must default to due-run evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_POLICY_DUE_RUN" deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml; then
+  echo "Policy rollout evidence Job must configure due-run evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q 'value: "1"' deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml; then
+  echo "Policy rollout evidence Job must enable due-run evidence capture" >&2
+  exit 1
+fi
+
 if ! grep -q "policy-rollout-due-run-evidence.json" "$policy_rollout_script"; then
   echo "Policy rollout evidence script must write explicit due-run evidence metadata" >&2
   exit 1
@@ -865,6 +880,16 @@ fi
 
 if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit policy rollout due-run evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "controller_required.*true" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must require a production controller target" >&2
+  exit 1
+fi
+
+if ! grep -q "latest_controller_validated" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must verify validated controller evidence" >&2
   exit 1
 fi
 

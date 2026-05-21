@@ -6,12 +6,19 @@ SUBJECT="${MANDOFORGE_STAGE2_GATE_SUBJECT:-policy-rollout-evidence-gate}"
 ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/policy-rollout-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
-RUN_POLICY_DUE_RUN="${RUN_STAGE2_POLICY_DUE_RUN:-0}"
+RUN_POLICY_DUE_RUN="${RUN_STAGE2_POLICY_DUE_RUN:-1}"
+AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
 
 auth_headers=(
-  -H "x-mandoforge-subject: $SUBJECT"
-  -H "x-mandoforge-roles: $ROLES"
 )
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -74,6 +81,7 @@ write_summary() {
   local controller_required
   local controller_configured
   local latest_controller_status
+  local latest_controller_validated
   local controller_fresh
   local controller_age_hours
   local blocked_count
@@ -100,9 +108,34 @@ write_summary() {
   controller_required="$(jq -r '.controller_required // false' "$readiness_file")"
   controller_configured="$(jq -r '.controller_configured // false' "$readiness_file")"
   latest_controller_status="$(jq -r '.latest_controller_status // "none"' "$readiness_file")"
+  latest_controller_validated="$(jq -r '.latest_controller_validated // false' "$readiness_file")"
   controller_fresh="$(jq -r '.controller_evidence_fresh // false' "$readiness_file")"
   controller_age_hours="$(jq -r '.latest_controller_age_hours // "none"' "$readiness_file")"
-  blocked_count="$(jq -r 'if .production_blocked == true then 1 else 0 end' "$readiness_file")"
+  blocked_count="$(jq -r '[
+      .production_blocked,
+      (.controller_required != true),
+      (.controller_configured != true),
+      (.latest_controller_validated != true),
+      (.controller_evidence_fresh != true),
+      (.due_run_fresh != true),
+      (.rollout_active == true),
+      ((.active_revision_id // null) == null)
+    ] | map(select(. == true)) | length' "$readiness_file")"
+  if [[ "$validation_evidence_status" != "captured" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$validation_status" != "validated" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$RUN_POLICY_DUE_RUN" != "1" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$due_run_evidence_status" != "captured" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$due_run_status" != "activated" && "$due_run_status" != "noop" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "policy_rollout_readiness_status=$readiness_status"
@@ -120,6 +153,7 @@ write_summary() {
     echo "controller_required=$controller_required"
     echo "controller_configured=$controller_configured"
     echo "latest_controller_status=$latest_controller_status"
+    echo "latest_controller_validated=$latest_controller_validated"
     echo "controller_evidence_fresh=$controller_fresh"
     echo "controller_age_hours=$controller_age_hours"
     echo "policy_due_run=$RUN_POLICY_DUE_RUN"
@@ -127,6 +161,30 @@ write_summary() {
     echo
     echo "blocking_reasons:"
     jq -r '.blocking_reasons[]? | "- \(.)"' "$readiness_file"
+    if [[ "$controller_required" != "true" ]]; then
+      echo "- policy rollout orchestration controller is not required by configuration"
+    fi
+    if [[ "$controller_configured" != "true" ]]; then
+      echo "- policy rollout orchestration controller is not configured"
+    fi
+    if [[ "$latest_controller_validated" != "true" ]]; then
+      echo "- policy rollout orchestration controller evidence is not validated"
+    fi
+    if [[ "$controller_fresh" != "true" ]]; then
+      echo "- policy rollout orchestration controller evidence is not fresh"
+    fi
+    if [[ "$validation_status" != "validated" ]]; then
+      echo "- policy rollout orchestration validation status is not validated: $validation_status"
+    fi
+    if [[ "$RUN_POLICY_DUE_RUN" != "1" ]]; then
+      echo "- policy due-run evidence capture is disabled"
+    fi
+    if [[ "$due_run_evidence_status" != "captured" ]]; then
+      echo "- policy due-run evidence was not captured"
+    fi
+    if [[ "$due_run_status" != "activated" && "$due_run_status" != "noop" ]]; then
+      echo "- policy due-run status is not activated or noop: $due_run_status"
+    fi
     echo
     echo "validation_issues:"
     if [[ -s "$validation_evidence_file" ]]; then

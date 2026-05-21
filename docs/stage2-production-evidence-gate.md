@@ -157,7 +157,13 @@ RUN_STAGE2_POLICY_DUE_RUN=1 \
 ./scripts/policy-rollout-evidence-gate.sh
 ```
 
-That gate collects policy rollout orchestration readiness, validates the external-controller boundary, and optionally runs due-rollout supervision evidence into `.mandoforge/policy-rollout-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects policy rollout orchestration readiness, validates the
+external-controller boundary, and runs due-rollout supervision evidence into
+`.mandoforge/policy-rollout-evidence/`. It fails closed unless the production
+controller is required, configured, validated, fresh, and paired with captured
+orchestration-validation plus due-run evidence. The matching in-cluster template
+is `deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml`, which
+persists its output under the Stage 2 production evidence PVC.
 
 For a narrower Codex App Server proof, run:
 

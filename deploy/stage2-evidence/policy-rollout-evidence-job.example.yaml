@@ -33,7 +33,7 @@ spec:
             - name: EVIDENCE_DIR
               value: /evidence/policy-rollout
             - name: RUN_STAGE2_POLICY_DUE_RUN
-              value: "0"
+              value: "1"
             - name: MANDOFORGE_STAGE2_GATE_SUBJECT
               valueFrom:
                 secretKeyRef:
