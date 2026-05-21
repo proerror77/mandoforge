@@ -45,6 +45,33 @@ is_finance_system_identity() {
   [[ ! "$value" =~ (^|[./:_-])(feishu|lark|drive|file|artifact)([./:_-]|$) ]] || return 1
 }
 
+finance_delivery_receipt_count() {
+  jq -r '[
+    (
+      .export_state.delivery_receipts[]?,
+      .export_state.erp_delivery_receipts[]?,
+      .export_state.accounting_receipts[]?,
+      .export_state.deliveries[]?,
+      .export_state.erp_batches[]?,
+      if (((.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id // "") | length) > 0) then
+        {
+          receipt_id: (.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id),
+          system_id: (.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id),
+          status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "delivered"),
+          record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0)
+        }
+      else empty end
+    )
+    | select(
+        type == "object"
+        and ((.receipt_id // .receipt // .batch_id // .erp_batch_id // .delivery_id // .posting_id // "") | length > 0)
+        and ((.system_id // .erp_system_id // .accounting_system_id // .target_id // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("delivered", "posted", "accepted", "completed", "reconciled", "validated"))
+        and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -181,6 +208,7 @@ write_summary() {
   local export_delivery_observer_status
   local export_delivery_mode
   local export_delivery_count
+  local export_delivery_receipt_count
   local export_delivery_file_token
   local export_delivery_file_url
   local export_delivery_file_name
@@ -220,6 +248,7 @@ write_summary() {
   reconciliation_run_status="not_run"
   export_delivery_observer_status="not_observed"
   export_delivery_mode="unknown"
+  export_delivery_receipt_count="0"
   export_delivery_file_token="none"
   export_delivery_file_url="none"
   export_delivery_file_name="none"
@@ -244,6 +273,7 @@ write_summary() {
     export_delivery_observer_status="$(jq -r '.status // "ok"' "$export_delivery_observer_file")"
     export_delivery_mode="$(jq -r '.export_state.delivery_mode // "unknown"' "$export_delivery_observer_file")"
     export_delivery_count="$(jq -r '.export_state.delivery_count // 0' "$export_delivery_observer_file")"
+    export_delivery_receipt_count="$(finance_delivery_receipt_count "$export_delivery_observer_file")"
     export_delivery_file_token="$(jq -r '.export_state.latest_file_token // "none"' "$export_delivery_observer_file")"
     export_delivery_file_url="$(jq -r '.export_state.latest_file_url // "none"' "$export_delivery_observer_file")"
     export_delivery_file_name="$(jq -r '.export_state.latest_file_name // "none"' "$export_delivery_observer_file")"
@@ -284,6 +314,9 @@ write_summary() {
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ "$export_delivery_observer_status" != "ok" || "$export_delivery_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$export_delivery_receipt_count" =~ ^[0-9]+$ || ! "$export_delivery_count" =~ ^[0-9]+$ || "$export_delivery_receipt_count" -lt "$export_delivery_count" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
   case "$export_delivery_mode" in
@@ -342,6 +375,7 @@ write_summary() {
     echo "finance_export_delivery_observer_status=$export_delivery_observer_status"
     echo "finance_export_delivery_mode=$export_delivery_mode"
     echo "finance_export_delivery_count=$export_delivery_count"
+    echo "finance_export_delivery_receipt_count=$export_delivery_receipt_count"
     echo "finance_export_delivery_file_token=$export_delivery_file_token"
     echo "finance_export_delivery_file_url=$export_delivery_file_url"
     echo "finance_export_delivery_file_name=$export_delivery_file_name"
@@ -383,6 +417,9 @@ write_summary() {
     fi
     if [[ "$export_delivery_observer_status" != "ok" || "$export_delivery_count" == "0" ]]; then
       echo "- finance export delivery observer did not confirm delivery"
+    fi
+    if [[ ! "$export_delivery_receipt_count" =~ ^[0-9]+$ || ! "$export_delivery_count" =~ ^[0-9]+$ || "$export_delivery_receipt_count" -lt "$export_delivery_count" ]]; then
+      echo "- finance export delivery observer did not report ERP/accounting receipt details for every delivery: receipt_count=$export_delivery_receipt_count delivery_count=$export_delivery_count"
     fi
     case "$export_delivery_mode" in
       accounting*|erp*|netsuite|quickbooks|xero|sap|oracle_erp)

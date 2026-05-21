@@ -2075,8 +2075,28 @@ if ! grep -q "finance_export_delivery_system_id" "$finance_script"; then
   exit 1
 fi
 
+if ! grep -q "finance_export_delivery_receipt_count" "$finance_script"; then
+  echo "finance evidence script must record ERP/accounting delivery receipt details" >&2
+  exit 1
+fi
+
 if ! grep -q "true ERP/accounting system identity" "$finance_script"; then
   echo "finance evidence script must reject artifact-store ERP/accounting system ids" >&2
+  exit 1
+fi
+
+if ! grep -q "delivery_receipt_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require ERP/accounting delivery receipt details" >&2
+  exit 1
+fi
+
+if ! grep -q "delivery_receipt_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require ERP/accounting delivery receipt details" >&2
+  exit 1
+fi
+
+if ! grep -q "missing finance delivery receipt evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject finance delivery without ERP/accounting receipt details" >&2
   exit 1
 fi
 

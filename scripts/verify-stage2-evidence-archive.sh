@@ -221,6 +221,33 @@ is_finance_system_identity_value() {
   [[ ! "$value" =~ (^|[./:_-])(feishu|lark|drive|file|artifact)([./:_-]|$) ]] || return 1
 }
 
+finance_delivery_receipt_count() {
+  jq -r '[
+    (
+      .export_state.delivery_receipts[]?,
+      .export_state.erp_delivery_receipts[]?,
+      .export_state.accounting_receipts[]?,
+      .export_state.deliveries[]?,
+      .export_state.erp_batches[]?,
+      if (((.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id // "") | length) > 0) then
+        {
+          receipt_id: (.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id),
+          system_id: (.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id),
+          status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "delivered"),
+          record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0)
+        }
+      else empty end
+    )
+    | select(
+        type == "object"
+        and ((.receipt_id // .receipt // .batch_id // .erp_batch_id // .delivery_id // .posting_id // "") | length > 0)
+        and ((.system_id // .erp_system_id // .accounting_system_id // .target_id // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("delivered", "posted", "accepted", "completed", "reconciled", "validated"))
+        and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
+      )
+  ] | length' "$1"
+}
+
 artifact_issue() {
   local root="$1"
   local relative_path="$2"
@@ -796,10 +823,12 @@ artifact_issue() {
       local status
       local delivery_mode
       local delivery_count
+      local delivery_receipt_count
       local system_id
       status="$(jq -r '.status // "unknown"' "$path")"
       delivery_mode="$(jq -r '.export_state.delivery_mode // "unknown"' "$path")"
       delivery_count="$(jq -r '.export_state.delivery_count // 0' "$path")"
+      delivery_receipt_count="$(finance_delivery_receipt_count "$path")"
       system_id="$(jq -r '.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // ""' "$path")"
       if [[ "$status" != "ok" ]]; then
         printf '%s observer_status=%s' "$relative_path" "$status"
@@ -807,6 +836,10 @@ artifact_issue() {
       fi
       if [[ ! "$delivery_count" =~ ^[0-9]+$ || "$delivery_count" == "0" ]]; then
         printf '%s delivery_count=%s' "$relative_path" "$delivery_count"
+        return 0
+      fi
+      if [[ ! "$delivery_receipt_count" =~ ^[0-9]+$ || "$delivery_receipt_count" -lt "$delivery_count" ]]; then
+        printf '%s delivery_receipt_count=%s delivery_count=%s' "$relative_path" "$delivery_receipt_count" "$delivery_count"
         return 0
       fi
       if ! is_accounting_or_erp_delivery_mode "$delivery_mode"; then
@@ -1841,7 +1874,10 @@ JSON
   "export_state": {
     "delivery_mode": "netsuite",
     "system_id": "netsuite-prod-1",
-    "delivery_count": 1
+    "delivery_count": 1,
+    "delivery_receipts": [
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "status": "posted", "record_count": 1}
+    ]
   }
 }
 JSON
@@ -2529,6 +2565,37 @@ JSON
     "delivery_mode": "netsuite",
     "system_id": "netsuite-prod-1",
     "delivery_count": 1
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-delivery-receipts-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-delivery-receipts.out 2>/tmp/mandoforge-stage2-archive-finance-delivery-receipts.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing finance delivery receipt evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-export-delivery-observer.json" <<'JSON'
+{
+  "status": "ok",
+  "export_state": {
+    "delivery_mode": "netsuite",
+    "system_id": "netsuite-prod-1",
+    "delivery_count": 1,
+    "delivery_receipts": [
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "status": "posted", "record_count": 1}
+    ]
   }
 }
 JSON
