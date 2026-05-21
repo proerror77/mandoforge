@@ -35,7 +35,7 @@ Do not commit real tokens, real production URLs, generated Secrets, or evidence 
 
 The controller matrix is the source of truth for Stage 2 production adoption wiring. Every row must either pass against a real target or remain listed in the residual adoption backlog.
 
-All declared target identities used by the strict all-up gate must name real production targets. The preflight, Secret render, and archive verifier reject Whiskey, pilot, mock, example, sample, demo, local, localhost, and loopback identities. Finance identities additionally reject Feishu/Lark/Drive/file/artifact targets because those prove artifact delivery, not accounting-system adoption.
+All declared target identities used by the strict all-up gate must name real production targets. The preflight, Secret render, completion audit, and archive verifier reject Whiskey, pilot, mock, example, sample, demo, local, localhost, and loopback identities. Finance identities additionally reject Feishu/Lark/Drive/file/artifact targets because those prove artifact delivery, not accounting-system adoption.
 
 | Adoption area | Controller env and opt-in flags | Focused gate | Required proof |
 | --- | --- | --- | --- |
@@ -135,7 +135,7 @@ All declared target identities used by the strict all-up gate must name real pro
    scripts/stage2-completion-audit-gate.sh
    ```
 
-   The strict production evidence gate writes this automatically under `$EVIDENCE_DIR/completion-audit/` when `RUN_STAGE2_COMPLETION_AUDIT=1`.
+   The strict production evidence gate writes this automatically under `$EVIDENCE_DIR/completion-audit/` when `RUN_STAGE2_COMPLETION_AUDIT=1`. The audit expects the same `production-evidence-run.json` target manifest as the archive verifier and fails if the tenant routing, policy rollout, Vault/KMS, worker/Remote Computer, or finance artifacts report a different production target.
 
 9. Archive the evidence PVC.
 
