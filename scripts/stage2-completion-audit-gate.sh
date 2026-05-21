@@ -791,6 +791,8 @@ artifact_contract_issue() {
   fi
 
   if [[ "$req_id" == "tenant-routing" && "$artifact_name" == "tenant-routing-validation-evidence.json" ]]; then
+    local evidence_status
+    local validation_status
     local target_kind
     local tenant_count
     local tenant_sample_count
@@ -802,6 +804,8 @@ artifact_contract_issue() {
     local cross_tenant_negative_test_count
     local deployment_id
 
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    validation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$artifact" 2>/dev/null || echo "0")"
     tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
@@ -813,6 +817,14 @@ artifact_contract_issue() {
     cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$artifact" 2>/dev/null || echo "0")"
     deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
 
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'tenant routing evidence_status=%s' "$evidence_status"
+      return 0
+    fi
+    if [[ "$validation_status" != "validated" ]]; then
+      printf 'tenant routing validation_status=%s' "$validation_status"
+      return 0
+    fi
     case "$target_kind" in
       multi_tenant_deployment|enterprise_multi_tenant|production_multi_tenant)
         ;;

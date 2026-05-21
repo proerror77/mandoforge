@@ -1610,8 +1610,18 @@ if ! grep -q "tenant-routing-validation-evidence.json" scripts/stage2-completion
   exit 1
 fi
 
+if ! grep -q "tenant routing evidence_status" scripts/stage2-completion-audit-gate.sh || ! grep -q "tenant routing validation_status" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require captured and validated tenant routing evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "tenant_sample_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rls_forced_table_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cross_tenant_negative_test_count" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive verifier must require audited tenant samples, forced-RLS counts, and negative-test counts" >&2
+  exit 1
+fi
+
+if ! grep -q "evidence_status=%s" scripts/verify-stage2-evidence-archive.sh || ! grep -q "validation_status=%s" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive verifier must require captured and validated tenant routing evidence" >&2
   exit 1
 fi
 

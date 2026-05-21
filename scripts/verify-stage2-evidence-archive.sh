@@ -273,6 +273,8 @@ artifact_issue() {
       fi
       ;;
     tenant-routing-validation-evidence.json)
+      local evidence_status
+      local validation_status
       local target_kind
       local tenant_count
       local tenant_sample_count
@@ -283,6 +285,8 @@ artifact_issue() {
       local cross_tenant_negative_tests
       local cross_tenant_negative_test_count
       local deployment_id
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
+      validation_status="$(jq -r '.response.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
       tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$path")"
       tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$path")"
@@ -293,6 +297,14 @@ artifact_issue() {
       cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$path")"
       cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$path")"
       deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
+      if [[ "$validation_status" != "validated" ]]; then
+        printf '%s validation_status=%s' "$relative_path" "$validation_status"
+        return 0
+      fi
       if ! is_multi_tenant_target_kind "$target_kind"; then
         printf '%s target_kind=%s is not broader multi-tenant' "$relative_path" "$target_kind"
         return 0
@@ -1150,7 +1162,9 @@ JSON
 JSON
   cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
+    "status": "validated",
     "controller_execution": {
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
