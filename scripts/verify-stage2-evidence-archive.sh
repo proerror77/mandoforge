@@ -1577,6 +1577,34 @@ JSON
   "export_state": {
     "delivery_mode": "netsuite",
     "system_id": "netsuite-prod-1",
+    "delivery_count": 0
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-zero-delivery.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-zero-delivery.out 2>/tmp/mandoforge-stage2-archive-finance-zero-delivery.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected zero finance delivery count to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-export-delivery-observer.json" <<'JSON'
+{
+  "status": "ok",
+  "export_state": {
+    "delivery_mode": "netsuite",
+    "system_id": "netsuite-prod-1",
     "delivery_count": 1
   }
 }

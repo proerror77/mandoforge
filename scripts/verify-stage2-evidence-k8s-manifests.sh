@@ -1840,6 +1840,11 @@ if ! grep -q "delivery_mode=.* is not accounting/ERP" scripts/verify-stage2-evid
   exit 1
 fi
 
+if ! grep -q "zero finance delivery count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject zero-count finance delivery evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "finance-close-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "usage_finance_close_controller_executed" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must contract-check finance close controller evidence" >&2
   exit 1
