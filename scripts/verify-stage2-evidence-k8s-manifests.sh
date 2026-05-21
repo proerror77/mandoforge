@@ -1710,6 +1710,11 @@ if ! grep -q "policy-rollout-orchestration-validation-evidence.json" scripts/ver
   exit 1
 fi
 
+if ! grep -q "policy rollout without rollback support" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject policy rollout evidence without rollback support" >&2
+  exit 1
+fi
+
 if ! grep -q "evidence_status=%s" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive verifier must require captured policy rollout artifacts" >&2
   exit 1
