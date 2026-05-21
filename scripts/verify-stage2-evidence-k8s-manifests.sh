@@ -1735,6 +1735,11 @@ if ! grep -q "policy rollout without rollback support" scripts/verify-stage2-evi
   exit 1
 fi
 
+if ! grep -q "zero policy due-run scan count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject policy due-run evidence without scanned revisions" >&2
+  exit 1
+fi
+
 if ! grep -q "evidence_status=%s" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive verifier must require captured policy rollout artifacts" >&2
   exit 1
