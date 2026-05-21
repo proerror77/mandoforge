@@ -2375,6 +2375,11 @@ if ! grep -q "finance_export_delivery_receipt_count" "$finance_script" || ! grep
   exit 1
 fi
 
+if ! grep -q "delivery_id: Uuid" crates/mandoforge-api/src/main.rs || ! grep -q "file_name: String" crates/mandoforge-api/src/main.rs || ! grep -q "export_bytes: usize" crates/mandoforge-api/src/main.rs || ! grep -q "record_count: usize" crates/mandoforge-api/src/main.rs; then
+  echo "Finance export delivery API must expose file and receipt binding fields for ERP/accounting evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "root_system_id" "$finance_script" || ! grep -q "root_system_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "root_system_id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Finance evidence gates must bind ERP/accounting delivery receipts to the observer system id" >&2
   exit 1

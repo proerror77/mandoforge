@@ -3338,7 +3338,11 @@ struct UsageFinanceExportDelivery {
     channel: String,
     scheduled: bool,
     target_configured: bool,
+    delivery_id: Uuid,
+    file_name: String,
     bytes: usize,
+    export_bytes: usize,
+    record_count: usize,
     provider_count: usize,
     budget_pressure_count: usize,
     rollup_count: usize,
@@ -27998,6 +28002,8 @@ async fn execute_usage_finance_export_delivery(
     subject: Option<&str>,
 ) -> Result<UsageFinanceExportDelivery, AppError> {
     let delivered_at = Utc::now();
+    let delivery_id = Uuid::new_v4();
+    let file_name = "mandoforge-usage-export.csv".to_string();
     if scheduled && !usage_finance_export_schedule_enabled() {
         return Ok(UsageFinanceExportDelivery {
             status: "disabled".to_string(),
@@ -28005,7 +28011,11 @@ async fn execute_usage_finance_export_delivery(
             channel: "webhook".to_string(),
             scheduled,
             target_configured: usage_finance_export_webhook_url().is_some(),
+            delivery_id,
+            file_name,
             bytes: 0,
+            export_bytes: 0,
+            record_count: 0,
             provider_count: 0,
             budget_pressure_count: 0,
             rollup_count: 0,
@@ -28027,7 +28037,11 @@ async fn execute_usage_finance_export_delivery(
         channel: "webhook".to_string(),
         scheduled,
         target_configured: webhook_url.is_some(),
+        delivery_id,
+        file_name: file_name.clone(),
         bytes: csv.len(),
+        export_bytes: csv.len(),
+        record_count: summary.by_provider.len() + trend.rollup_count,
         provider_count: summary.by_provider.len(),
         budget_pressure_count: trend.budget_pressure.pressure_count,
         rollup_count: trend.rollup_count,
@@ -28041,7 +28055,12 @@ async fn execute_usage_finance_export_delivery(
                 .post(&webhook_url)
                 .json(&json!({
                     "type": "mandoforge.usage_finance_export",
-                    "filename": "mandoforge-usage-export.csv",
+                    "delivery_id": delivery.delivery_id,
+                    "filename": delivery.file_name,
+                    "file_name": delivery.file_name,
+                    "export_bytes": delivery.export_bytes,
+                    "byte_count": delivery.export_bytes,
+                    "record_count": delivery.record_count,
                     "csv": csv,
                     "scheduled": scheduled,
                     "provider_count": summary.by_provider.len(),
@@ -28076,7 +28095,11 @@ async fn execute_usage_finance_export_delivery(
                 "delivered": delivery.delivered,
                 "scheduled": scheduled,
                 "target_configured": delivery.target_configured,
+                "delivery_id": delivery.delivery_id,
+                "file_name": delivery.file_name,
                 "bytes": delivery.bytes,
+                "export_bytes": delivery.export_bytes,
+                "record_count": delivery.record_count,
                 "provider_count": delivery.provider_count,
                 "budget_pressure_count": delivery.budget_pressure_count,
                 "rollup_count": delivery.rollup_count,
@@ -65042,6 +65065,13 @@ not json
             );
             assert_eq!(delivery.rollup_count, usage_trends.rollup_count);
             assert!(delivery.bytes > 0);
+            assert_ne!(delivery.delivery_id, Uuid::nil());
+            assert_eq!(delivery.file_name, "mandoforge-usage-export.csv");
+            assert_eq!(delivery.export_bytes, delivery.bytes);
+            assert_eq!(
+                delivery.record_count,
+                delivery.provider_count + delivery.rollup_count
+            );
         }
 
         let active_provider: ProviderRecord = request_json(
