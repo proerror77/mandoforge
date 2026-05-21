@@ -1830,6 +1830,11 @@ if ! grep -q "summary worker evidence cluster id" scripts/verify-stage2-evidence
   exit 1
 fi
 
+if ! grep -q "summary without shared cluster proof" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject combined worker/Remote Computer summaries without shared cluster proof" >&2
+  exit 1
+fi
+
 if ! grep -q "local Remote Computer state backend evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject local Remote Computer state backend evidence" >&2
   exit 1

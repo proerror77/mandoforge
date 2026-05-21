@@ -2836,6 +2836,44 @@ JSON
   "status": "ready",
   "production_blocked": false,
   "production_blocked_count": 0,
+  "same_cluster_target": false,
+  "worker": {
+    "cluster_id": "prod-cluster-1"
+  },
+  "remote_computer": {
+    "state_sync_cluster_id": "prod-cluster-1",
+    "sidecar_cluster_id": "prod-cluster-1",
+    "distributed_state_backend": "juicefs",
+    "state_claim": "mandoforge-remote-computer-state",
+    "checked_path_count": 6,
+    "replacement_pods_healthy": true,
+    "checked_pod_count": 1
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-summary-shared-cluster-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-summary-shared-cluster-negative.out 2>/tmp/mandoforge-stage2-archive-summary-shared-cluster-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected summary without shared cluster proof to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/worker-remote-computer/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "production_blocked": false,
+  "production_blocked_count": 0,
   "same_cluster_target": true,
   "worker": {
     "cluster_id": "prod-cluster-1"
