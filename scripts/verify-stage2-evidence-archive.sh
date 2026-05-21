@@ -536,6 +536,8 @@ verify_run_manifest() {
   local recovery_key_id
   local expected_finance_system_id
   local finance_system_id
+  local expected_managed_session_runtime_target_id
+  local managed_session_runtime_target_id
 
   if [[ ! -s "$manifest" ]]; then
     echo "Stage 2 evidence archive semantic issue: production-evidence-run.json missing" >&2
@@ -617,6 +619,19 @@ verify_run_manifest() {
   fi
   finance_system_id="$(jq -r '.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // ""' "$root/finance-export-delivery-observer.json" 2>/dev/null || echo "")"
   issue="$(value_mismatch_issue "finance ERP system id" "$expected_finance_system_id" "$finance_system_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
+
+  expected_managed_session_runtime_target_id="$(jq -r '.expected_targets.managed_session_runtime.target_id // ""' "$manifest")"
+  issue="$(target_identity_issue "expected managed-session runtime target id" "$expected_managed_session_runtime_target_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
+  managed_session_runtime_target_id="$(jq -r '.target.id // .target.cluster_id // .target.deployment_id // ""' "$root/managed-session-restart-resume-evidence.json" 2>/dev/null || echo "")"
+  issue="$(value_mismatch_issue "managed-session runtime target id" "$expected_managed_session_runtime_target_id" "$managed_session_runtime_target_id")"
   if [[ -n "$issue" ]]; then
     issue_count=$((issue_count + 1))
     echo "Stage 2 evidence archive semantic issue: $issue" >&2
@@ -832,6 +847,9 @@ JSON
     },
     "finance": {
       "system_id": "netsuite-prod-1"
+    },
+    "managed_session_runtime": {
+      "target_id": "managed-session-runtime-prod-1"
     }
   }
 }
@@ -1062,6 +1080,9 @@ JSON
     },
     "finance": {
       "system_id": "netsuite-prod-1"
+    },
+    "managed_session_runtime": {
+      "target_id": "managed-session-runtime-prod-1"
     }
   }
 }

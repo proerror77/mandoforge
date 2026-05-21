@@ -1505,6 +1505,31 @@ if ! grep -q "RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME" scripts/stage2-producti
   exit 1
 fi
 
+if ! grep -q "MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must write the managed-session target id into the run manifest" >&2
+  exit 1
+fi
+
+if ! grep -q "managed-session runtime target id does not match production-evidence-run.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must bind managed-session evidence to the run manifest target id" >&2
+  exit 1
+fi
+
+if ! grep -q "managed-session runtime target id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must bind managed-session evidence to the declared target id" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID" scripts/stage2-production-evidence-preflight.sh; then
+  echo "Stage 2 preflight must require a managed-session runtime target id" >&2
+  exit 1
+fi
+
+if ! grep -q "MANAGED_SESSION_RUNTIME_TARGET_ID" scripts/render-stage2-controller-secret.sh; then
+  echo "Stage 2 Secret render must reject missing or pilot managed-session runtime target ids" >&2
+  exit 1
+fi
+
 if ! grep -q "finance ERP system id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must bind finance evidence to the declared ERP system id" >&2
   exit 1

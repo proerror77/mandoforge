@@ -18,6 +18,7 @@ TENANT_DEPLOYMENT_ID="${MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID:-}"
 POLICY_CONTROLLER_ID="${MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID:-}"
 KMS_BACKEND_ID="${MANDOFORGE_STAGE2_KMS_BACKEND_ID:-}"
 FINANCE_SYSTEM_ID="${MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID:-}"
+MANAGED_SESSION_RUNTIME_TARGET_ID="${MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID:-}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -221,6 +222,7 @@ write_production_evidence_run_manifest() {
     --arg kms_backend_id "$KMS_BACKEND_ID" \
     --arg kms_key_id "${MANDOFORGE_KMS_KEY_ID:-}" \
     --arg finance_system_id "$FINANCE_SYSTEM_ID" \
+    --arg managed_session_runtime_target_id "$MANAGED_SESSION_RUNTIME_TARGET_ID" \
     '{
       generated_at: $generated_at,
       source: "stage2-production-evidence-gate",
@@ -243,6 +245,9 @@ write_production_evidence_run_manifest() {
         },
         finance: {
           system_id: $finance_system_id
+        },
+        managed_session_runtime: {
+          target_id: $managed_session_runtime_target_id
         }
       }
     }' >"$target"

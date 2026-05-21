@@ -5837,7 +5837,11 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "RUN_STAGE2_PRODUCTION_VALIDATIONS=1",
                 "MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED=true",
             ],
-            required_artifacts: vec!["api-tenant-isolation-routing-validate.json"],
+            required_artifacts: vec![
+                "production-evidence-run.json",
+                "api-tenant-isolation-routing-validate.json",
+                "tenant-routing-validation-evidence.json",
+            ],
             required_evidence: vec![
                 "runtime tenant routing is not single-tenant",
                 "tracked tenant tables have enabled and forced RLS",
@@ -5860,6 +5864,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "RUN_STAGE2_POLICY_DUE_RUN=1",
             ],
             required_artifacts: vec![
+                "production-evidence-run.json",
                 "policy-rollout-orchestration-validation-evidence.json",
                 "policy-rollout-due-run-evidence.json",
             ],
@@ -5922,6 +5927,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "RUN_STAGE2_SECRET_LIFECYCLE=1",
             ],
             required_artifacts: vec![
+                "production-evidence-run.json",
                 "vault-kms-recovery-evidence.json",
                 "vault-kms-rotation-evidence.json",
             ],
@@ -5961,6 +5967,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1",
             ],
             required_artifacts: vec![
+                "production-evidence-run.json",
                 "worker-load-validation-evidence.json",
                 "remote-computer-state-sync-evidence.json",
                 "remote-computer-sidecar-recovery-evidence.json",
@@ -6084,9 +6091,13 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             validation_endpoints: vec!["./scripts/managed-session-runtime-evidence-gate.sh"],
             required_flags: vec![
                 "RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME=1",
+                "MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID=managed-session-runtime-prod",
                 "MANAGED_SESSION_RESTART_RESUME_CONTROLLER_URL=https://controller.example.com/mandoforge/managed-sessions/restart-resume/validate",
             ],
-            required_artifacts: vec!["managed-session-restart-resume-evidence.json"],
+            required_artifacts: vec![
+                "production-evidence-run.json",
+                "managed-session-restart-resume-evidence.json",
+            ],
             required_evidence: vec![
                 "session event enqueue and worker drain are observed before restart",
                 "API and worker are restarted during the drill",
@@ -6188,6 +6199,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "RUN_STAGE2_FINANCE_EXPORT=1",
             ],
             required_artifacts: vec![
+                "production-evidence-run.json",
                 "finance-close-evidence.json",
                 "finance-reconciliation-evidence.json",
                 "usage-export-csv-evidence.json",
@@ -38884,6 +38896,12 @@ Stage 2 is not complete.
             managed_session
                 .required_flags
                 .contains(&"RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME=1".to_string())
+        );
+        assert!(
+            managed_session.required_flags.contains(
+                &"MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID=managed-session-runtime-prod"
+                    .to_string()
+            )
         );
         assert!(
             managed_session

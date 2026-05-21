@@ -290,6 +290,15 @@ check_finance() {
   require_true RUN_STAGE2_FINANCE_EXPORT "$label"
 }
 
+check_managed_session_runtime() {
+  local label="managed-session-runtime"
+  require_production_identity MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID "$label"
+  require_production_url MANAGED_SESSION_RESTART_RESUME_CONTROLLER_URL "$label"
+  require_no_whiskey_url MANAGED_SESSION_RESTART_RESUME_CONTROLLER_URL "$label"
+  require_value MANAGED_SESSION_RESTART_RESUME_CONTROLLER_TOKEN "$label"
+  require_true RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME "$label"
+}
+
 echo "stage2_production_evidence_preflight_env=$env_file"
 check_global
 check_worker_remote_computer
@@ -297,6 +306,7 @@ check_tenant
 check_policy
 check_vault_kms
 check_finance
+check_managed_session_runtime
 
 echo
 echo "preflight_pass_count=$pass_count"

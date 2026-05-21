@@ -304,6 +304,7 @@ artifact_contract_issue() {
     local expected_kms_backend_id
     local expected_kms_key_id
     local expected_finance_system_id
+    local expected_managed_session_runtime_target_id
 
     expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_tenant_deployment_id="$(jq -r '.expected_targets.tenant_routing.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
@@ -311,6 +312,7 @@ artifact_contract_issue() {
     expected_kms_backend_id="$(jq -r '.expected_targets.vault_kms.backend_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_kms_key_id="$(jq -r '.expected_targets.vault_kms.key_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_finance_system_id="$(jq -r '.expected_targets.finance.system_id // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_managed_session_runtime_target_id="$(jq -r '.expected_targets.managed_session_runtime.target_id // ""' "$artifact" 2>/dev/null || echo "")"
 
     if [[ "$req_id" == "worker-remote-computer" ]] && ! is_production_identity "$expected_cluster_id"; then
       printf 'expected worker/Remote Computer cluster id=%s is pilot/mock/local' "${expected_cluster_id:-<empty>}"
@@ -330,6 +332,10 @@ artifact_contract_issue() {
     fi
     if [[ "$req_id" == "finance-close" ]] && ! is_finance_system_identity "$expected_finance_system_id"; then
       printf 'expected finance system id=%s is not a true ERP/accounting system identity' "${expected_finance_system_id:-<empty>}"
+      return 0
+    fi
+    if [[ "$req_id" == "managed-session-restart-resume" ]] && ! is_production_identity "$expected_managed_session_runtime_target_id"; then
+      printf 'expected managed-session runtime target id=%s is pilot/mock/local' "${expected_managed_session_runtime_target_id:-<empty>}"
       return 0
     fi
   fi
@@ -820,6 +826,17 @@ requirement_cross_artifact_issue() {
     actual_finance_system_id="$(jq -r '.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // ""' "$SOURCE_EVIDENCE_DIR/finance-export-delivery-observer.json" 2>/dev/null || echo "")"
     if [[ -n "$expected_finance_system_id" && -n "$actual_finance_system_id" && "$expected_finance_system_id" != "$actual_finance_system_id" ]]; then
       printf 'finance ERP system id does not match production-evidence-run.json'
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "managed-session-restart-resume" ]]; then
+    local expected_managed_session_runtime_target_id
+    local actual_managed_session_runtime_target_id
+    expected_managed_session_runtime_target_id="$(jq -r '.expected_targets.managed_session_runtime.target_id // ""' "$run_manifest" 2>/dev/null || echo "")"
+    actual_managed_session_runtime_target_id="$(jq -r '.target.id // .target.cluster_id // .target.deployment_id // ""' "$SOURCE_EVIDENCE_DIR/managed-session-restart-resume-evidence.json" 2>/dev/null || echo "")"
+    if [[ -n "$expected_managed_session_runtime_target_id" && -n "$actual_managed_session_runtime_target_id" && "$expected_managed_session_runtime_target_id" != "$actual_managed_session_runtime_target_id" ]]; then
+      printf 'managed-session runtime target id does not match production-evidence-run.json'
       return 0
     fi
   fi

@@ -6,6 +6,7 @@ ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 CONTROLLER_URL="${MANAGED_SESSION_RESTART_RESUME_CONTROLLER_URL:-}"
 CONTROLLER_TOKEN="${MANAGED_SESSION_RESTART_RESUME_CONTROLLER_TOKEN:-}"
 SOURCE_FILE="${MANAGED_SESSION_RESTART_RESUME_EVIDENCE_FILE:-}"
+EXPECTED_TARGET_ID="${MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID:-}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -86,6 +87,7 @@ validate_evidence() {
   local blocked_count=0
   [[ "$status" == "validated" || "$status" == "completed" || "$status" == "ready" ]] || blocked_count=$((blocked_count + 1))
   is_production_identity "$target_id" || blocked_count=$((blocked_count + 1))
+  [[ -z "$EXPECTED_TARGET_ID" || "$EXPECTED_TARGET_ID" == "$target_id" ]] || blocked_count=$((blocked_count + 1))
   [[ "$target_kind" == "managed_session_runtime" || "$target_kind" == "production_runtime_cluster" || "$target_kind" == "managed_agent_cluster" ]] || blocked_count=$((blocked_count + 1))
   [[ "$enqueue_event_persisted" == "true" ]] || blocked_count=$((blocked_count + 1))
   [[ "$worker_drain_observed" == "true" ]] || blocked_count=$((blocked_count + 1))
@@ -109,6 +111,7 @@ validate_evidence() {
     --arg status "$gate_status" \
     --arg artifact "$artifact" \
     --arg target_id "$target_id" \
+    --arg expected_target_id "$EXPECTED_TARGET_ID" \
     --arg target_kind "$target_kind" \
     --argjson blocked_count "$blocked_count" \
     --argjson enqueue_event_persisted "$enqueue_event_persisted" \
@@ -128,6 +131,7 @@ validate_evidence() {
       artifact: $artifact,
       target: {
         id: $target_id,
+        expected_id: (if $expected_target_id == "" then null else $expected_target_id end),
         kind: $target_kind
       },
       blocked_count: $blocked_count,
