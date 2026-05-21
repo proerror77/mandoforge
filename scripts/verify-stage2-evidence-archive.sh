@@ -1492,6 +1492,55 @@ JSON
   } >"${archive}.manifest.txt"
   verify_archive "$archive"
 
+  cat >"$tmpdir/evidence/worker-load-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "load_validated": true,
+      "isolated_worker_pool_configured": false
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-worker-isolated-pool-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-worker-isolated-pool-negative.out 2>/tmp/mandoforge-stage2-archive-worker-isolated-pool-negative.err
+  local negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing isolated worker pool evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/worker-load-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "load_validated": true,
+      "isolated_worker_pool_configured": true
+    }
+  }
+}
+JSON
+
   cat >"$tmpdir/evidence/remote-computer-state-sync-evidence.json" <<'JSON'
 {
   "status": "captured",
@@ -1519,7 +1568,7 @@ JSON
   } >"${archive}.manifest.txt"
   set +e
   "$0" "$archive" >/tmp/mandoforge-stage2-archive-remote-state-backend-negative.out 2>/tmp/mandoforge-stage2-archive-remote-state-backend-negative.err
-  local negative_status="$?"
+  negative_status="$?"
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected local Remote Computer state backend evidence to fail" >&2
