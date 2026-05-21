@@ -1710,6 +1710,11 @@ if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" "$finance_script" || ! grep 
   exit 1
 fi
 
+if ! grep -q "finance export delivery observer token is missing" "$finance_script"; then
+  echo "finance evidence script must fail closed without an export delivery observer token" >&2
+  exit 1
+fi
+
 if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must support authenticated finance export delivery observer evidence" >&2
   exit 1

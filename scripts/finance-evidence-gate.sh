@@ -348,6 +348,9 @@ write_summary() {
   if [[ "$RUN_FINANCE_EXPORT" != "1" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ "$RUN_FINANCE_EXPORT" == "1" && -z "$DELIVERY_OBSERVER_TOKEN" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$close_evidence_status" != "captured" || "$close_run_status" != "completed" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -459,6 +462,9 @@ write_summary() {
     fi
     if [[ "$RUN_FINANCE_EXPORT" != "1" ]]; then
       echo "- finance export evidence capture is disabled"
+    fi
+    if [[ "$RUN_FINANCE_EXPORT" == "1" && -z "$DELIVERY_OBSERVER_TOKEN" ]]; then
+      echo "- finance export delivery observer token is missing"
     fi
     if [[ "$close_evidence_status" != "captured" || "$close_run_status" != "completed" ]]; then
       echo "- finance close evidence is not completed: evidence=$close_evidence_status status=$close_run_status"
@@ -585,7 +591,7 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/usage/finance-summary >/dev/null
 fetch_json GET /api/usage/finance-operations/summary >/dev/null
 
-if [[ -z "$DELIVERY_OBSERVER_URL" && -n "${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL:-}" ]]; then
+if [[ -z "$DELIVERY_OBSERVER_URL" && -n "$DELIVERY_OBSERVER_TOKEN" && -n "${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL:-}" ]]; then
   DELIVERY_OBSERVER_URL="${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL%/finance/export}/healthz"
   DELIVERY_OBSERVER_URL="${DELIVERY_OBSERVER_URL/host.docker.internal/172.17.0.1}"
 fi
@@ -604,7 +610,7 @@ else
   echo "skipping finance export capture; set RUN_STAGE2_FINANCE_EXPORT=1 to include CSV and delivery evidence" >&2
 fi
 
-if [[ -n "$DELIVERY_OBSERVER_URL" ]]; then
+if [[ -n "$DELIVERY_OBSERVER_URL" && -n "$DELIVERY_OBSERVER_TOKEN" ]]; then
   capture_delivery_observer "$DELIVERY_OBSERVER_URL"
 fi
 

@@ -1049,11 +1049,11 @@ run_controller_validations() {
   if [[ "${RUN_STAGE2_FINANCE_EXPORT:-0}" == "1" ]]; then
     fetch_file GET /api/usage/export.csv "$EVIDENCE_DIR/api-usage-export.csv" "$EVIDENCE_DIR/usage-export-csv-evidence.json"
     capture_finance_export_delivery_validation
-    if [[ -z "$FINANCE_DELIVERY_OBSERVER_URL" && -n "${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL:-}" ]]; then
+    if [[ -z "$FINANCE_DELIVERY_OBSERVER_URL" && -n "$FINANCE_DELIVERY_OBSERVER_TOKEN" && -n "${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL:-}" ]]; then
       FINANCE_DELIVERY_OBSERVER_URL="${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL%/finance/export}/healthz"
       FINANCE_DELIVERY_OBSERVER_URL="${FINANCE_DELIVERY_OBSERVER_URL/host.docker.internal/172.17.0.1}"
     fi
-    if [[ -n "$FINANCE_DELIVERY_OBSERVER_URL" ]]; then
+    if [[ -n "$FINANCE_DELIVERY_OBSERVER_URL" && -n "$FINANCE_DELIVERY_OBSERVER_TOKEN" ]]; then
       capture_finance_delivery_observer_validation "$FINANCE_DELIVERY_OBSERVER_URL"
     fi
   else
