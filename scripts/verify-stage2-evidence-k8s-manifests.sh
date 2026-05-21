@@ -1945,6 +1945,11 @@ if ! grep -q "zero finance delivery count" scripts/verify-stage2-evidence-archiv
   exit 1
 fi
 
+if ! grep -q "zero finance export delivery byte evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject zero-byte finance export delivery evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "unconfigured finance delivery target" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject finance delivery without configured target" >&2
   exit 1
