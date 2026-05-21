@@ -1380,6 +1380,11 @@ if ! grep -q "MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID" "$policy_rollout_script" |
   exit 1
 fi
 
+if ! grep -q "MANDOFORGE_STAGE2_POLICY_STORE_ID" "$policy_rollout_script" || ! grep -q "expected_policy_store_id" "$policy_rollout_script" || ! grep -q "MANDOFORGE_STAGE2_POLICY_DEPLOYMENT_ID" "$policy_rollout_script" || ! grep -q "expected_policy_deployment_id" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must bind evidence to the declared production policy store and deployment ids" >&2
+  exit 1
+fi
+
 if ! grep -q "production_policy_store" "$policy_rollout_script"; then
   echo "Policy rollout evidence script must require production policy store evidence" >&2
   exit 1
@@ -1447,6 +1452,11 @@ fi
 
 if ! grep -q "policy_store_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "deployment_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "step_count" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must require policy store id, deployment id, and audited orchestration steps" >&2
+  exit 1
+fi
+
+if ! grep -q "expected_policy_store_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "expected_policy_deployment_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "policy due-run deployment_id does not match production-evidence-run.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must cross-check policy store and deployment ids against the run manifest" >&2
   exit 1
 fi
 
@@ -2222,6 +2232,11 @@ fi
 
 if ! grep -q "mismatched policy controller target evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject policy controller target mismatches" >&2
+  exit 1
+fi
+
+if ! grep -q "mismatched policy store/deployment target evidence" scripts/verify-stage2-evidence-archive.sh || ! grep -q "policy due-run policy_store_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "expected policy rollout deployment_id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive verifier must reject policy store/deployment target mismatches" >&2
   exit 1
 fi
 

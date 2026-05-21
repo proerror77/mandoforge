@@ -812,6 +812,8 @@ artifact_contract_issue() {
     local expected_state_claim
     local expected_tenant_deployment_id
     local expected_policy_controller_id
+    local expected_policy_store_id
+    local expected_policy_deployment_id
     local expected_kms_backend_id
     local expected_kms_key_id
     local expected_finance_system_id
@@ -822,6 +824,8 @@ artifact_contract_issue() {
     expected_state_claim="$(jq -r '.expected_targets.worker_remote_computer.state_claim // .expected_targets.worker_remote_computer.claim // .expected_targets.worker_remote_computer.pvc // ""' "$artifact" 2>/dev/null || echo "")"
     expected_tenant_deployment_id="$(jq -r '.expected_targets.tenant_routing.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_policy_controller_id="$(jq -r '.expected_targets.policy_rollout.controller_id // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_policy_store_id="$(jq -r '.expected_targets.policy_rollout.policy_store_id // .expected_targets.policy_rollout.store_id // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_policy_deployment_id="$(jq -r '.expected_targets.policy_rollout.deployment_id // .expected_targets.policy_rollout.policy_deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_kms_backend_id="$(jq -r '.expected_targets.vault_kms.backend_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_kms_key_id="$(jq -r '.expected_targets.vault_kms.key_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_finance_system_id="$(jq -r '.expected_targets.finance.system_id // ""' "$artifact" 2>/dev/null || echo "")"
@@ -845,6 +849,10 @@ artifact_contract_issue() {
     fi
     if [[ "$req_id" == "policy-rollout" ]] && ! is_production_identity "$expected_policy_controller_id"; then
       printf 'expected policy controller id=%s is pilot/mock/local' "${expected_policy_controller_id:-<empty>}"
+      return 0
+    fi
+    if [[ "$req_id" == "policy-rollout" ]] && { ! is_production_identity "$expected_policy_store_id" || ! is_production_identity "$expected_policy_deployment_id"; }; then
+      printf 'expected policy store or deployment id is pilot/mock/local'
       return 0
     fi
     if [[ "$req_id" == "vault-kms" ]] && { ! is_production_identity "$expected_kms_backend_id" || ! is_production_identity "$expected_kms_key_id"; }; then
@@ -1940,11 +1948,45 @@ requirement_cross_artifact_issue() {
 
   if [[ "$req_id" == "policy-rollout" ]]; then
     local expected_controller_id
+    local expected_policy_store_id
+    local expected_deployment_id
     local actual_controller_id
+    local actual_policy_store_id
+    local actual_deployment_id
+    local due_run_controller_id
+    local due_run_policy_store_id
+    local due_run_deployment_id
     expected_controller_id="$(jq -r '.expected_targets.policy_rollout.controller_id // ""' "$run_manifest" 2>/dev/null || echo "")"
+    expected_policy_store_id="$(jq -r '.expected_targets.policy_rollout.policy_store_id // .expected_targets.policy_rollout.store_id // ""' "$run_manifest" 2>/dev/null || echo "")"
+    expected_deployment_id="$(jq -r '.expected_targets.policy_rollout.deployment_id // .expected_targets.policy_rollout.policy_deployment_id // ""' "$run_manifest" 2>/dev/null || echo "")"
     actual_controller_id="$(jq -r '.response.controller_execution.controller_id // ""' "$SOURCE_EVIDENCE_DIR/policy-rollout-orchestration-validation-evidence.json" 2>/dev/null || echo "")"
+    actual_policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$SOURCE_EVIDENCE_DIR/policy-rollout-orchestration-validation-evidence.json" 2>/dev/null || echo "")"
+    actual_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$SOURCE_EVIDENCE_DIR/policy-rollout-orchestration-validation-evidence.json" 2>/dev/null || echo "")"
+    due_run_controller_id="$(jq -r '.response.controller_id // ""' "$SOURCE_EVIDENCE_DIR/policy-rollout-due-run-evidence.json" 2>/dev/null || echo "")"
+    due_run_policy_store_id="$(jq -r '.response.policy_store_id // ""' "$SOURCE_EVIDENCE_DIR/policy-rollout-due-run-evidence.json" 2>/dev/null || echo "")"
+    due_run_deployment_id="$(jq -r '.response.deployment_id // ""' "$SOURCE_EVIDENCE_DIR/policy-rollout-due-run-evidence.json" 2>/dev/null || echo "")"
     if [[ -n "$expected_controller_id" && -n "$actual_controller_id" && "$expected_controller_id" != "$actual_controller_id" ]]; then
       printf 'policy rollout controller id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_policy_store_id" && -n "$actual_policy_store_id" && "$expected_policy_store_id" != "$actual_policy_store_id" ]]; then
+      printf 'policy rollout policy_store_id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_deployment_id" && -n "$actual_deployment_id" && "$expected_deployment_id" != "$actual_deployment_id" ]]; then
+      printf 'policy rollout deployment_id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_controller_id" && -n "$due_run_controller_id" && "$expected_controller_id" != "$due_run_controller_id" ]]; then
+      printf 'policy due-run controller id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_policy_store_id" && -n "$due_run_policy_store_id" && "$expected_policy_store_id" != "$due_run_policy_store_id" ]]; then
+      printf 'policy due-run policy_store_id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_deployment_id" && -n "$due_run_deployment_id" && "$expected_deployment_id" != "$due_run_deployment_id" ]]; then
+      printf 'policy due-run deployment_id does not match production-evidence-run.json'
       return 0
     fi
   fi

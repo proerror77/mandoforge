@@ -277,6 +277,8 @@ check_tenant() {
 check_policy() {
   local label="policy-rollout"
   require_production_identity MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID "$label"
+  require_production_identity MANDOFORGE_STAGE2_POLICY_STORE_ID "$label"
+  require_production_identity MANDOFORGE_STAGE2_POLICY_DEPLOYMENT_ID "$label"
   require_true MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_REQUIRED "$label"
   require_production_url MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL "$label"
   require_no_whiskey_url MANDOFORGE_POLICY_ROLLOUT_ORCHESTRATION_CONTROLLER_URL "$label"

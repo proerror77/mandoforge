@@ -8,6 +8,8 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/policy-rollout-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_POLICY_DUE_RUN="${RUN_STAGE2_POLICY_DUE_RUN:-1}"
 EXPECTED_POLICY_CONTROLLER_ID="${MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID:-}"
+EXPECTED_POLICY_STORE_ID="${MANDOFORGE_STAGE2_POLICY_STORE_ID:-}"
+EXPECTED_POLICY_DEPLOYMENT_ID="${MANDOFORGE_STAGE2_POLICY_DEPLOYMENT_ID:-}"
 AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
 
 auth_headers=(
@@ -293,6 +295,22 @@ write_summary() {
       blocked_count="$((blocked_count + 1))"
     fi
   fi
+  if [[ -n "$EXPECTED_POLICY_STORE_ID" ]]; then
+    if ! is_production_identity "$EXPECTED_POLICY_STORE_ID"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ "$controller_policy_store_id" != "$EXPECTED_POLICY_STORE_ID" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+  fi
+  if [[ -n "$EXPECTED_POLICY_DEPLOYMENT_ID" ]]; then
+    if ! is_production_identity "$EXPECTED_POLICY_DEPLOYMENT_ID"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ "$controller_deployment_id" != "$EXPECTED_POLICY_DEPLOYMENT_ID" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+  fi
   if ! is_production_rollout_scope "$controller_rollout_scope"; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -366,6 +384,8 @@ write_summary() {
     echo "controller_environment=$controller_environment"
     echo "controller_id=$controller_id"
     echo "expected_policy_controller_id=${EXPECTED_POLICY_CONTROLLER_ID:-<unset>}"
+    echo "expected_policy_store_id=${EXPECTED_POLICY_STORE_ID:-<unset>}"
+    echo "expected_policy_deployment_id=${EXPECTED_POLICY_DEPLOYMENT_ID:-<unset>}"
     echo "controller_rollout_scope=$controller_rollout_scope"
     echo "controller_production_policy_store=$controller_production_policy_store"
     echo "controller_rollback_supported=$controller_rollback_supported"
@@ -413,6 +433,22 @@ write_summary() {
       fi
       if [[ "$controller_id" != "$EXPECTED_POLICY_CONTROLLER_ID" ]]; then
         echo "- policy rollout controller id does not match MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID"
+      fi
+    fi
+    if [[ -n "$EXPECTED_POLICY_STORE_ID" ]]; then
+      if ! is_production_identity "$EXPECTED_POLICY_STORE_ID"; then
+        echo "- configured MANDOFORGE_STAGE2_POLICY_STORE_ID is pilot/mock/local: $EXPECTED_POLICY_STORE_ID"
+      fi
+      if [[ "$controller_policy_store_id" != "$EXPECTED_POLICY_STORE_ID" ]]; then
+        echo "- policy rollout policy_store_id does not match MANDOFORGE_STAGE2_POLICY_STORE_ID"
+      fi
+    fi
+    if [[ -n "$EXPECTED_POLICY_DEPLOYMENT_ID" ]]; then
+      if ! is_production_identity "$EXPECTED_POLICY_DEPLOYMENT_ID"; then
+        echo "- configured MANDOFORGE_STAGE2_POLICY_DEPLOYMENT_ID is pilot/mock/local: $EXPECTED_POLICY_DEPLOYMENT_ID"
+      fi
+      if [[ "$controller_deployment_id" != "$EXPECTED_POLICY_DEPLOYMENT_ID" ]]; then
+        echo "- policy rollout deployment_id does not match MANDOFORGE_STAGE2_POLICY_DEPLOYMENT_ID"
       fi
     fi
     if ! is_production_rollout_scope "$controller_rollout_scope"; then

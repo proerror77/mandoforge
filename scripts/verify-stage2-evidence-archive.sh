@@ -1600,7 +1600,14 @@ verify_run_manifest() {
   local expected_tenant_deployment_id
   local tenant_deployment_id
   local expected_policy_controller_id
+  local expected_policy_store_id
+  local expected_policy_deployment_id
   local policy_controller_id
+  local policy_store_id
+  local policy_deployment_id
+  local due_run_policy_controller_id
+  local due_run_policy_store_id
+  local due_run_policy_deployment_id
   local expected_kms_backend_id
   local expected_kms_key_id
   local rotation_backend_id
@@ -1698,12 +1705,40 @@ verify_run_manifest() {
     issue_count=$((issue_count + 1))
     echo "Stage 2 evidence archive semantic issue: $issue" >&2
   fi
+  expected_policy_store_id="$(jq -r '.expected_targets.policy_rollout.policy_store_id // .expected_targets.policy_rollout.store_id // ""' "$manifest")"
+  issue="$(target_identity_issue "expected policy rollout policy_store_id" "$expected_policy_store_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
+  expected_policy_deployment_id="$(jq -r '.expected_targets.policy_rollout.deployment_id // .expected_targets.policy_rollout.policy_deployment_id // ""' "$manifest")"
+  issue="$(target_identity_issue "expected policy rollout deployment_id" "$expected_policy_deployment_id")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
   policy_controller_id="$(jq -r '.response.controller_execution.controller_id // ""' "$root/policy-rollout-orchestration-validation-evidence.json" 2>/dev/null || echo "")"
+  policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$root/policy-rollout-orchestration-validation-evidence.json" 2>/dev/null || echo "")"
+  policy_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$root/policy-rollout-orchestration-validation-evidence.json" 2>/dev/null || echo "")"
+  due_run_policy_controller_id="$(jq -r '.response.controller_id // ""' "$root/policy-rollout-due-run-evidence.json" 2>/dev/null || echo "")"
+  due_run_policy_store_id="$(jq -r '.response.policy_store_id // ""' "$root/policy-rollout-due-run-evidence.json" 2>/dev/null || echo "")"
+  due_run_policy_deployment_id="$(jq -r '.response.deployment_id // ""' "$root/policy-rollout-due-run-evidence.json" 2>/dev/null || echo "")"
   issue="$(value_mismatch_issue "policy rollout controller id" "$expected_policy_controller_id" "$policy_controller_id")"
   if [[ -n "$issue" ]]; then
     issue_count=$((issue_count + 1))
     echo "Stage 2 evidence archive semantic issue: $issue" >&2
   fi
+  for issue in \
+    "$(value_mismatch_issue "policy rollout policy_store_id" "$expected_policy_store_id" "$policy_store_id")" \
+    "$(value_mismatch_issue "policy rollout deployment_id" "$expected_policy_deployment_id" "$policy_deployment_id")" \
+    "$(value_mismatch_issue "policy due-run controller id" "$expected_policy_controller_id" "$due_run_policy_controller_id")" \
+    "$(value_mismatch_issue "policy due-run policy_store_id" "$expected_policy_store_id" "$due_run_policy_store_id")" \
+    "$(value_mismatch_issue "policy due-run deployment_id" "$expected_policy_deployment_id" "$due_run_policy_deployment_id")"; do
+    if [[ -n "$issue" ]]; then
+      issue_count=$((issue_count + 1))
+      echo "Stage 2 evidence archive semantic issue: $issue" >&2
+    fi
+  done
 
   expected_kms_backend_id="$(jq -r '.expected_targets.vault_kms.backend_id // ""' "$manifest")"
   expected_kms_key_id="$(jq -r '.expected_targets.vault_kms.key_id // ""' "$manifest")"
@@ -1973,7 +2008,9 @@ JSON
       "rls_tables": ["public.sessions", "public.session_events"]
     },
     "policy_rollout": {
-      "controller_id": "policy-controller-prod-1"
+      "controller_id": "policy-controller-prod-1",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1"
     },
     "vault_kms": {
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
@@ -2197,7 +2234,9 @@ JSON
       "rls_tables": ["public.sessions", "public.session_events"]
     },
     "policy_rollout": {
-      "controller_id": "policy-controller-prod-1"
+      "controller_id": "policy-controller-prod-1",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1"
     },
     "vault_kms": {
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
@@ -2245,7 +2284,9 @@ JSON
       "rls_tables": ["public.sessions", "public.session_events"]
     },
     "policy_rollout": {
-      "controller_id": "policy-controller-prod-1"
+      "controller_id": "policy-controller-prod-1",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1"
     },
     "vault_kms": {
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
@@ -4604,7 +4645,9 @@ JSON
       "deployment_id": "tenant-routing-prod-1"
     },
     "policy_rollout": {
-      "controller_id": "policy-controller-prod-1"
+      "controller_id": "policy-controller-prod-1",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1"
     },
     "vault_kms": {
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-2",
@@ -4651,7 +4694,9 @@ JSON
       "deployment_id": "tenant-routing-prod-1"
     },
     "policy_rollout": {
-      "controller_id": "policy-controller-prod-2"
+      "controller_id": "policy-controller-prod-2",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1"
     },
     "vault_kms": {
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
@@ -4695,10 +4740,61 @@ JSON
       "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
+      "deployment_id": "tenant-routing-prod-1"
+    },
+    "policy_rollout": {
+      "controller_id": "policy-controller-prod-1",
+      "policy_store_id": "policy-store-prod-2",
+      "deployment_id": "policy-deployment-prod-2"
+    },
+    "vault_kms": {
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1"
+    },
+    "finance": {
+      "system_id": "netsuite-prod-1"
+    },
+    "managed_session_runtime": {
+      "target_id": "managed-session-runtime-prod-1"
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-store-deployment-target-mismatch-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-store-deployment-target-mismatch-negative.out 2>/tmp/mandoforge-stage2-archive-policy-store-deployment-target-mismatch-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected mismatched policy store/deployment target evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/production-evidence-run.json" <<'JSON'
+{
+  "generated_at": "1970-01-01T00:00:00Z",
+  "source": "stage2-production-evidence-gate",
+  "expected_targets": {
+    "worker_remote_computer": {
+      "cluster_id": "prod-cluster-1",
+      "worker_pool": "managed-agents-prod",
+      "state_claim": "mandoforge-remote-computer-state"
+    },
+    "tenant_routing": {
       "deployment_id": "tenant-routing-prod-2"
     },
     "policy_rollout": {
-      "controller_id": "policy-controller-prod-1"
+      "controller_id": "policy-controller-prod-1",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1"
     },
     "vault_kms": {
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
@@ -4745,7 +4841,9 @@ JSON
       "deployment_id": "tenant-routing-prod-1"
     },
     "policy_rollout": {
-      "controller_id": "policy-controller-prod-1"
+      "controller_id": "policy-controller-prod-1",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1"
     },
     "vault_kms": {
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
@@ -6765,7 +6863,9 @@ JSON
       "deployment_id": "tenant-routing-prod-1"
     },
     "policy_rollout": {
-      "controller_id": "policy-controller-prod-1"
+      "controller_id": "policy-controller-prod-1",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1"
     },
     "vault_kms": {
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",

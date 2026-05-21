@@ -21,6 +21,8 @@ REMOTE_STATE_BACKEND="${MANDOFORGE_STAGE2_REMOTE_STATE_BACKEND:-}"
 TENANT_DEPLOYMENT_ID="${MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID:-}"
 TENANT_RLS_TABLES="${MANDOFORGE_STAGE2_TENANT_RLS_TABLES:-}"
 POLICY_CONTROLLER_ID="${MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID:-}"
+POLICY_STORE_ID="${MANDOFORGE_STAGE2_POLICY_STORE_ID:-}"
+POLICY_DEPLOYMENT_ID="${MANDOFORGE_STAGE2_POLICY_DEPLOYMENT_ID:-}"
 KMS_BACKEND_ID="${MANDOFORGE_STAGE2_KMS_BACKEND_ID:-}"
 FINANCE_SYSTEM_ID="${MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID:-}"
 MANAGED_SESSION_RUNTIME_TARGET_ID="${MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID:-}"
@@ -234,6 +236,8 @@ write_production_evidence_run_manifest() {
     --arg tenant_deployment_id "$TENANT_DEPLOYMENT_ID" \
     --arg tenant_rls_tables "$TENANT_RLS_TABLES" \
     --arg policy_controller_id "$POLICY_CONTROLLER_ID" \
+    --arg policy_store_id "$POLICY_STORE_ID" \
+    --arg policy_deployment_id "$POLICY_DEPLOYMENT_ID" \
     --arg kms_backend_id "$KMS_BACKEND_ID" \
     --arg kms_key_id "${MANDOFORGE_KMS_KEY_ID:-}" \
     --arg finance_system_id "$FINANCE_SYSTEM_ID" \
@@ -261,7 +265,9 @@ write_production_evidence_run_manifest() {
           )
         },
         policy_rollout: {
-          controller_id: $policy_controller_id
+          controller_id: $policy_controller_id,
+          policy_store_id: $policy_store_id,
+          deployment_id: $policy_deployment_id
         },
         vault_kms: {
           backend_id: $kms_backend_id,
