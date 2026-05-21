@@ -262,6 +262,30 @@ is_finance_system_identity() {
   [[ ! "$value" =~ (^|[./:_-])(feishu|lark|drive|file|artifact)([./:_-]|$) ]] || return 1
 }
 
+is_real_cluster_kind() {
+  local value="$1"
+  case "$value" in
+    k8s_cluster|kubernetes_cluster|production_cluster|real_cluster)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_distributed_state_backend() {
+  local value="$1"
+  case "$value" in
+    juicefs|cephfs|longhorn-rwx)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
@@ -300,6 +324,93 @@ artifact_contract_issue() {
     fi
     if ! is_finance_system_identity "$system_id"; then
       printf 'system_id=%s is not a true ERP/accounting system identity' "$system_id"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "worker-load-validation-evidence.json" ]]; then
+    local target_kind
+    local node_count
+    local cluster_id
+
+    target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    node_count="$(jq -r '.response.controller_execution.node_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+
+    if ! is_real_cluster_kind "$target_kind"; then
+      printf 'target_kind=%s is not a real cluster' "$target_kind"
+      return 0
+    fi
+    if [[ ! "$node_count" =~ ^[0-9]+$ || "$node_count" -lt 2 ]]; then
+      printf 'node_count=%s is not multi-node' "$node_count"
+      return 0
+    fi
+    if ! is_production_identity "$cluster_id"; then
+      printf 'cluster_id=%s is pilot/mock/local' "${cluster_id:-<empty>}"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "remote-computer-state-sync-evidence.json" ]]; then
+    local target_kind
+    local node_count
+    local state_backend
+    local cluster_id
+
+    target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    node_count="$(jq -r '.response.controller_execution.node_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    state_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+
+    if ! is_real_cluster_kind "$target_kind"; then
+      printf 'target_kind=%s is not a real cluster' "$target_kind"
+      return 0
+    fi
+    if [[ ! "$node_count" =~ ^[0-9]+$ || "$node_count" -lt 2 ]]; then
+      printf 'node_count=%s is not multi-node' "$node_count"
+      return 0
+    fi
+    if ! is_distributed_state_backend "$state_backend"; then
+      printf 'state_backend=%s is not distributed' "$state_backend"
+      return 0
+    fi
+    if ! is_production_identity "$cluster_id"; then
+      printf 'cluster_id=%s is pilot/mock/local' "${cluster_id:-<empty>}"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "remote-computer-sidecar-recovery-evidence.json" ]]; then
+    local validation_status
+    local target_kind
+    local node_count
+    local replacement_scope
+    local cluster_id
+
+    validation_status="$(jq -r '.response.validation_result.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    target_kind="$(jq -r '.response.validation_result.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    node_count="$(jq -r '.response.validation_result.node_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    replacement_scope="$(jq -r '.response.validation_result.replacement_scope // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+
+    if [[ "$validation_status" != "validated" ]]; then
+      printf 'validation_status=%s' "$validation_status"
+      return 0
+    fi
+    if ! is_real_cluster_kind "$target_kind"; then
+      printf 'target_kind=%s is not a real cluster' "$target_kind"
+      return 0
+    fi
+    if [[ ! "$node_count" =~ ^[0-9]+$ || "$node_count" -lt 2 ]]; then
+      printf 'node_count=%s is not multi-node' "$node_count"
+      return 0
+    fi
+    if [[ "$replacement_scope" != "cluster" ]]; then
+      printf 'replacement_scope=%s is not cluster' "$replacement_scope"
+      return 0
+    fi
+    if ! is_production_identity "$cluster_id"; then
+      printf 'cluster_id=%s is pilot/mock/local' "${cluster_id:-<empty>}"
       return 0
     fi
   fi
@@ -491,6 +602,30 @@ artifact_contract_issue() {
     if ! is_production_identity "$backend_id" || ! is_production_identity "$key_id"; then
       printf 'backend_id or key_id is pilot/mock/local'
       return 0
+    fi
+  fi
+}
+
+requirement_cross_artifact_issue() {
+  local req_id="$1"
+
+  if [[ "$req_id" == "worker-remote-computer" ]]; then
+    local worker_artifact="$SOURCE_EVIDENCE_DIR/worker-load-validation-evidence.json"
+    local state_artifact="$SOURCE_EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
+    local sidecar_artifact="$SOURCE_EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
+    local worker_cluster_id
+    local state_cluster_id
+    local sidecar_cluster_id
+
+    worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$worker_artifact" 2>/dev/null || echo "")"
+    state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$state_artifact" 2>/dev/null || echo "")"
+    sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$sidecar_artifact" 2>/dev/null || echo "")"
+
+    if [[ -n "$worker_cluster_id" && -n "$state_cluster_id" && -n "$sidecar_cluster_id" ]]; then
+      if ! [[ "$worker_cluster_id" == "$state_cluster_id" && "$worker_cluster_id" == "$sidecar_cluster_id" ]]; then
+        printf 'worker, state-sync, and sidecar evidence do not share one cluster id'
+        return 0
+      fi
     fi
   fi
 }
@@ -695,6 +830,11 @@ while IFS= read -r encoded; do
       echo "$artifact" >>"$missing_required_evidence_artifacts"
     fi
   done <"$required_evidence_artifacts"
+
+  cross_artifact_issue="$(requirement_cross_artifact_issue "$req_id")"
+  if [[ -n "$cross_artifact_issue" ]]; then
+    echo "$req_id cross-artifact contract ($cross_artifact_issue)" >>"$missing_required_evidence_artifacts"
+  fi
 
   while IFS= read -r script_path; do
     [[ -z "$script_path" ]] && continue

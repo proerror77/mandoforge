@@ -1443,6 +1443,16 @@ if ! grep -q "worker-load-validation-evidence.json" scripts/verify-stage2-eviden
   exit 1
 fi
 
+if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must inspect worker real-cluster evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "do not share one cluster id" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must reject mixed-cluster worker/Remote Computer evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "do not share one cluster id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject mixed-cluster worker/Remote Computer evidence" >&2
   exit 1
