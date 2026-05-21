@@ -201,6 +201,7 @@ tenant_negative_test_detail_count() {
           ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
           or (.access_granted == false)
         )
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .tested_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1"
 }
@@ -1798,9 +1799,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3457,9 +3458,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3503,9 +3504,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3639,13 +3640,61 @@ JSON
         {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
         {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
       ],
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 1,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-negative-test-audit-missing.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-negative-test-audit-missing.out 2>/tmp/mandoforge-stage2-archive-tenant-negative-test-audit-missing.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing cross-tenant negative test audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "rls_enforced": true,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
       "tenant_context_validated": false,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3693,9 +3742,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3742,9 +3791,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3792,9 +3841,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3839,9 +3888,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3889,9 +3938,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }

@@ -473,6 +473,7 @@ tenant_negative_test_detail_count() {
           ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
           or (.access_granted == false)
         )
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .tested_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1" 2>/dev/null || echo "0"
 }

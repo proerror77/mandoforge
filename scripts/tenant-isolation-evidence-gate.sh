@@ -226,6 +226,7 @@ write_summary() {
             ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
             or (.access_granted == false)
           )
+          and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .tested_at // .timestamp // "") | length > 0)
         )
     ] | length' "$validation_evidence_file")"
   fi
