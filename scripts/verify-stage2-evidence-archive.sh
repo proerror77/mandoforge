@@ -1530,6 +1530,64 @@ JSON
   }
 }
 JSON
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": ["tenant-a", "tenant-b"],
+      "rls_enforced": true,
+      "rls_table_count": 12,
+      "rls_forced_table_count": 8,
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 3
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-rls-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-rls-negative.out 2>/tmp/mandoforge-stage2-archive-tenant-rls-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected incomplete forced-RLS evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": ["tenant-a", "tenant-b"],
+      "rls_enforced": true,
+      "rls_table_count": 12,
+      "rls_forced_table_count": 12,
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 3
+    }
+  }
+}
+JSON
   cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
 {
   "response": {
