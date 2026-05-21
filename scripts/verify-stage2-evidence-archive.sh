@@ -421,34 +421,36 @@ is_finance_system_identity_value() {
 }
 
 finance_delivery_receipt_count() {
-  jq -r '[
-    (
-      .export_state.delivery_receipts[]?,
-      .export_state.erp_delivery_receipts[]?,
-      .export_state.accounting_receipts[]?,
-      .export_state.deliveries[]?,
-      .export_state.erp_batches[]?,
-      if (((.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id // "") | length) > 0) then
-        {
-          receipt_id: (.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id),
-          system_id: (.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id),
-          status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "delivered"),
-          record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0),
-          audit_id: (.export_state.latest_delivery_audit_id // .export_state.latest_audit_id // .export_state.audit_id),
-          run_id: (.export_state.latest_delivery_run_id // .export_state.latest_run_id // .export_state.run_id),
-          posted_at: (.export_state.latest_posted_at // .export_state.latest_delivered_at // .export_state.latest_timestamp // .export_state.posted_at // .export_state.delivered_at // .export_state.timestamp)
-        }
-      else empty end
-    )
-    | select(
-        type == "object"
-        and ((.receipt_id // .receipt // .batch_id // .erp_batch_id // .delivery_id // .posting_id // "") | length > 0)
-        and ((.system_id // .erp_system_id // .accounting_system_id // .target_id // "") | length > 0)
-        and ((.status // .result // "") | ascii_downcase | IN("delivered", "posted", "accepted", "completed", "reconciled", "validated"))
-        and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
-        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .posted_at // .delivered_at // .received_at // .accepted_at // .timestamp // "") | length > 0)
+  jq -r '
+    (.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id // "") as $root_system_id
+    | [
+      (
+        .export_state.delivery_receipts[]?,
+        .export_state.erp_delivery_receipts[]?,
+        .export_state.accounting_receipts[]?,
+        .export_state.deliveries[]?,
+        .export_state.erp_batches[]?,
+        if (((.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id // "") | length) > 0) then
+          {
+            receipt_id: (.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id),
+            system_id: $root_system_id,
+            status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "delivered"),
+            record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0),
+            audit_id: (.export_state.latest_delivery_audit_id // .export_state.latest_audit_id // .export_state.audit_id),
+            run_id: (.export_state.latest_delivery_run_id // .export_state.latest_run_id // .export_state.run_id),
+            posted_at: (.export_state.latest_posted_at // .export_state.latest_delivered_at // .export_state.latest_timestamp // .export_state.posted_at // .export_state.delivered_at // .export_state.timestamp)
+          }
+        else empty end
       )
-  ] | length' "$1"
+      | select(
+          type == "object"
+          and ((.receipt_id // .receipt // .batch_id // .erp_batch_id // .delivery_id // .posting_id // "") | length > 0)
+          and (((.system_id // .erp_system_id // .accounting_system_id // .target_id // "") as $receipt_system_id | ($receipt_system_id | length > 0) and $receipt_system_id == $root_system_id))
+          and ((.status // .result // "") | ascii_downcase | IN("delivered", "posted", "accepted", "completed", "reconciled", "validated"))
+          and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
+          and ((.audit_id // .audit_log_id // .trace_id // .run_id // .posted_at // .delivered_at // .received_at // .accepted_at // .timestamp // "") | length > 0)
+        )
+    ] | length' "$1"
 }
 
 finance_close_step_detail_count() {
@@ -3213,6 +3215,37 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing finance delivery receipt audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-export-delivery-observer.json" <<'JSON'
+{
+  "status": "ok",
+  "export_state": {
+    "delivery_mode": "netsuite",
+    "system_id": "netsuite-prod-1",
+    "delivery_count": 1,
+    "delivery_receipts": [
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "quickbooks-prod-2", "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-delivery-receipt-system-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-delivery-receipt-system.out 2>/tmp/mandoforge-stage2-archive-finance-delivery-receipt-system.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected mismatched finance delivery receipt system evidence to fail" >&2
     exit 1
   fi
 
