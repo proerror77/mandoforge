@@ -229,6 +229,24 @@ is_production_policy_rollout_scope() {
   esac
 }
 
+policy_due_run_scan_detail_count() {
+  jq -r '[
+    (
+      .response.scanned_revisions[]?,
+      .response.scanned_policies[]?,
+      .response.policy_revisions[]?,
+      .response.scanned_items[]?,
+      .response.checked_revisions[]?
+    )
+    | select(
+        type == "object"
+        and ((.policy_id // .policy // .policy_key // .policy_name // "") | length > 0)
+        and ((.revision_id // .revision // .policy_revision_id // .version // "") | length > 0)
+        and ((.status // .result // .action // "") | ascii_downcase | IN("scanned", "checked", "skipped", "noop", "activated", "validated", "passed"))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 normalize_kms_kind() {
   printf '%s' "$1" | tr '[:upper:]-' '[:lower:]_'
 }
@@ -1032,11 +1050,13 @@ artifact_contract_issue() {
     local evidence_status
     local due_run_status
     local scanned_count
+    local scan_detail_count
     local checked_at
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     due_run_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     scanned_count="$(jq -r '.response.scanned_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    scan_detail_count="$(policy_due_run_scan_detail_count "$artifact")"
     checked_at="$(jq -r '.response.checked_at // ""' "$artifact" 2>/dev/null || echo "")"
 
     if [[ "$evidence_status" != "captured" ]]; then
@@ -1049,6 +1069,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$scanned_count" =~ ^[0-9]+$ || "$scanned_count" == "0" ]]; then
       printf 'scanned_count=%s' "$scanned_count"
+      return 0
+    fi
+    if [[ ! "$scan_detail_count" =~ ^[0-9]+$ || "$scan_detail_count" -lt "$scanned_count" ]]; then
+      printf 'scan_detail_count=%s scanned_count=%s' "$scan_detail_count" "$scanned_count"
       return 0
     fi
     if [[ -z "$checked_at" ]]; then

@@ -180,6 +180,24 @@ is_production_rollout_scope() {
   esac
 }
 
+policy_due_run_scan_detail_count() {
+  jq -r '[
+    (
+      .response.scanned_revisions[]?,
+      .response.scanned_policies[]?,
+      .response.policy_revisions[]?,
+      .response.scanned_items[]?,
+      .response.checked_revisions[]?
+    )
+    | select(
+        type == "object"
+        and ((.policy_id // .policy // .policy_key // .policy_name // "") | length > 0)
+        and ((.revision_id // .revision // .policy_revision_id // .version // "") | length > 0)
+        and ((.status // .result // .action // "") | ascii_downcase | IN("scanned", "checked", "skipped", "noop", "activated", "validated", "passed"))
+      )
+  ] | length' "$1"
+}
+
 normalize_kind() {
   printf '%s' "$1" | tr '[:upper:]-' '[:lower:]_'
 }
@@ -653,10 +671,12 @@ artifact_issue() {
       local evidence_status
       local due_run_status
       local scanned_count
+      local scan_detail_count
       local checked_at
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       due_run_status="$(jq -r '.response.status // "unknown"' "$path")"
       scanned_count="$(jq -r '.response.scanned_count // 0' "$path")"
+      scan_detail_count="$(policy_due_run_scan_detail_count "$path")"
       checked_at="$(jq -r '.response.checked_at // ""' "$path")"
       if [[ "$evidence_status" != "captured" ]]; then
         printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
@@ -668,6 +688,10 @@ artifact_issue() {
       fi
       if [[ ! "$scanned_count" =~ ^[0-9]+$ || "$scanned_count" == "0" ]]; then
         printf '%s scanned_count=%s' "$relative_path" "$scanned_count"
+        return 0
+      fi
+      if [[ ! "$scan_detail_count" =~ ^[0-9]+$ || "$scan_detail_count" -lt "$scanned_count" ]]; then
+        printf '%s scan_detail_count=%s scanned_count=%s' "$relative_path" "$scan_detail_count" "$scanned_count"
         return 0
       fi
       if [[ -z "$checked_at" ]]; then
@@ -1569,6 +1593,9 @@ JSON
     "status": "noop",
     "scanned_count": 1,
     "skipped_count": 1,
+    "scanned_revisions": [
+      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "status": "scanned"}
+    ],
     "checked_at": "1970-01-01T00:00:00Z"
   }
 }
@@ -3458,6 +3485,38 @@ JSON
     "status": "noop",
     "scanned_count": 1,
     "skipped_count": 1,
+    "checked_at": "1970-01-01T00:00:00Z"
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-due-run-scan-detail-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-due-run-scan-detail-negative.out 2>/tmp/mandoforge-stage2-archive-policy-due-run-scan-detail-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing policy due-run scan detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/policy-rollout-due-run-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "noop",
+    "scanned_count": 1,
+    "skipped_count": 1,
+    "scanned_revisions": [
+      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "status": "scanned"}
+    ],
     "checked_at": ""
   }
 }
@@ -3487,6 +3546,9 @@ JSON
     "status": "noop",
     "scanned_count": 1,
     "skipped_count": 1,
+    "scanned_revisions": [
+      {"policy_id": "policy-prod-1", "revision_id": "policy-revision-prod-1", "status": "scanned"}
+    ],
     "checked_at": "1970-01-01T00:00:00Z"
   }
 }

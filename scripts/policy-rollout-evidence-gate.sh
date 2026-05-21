@@ -71,6 +71,24 @@ is_production_identity() {
   [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
 }
 
+policy_due_run_scan_detail_count() {
+  jq -r '[
+    (
+      .response.scanned_revisions[]?,
+      .response.scanned_policies[]?,
+      .response.policy_revisions[]?,
+      .response.scanned_items[]?,
+      .response.checked_revisions[]?
+    )
+    | select(
+        type == "object"
+        and ((.policy_id // .policy // .policy_key // .policy_name // "") | length > 0)
+        and ((.revision_id // .revision // .policy_revision_id // .version // "") | length > 0)
+        and ((.status // .result // .action // "") | ascii_downcase | IN("scanned", "checked", "skipped", "noop", "activated", "validated", "passed"))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -117,6 +135,7 @@ write_summary() {
   local due_run_evidence_status
   local due_run_status
   local due_run_scanned_count
+  local due_run_scan_detail_count
   local due_run_checked_at
   local production_blocked
   local rollout_active
@@ -170,11 +189,13 @@ write_summary() {
   due_run_evidence_status="not_requested"
   due_run_status="not_run"
   due_run_scanned_count="0"
+  due_run_scan_detail_count="0"
   due_run_checked_at=""
   if [[ -s "$due_run_evidence_file" ]]; then
     due_run_evidence_status="$(jq -r '.status // "unknown"' "$due_run_evidence_file")"
     due_run_status="$(jq -r '.response.status // "unknown"' "$due_run_evidence_file")"
     due_run_scanned_count="$(jq -r '.response.scanned_count // 0' "$due_run_evidence_file")"
+    due_run_scan_detail_count="$(policy_due_run_scan_detail_count "$due_run_evidence_file")"
     due_run_checked_at="$(jq -r '.response.checked_at // ""' "$due_run_evidence_file")"
   fi
   production_blocked="$(jq -r 'if has("production_blocked") then .production_blocked else true end' "$readiness_file")"
@@ -249,6 +270,9 @@ write_summary() {
   if [[ ! "$due_run_scanned_count" =~ ^[0-9]+$ || "$due_run_scanned_count" == "0" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ ! "$due_run_scan_detail_count" =~ ^[0-9]+$ || ! "$due_run_scanned_count" =~ ^[0-9]+$ || "$due_run_scan_detail_count" -lt "$due_run_scanned_count" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ -z "$due_run_checked_at" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -260,6 +284,7 @@ write_summary() {
     echo "policy_rollout_due_run_evidence_status=$due_run_evidence_status"
     echo "policy_rollout_due_run_status=$due_run_status"
     echo "policy_rollout_due_run_scanned_count=$due_run_scanned_count"
+    echo "policy_rollout_due_run_scan_detail_count=$due_run_scan_detail_count"
     echo "policy_rollout_due_run_checked_at=$due_run_checked_at"
     echo "production_blocked=$production_blocked"
     echo "production_blocked_count=$blocked_count"
@@ -348,6 +373,9 @@ write_summary() {
     fi
     if [[ ! "$due_run_scanned_count" =~ ^[0-9]+$ || "$due_run_scanned_count" == "0" ]]; then
       echo "- policy due-run did not scan any policy revisions: scanned_count=$due_run_scanned_count"
+    fi
+    if [[ ! "$due_run_scan_detail_count" =~ ^[0-9]+$ || ! "$due_run_scanned_count" =~ ^[0-9]+$ || "$due_run_scan_detail_count" -lt "$due_run_scanned_count" ]]; then
+      echo "- policy due-run did not report audited scan details for every scanned revision: detail_count=$due_run_scan_detail_count scanned_count=$due_run_scanned_count"
     fi
     if [[ -z "$due_run_checked_at" ]]; then
       echo "- policy due-run did not report checked_at"
