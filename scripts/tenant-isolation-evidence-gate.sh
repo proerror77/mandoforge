@@ -69,6 +69,39 @@ forced_rls_table_detail_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+tenant_sample_count() {
+  jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$1" 2>/dev/null || echo "0"
+}
+
+unique_tenant_sample_count() {
+  jq -r '[
+    (
+      .response.controller_execution.tenant_samples[]?,
+      .response.controller_execution.tenant_ids_sample[]?
+    )
+    | if type == "object" then (.tenant_id // .tenant // .id // .name // "") elif type == "string" then . else "" end
+    | select(length > 0)
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
+}
+
+tenant_sample_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.tenant_samples[]?,
+      .response.controller_execution.tenant_ids_sample[]?
+    )
+    | select(
+        type == "object"
+        and ((.tenant_id // .tenant // .id // .name // "") | length > 0)
+        and (
+          ((.status // .result // .outcome // "") | ascii_downcase | IN("sampled", "validated", "passed", "observed", "checked"))
+          or (.validated == true)
+        )
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .sampled_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -122,6 +155,8 @@ write_summary() {
   local routing_environment
   local routing_tenant_count
   local routing_tenant_sample_count
+  local routing_unique_tenant_sample_count
+  local routing_tenant_sample_detail_count
   local routing_rls_enforced
   local routing_rls_table_count
   local routing_rls_forced_table_count
@@ -149,6 +184,8 @@ write_summary() {
   routing_environment="unknown"
   routing_tenant_count="0"
   routing_tenant_sample_count="0"
+  routing_unique_tenant_sample_count="0"
+  routing_tenant_sample_detail_count="0"
   routing_rls_enforced="false"
   routing_rls_table_count="0"
   routing_rls_forced_table_count="0"
@@ -164,7 +201,9 @@ write_summary() {
     routing_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$validation_evidence_file")"
     routing_environment="$(jq -r '.response.controller_execution.environment // "unknown"' "$validation_evidence_file")"
     routing_tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$validation_evidence_file")"
-    routing_tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$validation_evidence_file")"
+    routing_tenant_sample_count="$(tenant_sample_count "$validation_evidence_file")"
+    routing_unique_tenant_sample_count="$(unique_tenant_sample_count "$validation_evidence_file")"
+    routing_tenant_sample_detail_count="$(tenant_sample_detail_count "$validation_evidence_file")"
     routing_rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$validation_evidence_file")"
     routing_rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$validation_evidence_file")"
     routing_rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$validation_evidence_file")"
@@ -220,6 +259,12 @@ write_summary() {
   if ! has_multiple_tenants "$routing_tenant_sample_count"; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! has_multiple_tenants "$routing_unique_tenant_sample_count"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$routing_tenant_sample_detail_count" =~ ^[0-9]+$ || ! "$routing_tenant_sample_count" =~ ^[0-9]+$ || "$routing_tenant_sample_detail_count" -lt "$routing_tenant_sample_count" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$routing_rls_enforced" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -260,6 +305,8 @@ write_summary() {
     echo "routing_environment=$routing_environment"
     echo "routing_tenant_count=$routing_tenant_count"
     echo "routing_tenant_sample_count=$routing_tenant_sample_count"
+    echo "routing_unique_tenant_sample_count=$routing_unique_tenant_sample_count"
+    echo "routing_tenant_sample_detail_count=$routing_tenant_sample_detail_count"
     echo "routing_rls_enforced=$routing_rls_enforced"
     echo "routing_rls_table_count=$routing_rls_table_count"
     echo "routing_rls_forced_table_count=$routing_rls_forced_table_count"
@@ -302,6 +349,12 @@ write_summary() {
     fi
     if ! has_multiple_tenants "$routing_tenant_sample_count"; then
       echo "- tenant routing controller did not report at least two audited tenant samples: sample_count=$routing_tenant_sample_count"
+    fi
+    if ! has_multiple_tenants "$routing_unique_tenant_sample_count"; then
+      echo "- tenant routing controller did not report at least two unique tenant samples: unique_sample_count=$routing_unique_tenant_sample_count"
+    fi
+    if [[ ! "$routing_tenant_sample_detail_count" =~ ^[0-9]+$ || ! "$routing_tenant_sample_count" =~ ^[0-9]+$ || "$routing_tenant_sample_detail_count" -lt "$routing_tenant_sample_count" ]]; then
+      echo "- tenant routing controller did not include audited detail for every tenant sample: detail_count=$routing_tenant_sample_detail_count sample_count=$routing_tenant_sample_count"
     fi
     if [[ "$routing_rls_enforced" != "true" ]]; then
       echo "- tenant routing controller did not confirm RLS enforcement"

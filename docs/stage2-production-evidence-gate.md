@@ -136,7 +136,8 @@ support, fresh controller evidence, validated routing evidence, and RLS enabled,
 forced, and tenant-context configured. The routing controller response must also
 identify a broader multi-tenant deployment (`multi_tenant_deployment`,
 `enterprise_multi_tenant`, or `production_multi_tenant`), report at least two
-tenants plus at least two audited tenant samples, and confirm RLS enforcement,
+tenants plus at least two unique audited tenant samples with tenant id plus audit
+id, trace id, run id, or timestamp detail, and confirm RLS enforcement,
 tenant context propagation, nonzero RLS table coverage, forced RLS for every
 reported table, and a nonzero audited cross-tenant negative-test count; a
 single-tenant or Whiskey-only pilot target is inventory evidence, not completion

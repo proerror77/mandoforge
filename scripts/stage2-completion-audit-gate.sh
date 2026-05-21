@@ -492,6 +492,39 @@ forced_rls_table_detail_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+tenant_sample_count() {
+  jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$1" 2>/dev/null || echo "0"
+}
+
+unique_tenant_sample_count() {
+  jq -r '[
+    (
+      .response.controller_execution.tenant_samples[]?,
+      .response.controller_execution.tenant_ids_sample[]?
+    )
+    | if type == "object" then (.tenant_id // .tenant // .id // .name // "") elif type == "string" then . else "" end
+    | select(length > 0)
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
+}
+
+tenant_sample_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.tenant_samples[]?,
+      .response.controller_execution.tenant_ids_sample[]?
+    )
+    | select(
+        type == "object"
+        and ((.tenant_id // .tenant // .id // .name // "") | length > 0)
+        and (
+          ((.status // .result // .outcome // "") | ascii_downcase | IN("sampled", "validated", "passed", "observed", "checked"))
+          or (.validated == true)
+        )
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .sampled_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 is_nonnegative_integer() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
@@ -1260,6 +1293,7 @@ artifact_contract_issue() {
     local tenant_count
     local tenant_sample_count
     local unique_tenant_sample_count
+    local tenant_sample_detail_count
     local rls_enforced
     local rls_table_count
     local rls_forced_table_count
@@ -1274,8 +1308,9 @@ artifact_contract_issue() {
     validation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$artifact" 2>/dev/null || echo "0")"
-    tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
-    unique_tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | unique | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | unique | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+    tenant_sample_count="$(tenant_sample_count "$artifact")"
+    unique_tenant_sample_count="$(unique_tenant_sample_count "$artifact")"
+    tenant_sample_detail_count="$(tenant_sample_detail_count "$artifact")"
     rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$artifact" 2>/dev/null || echo "false")"
     rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
     rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
@@ -1312,6 +1347,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$unique_tenant_sample_count" =~ ^[0-9]+$ || "$unique_tenant_sample_count" -lt 2 ]]; then
       printf 'unique_tenant_sample_count=%s is not an audited multi-tenant sample' "$unique_tenant_sample_count"
+      return 0
+    fi
+    if [[ ! "$tenant_sample_detail_count" =~ ^[0-9]+$ || "$tenant_sample_detail_count" -lt "$tenant_sample_count" ]]; then
+      printf 'tenant_sample_detail_count=%s tenant_sample_count=%s' "$tenant_sample_detail_count" "$tenant_sample_count"
       return 0
     fi
     if [[ "$rls_enforced" != "true" ]]; then

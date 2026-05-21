@@ -221,6 +221,39 @@ forced_rls_table_detail_count() {
   ] | length' "$1"
 }
 
+tenant_sample_count() {
+  jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$1"
+}
+
+unique_tenant_sample_count() {
+  jq -r '[
+    (
+      .response.controller_execution.tenant_samples[]?,
+      .response.controller_execution.tenant_ids_sample[]?
+    )
+    | if type == "object" then (.tenant_id // .tenant // .id // .name // "") elif type == "string" then . else "" end
+    | select(length > 0)
+  ] | unique | length' "$1"
+}
+
+tenant_sample_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.tenant_samples[]?,
+      .response.controller_execution.tenant_ids_sample[]?
+    )
+    | select(
+        type == "object"
+        and ((.tenant_id // .tenant // .id // .name // "") | length > 0)
+        and (
+          ((.status // .result // .outcome // "") | ascii_downcase | IN("sampled", "validated", "passed", "observed", "checked"))
+          or (.validated == true)
+        )
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .sampled_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1"
+}
+
 kms_rotation_detail_count() {
   jq -r '[
     (
@@ -674,6 +707,7 @@ artifact_issue() {
       local tenant_count
       local tenant_sample_count
       local unique_tenant_sample_count
+      local tenant_sample_detail_count
       local rls_enforced
       local rls_table_count
       local rls_forced_table_count
@@ -687,8 +721,9 @@ artifact_issue() {
       validation_status="$(jq -r '.response.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
       tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$path")"
-      tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$path")"
-      unique_tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | unique | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | unique | length) else 0 end' "$path")"
+      tenant_sample_count="$(tenant_sample_count "$path")"
+      unique_tenant_sample_count="$(unique_tenant_sample_count "$path")"
+      tenant_sample_detail_count="$(tenant_sample_detail_count "$path")"
       rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$path")"
       rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$path")"
       rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$path")"
@@ -720,6 +755,10 @@ artifact_issue() {
       fi
       if [[ ! "$unique_tenant_sample_count" =~ ^[0-9]+$ || "$unique_tenant_sample_count" -lt 2 ]]; then
         printf '%s unique_tenant_sample_count=%s is not an audited multi-tenant sample' "$relative_path" "$unique_tenant_sample_count"
+        return 0
+      fi
+      if [[ ! "$tenant_sample_detail_count" =~ ^[0-9]+$ || "$tenant_sample_detail_count" -lt "$tenant_sample_count" ]]; then
+        printf '%s tenant_sample_detail_count=%s tenant_sample_count=%s' "$relative_path" "$tenant_sample_detail_count" "$tenant_sample_count"
         return 0
       fi
       if [[ "$rls_enforced" != "true" || "$tenant_context_validated" != "true" || "$cross_tenant_negative_tests" != "true" ]]; then
@@ -1741,7 +1780,10 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
-      "tenant_samples": ["tenant-a", "tenant-b"],
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
@@ -3364,7 +3406,10 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
-      "tenant_samples": ["tenant-a", "tenant-b"],
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 1,
@@ -3407,7 +3452,10 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
-      "tenant_samples": ["tenant-a", "tenant-b"],
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
@@ -3450,7 +3498,10 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
-      "tenant_samples": ["tenant-a", "tenant-b"],
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
@@ -3492,7 +3543,10 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
-      "tenant_samples": ["tenant-a", "tenant-b"],
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
@@ -3534,7 +3588,10 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
-      "tenant_samples": ["tenant-a", "tenant-b"],
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
@@ -3581,7 +3638,10 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 1,
-      "tenant_samples": ["tenant-a", "tenant-b"],
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
@@ -3628,7 +3688,9 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
-      "tenant_samples": ["tenant-a"],
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
@@ -3675,7 +3737,10 @@ JSON
       "target_kind": "production_multi_tenant",
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
-      "tenant_samples": ["tenant-a", "tenant-a"],
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
@@ -3723,6 +3788,56 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": ["tenant-a", "tenant-b"],
+      "rls_enforced": true,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+      ],
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 3,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"},
+        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied"},
+        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-sample-audit-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-sample-audit-negative.out 2>/tmp/mandoforge-stage2-archive-tenant-sample-audit-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing tenant sample audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
