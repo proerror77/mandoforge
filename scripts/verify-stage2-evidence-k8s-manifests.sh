@@ -1168,6 +1168,16 @@ if ! grep -q "RUN_STAGE2_FINANCE_EXPORT" "$finance_script"; then
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_FINANCE_EXPORT.*:-1" "$finance_script"; then
+  echo "finance evidence script must default to finance export evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_FINANCE_CONTROLLERS.*:-1" "$finance_script"; then
+  echo "finance evidence script must default to finance controller evidence capture" >&2
+  exit 1
+fi
+
 if ! grep -q "/api/usage/export.csv" "$finance_script"; then
   echo "finance evidence script must capture CSV export evidence" >&2
   exit 1
@@ -1210,6 +1220,26 @@ fi
 
 if ! grep -q "finance-export-delivery-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit finance export delivery evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "FINANCE_EXPORT_DELIVERY_OBSERVER_URL" "$finance_script"; then
+  echo "finance evidence script must support export delivery observer evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "finance_export_delivery_mode" "$finance_script"; then
+  echo "finance evidence script must report export delivery mode" >&2
+  exit 1
+fi
+
+if ! grep -q "lark_drive" "$finance_script"; then
+  echo "finance evidence script must distinguish Feishu Drive from accounting/ERP targets" >&2
+  exit 1
+fi
+
+if ! grep -q "latest_reconciliation_reconciled" "$finance_script"; then
+  echo "finance evidence script must verify reconciled accounting evidence" >&2
   exit 1
 fi
 

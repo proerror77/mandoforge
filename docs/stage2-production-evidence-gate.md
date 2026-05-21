@@ -206,10 +206,22 @@ For a narrower finance proof, run:
 ```bash
 RUN_STAGE2_FINANCE_CONTROLLERS=1 \
 RUN_STAGE2_FINANCE_EXPORT=1 \
+FINANCE_EXPORT_DELIVERY_OBSERVER_URL=https://controller.example.com/finance/healthz \
 ./scripts/finance-evidence-gate.sh
 ```
 
-That gate collects finance dashboard summary, finance operations readiness, optional finance close/accounting reconciliation controller evidence, and optional export/delivery evidence into `.mandoforge/finance-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/finance-evidence-job.example.yaml`, which explicitly enables controller and export proof and persists its output under the Stage 2 production evidence PVC.
+That gate collects finance dashboard summary, finance operations readiness,
+finance close/accounting reconciliation controller evidence, CSV export capture,
+export-delivery evidence, and delivery-observer evidence into
+`.mandoforge/finance-evidence/`. It fails closed unless close completed,
+reconciliation is reconciled and fresh, the CSV is nonempty, delivery succeeded
+to a configured target, and the observer reports an accounting/ERP delivery mode
+such as `accounting_erp`, `erp`, `netsuite`, `quickbooks`, `xero`, `sap`, or
+`oracle_erp`; `lark_drive` and `accept_only` do not satisfy the ERP proof. The
+matching in-cluster template is
+`deploy/stage2-evidence/finance-evidence-job.example.yaml`, which explicitly
+enables controller and export proof and persists its output under the Stage 2
+production evidence PVC.
 
 The script deliberately skips higher-impact production actions unless explicitly enabled:
 
