@@ -247,7 +247,7 @@ write_summary() {
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .rotated_at // .timestamp // "") | length > 0)
         )
     ] | length' "$rotation_evidence_file")"
-    rotation_action_count="$(jq -r 'if ((.response.actions // null) | type) == "array" then (.response.actions | length) else 0 end' "$rotation_evidence_file")"
+    rotation_action_count="$(jq -r '[.response.actions[]? | select(. == "external_kms_rotation_confirmed")] | length' "$rotation_evidence_file")"
   fi
   blocked_count="$(jq -r '[
       .production_rotation.production_blocked,
@@ -438,7 +438,7 @@ write_summary() {
       echo "- KMS rotation did not include key-level rotation details for every counted key/catalog update: detail_count=$rotation_detail_count rotated_count=$rotation_rotated_count catalog_updated_count=$rotation_catalog_updated_count"
     fi
     if [[ ! "$rotation_action_count" =~ ^[0-9]+$ || "$rotation_action_count" == "0" ]]; then
-      echo "- KMS rotation did not report any audited actions"
+      echo "- KMS rotation did not report the external_kms_rotation_confirmed action"
     fi
     echo
     echo "recovery_blocking_reasons:"

@@ -770,6 +770,11 @@ if ! grep -q "vault-kms-rotation-evidence.json" "$vault_script"; then
   exit 1
 fi
 
+if ! grep -q "external_kms_rotation_confirmed" "$vault_script"; then
+  echo "Vault evidence script must require explicit external KMS rotation confirmation action evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "vault-kms-rotation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit KMS rotation evidence metadata" >&2
   exit 1
