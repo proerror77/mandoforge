@@ -1720,8 +1720,18 @@ if ! grep -q "does not match production-evidence-run.json" scripts/stage2-comple
   exit 1
 fi
 
+if ! grep -q "summary worker cluster id does not match production-evidence-run.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must bind combined worker/Remote Computer summary to the run manifest" >&2
+  exit 1
+fi
+
 if ! grep -q "do not share one cluster id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject mixed-cluster worker/Remote Computer evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "summary worker evidence cluster id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must bind combined worker/Remote Computer summary to root evidence artifacts" >&2
   exit 1
 fi
 

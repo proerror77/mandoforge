@@ -1116,15 +1116,22 @@ requirement_cross_artifact_issue() {
     local worker_artifact="$SOURCE_EVIDENCE_DIR/worker-load-validation-evidence.json"
     local state_artifact="$SOURCE_EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
     local sidecar_artifact="$SOURCE_EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
+    local summary_artifact="$SOURCE_EVIDENCE_DIR/worker-remote-computer/summary.json"
     local expected_cluster_id
     local worker_cluster_id
     local state_cluster_id
     local sidecar_cluster_id
+    local summary_worker_cluster_id
+    local summary_state_cluster_id
+    local summary_sidecar_cluster_id
 
     expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$run_manifest" 2>/dev/null || echo "")"
     worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$worker_artifact" 2>/dev/null || echo "")"
     state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$state_artifact" 2>/dev/null || echo "")"
     sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$sidecar_artifact" 2>/dev/null || echo "")"
+    summary_worker_cluster_id="$(jq -r '.worker.cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
+    summary_state_cluster_id="$(jq -r '.remote_computer.state_sync_cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
+    summary_sidecar_cluster_id="$(jq -r '.remote_computer.sidecar_cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
 
     if [[ -n "$expected_cluster_id" && -n "$worker_cluster_id" && "$expected_cluster_id" != "$worker_cluster_id" ]]; then
       printf 'worker cluster id does not match production-evidence-run.json'
@@ -1143,6 +1150,30 @@ requirement_cross_artifact_issue() {
         printf 'worker, state-sync, and sidecar evidence do not share one cluster id'
         return 0
       fi
+    fi
+    if [[ -n "$expected_cluster_id" && -n "$summary_worker_cluster_id" && "$expected_cluster_id" != "$summary_worker_cluster_id" ]]; then
+      printf 'worker/Remote Computer summary worker cluster id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_cluster_id" && -n "$summary_state_cluster_id" && "$expected_cluster_id" != "$summary_state_cluster_id" ]]; then
+      printf 'worker/Remote Computer summary state-sync cluster id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_cluster_id" && -n "$summary_sidecar_cluster_id" && "$expected_cluster_id" != "$summary_sidecar_cluster_id" ]]; then
+      printf 'worker/Remote Computer summary sidecar cluster id does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$worker_cluster_id" && -n "$summary_worker_cluster_id" && "$worker_cluster_id" != "$summary_worker_cluster_id" ]]; then
+      printf 'worker/Remote Computer summary worker cluster id does not match worker evidence'
+      return 0
+    fi
+    if [[ -n "$state_cluster_id" && -n "$summary_state_cluster_id" && "$state_cluster_id" != "$summary_state_cluster_id" ]]; then
+      printf 'worker/Remote Computer summary state-sync cluster id does not match state-sync evidence'
+      return 0
+    fi
+    if [[ -n "$sidecar_cluster_id" && -n "$summary_sidecar_cluster_id" && "$sidecar_cluster_id" != "$summary_sidecar_cluster_id" ]]; then
+      printf 'worker/Remote Computer summary sidecar cluster id does not match sidecar evidence'
+      return 0
     fi
   fi
 
