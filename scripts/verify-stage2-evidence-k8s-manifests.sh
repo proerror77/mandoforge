@@ -2210,6 +2210,11 @@ if ! grep -q "mismatched policy due-run scan binding evidence" scripts/verify-st
   exit 1
 fi
 
+if ! grep -q "mismatched policy controller target evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject policy controller target mismatches" >&2
+  exit 1
+fi
+
 if ! grep -q "missing policy due-run checked_at evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject policy due-run evidence without checked_at" >&2
   exit 1

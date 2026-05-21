@@ -4472,6 +4472,78 @@ JSON
   }
 }
 JSON
+  cat >"$tmpdir/evidence/production-evidence-run.json" <<'JSON'
+{
+  "generated_at": "1970-01-01T00:00:00Z",
+  "source": "stage2-production-evidence-gate",
+  "expected_targets": {
+    "worker_remote_computer": {
+      "cluster_id": "prod-cluster-1"
+    },
+    "tenant_routing": {
+      "deployment_id": "tenant-routing-prod-1"
+    },
+    "policy_rollout": {
+      "controller_id": "policy-controller-prod-2"
+    },
+    "vault_kms": {
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1"
+    },
+    "finance": {
+      "system_id": "netsuite-prod-1"
+    },
+    "managed_session_runtime": {
+      "target_id": "managed-session-runtime-prod-1"
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-controller-target-mismatch-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-controller-target-mismatch-negative.out 2>/tmp/mandoforge-stage2-archive-policy-controller-target-mismatch-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected mismatched policy controller target evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/production-evidence-run.json" <<'JSON'
+{
+  "generated_at": "1970-01-01T00:00:00Z",
+  "source": "stage2-production-evidence-gate",
+  "expected_targets": {
+    "worker_remote_computer": {
+      "cluster_id": "prod-cluster-1"
+    },
+    "tenant_routing": {
+      "deployment_id": "tenant-routing-prod-1"
+    },
+    "policy_rollout": {
+      "controller_id": "policy-controller-prod-1"
+    },
+    "vault_kms": {
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1"
+    },
+    "finance": {
+      "system_id": "netsuite-prod-1"
+    },
+    "managed_session_runtime": {
+      "target_id": "managed-session-runtime-prod-1"
+    }
+  }
+}
+JSON
   cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
 {
   "status": "captured",
