@@ -98,7 +98,8 @@ kms_recovery_step_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$root_backend_id, $root_key_id, $root_recovery_id, (.name // .step // .kind // .action // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 slugify() {
@@ -266,7 +267,8 @@ write_summary() {
           and ((.status // .result // "") | ascii_downcase | IN("rotated", "validated", "completed", "passed"))
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .rotated_at // .timestamp // "") | length > 0)
         )
-    ] | length' "$rotation_evidence_file")"
+      | [$root_backend_id, $root_key_id, $root_rotation_id, (.secret_id // .secret_ref // .record_id // .catalog_entry_id // .entry_id // .name // .path // .key_id // .key // .kms_key_id // "")] | @tsv
+    ] | unique | length' "$rotation_evidence_file")"
     rotation_action_count="$(jq -r '[.response.actions[]? | select(. == "external_kms_rotation_confirmed")] | length' "$rotation_evidence_file")"
   fi
   blocked_count="$(jq -r '[

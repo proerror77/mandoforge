@@ -170,12 +170,12 @@ Vault is healthy, the secret provider is ready, the KMS/HSM backend is external
 and ready, rotation evidence is captured and validated against a reported
 production backend kind/environment/backend id/key id with a production
 rotation id, nonzero rotated record count, nonzero catalog update count, and
-key-level rotation details that include key id, rotation id, catalog update
+unique key/record-level rotation details that include key id, rotation id, catalog update
 confirmation, rotated/validated/completed status, and audit id, trace id, run id,
 or timestamp detail, and recovery evidence is captured with fresh validated
 controller evidence for the same class of production backend identity. Recovery
 evidence must also report a production recovery id, production recovery target
-kind, and audited recovery steps with step names, matching backend/key/recovery
+kind, and unique audited recovery steps with step names, matching backend/key/recovery
 ids, passed/validated/completed status, and audit id, trace id, run id, or
 timestamp detail. The matching in-cluster
 template is `deploy/stage2-evidence/vault-evidence-job.example.yaml`, which

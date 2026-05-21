@@ -950,6 +950,11 @@ if ! grep -q "missing KMS rotation audit evidence" scripts/verify-stage2-evidenc
   exit 1
 fi
 
+if ! grep -q "duplicate KMS rotation detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate KMS rotation detail records" >&2
+  exit 1
+fi
+
 if ! grep -q "zero KMS rotated count" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject KMS rotation evidence with no rotated records" >&2
   exit 1
@@ -977,6 +982,11 @@ fi
 
 if ! grep -q "missing KMS recovery step audit evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject KMS recovery steps without audit details" >&2
+  exit 1
+fi
+
+if ! grep -q "duplicate KMS recovery step evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate KMS recovery step details" >&2
   exit 1
 fi
 

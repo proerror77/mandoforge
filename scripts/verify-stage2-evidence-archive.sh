@@ -359,7 +359,8 @@ kms_rotation_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("rotated", "validated", "completed", "passed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .rotated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$root_backend_id, $root_key_id, $root_rotation_id, (.secret_id // .secret_ref // .record_id // .catalog_entry_id // .entry_id // .name // .path // .key_id // .key // .kms_key_id // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 is_production_policy_controller_kind() {
@@ -465,7 +466,8 @@ kms_recovery_step_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$root_backend_id, $root_key_id, $root_recovery_id, (.name // .step // .kind // .action // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 normalize_kind() {
@@ -3887,6 +3889,49 @@ JSON
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
       "key_id": "key-1",
       "rotation_id": "kms-rotation-1",
+      "rotated_count": 2
+    },
+    "rotated_count": 2,
+    "catalog_updated_count": 2,
+    "rotation_details": [
+      {"backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "rotation_id": "kms-rotation-1", "record_id": "secret-record-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-1", "rotated_at": "1970-01-01T00:00:00Z"},
+      {"backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "rotation_id": "kms-rotation-1", "record_id": "secret-record-1", "status": "rotated", "catalog_updated": true, "audit_id": "kms-rotation-audit-2", "rotated_at": "1970-01-01T00:00:01Z"}
+    ],
+    "actions": ["external_kms_rotation_confirmed"]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-vault-rotation-duplicate-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-vault-rotation-duplicate-negative.out 2>/tmp/mandoforge-stage2-archive-vault-rotation-duplicate-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate KMS rotation detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/vault-kms-rotation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "external_execution": {
+      "status": "validated",
+      "production_backend": true,
+      "backend_kind": "aws_kms",
+      "environment": "production",
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1",
+      "rotation_id": "kms-rotation-1",
       "rotated_count": 1
     },
     "rotated_count": 1,
@@ -4091,6 +4136,45 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing KMS recovery step audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/vault-kms-recovery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "status": "validated",
+      "backend_kind": "aws_kms",
+      "environment": "production",
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1",
+      "recovery_id": "kms-recovery-1",
+      "recovery_target_kind": "production_kms_backend",
+      "steps": [
+        {"name": "restore-key-material", "status": "validated", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1", "audit_id": "kms-recovery-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "restore-key-material", "status": "validated", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1", "audit_id": "kms-recovery-audit-2", "checked_at": "1970-01-01T00:00:01Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-vault-recovery-step-duplicate-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-vault-recovery-step-duplicate-negative.out 2>/tmp/mandoforge-stage2-archive-vault-recovery-step-duplicate-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate KMS recovery step evidence to fail" >&2
     exit 1
   fi
 
