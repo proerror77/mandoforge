@@ -1745,6 +1745,11 @@ if ! grep -q "missing cross-tenant negative tests" scripts/verify-stage2-evidenc
   exit 1
 fi
 
+if ! grep -q "missing tenant context validation evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject tenant evidence without tenant context validation" >&2
+  exit 1
+fi
+
 if ! grep -q "single tenant sample evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject tenant evidence without audited multi-tenant samples" >&2
   exit 1
