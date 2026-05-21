@@ -34065,6 +34065,9 @@ async fn list_execution_jobs(
         authorize_collection_request(&state, &headers, Permission::SessionsRead, "execution_jobs")
             .await?;
     let worker_environment_id = worker_environment_id_from_headers(&headers)?;
+    let worker_pool = worker_pool_from_headers(&headers);
+    let worker_pool_environment_ids =
+        worker_pool_environment_ids(&state, worker_pool.as_deref()).await?;
     let visible_sessions = state.list_sessions_visible_to(&principal).await?;
     let visible_session_ids: HashSet<_> =
         visible_sessions.iter().map(|session| session.id).collect();
@@ -34088,6 +34091,17 @@ async fn list_execution_jobs(
                         == Some(environment_id)
                 })
             })
+            .filter(|job| {
+                worker_pool.as_ref().is_none_or(|_| {
+                    session_environment_ids
+                        .get(&job.session_id)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|environment_id| {
+                            worker_pool_environment_ids.contains(&environment_id)
+                        })
+                })
+            })
             .collect(),
     ))
 }
@@ -34104,6 +34118,9 @@ async fn list_session_loop_jobs(
     )
     .await?;
     let worker_environment_id = worker_environment_id_from_headers(&headers)?;
+    let worker_pool = worker_pool_from_headers(&headers);
+    let worker_pool_environment_ids =
+        worker_pool_environment_ids(&state, worker_pool.as_deref()).await?;
     let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
     Ok(Json(
         state
@@ -34114,6 +34131,13 @@ async fn list_session_loop_jobs(
             .filter(|job| {
                 worker_environment_id.map_or(true, |environment_id| {
                     job.environment_id == Some(environment_id)
+                })
+            })
+            .filter(|job| {
+                worker_pool.as_ref().is_none_or(|_| {
+                    job.environment_id.is_some_and(|environment_id| {
+                        worker_pool_environment_ids.contains(&environment_id)
+                    })
                 })
             })
             .collect(),
@@ -34130,6 +34154,47 @@ fn worker_environment_id_from_headers(headers: &HeaderMap) -> Result<Option<Uuid
     Uuid::parse_str(value)
         .map(Some)
         .map_err(|_| AppError::bad_request("x-mandoforge-environment-id must be a UUID"))
+}
+
+fn worker_pool_from_headers(headers: &HeaderMap) -> Option<String> {
+    header_value(headers, "x-mandoforge-worker-pool")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+async fn worker_pool_environment_ids(
+    state: &AppState,
+    worker_pool: Option<&str>,
+) -> Result<HashSet<Uuid>, AppError> {
+    let Some(worker_pool) = worker_pool.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(HashSet::new());
+    };
+    Ok(state
+        .list_environments()
+        .await?
+        .into_iter()
+        .filter(|environment| environment.archived_at.is_none())
+        .filter(|environment| {
+            environment_worker_pool(&environment.worker_queue_binding).as_deref()
+                == Some(worker_pool)
+        })
+        .map(|environment| environment.id)
+        .collect())
+}
+
+fn environment_worker_pool(worker_queue_binding: &Value) -> Option<String> {
+    for key in ["queue", "worker_pool", "pool"] {
+        if let Some(value) = worker_queue_binding
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 async fn enforce_worker_environment_binding(
@@ -34151,6 +34216,31 @@ async fn enforce_worker_environment_binding(
     Err(AppError::not_found(
         "job not claimable for worker environment",
     ))
+}
+
+async fn enforce_worker_pool_binding(
+    state: &AppState,
+    headers: &HeaderMap,
+    session_id: Uuid,
+    job_environment_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let Some(worker_pool) = worker_pool_from_headers(headers) else {
+        return Ok(());
+    };
+    let actual_environment_id = match job_environment_id {
+        Some(environment_id) => Some(environment_id),
+        None => state.get_session(session_id).await?.environment_id,
+    };
+    let Some(environment_id) = actual_environment_id else {
+        return Err(AppError::not_found("job not claimable for worker pool"));
+    };
+    let environment = state.get_environment(environment_id).await?;
+    if environment_worker_pool(&environment.worker_queue_binding).as_deref()
+        == Some(worker_pool.as_str())
+    {
+        return Ok(());
+    }
+    Err(AppError::not_found("job not claimable for worker pool"))
 }
 
 async fn assign_execution_job_remote_computer_lease(
@@ -37478,6 +37568,7 @@ async fn run_execution_job_route(
     authorize_execution_job_run(&state, &headers, id).await?;
     let job = state.execution_queue.get(id).await?;
     enforce_worker_environment_binding(&state, &headers, job.session_id, None).await?;
+    enforce_worker_pool_binding(&state, &headers, job.session_id, None).await?;
     let worker_id = headers
         .get("x-mandoforge-worker-id")
         .and_then(|value| value.to_str().ok())
@@ -37506,6 +37597,7 @@ async fn run_session_loop_job_route(
     let job = state.get_session_loop_job(id).await?;
     enforce_worker_environment_binding(&state, &headers, job.session_id, job.environment_id)
         .await?;
+    enforce_worker_pool_binding(&state, &headers, job.session_id, job.environment_id).await?;
     if !session_accepts_worker_execution(&state, job.session_id).await? {
         let skipped = state
             .discard_session_loop_job(
@@ -46602,6 +46694,28 @@ not json
                 .iter()
                 .any(|job| job.session_id == session_b.id)
         );
+        let loop_jobs_for_pool_a: Vec<SessionLoopJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/session-loop-jobs")
+                .header("x-mandoforge-subject", "worker-a")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-worker-pool", "worker-a")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            loop_jobs_for_pool_a
+                .iter()
+                .any(|job| job.session_id == session_a.id)
+        );
+        assert!(
+            !loop_jobs_for_pool_a
+                .iter()
+                .any(|job| job.session_id == session_b.id),
+            "worker pool A should not see B loop jobs: {loop_jobs_for_pool_a:?}"
+        );
 
         let loop_job_b = session_loop_jobs_for_session(app.clone(), session_b.id)
             .await
@@ -46626,6 +46740,21 @@ not json
             error["error"],
             json!("job not claimable for worker environment")
         );
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/session-loop-jobs/{}/run", loop_job_b.id))
+                .header("x-mandoforge-worker-id", "worker-pool-a")
+                .header("x-mandoforge-subject", "worker-pool-a")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-worker-pool", "worker-a")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["error"], json!("job not claimable for worker pool"));
 
         for session in [&session_a, &session_b] {
             let approval_required: Value = request_json(
@@ -46676,6 +46805,28 @@ not json
                 .any(|job| job.session_id == session_b.id),
             "environment A worker should not see B execution jobs: {execution_jobs_for_a:?}"
         );
+        let execution_jobs_for_pool_a: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .header("x-mandoforge-subject", "worker-a")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-worker-pool", "worker-a")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            execution_jobs_for_pool_a
+                .iter()
+                .any(|job| job.session_id == session_a.id)
+        );
+        assert!(
+            !execution_jobs_for_pool_a
+                .iter()
+                .any(|job| job.session_id == session_b.id),
+            "worker pool A should not see B execution jobs: {execution_jobs_for_pool_a:?}"
+        );
 
         let execution_job_b = request_json::<Vec<execution_queue::ExecutionJob>>(
             app.clone(),
@@ -46691,7 +46842,7 @@ not json
         .find(|job| job.session_id == session_b.id)
         .expect("environment B execution job");
         let (status, error) = request_value(
-            app,
+            app.clone(),
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/execution-jobs/{}/run", execution_job_b.id))
@@ -46708,6 +46859,21 @@ not json
             error["error"],
             json!("job not claimable for worker environment")
         );
+        let (status, error) = request_value(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{}/run", execution_job_b.id))
+                .header("x-mandoforge-worker-id", "worker-pool-a")
+                .header("x-mandoforge-subject", "worker-pool-a")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-worker-pool", "worker-a")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["error"], json!("job not claimable for worker pool"));
     }
 
     #[tokio::test]

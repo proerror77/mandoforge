@@ -234,11 +234,14 @@ cargo run -p mandoforge-api
 
 BASE_URL=http://127.0.0.1:8787 \
 MANDOFORGE_WORKER_TOKEN=local-worker-token \
+WORKER_POOL=managed-agent \
 cargo run -p mandoforge-api --bin mandoforge-worker
 ```
 
 The same worker drains both session-loop jobs and approved execution jobs. It is
-the local entrypoint for the always-on orchestrator loop.
+the local entrypoint for the always-on orchestrator loop. `WORKER_ENVIRONMENT_ID`
+binds a worker to one Environment id; `WORKER_POOL` or `WORKER_QUEUE` binds it
+to Environments whose `worker_queue_binding` names the same pool.
 
 Governed coding-agent CLI profiles:
 

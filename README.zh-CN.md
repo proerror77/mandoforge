@@ -202,12 +202,15 @@ cargo run -p mandoforge-api
 
 BASE_URL=http://127.0.0.1:8787 \
 MANDOFORGE_WORKER_TOKEN=local-worker-token \
+WORKER_POOL=managed-agent \
 cargo run -p mandoforge-api --bin mandoforge-worker
 ```
 
 这个 worker 会消费 session-loop jobs 和已批准的 execution jobs。用户从 UI
 或 `/api/sessions/:id/events` 写入任务后，session-loop job 由 worker claim，
-再进入 provider / tool / approval / execution queue 路径。
+再进入 provider / tool / approval / execution queue 路径。`WORKER_ENVIRONMENT_ID`
+会把 worker 绑定到单个 Environment id；`WORKER_POOL` 或 `WORKER_QUEUE`
+会绑定到 `worker_queue_binding` 里同名 pool 的 Environments。
 
 受管 coding-agent CLI profile：
 
