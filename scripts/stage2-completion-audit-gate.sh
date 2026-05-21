@@ -774,6 +774,7 @@ artifact_contract_issue() {
   if [[ "$artifact_name" == "production-evidence-run.json" ]]; then
     local expected_cluster_id
     local expected_worker_pool
+    local expected_state_claim
     local expected_tenant_deployment_id
     local expected_policy_controller_id
     local expected_kms_backend_id
@@ -783,6 +784,7 @@ artifact_contract_issue() {
 
     expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_worker_pool="$(jq -r '.expected_targets.worker_remote_computer.worker_pool // .expected_targets.worker_remote_computer.pool // .expected_targets.worker_remote_computer.queue // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_state_claim="$(jq -r '.expected_targets.worker_remote_computer.state_claim // .expected_targets.worker_remote_computer.claim // .expected_targets.worker_remote_computer.pvc // ""' "$artifact" 2>/dev/null || echo "")"
     expected_tenant_deployment_id="$(jq -r '.expected_targets.tenant_routing.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_policy_controller_id="$(jq -r '.expected_targets.policy_rollout.controller_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_kms_backend_id="$(jq -r '.expected_targets.vault_kms.backend_id // ""' "$artifact" 2>/dev/null || echo "")"
@@ -796,6 +798,10 @@ artifact_contract_issue() {
     fi
     if [[ "$req_id" == "worker-remote-computer" ]] && ! is_production_identity "$expected_worker_pool"; then
       printf 'expected worker/Remote Computer worker_pool=%s is pilot/mock/local' "${expected_worker_pool:-<empty>}"
+      return 0
+    fi
+    if [[ "$req_id" == "worker-remote-computer" ]] && ! is_production_identity "$expected_state_claim"; then
+      printf 'expected Remote Computer state claim=%s is pilot/mock/local' "${expected_state_claim:-<empty>}"
       return 0
     fi
     if [[ "$req_id" == "tenant-routing" ]] && ! is_production_identity "$expected_tenant_deployment_id"; then
@@ -1768,20 +1774,26 @@ requirement_cross_artifact_issue() {
     local sidecar_cluster_id
     local summary_worker_cluster_id
     local expected_worker_pool
+    local expected_state_claim
     local worker_pool
     local summary_worker_pool
     local summary_state_cluster_id
+    local state_claim
+    local summary_state_claim
     local summary_sidecar_cluster_id
 
     expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$run_manifest" 2>/dev/null || echo "")"
     expected_worker_pool="$(jq -r '.expected_targets.worker_remote_computer.worker_pool // .expected_targets.worker_remote_computer.pool // .expected_targets.worker_remote_computer.queue // ""' "$run_manifest" 2>/dev/null || echo "")"
+    expected_state_claim="$(jq -r '.expected_targets.worker_remote_computer.state_claim // .expected_targets.worker_remote_computer.claim // .expected_targets.worker_remote_computer.pvc // ""' "$run_manifest" 2>/dev/null || echo "")"
     worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$worker_artifact" 2>/dev/null || echo "")"
     worker_pool="$(jq -r '.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // ""' "$worker_artifact" 2>/dev/null || echo "")"
     state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$state_artifact" 2>/dev/null || echo "")"
+    state_claim="$(jq -r '.response.controller_execution.state_claim // .response.controller_execution.claim // .response.controller_execution.pvc // .response.controller_execution.persistent_volume_claim // ""' "$state_artifact" 2>/dev/null || echo "")"
     sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$sidecar_artifact" 2>/dev/null || echo "")"
     summary_worker_cluster_id="$(jq -r '.worker.cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
     summary_worker_pool="$(jq -r '.worker.worker_pool // .worker.pool_id // .worker.queue // .worker.queue_name // ""' "$summary_artifact" 2>/dev/null || echo "")"
     summary_state_cluster_id="$(jq -r '.remote_computer.state_sync_cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
+    summary_state_claim="$(jq -r '.remote_computer.state_claim // .remote_computer.claim // .remote_computer.pvc // .remote_computer.persistent_volume_claim // ""' "$summary_artifact" 2>/dev/null || echo "")"
     summary_sidecar_cluster_id="$(jq -r '.remote_computer.sidecar_cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
 
     if [[ -n "$expected_cluster_id" && -n "$worker_cluster_id" && "$expected_cluster_id" != "$worker_cluster_id" ]]; then
@@ -1828,6 +1840,18 @@ requirement_cross_artifact_issue() {
     fi
     if [[ -n "$worker_pool" && -n "$summary_worker_pool" && "$worker_pool" != "$summary_worker_pool" ]]; then
       printf 'worker/Remote Computer summary worker_pool does not match worker evidence'
+      return 0
+    fi
+    if [[ -n "$expected_state_claim" && -n "$state_claim" && "$expected_state_claim" != "$state_claim" ]]; then
+      printf 'Remote Computer state claim does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_state_claim" && -n "$summary_state_claim" && "$expected_state_claim" != "$summary_state_claim" ]]; then
+      printf 'worker/Remote Computer summary state claim does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$state_claim" && -n "$summary_state_claim" && "$state_claim" != "$summary_state_claim" ]]; then
+      printf 'worker/Remote Computer summary state claim does not match state-sync evidence'
       return 0
     fi
     if [[ -n "$state_cluster_id" && -n "$summary_state_cluster_id" && "$state_cluster_id" != "$summary_state_cluster_id" ]]; then

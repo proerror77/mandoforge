@@ -2255,6 +2255,11 @@ if ! grep -q "summary worker_pool does not match production-evidence-run.json" s
   exit 1
 fi
 
+if ! grep -q "summary state claim does not match production-evidence-run.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must bind combined worker/Remote Computer state claims to the run manifest" >&2
+  exit 1
+fi
+
 if ! grep -q "do not share one cluster id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject mixed-cluster worker/Remote Computer evidence" >&2
   exit 1
@@ -2262,6 +2267,11 @@ fi
 
 if ! grep -q "combined summary worker_pool mismatch" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject mixed-worker-pool worker/Remote Computer evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "combined summary state claim mismatch" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject mixed-state-claim worker/Remote Computer evidence" >&2
   exit 1
 fi
 

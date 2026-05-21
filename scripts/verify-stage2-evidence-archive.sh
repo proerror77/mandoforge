@@ -1527,13 +1527,16 @@ verify_run_manifest() {
   local issue
   local expected_cluster_id
   local expected_worker_pool
+  local expected_state_claim
   local worker_cluster_id
   local worker_pool
   local state_cluster_id
+  local state_claim
   local sidecar_cluster_id
   local summary_worker_cluster_id
   local summary_worker_pool
   local summary_state_cluster_id
+  local summary_state_claim
   local summary_sidecar_cluster_id
   local expected_tenant_deployment_id
   local tenant_deployment_id
@@ -1567,13 +1570,21 @@ verify_run_manifest() {
     issue_count=$((issue_count + 1))
     echo "Stage 2 evidence archive semantic issue: $issue" >&2
   fi
+  expected_state_claim="$(jq -r '.expected_targets.worker_remote_computer.state_claim // .expected_targets.worker_remote_computer.claim // .expected_targets.worker_remote_computer.pvc // ""' "$manifest")"
+  issue="$(target_identity_issue "expected Remote Computer state claim" "$expected_state_claim")"
+  if [[ -n "$issue" ]]; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: $issue" >&2
+  fi
   worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/worker-load-validation-evidence.json" 2>/dev/null || echo "")"
   worker_pool="$(jq -r '.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // ""' "$root/worker-load-validation-evidence.json" 2>/dev/null || echo "")"
   state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/remote-computer-state-sync-evidence.json" 2>/dev/null || echo "")"
+  state_claim="$(jq -r '.response.controller_execution.state_claim // .response.controller_execution.claim // .response.controller_execution.pvc // .response.controller_execution.persistent_volume_claim // ""' "$root/remote-computer-state-sync-evidence.json" 2>/dev/null || echo "")"
   sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$root/remote-computer-sidecar-recovery-evidence.json" 2>/dev/null || echo "")"
   summary_worker_cluster_id="$(jq -r '.worker.cluster_id // ""' "$root/worker-remote-computer/summary.json" 2>/dev/null || echo "")"
   summary_worker_pool="$(jq -r '.worker.worker_pool // .worker.pool_id // .worker.queue // .worker.queue_name // ""' "$root/worker-remote-computer/summary.json" 2>/dev/null || echo "")"
   summary_state_cluster_id="$(jq -r '.remote_computer.state_sync_cluster_id // ""' "$root/worker-remote-computer/summary.json" 2>/dev/null || echo "")"
+  summary_state_claim="$(jq -r '.remote_computer.state_claim // .remote_computer.claim // .remote_computer.pvc // .remote_computer.persistent_volume_claim // ""' "$root/worker-remote-computer/summary.json" 2>/dev/null || echo "")"
   summary_sidecar_cluster_id="$(jq -r '.remote_computer.sidecar_cluster_id // ""' "$root/worker-remote-computer/summary.json" 2>/dev/null || echo "")"
   for issue in \
     "$(value_mismatch_issue "worker cluster id" "$expected_cluster_id" "$worker_cluster_id")" \
@@ -1586,6 +1597,9 @@ verify_run_manifest() {
     "$(value_mismatch_issue "worker/Remote Computer worker pool" "$expected_worker_pool" "$worker_pool")" \
     "$(value_mismatch_issue "worker/Remote Computer summary worker pool" "$expected_worker_pool" "$summary_worker_pool")" \
     "$(value_mismatch_issue "worker/Remote Computer summary worker pool evidence" "$worker_pool" "$summary_worker_pool")" \
+    "$(value_mismatch_issue "Remote Computer state claim" "$expected_state_claim" "$state_claim")" \
+    "$(value_mismatch_issue "worker/Remote Computer summary state claim" "$expected_state_claim" "$summary_state_claim")" \
+    "$(value_mismatch_issue "worker/Remote Computer summary state claim evidence" "$state_claim" "$summary_state_claim")" \
     "$(value_mismatch_issue "worker/Remote Computer summary state-sync evidence cluster id" "$state_cluster_id" "$summary_state_cluster_id")" \
     "$(value_mismatch_issue "worker/Remote Computer summary sidecar evidence cluster id" "$sidecar_cluster_id" "$summary_sidecar_cluster_id")"; do
     if [[ -n "$issue" ]]; then
@@ -1879,7 +1893,8 @@ JSON
   "expected_targets": {
     "worker_remote_computer": {
       "cluster_id": "prod-cluster-1",
-      "worker_pool": "managed-agents-prod"
+      "worker_pool": "managed-agents-prod",
+      "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
       "deployment_id": "tenant-routing-prod-1"
@@ -2101,7 +2116,8 @@ JSON
   "expected_targets": {
     "worker_remote_computer": {
       "cluster_id": "prod-cluster-1",
-      "worker_pool": "managed-agents-prod"
+      "worker_pool": "managed-agents-prod",
+      "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
       "deployment_id": "tenant-routing-prod-1"
@@ -2147,7 +2163,8 @@ JSON
   "expected_targets": {
     "worker_remote_computer": {
       "cluster_id": "prod-cluster-1",
-      "worker_pool": "managed-agents-prod"
+      "worker_pool": "managed-agents-prod",
+      "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
       "deployment_id": "tenant-routing-prod-1"
@@ -4424,7 +4441,8 @@ JSON
   "expected_targets": {
     "worker_remote_computer": {
       "cluster_id": "prod-cluster-1",
-      "worker_pool": "managed-agents-prod"
+      "worker_pool": "managed-agents-prod",
+      "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
       "deployment_id": "tenant-routing-prod-1"
@@ -4470,7 +4488,8 @@ JSON
   "expected_targets": {
     "worker_remote_computer": {
       "cluster_id": "prod-cluster-1",
-      "worker_pool": "managed-agents-prod"
+      "worker_pool": "managed-agents-prod",
+      "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
       "deployment_id": "tenant-routing-prod-1"
@@ -4516,7 +4535,8 @@ JSON
   "expected_targets": {
     "worker_remote_computer": {
       "cluster_id": "prod-cluster-1",
-      "worker_pool": "managed-agents-prod"
+      "worker_pool": "managed-agents-prod",
+      "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
       "deployment_id": "tenant-routing-prod-2"
@@ -4562,7 +4582,8 @@ JSON
   "expected_targets": {
     "worker_remote_computer": {
       "cluster_id": "prod-cluster-1",
-      "worker_pool": "managed-agents-prod"
+      "worker_pool": "managed-agents-prod",
+      "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
       "deployment_id": "tenant-routing-prod-1"
@@ -6029,6 +6050,60 @@ JSON
   "production_blocked_count": 0,
   "same_cluster_target": true,
   "worker": {
+    "cluster_id": "prod-cluster-1",
+    "worker_pool": "managed-agents-prod",
+    "load_check_detail_count": 1,
+    "load_checks": [
+      {"cluster_id": "prod-cluster-1", "name": "queue-isolated", "worker_pool": "managed-agents-prod", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ]
+  },
+  "remote_computer": {
+    "state_sync_cluster_id": "prod-cluster-1",
+    "sidecar_cluster_id": "prod-cluster-1",
+    "distributed_state_backend": "juicefs",
+    "state_claim": "different-prod-state-claim",
+    "checked_path_count": 6,
+    "checked_paths": [
+      {"cluster_id": "prod-cluster-1", "path": "/agent-state/session-events", "status": "validated", "state_claim": "different-prod-state-claim", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"cluster_id": "prod-cluster-1", "path": "/agent-state/runtime-turns", "status": "validated", "state_claim": "different-prod-state-claim", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"cluster_id": "prod-cluster-1", "path": "/agent-state/artifacts", "status": "validated", "state_claim": "different-prod-state-claim", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"cluster_id": "prod-cluster-1", "path": "/agent-state/audit-log", "status": "validated", "state_claim": "different-prod-state-claim", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"cluster_id": "prod-cluster-1", "path": "/agent-state/leases", "status": "validated", "state_claim": "different-prod-state-claim", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"cluster_id": "prod-cluster-1", "path": "/agent-state/checkpoints", "status": "validated", "state_claim": "different-prod-state-claim", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ],
+    "replacement_pods_healthy": true,
+    "checked_pod_count": 1,
+    "checked_pods": [
+      {"cluster_id": "prod-cluster-1", "pod": "remote-computer-sidecar-prod-1", "status": "running", "audit_id": "sidecar-pod-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-summary-state-claim-mismatch.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-summary-state-claim-negative.out 2>/tmp/mandoforge-stage2-archive-summary-state-claim-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected combined summary state claim mismatch to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/worker-remote-computer/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "production_blocked": false,
+  "production_blocked_count": 0,
+  "same_cluster_target": true,
+  "worker": {
     "cluster_id": "different-prod-cluster",
     "worker_pool": "managed-agents-prod",
     "load_check_detail_count": 1,
@@ -6473,7 +6548,8 @@ JSON
   "expected_targets": {
     "worker_remote_computer": {
       "cluster_id": "whiskey-pilot-cluster",
-      "worker_pool": "managed-agents-prod"
+      "worker_pool": "managed-agents-prod",
+      "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
       "deployment_id": "tenant-routing-prod-1"
