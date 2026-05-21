@@ -491,11 +491,13 @@ artifact_contract_issue() {
     local reconciliation_status
     local reconciliation_id
     local check_count
+    local invalid_check_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     reconciliation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     reconciliation_id="$(jq -r '.response.reconciliation_id // ""' "$artifact" 2>/dev/null || echo "")"
     check_count="$(jq -r 'if ((.response.checks // null) | type) == "array" then (.response.checks | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+    invalid_check_count="$(jq -r '[.response.checks[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$evidence_status" != "captured" || "$reconciliation_status" != "reconciled" ]]; then
       printf 'finance reconciliation evidence=%s status=%s' "$evidence_status" "$reconciliation_status"
@@ -507,6 +509,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$check_count" =~ ^[0-9]+$ || "$check_count" == "0" ]]; then
       printf 'finance reconciliation check_count=%s' "$check_count"
+      return 0
+    fi
+    if [[ ! "$invalid_check_count" =~ ^[0-9]+$ || "$invalid_check_count" != "0" ]]; then
+      printf 'invalid finance reconciliation check status count=%s' "$invalid_check_count"
       return 0
     fi
   fi

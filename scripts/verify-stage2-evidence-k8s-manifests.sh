@@ -2030,8 +2030,18 @@ if ! grep -q "finance-reconciliation-evidence.json" scripts/verify-stage2-eviden
   exit 1
 fi
 
+if ! grep -q "invalid finance reconciliation check status count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must reject failed finance reconciliation checks" >&2
+  exit 1
+fi
+
 if ! grep -q "missing finance reconciliation check evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject finance reconciliation evidence without checks" >&2
+  exit 1
+fi
+
+if ! grep -q "invalid finance reconciliation check status evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject failed finance reconciliation checks" >&2
   exit 1
 fi
 

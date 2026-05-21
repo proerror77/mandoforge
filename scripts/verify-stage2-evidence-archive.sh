@@ -735,10 +735,12 @@ artifact_issue() {
       local reconciliation_status
       local reconciliation_id
       local check_count
+      local invalid_check_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       reconciliation_status="$(jq -r '.response.status // "unknown"' "$path")"
       reconciliation_id="$(jq -r '.response.reconciliation_id // ""' "$path")"
       check_count="$(jq -r 'if ((.response.checks // null) | type) == "array" then (.response.checks | length) else 0 end' "$path")"
+      invalid_check_count="$(jq -r '[.response.checks[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$path")"
       if [[ "$evidence_status" != "captured" || "$reconciliation_status" != "reconciled" ]]; then
         printf '%s evidence_status=%s reconciliation_status=%s' "$relative_path" "$evidence_status" "$reconciliation_status"
         return 0
@@ -749,6 +751,10 @@ artifact_issue() {
       fi
       if [[ ! "$check_count" =~ ^[0-9]+$ || "$check_count" == "0" ]]; then
         printf '%s check_count=%s' "$relative_path" "$check_count"
+        return 0
+      fi
+      if [[ ! "$invalid_check_count" =~ ^[0-9]+$ || "$invalid_check_count" != "0" ]]; then
+        printf '%s invalid finance reconciliation check status count=%s' "$relative_path" "$invalid_check_count"
         return 0
       fi
       ;;
@@ -1601,6 +1607,36 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing finance reconciliation check evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-reconciliation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "reconciled",
+    "reconciliation_id": "netsuite-reconciliation-prod-1",
+    "checks": [
+      {"name": "close-evidence", "status": "failed"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-reconciliation-check-status-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-reconciliation-check-status-negative.out 2>/tmp/mandoforge-stage2-archive-finance-reconciliation-check-status-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected invalid finance reconciliation check status evidence to fail" >&2
     exit 1
   fi
 
