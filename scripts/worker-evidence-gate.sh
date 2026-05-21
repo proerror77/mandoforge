@@ -87,6 +87,24 @@ is_production_identity() {
   [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
 }
 
+worker_load_check_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.load_checks[]?,
+      .response.controller_execution.worker_pool_checks[]?,
+      .response.controller_execution.validation_checks[]?,
+      .response.controller_execution.load_validation_checks[]?,
+      .response.controller_execution.checks[]?
+    )
+    | select(
+        type == "object"
+        and ((.name // .check // .kind // "") | length > 0)
+        and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 write_summary() {
   local readiness_file="$EVIDENCE_DIR/api-execution-jobs-worker-readiness.json"
   local load_validation_evidence_file="$EVIDENCE_DIR/worker-load-validation-evidence.json"
@@ -113,6 +131,7 @@ write_summary() {
   local load_validation_cluster_profile
   local load_validation_controller_load_validated
   local load_validation_controller_isolated_pool
+  local load_validation_check_detail_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
   readiness_score="$(jq -r '.readiness_score // 0' "$readiness_file")"
@@ -131,6 +150,7 @@ write_summary() {
   load_validation_cluster_profile="unknown"
   load_validation_controller_load_validated="false"
   load_validation_controller_isolated_pool="false"
+  load_validation_check_detail_count="0"
   if [[ -s "$load_validation_evidence_file" ]]; then
     load_validation_evidence_status="$(jq -r '.status // "unknown"' "$load_validation_evidence_file")"
     load_validation_run_status="$(jq -r '.response.status // "unknown"' "$load_validation_evidence_file")"
@@ -141,6 +161,7 @@ write_summary() {
     load_validation_cluster_profile="$(jq -r '.response.controller_execution.cluster_profile // "unknown"' "$load_validation_evidence_file")"
     load_validation_controller_load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$load_validation_evidence_file")"
     load_validation_controller_isolated_pool="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$load_validation_evidence_file")"
+    load_validation_check_detail_count="$(worker_load_check_detail_count "$load_validation_evidence_file")"
   fi
   isolated_pool="$(jq -r '.load_validation.isolated_worker_pool_configured // false' "$readiness_file")"
   load_validation_controller_fresh="$(jq -r '.load_validation.controller_evidence_fresh // false' "$readiness_file")"
@@ -153,6 +174,7 @@ write_summary() {
   is_multi_node "$load_validation_node_count" || blocked_count=$((blocked_count + 1))
   is_production_identity "$load_validation_cluster_id" || blocked_count=$((blocked_count + 1))
   [[ "$load_validation_controller_load_validated" == "true" ]] || blocked_count=$((blocked_count + 1))
+  [[ "$load_validation_check_detail_count" =~ ^[0-9]+$ && "$load_validation_check_detail_count" -gt 0 ]] || blocked_count=$((blocked_count + 1))
   [[ "$load_validation_controller_isolated_pool" == "true" ]] || blocked_count=$((blocked_count + 1))
   if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
     is_production_identity "$PRODUCTION_CLUSTER_ID" || blocked_count=$((blocked_count + 1))
@@ -176,6 +198,7 @@ write_summary() {
     echo "load_validation_cluster_id=$load_validation_cluster_id"
     echo "load_validation_cluster_profile=$load_validation_cluster_profile"
     echo "load_validation_controller_load_validated=$load_validation_controller_load_validated"
+    echo "load_validation_check_detail_count=$load_validation_check_detail_count"
     echo "load_validation_controller_isolated_worker_pool_configured=$load_validation_controller_isolated_pool"
     echo "expected_production_cluster_id=${PRODUCTION_CLUSTER_ID:-<unset>}"
     echo "isolated_worker_pool_configured=$isolated_pool"
@@ -207,6 +230,9 @@ write_summary() {
     fi
     if [[ "$load_validation_controller_load_validated" != "true" ]]; then
       echo "- worker load-validation controller did not report load_validated=true"
+    fi
+    if [[ ! "$load_validation_check_detail_count" =~ ^[0-9]+$ || "$load_validation_check_detail_count" == "0" ]]; then
+      echo "- worker load-validation controller did not report audited worker-pool load check details"
     fi
     if [[ "$load_validation_controller_isolated_pool" != "true" ]]; then
       echo "- worker load-validation controller did not report isolated_worker_pool_configured=true"

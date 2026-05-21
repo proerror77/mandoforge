@@ -49,6 +49,24 @@ is_distributed_state_backend() {
   esac
 }
 
+worker_load_check_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.load_checks[]?,
+      .response.controller_execution.worker_pool_checks[]?,
+      .response.controller_execution.validation_checks[]?,
+      .response.controller_execution.load_validation_checks[]?,
+      .response.controller_execution.checks[]?
+    )
+    | select(
+        type == "object"
+        and ((.name // .check // .kind // "") | length > 0)
+        and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+      )
+  ] | length' "$1"
+}
+
 remote_state_checked_path_detail_count() {
   jq -r '[
     (
@@ -285,6 +303,7 @@ artifact_issue() {
       local cluster_id
       local load_validated
       local isolated_worker_pool_configured
+      local load_check_detail_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
@@ -292,6 +311,7 @@ artifact_issue() {
       cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$path")"
       load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$path")"
       isolated_worker_pool_configured="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$path")"
+      load_check_detail_count="$(worker_load_check_detail_count "$path")"
       if [[ "$evidence_status" != "captured" ]]; then
         printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
         return 0
@@ -318,6 +338,10 @@ artifact_issue() {
       fi
       if [[ "$load_validated" != "true" ]]; then
         printf '%s load_validated=%s' "$relative_path" "$load_validated"
+        return 0
+      fi
+      if [[ ! "$load_check_detail_count" =~ ^[0-9]+$ || "$load_check_detail_count" == "0" ]]; then
+        printf '%s load_check_detail_count=%s' "$relative_path" "$load_check_detail_count"
         return 0
       fi
       if [[ "$isolated_worker_pool_configured" != "true" ]]; then
@@ -456,6 +480,7 @@ artifact_issue() {
       local state_claim
       local state_checked_path_count
       local state_checked_path_detail_count
+      local worker_load_check_detail_count
       local sidecar_replacement_pods_healthy
       local sidecar_checked_pod_count
       local sidecar_checked_pod_detail_count
@@ -469,6 +494,7 @@ artifact_issue() {
       state_claim="$(jq -r '.remote_computer.state_claim // ""' "$path")"
       state_checked_path_count="$(jq -r '.remote_computer.checked_path_count // 0' "$path")"
       state_checked_path_detail_count="$(summary_checked_path_detail_count "$path")"
+      worker_load_check_detail_count="$(jq -r '.worker.load_check_detail_count // 0' "$path")"
       sidecar_replacement_pods_healthy="$(jq -r '.remote_computer.replacement_pods_healthy // false' "$path")"
       sidecar_checked_pod_count="$(jq -r '.remote_computer.checked_pod_count // 0' "$path")"
       sidecar_checked_pod_detail_count="$(summary_sidecar_checked_pod_detail_count "$path")"
@@ -498,6 +524,10 @@ artifact_issue() {
       fi
       if [[ ! "$state_checked_path_detail_count" =~ ^[0-9]+$ || "$state_checked_path_detail_count" -lt "$state_checked_path_count" ]]; then
         printf '%s checked_path_detail_count=%s checked_path_count=%s' "$relative_path" "$state_checked_path_detail_count" "$state_checked_path_count"
+        return 0
+      fi
+      if [[ ! "$worker_load_check_detail_count" =~ ^[0-9]+$ || "$worker_load_check_detail_count" == "0" ]]; then
+        printf '%s worker_load_check_detail_count=%s' "$relative_path" "$worker_load_check_detail_count"
         return 0
       fi
       if [[ "$sidecar_replacement_pods_healthy" != "true" ]]; then
@@ -1431,7 +1461,10 @@ JSON
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
       "load_validated": true,
-      "isolated_worker_pool_configured": true
+      "isolated_worker_pool_configured": true,
+      "load_checks": [
+        {"name": "queue-depth-load-validation", "worker_pool": "managed-agents-prod", "status": "passed"}
+      ]
     }
   }
 }
@@ -1514,7 +1547,8 @@ JSON
   "production_blocked_count": 0,
   "same_cluster_target": true,
   "worker": {
-    "cluster_id": "prod-cluster-1"
+    "cluster_id": "prod-cluster-1",
+    "load_check_detail_count": 1
   },
   "remote_computer": {
     "state_sync_cluster_id": "prod-cluster-1",
@@ -2118,7 +2152,10 @@ JSON
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
       "load_validated": true,
-      "isolated_worker_pool_configured": false
+      "isolated_worker_pool_configured": false,
+      "load_checks": [
+        {"name": "queue-depth-load-validation", "worker_pool": "managed-agents-prod", "status": "passed"}
+      ]
     }
   }
 }
@@ -2185,6 +2222,42 @@ JSON
       "cluster_id": "prod-cluster-1",
       "load_validated": true,
       "isolated_worker_pool_configured": true
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-worker-load-check-detail-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-worker-load-check-detail-negative.out 2>/tmp/mandoforge-stage2-archive-worker-load-check-detail-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing worker load check detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/worker-load-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "load_validated": true,
+      "isolated_worker_pool_configured": true,
+      "load_checks": [
+        {"name": "queue-depth-load-validation", "worker_pool": "managed-agents-prod", "status": "passed"}
+      ]
     }
   }
 }
@@ -3610,7 +3683,8 @@ JSON
   "production_blocked_count": 0,
   "same_cluster_target": true,
   "worker": {
-    "cluster_id": "different-prod-cluster"
+    "cluster_id": "different-prod-cluster",
+    "load_check_detail_count": 1
   },
   "remote_computer": {
     "state_sync_cluster_id": "different-prod-cluster",
@@ -3659,7 +3733,8 @@ JSON
   "production_blocked_count": 0,
   "same_cluster_target": false,
   "worker": {
-    "cluster_id": "prod-cluster-1"
+    "cluster_id": "prod-cluster-1",
+    "load_check_detail_count": 1
   },
   "remote_computer": {
     "state_sync_cluster_id": "prod-cluster-1",
@@ -3708,7 +3783,8 @@ JSON
   "production_blocked_count": 0,
   "same_cluster_target": true,
   "worker": {
-    "cluster_id": "prod-cluster-1"
+    "cluster_id": "prod-cluster-1",
+    "load_check_detail_count": 1
   },
   "remote_computer": {
     "state_sync_cluster_id": "prod-cluster-1",

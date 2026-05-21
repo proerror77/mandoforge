@@ -510,8 +510,8 @@ if ! grep -q "isolated_worker_pool_configured" "$worker_remote_computer_script";
   exit 1
 fi
 
-if ! grep -q "load_validated" "$worker_remote_computer_script"; then
-  echo "Worker/Remote Computer evidence script must verify worker load validation evidence" >&2
+if ! grep -q "load_validated" "$worker_remote_computer_script" || ! grep -q "worker_load_check_detail_count" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must verify worker load validation detail evidence" >&2
   exit 1
 fi
 
@@ -955,8 +955,8 @@ if ! grep -q "is_real_cluster_kind" "$worker_script" || ! grep -q "load_validati
   exit 1
 fi
 
-if ! grep -q "load_validation_controller_load_validated" "$worker_script" || ! grep -q "load_validation_controller_isolated_worker_pool" "$worker_script"; then
-  echo "Worker evidence script must require controller-confirmed load and isolated worker-pool checks" >&2
+if ! grep -q "load_validation_controller_load_validated" "$worker_script" || ! grep -q "load_validation_check_detail_count" "$worker_script" || ! grep -q "load_validation_controller_isolated_worker_pool" "$worker_script"; then
+  echo "Worker evidence script must require controller-confirmed load detail and isolated worker-pool checks" >&2
   exit 1
 fi
 
@@ -1715,7 +1715,7 @@ if ! grep -q "worker-load-validation-evidence.json" scripts/verify-stage2-eviden
   exit 1
 fi
 
-if ! grep -q "load_validated" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_path_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_pod_detail_count" scripts/verify-stage2-evidence-archive.sh; then
+if ! grep -q "load_validated" scripts/verify-stage2-evidence-archive.sh || ! grep -q "load_check_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_path_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_pod_detail_count" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require audited worker load, state-contract path detail, and sidecar replacement Pod detail evidence" >&2
   exit 1
 fi
@@ -1732,6 +1732,11 @@ fi
 
 if ! grep -q "missing worker load validation evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject worker evidence without load validation proof" >&2
+  exit 1
+fi
+
+if ! grep -q "missing worker load check detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject worker evidence without load-check details" >&2
   exit 1
 fi
 
@@ -1760,7 +1765,7 @@ if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-completion-au
   exit 1
 fi
 
-if ! grep -q "load_validated" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_path_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_pod_detail_count" scripts/stage2-completion-audit-gate.sh; then
+if ! grep -q "load_validated" scripts/stage2-completion-audit-gate.sh || ! grep -q "load_check_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_path_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_pod_detail_count" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require audited worker load, state-contract path detail, and sidecar replacement Pod detail evidence" >&2
   exit 1
 fi

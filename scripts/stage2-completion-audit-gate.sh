@@ -330,6 +330,24 @@ is_real_cluster_kind() {
   esac
 }
 
+worker_load_check_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.load_checks[]?,
+      .response.controller_execution.worker_pool_checks[]?,
+      .response.controller_execution.validation_checks[]?,
+      .response.controller_execution.load_validation_checks[]?,
+      .response.controller_execution.checks[]?
+    )
+    | select(
+        type == "object"
+        and ((.name // .check // .kind // "") | length > 0)
+        and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 is_distributed_state_backend() {
   local value="$1"
   case "$value" in
@@ -802,6 +820,7 @@ artifact_contract_issue() {
     local cluster_id
     local load_validated
     local isolated_worker_pool_configured
+    local load_check_detail_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -810,6 +829,7 @@ artifact_contract_issue() {
     cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
     load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$artifact" 2>/dev/null || echo "false")"
     isolated_worker_pool_configured="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$artifact" 2>/dev/null || echo "false")"
+    load_check_detail_count="$(worker_load_check_detail_count "$artifact")"
 
     if [[ "$evidence_status" != "captured" ]]; then
       printf 'worker evidence_status=%s' "$evidence_status"
@@ -833,6 +853,10 @@ artifact_contract_issue() {
     fi
     if [[ "$load_validated" != "true" ]]; then
       printf 'load_validated=%s' "$load_validated"
+      return 0
+    fi
+    if [[ ! "$load_check_detail_count" =~ ^[0-9]+$ || "$load_check_detail_count" == "0" ]]; then
+      printf 'load_check_detail_count=%s' "$load_check_detail_count"
       return 0
     fi
     if [[ "$isolated_worker_pool_configured" != "true" ]]; then

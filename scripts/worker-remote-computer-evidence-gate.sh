@@ -98,6 +98,24 @@ is_production_identity() {
   [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
 }
 
+worker_load_check_detail_count() {
+  jq -r '[
+    (
+      .response.controller_execution.load_checks[]?,
+      .response.controller_execution.worker_pool_checks[]?,
+      .response.controller_execution.validation_checks[]?,
+      .response.controller_execution.load_validation_checks[]?,
+      .response.controller_execution.checks[]?
+    )
+    | select(
+        type == "object"
+        and ((.name // .check // .kind // "") | length > 0)
+        and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 write_summary() {
   local worker_dir="$EVIDENCE_DIR/worker"
   local remote_dir="$EVIDENCE_DIR/remote-computer"
@@ -147,6 +165,7 @@ write_summary() {
   local worker_target_kind
   local worker_node_count
   local worker_cluster_profile
+  local worker_load_check_detail_count
   local state_cluster_id
   local state_target_kind
   local state_node_count
@@ -176,6 +195,7 @@ write_summary() {
   worker_target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$worker_validation")"
   worker_node_count="$(jq -r '.response.controller_execution.node_count // 0' "$worker_validation")"
   worker_cluster_profile="$(jq -r '.response.controller_execution.cluster_profile // "unknown"' "$worker_validation")"
+  worker_load_check_detail_count="$(worker_load_check_detail_count "$worker_validation")"
 
   remote_state_ready="$(jq -r '.production_state_sync.status == "ready" and (.production_state_sync.production_blocked == false)' "$remote_readiness")"
   state_sync_evidence_status="$(jq -r '.status // "unknown"' "$state_sync")"
@@ -253,6 +273,7 @@ write_summary() {
   is_real_cluster_kind "$worker_target_kind" || blocked_count=$((blocked_count + 1))
   is_multi_node "$worker_node_count" || blocked_count=$((blocked_count + 1))
   is_production_identity "$worker_cluster_id" || blocked_count=$((blocked_count + 1))
+  [[ "$worker_load_check_detail_count" =~ ^[0-9]+$ && "$worker_load_check_detail_count" -gt 0 ]] || blocked_count=$((blocked_count + 1))
   [[ "$remote_state_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_sync_evidence_status" == "captured" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_controller_fresh" == "true" ]] || blocked_count=$((blocked_count + 1))
@@ -294,6 +315,7 @@ write_summary() {
     --arg worker_target_kind "$worker_target_kind" \
     --arg worker_node_count "$worker_node_count" \
     --arg worker_cluster_profile "$worker_cluster_profile" \
+    --arg worker_load_check_detail_count "$worker_load_check_detail_count" \
     --arg state_sync_response_status "$state_sync_response_status" \
     --arg state_sync_evidence_status "$state_sync_evidence_status" \
     --arg state_cluster_id "$state_cluster_id" \
@@ -344,7 +366,8 @@ write_summary() {
         cluster_id: $worker_cluster_id,
         target_kind: $worker_target_kind,
         node_count: ($worker_node_count | tonumber),
-        cluster_profile: $worker_cluster_profile
+        cluster_profile: $worker_cluster_profile,
+        load_check_detail_count: ($worker_load_check_detail_count | tonumber)
       },
       remote_computer: {
         readiness_file: $remote_readiness,
@@ -391,6 +414,7 @@ write_summary() {
     jq -r '"worker_cluster_id=\(.worker.cluster_id)"' "$summary_json"
     jq -r '"worker_target_kind=\(.worker.target_kind)"' "$summary_json"
     jq -r '"worker_node_count=\(.worker.node_count)"' "$summary_json"
+    jq -r '"worker_load_check_detail_count=\(.worker.load_check_detail_count)"' "$summary_json"
     jq -r '"remote_state_sync_ready=\(.remote_computer.state_sync_ready)"' "$summary_json"
     jq -r '"remote_state_controller_evidence_fresh=\(.remote_computer.state_controller_evidence_fresh)"' "$summary_json"
     jq -r '"remote_state_sync_evidence_status=\(.remote_computer.state_sync_evidence_status)"' "$summary_json"
@@ -420,6 +444,7 @@ write_summary() {
     is_real_cluster_kind "$worker_target_kind" || echo "- worker load validation target is not a real cluster kind: $worker_target_kind"
     is_multi_node "$worker_node_count" || echo "- worker load validation did not report a multi-node cluster: node_count=$worker_node_count"
     is_production_identity "$worker_cluster_id" || echo "- worker load validation cluster id is pilot/mock/local: ${worker_cluster_id:-<empty>}"
+    [[ "$worker_load_check_detail_count" =~ ^[0-9]+$ && "$worker_load_check_detail_count" -gt 0 ]] || echo "- worker load validation did not include worker-pool load check details"
     [[ "$state_sync_evidence_status" == "captured" ]] || echo "- Remote Computer state-sync evidence was not captured: $state_sync_evidence_status"
     is_real_cluster_kind "$state_target_kind" || echo "- Remote Computer state-sync target is not a real cluster kind: $state_target_kind"
     is_multi_node "$state_node_count" || echo "- Remote Computer state-sync did not report a multi-node cluster: node_count=$state_node_count"
