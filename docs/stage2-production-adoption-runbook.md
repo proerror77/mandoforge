@@ -35,7 +35,7 @@ Do not commit real tokens, real production URLs, generated Secrets, or evidence 
 
 The controller matrix is the source of truth for Stage 2 production adoption wiring. Every row must either pass against a real target or remain listed in the residual adoption backlog.
 
-All declared target identities used by the strict all-up gate must name real production targets. The preflight, Secret render, completion audit, and archive verifier reject Whiskey, pilot, mock, example, sample, demo, local, localhost, and loopback identities. Finance identities additionally reject Feishu/Lark/Drive/file/artifact targets because those prove artifact delivery, not accounting-system adoption.
+All declared target identities used by the strict all-up gate must name real production targets. The preflight, Secret render, completion audit, and archive verifier reject Whiskey, pilot, mock, example, sample, demo, local, localhost, and loopback identities, including KMS backend/key identities. Finance identities additionally reject Feishu/Lark/Drive/file/artifact targets because those prove artifact delivery, not accounting-system adoption.
 
 | Adoption area | Controller env and opt-in flags | Focused gate | Required proof |
 | --- | --- | --- | --- |

@@ -1645,6 +1645,11 @@ if ! grep -q "MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID" scripts/stage
   exit 1
 fi
 
+if ! grep -q "require_production_identity MANDOFORGE_KMS_KEY_ID" scripts/stage2-production-evidence-preflight.sh; then
+  echo "Stage 2 preflight must require a production KMS key id" >&2
+  exit 1
+fi
+
 if ! grep -q "MANAGED_SESSION_RUNTIME_TARGET_ID" scripts/render-stage2-controller-secret.sh; then
   echo "Stage 2 Secret render must reject missing or pilot managed-session runtime target ids" >&2
   exit 1

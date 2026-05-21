@@ -241,7 +241,7 @@ check_vault_kms() {
   local label="vault-kms"
   require_production_kms_provider
   require_production_identity MANDOFORGE_STAGE2_KMS_BACKEND_ID "$label"
-  require_value MANDOFORGE_KMS_KEY_ID "$label"
+  require_production_identity MANDOFORGE_KMS_KEY_ID "$label"
   require_value MANDOFORGE_KMS_ROTATION_POLICY "$label"
   require_eq MANDOFORGE_KMS_VALIDATION_MODE external "$label"
   require_production_url MANDOFORGE_KMS_ENDPOINT "$label"
