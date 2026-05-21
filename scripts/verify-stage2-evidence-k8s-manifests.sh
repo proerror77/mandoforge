@@ -1945,6 +1945,11 @@ if ! grep -q "finance-close-evidence.json" scripts/verify-stage2-evidence-archiv
   exit 1
 fi
 
+if ! grep -q "missing finance close controller action evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject finance close evidence without controller action proof" >&2
+  exit 1
+fi
+
 if ! grep -q "finance-reconciliation-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "reconciliation_id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must contract-check finance reconciliation evidence" >&2
   exit 1

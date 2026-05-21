@@ -1389,6 +1389,61 @@ JSON
   }
 }
 JSON
+  cat >"$tmpdir/evidence/finance-close-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "completed",
+    "actions": [],
+    "close_controller_configured": true,
+    "close_controller_execution": {
+      "status": "closed",
+      "close_id": "netsuite-close-prod-1",
+      "steps": [
+        {"name": "export-present", "status": "passed"},
+        {"name": "accounting-period-open", "status": "passed"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-close-action-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-close-action-negative.out 2>/tmp/mandoforge-stage2-archive-finance-close-action-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing finance close controller action evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-close-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "completed",
+    "actions": ["usage_finance_close_controller_executed"],
+    "close_controller_configured": true,
+    "close_controller_execution": {
+      "status": "closed",
+      "close_id": "netsuite-close-prod-1",
+      "steps": [
+        {"name": "export-present", "status": "passed"},
+        {"name": "accounting-period-open", "status": "passed"}
+      ]
+    }
+  }
+}
+JSON
+
   cat >"$tmpdir/evidence/vault-kms-rotation-evidence.json" <<'JSON'
 {
   "status": "captured",
