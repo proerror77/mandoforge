@@ -127,6 +127,26 @@ tenant_negative_test_detail_count() {
   ] | length' "$1"
 }
 
+kms_rotation_detail_count() {
+  jq -r '[
+    (
+      .response.rotated_keys[]?,
+      .response.rotation_details[]?,
+      .response.key_rotations[]?,
+      .response.external_execution.rotated_keys[]?,
+      .response.external_execution.rotation_details[]?,
+      .response.external_execution.key_rotations[]?
+    )
+    | select(
+        type == "object"
+        and ((.key_id // .key // .kms_key_id // "") | length > 0)
+        and ((.rotation_id // .rotation // .operation_id // "") | length > 0)
+        and ((.catalog_updated // .catalog_update_confirmed // false) == true)
+        and ((.status // .result // "") | ascii_downcase | IN("rotated", "validated", "completed", "passed"))
+      )
+  ] | length' "$1"
+}
+
 is_production_policy_controller_kind() {
   case "$1" in
     production_policy_controller|enterprise_policy_controller|external_policy_controller|policy_controller_cluster)
@@ -640,6 +660,7 @@ artifact_issue() {
       local rotation_id
       local rotated_count
       local catalog_updated_count
+      local rotation_detail_count
       local action_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       status="$(jq -r '.response.status // "unknown"' "$path")"
@@ -652,6 +673,7 @@ artifact_issue() {
       rotation_id="$(jq -r '.response.external_execution.rotation_id // ""' "$path")"
       rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$path")"
       catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$path")"
+      rotation_detail_count="$(kms_rotation_detail_count "$path")"
       action_count="$(jq -r '[.response.actions[]? | select(. == "external_kms_rotation_confirmed")] | length' "$path")"
       if [[ "$evidence_status" != "captured" ]]; then
         printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
@@ -691,6 +713,10 @@ artifact_issue() {
       fi
       if [[ ! "$catalog_updated_count" =~ ^[0-9]+$ || "$catalog_updated_count" == "0" ]]; then
         printf '%s catalog_updated_count=%s' "$relative_path" "$catalog_updated_count"
+        return 0
+      fi
+      if [[ ! "$rotation_detail_count" =~ ^[0-9]+$ || "$rotation_detail_count" -lt "$rotated_count" || "$rotation_detail_count" -lt "$catalog_updated_count" ]]; then
+        printf '%s rotation_detail_count=%s rotated_count=%s catalog_updated_count=%s' "$relative_path" "$rotation_detail_count" "$rotated_count" "$catalog_updated_count"
         return 0
       fi
       if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
@@ -1661,6 +1687,9 @@ JSON
     },
     "rotated_count": 1,
     "catalog_updated_count": 1,
+    "rotation_details": [
+      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true}
+    ],
     "actions": ["external_kms_rotation_confirmed"]
   }
 }
@@ -2520,6 +2549,9 @@ JSON
     },
     "rotated_count": 1,
     "catalog_updated_count": 0,
+    "rotation_details": [
+      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true}
+    ],
     "actions": ["external_kms_rotation_confirmed"]
   }
 }
@@ -2559,6 +2591,9 @@ JSON
     },
     "rotated_count": 0,
     "catalog_updated_count": 1,
+    "rotation_details": [
+      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true}
+    ],
     "actions": ["external_kms_rotation_confirmed"]
   }
 }
@@ -2598,6 +2633,48 @@ JSON
     },
     "rotated_count": 1,
     "catalog_updated_count": 1,
+    "actions": ["external_kms_rotation_confirmed"]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-vault-rotation-details-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-vault-rotation-details-negative.out 2>/tmp/mandoforge-stage2-archive-vault-rotation-details-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing KMS rotation key detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/vault-kms-rotation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "external_execution": {
+      "status": "validated",
+      "production_backend": true,
+      "backend_kind": "aws_kms",
+      "environment": "production",
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1",
+      "rotation_id": "kms-rotation-1",
+      "rotated_count": 1
+    },
+    "rotated_count": 1,
+    "catalog_updated_count": 1,
+    "rotation_details": [
+      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true}
+    ],
     "actions": ["rotation_audit_logged"]
   }
 }
@@ -2637,6 +2714,9 @@ JSON
     },
     "rotated_count": 1,
     "catalog_updated_count": 1,
+    "rotation_details": [
+      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true}
+    ],
     "actions": ["external_kms_rotation_confirmed"]
   }
 }
@@ -2676,6 +2756,9 @@ JSON
     },
     "rotated_count": 1,
     "catalog_updated_count": 1,
+    "rotation_details": [
+      {"key_id": "key-1", "rotation_id": "kms-rotation-1", "status": "rotated", "catalog_updated": true}
+    ],
     "actions": ["external_kms_rotation_confirmed"]
   }
 }

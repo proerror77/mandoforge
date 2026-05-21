@@ -152,6 +152,7 @@ write_summary() {
   local rotation_id
   local rotation_rotated_count
   local rotation_catalog_updated_count
+  local rotation_detail_count
   local rotation_action_count
   local blocked_count
 
@@ -200,6 +201,7 @@ write_summary() {
   rotation_id=""
   rotation_rotated_count="0"
   rotation_catalog_updated_count="0"
+  rotation_detail_count="0"
   rotation_action_count="0"
   if [[ -s "$rotation_evidence_file" ]]; then
     rotation_evidence_status="$(jq -r '.status // "unknown"' "$rotation_evidence_file")"
@@ -212,6 +214,23 @@ write_summary() {
     rotation_id="$(jq -r '.response.external_execution.rotation_id // ""' "$rotation_evidence_file")"
     rotation_rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$rotation_evidence_file")"
     rotation_catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$rotation_evidence_file")"
+    rotation_detail_count="$(jq -r '[
+      (
+        .response.rotated_keys[]?,
+        .response.rotation_details[]?,
+        .response.key_rotations[]?,
+        .response.external_execution.rotated_keys[]?,
+        .response.external_execution.rotation_details[]?,
+        .response.external_execution.key_rotations[]?
+      )
+      | select(
+          type == "object"
+          and ((.key_id // .key // .kms_key_id // "") | length > 0)
+          and ((.rotation_id // .rotation // .operation_id // "") | length > 0)
+          and ((.catalog_updated // .catalog_update_confirmed // false) == true)
+          and ((.status // .result // "") | ascii_downcase | IN("rotated", "validated", "completed", "passed"))
+        )
+    ] | length' "$rotation_evidence_file")"
     rotation_action_count="$(jq -r 'if ((.response.actions // null) | type) == "array" then (.response.actions | length) else 0 end' "$rotation_evidence_file")"
   fi
   blocked_count="$(jq -r '[
@@ -271,6 +290,9 @@ write_summary() {
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ ! "$rotation_catalog_updated_count" =~ ^[0-9]+$ || "$rotation_catalog_updated_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$rotation_detail_count" =~ ^[0-9]+$ || ! "$rotation_rotated_count" =~ ^[0-9]+$ || ! "$rotation_catalog_updated_count" =~ ^[0-9]+$ || "$rotation_detail_count" -lt "$rotation_rotated_count" || "$rotation_detail_count" -lt "$rotation_catalog_updated_count" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ ! "$rotation_action_count" =~ ^[0-9]+$ || "$rotation_action_count" == "0" ]]; then
@@ -336,6 +358,7 @@ write_summary() {
     echo "rotation_id=$rotation_id"
     echo "rotation_rotated_count=$rotation_rotated_count"
     echo "rotation_catalog_updated_count=$rotation_catalog_updated_count"
+    echo "rotation_detail_count=$rotation_detail_count"
     echo "rotation_action_count=$rotation_action_count"
     echo "production_blocked_count=$blocked_count"
     echo "evidence_dir=$EVIDENCE_DIR"
@@ -390,6 +413,9 @@ write_summary() {
     fi
     if [[ ! "$rotation_catalog_updated_count" =~ ^[0-9]+$ || "$rotation_catalog_updated_count" == "0" ]]; then
       echo "- KMS rotation did not update the secret catalog: catalog_updated_count=$rotation_catalog_updated_count"
+    fi
+    if [[ ! "$rotation_detail_count" =~ ^[0-9]+$ || ! "$rotation_rotated_count" =~ ^[0-9]+$ || ! "$rotation_catalog_updated_count" =~ ^[0-9]+$ || "$rotation_detail_count" -lt "$rotation_rotated_count" || "$rotation_detail_count" -lt "$rotation_catalog_updated_count" ]]; then
+      echo "- KMS rotation did not include key-level rotation details for every counted key/catalog update: detail_count=$rotation_detail_count rotated_count=$rotation_rotated_count catalog_updated_count=$rotation_catalog_updated_count"
     fi
     if [[ ! "$rotation_action_count" =~ ^[0-9]+$ || "$rotation_action_count" == "0" ]]; then
       echo "- KMS rotation did not report any audited actions"

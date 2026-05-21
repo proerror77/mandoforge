@@ -375,6 +375,26 @@ tenant_negative_test_detail_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+kms_rotation_detail_count() {
+  jq -r '[
+    (
+      .response.rotated_keys[]?,
+      .response.rotation_details[]?,
+      .response.key_rotations[]?,
+      .response.external_execution.rotated_keys[]?,
+      .response.external_execution.rotation_details[]?,
+      .response.external_execution.key_rotations[]?
+    )
+    | select(
+        type == "object"
+        and ((.key_id // .key // .kms_key_id // "") | length > 0)
+        and ((.rotation_id // .rotation // .operation_id // "") | length > 0)
+        and ((.catalog_updated // .catalog_update_confirmed // false) == true)
+        and ((.status // .result // "") | ascii_downcase | IN("rotated", "validated", "completed", "passed"))
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 artifact_contract_issue() {
   local req_id="$1"
   local artifact="$2"
@@ -1109,6 +1129,7 @@ artifact_contract_issue() {
     local rotation_id
     local rotated_count
     local catalog_updated_count
+    local rotation_detail_count
     local action_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -1122,6 +1143,7 @@ artifact_contract_issue() {
     rotation_id="$(jq -r '.response.external_execution.rotation_id // ""' "$artifact" 2>/dev/null || echo "")"
     rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$artifact" 2>/dev/null || echo "0")"
     catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    rotation_detail_count="$(kms_rotation_detail_count "$artifact")"
     action_count="$(jq -r '[.response.actions[]? | select(. == "external_kms_rotation_confirmed")] | length' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$evidence_status" != "captured" ]]; then
@@ -1166,6 +1188,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$catalog_updated_count" =~ ^[0-9]+$ || "$catalog_updated_count" == "0" ]]; then
       printf 'catalog_updated_count=%s' "$catalog_updated_count"
+      return 0
+    fi
+    if [[ ! "$rotation_detail_count" =~ ^[0-9]+$ || "$rotation_detail_count" -lt "$rotated_count" || "$rotation_detail_count" -lt "$catalog_updated_count" ]]; then
+      printf 'rotation_detail_count=%s rotated_count=%s catalog_updated_count=%s' "$rotation_detail_count" "$rotated_count" "$catalog_updated_count"
       return 0
     fi
     if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
