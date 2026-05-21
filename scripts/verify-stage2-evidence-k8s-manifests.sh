@@ -775,8 +775,18 @@ if ! grep -q "rotated_count" scripts/stage2-completion-audit-gate.sh || ! grep -
   exit 1
 fi
 
+if ! grep -q "KMS rotation evidence_status" scripts/stage2-completion-audit-gate.sh || ! grep -q "KMS recovery evidence_status" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must require captured KMS rotation and recovery evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "rotation_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "catalog_updated_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "recovery_target_kind" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require audited KMS rotation and recovery details" >&2
+  exit 1
+fi
+
+if ! grep -q "vault-kms-rotation-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "vault-kms-recovery-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "evidence_status=%s" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require captured KMS rotation and recovery evidence" >&2
   exit 1
 fi
 

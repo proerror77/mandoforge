@@ -435,6 +435,7 @@ artifact_issue() {
       fi
       ;;
     vault-kms-rotation-evidence.json)
+      local evidence_status
       local status
       local execution_status
       local production_backend
@@ -446,6 +447,7 @@ artifact_issue() {
       local rotated_count
       local catalog_updated_count
       local action_count
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
       status="$(jq -r '.response.status // "unknown"' "$path")"
       execution_status="$(jq -r '.response.external_execution.status // "unknown"' "$path")"
       production_backend="$(jq -r '.response.external_execution.production_backend // false' "$path")"
@@ -457,6 +459,10 @@ artifact_issue() {
       rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$path")"
       catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$path")"
       action_count="$(jq -r 'if ((.response.actions // null) | type) == "array" then (.response.actions | length) else 0 end' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
       if [[ "$status" != "validated" || "$execution_status" != "validated" || "$production_backend" != "true" ]]; then
         printf '%s status=%s execution_status=%s production_backend=%s' "$relative_path" "$status" "$execution_status" "$production_backend"
         return 0
@@ -499,6 +505,7 @@ artifact_issue() {
       fi
       ;;
     vault-kms-recovery-evidence.json)
+      local evidence_status
       local status
       local controller_status
       local backend_kind
@@ -508,6 +515,7 @@ artifact_issue() {
       local recovery_id
       local recovery_target_kind
       local step_count
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
       status="$(jq -r '.response.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       backend_kind="$(jq -r '.response.controller_execution.backend_kind // "unknown"' "$path")"
@@ -517,6 +525,10 @@ artifact_issue() {
       recovery_id="$(jq -r '.response.controller_execution.recovery_id // ""' "$path")"
       recovery_target_kind="$(jq -r '.response.controller_execution.recovery_target_kind // "unknown"' "$path")"
       step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
       if [[ "$status" != "validated" || "$controller_status" != "validated" ]]; then
         printf '%s status=%s controller_status=%s' "$relative_path" "$status" "$controller_status"
         return 0
@@ -1228,6 +1240,7 @@ JSON
 JSON
   cat >"$tmpdir/evidence/vault-kms-rotation-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "status": "validated",
     "external_execution": {
@@ -1248,6 +1261,7 @@ JSON
 JSON
   cat >"$tmpdir/evidence/vault-kms-recovery-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "status": "validated",
     "controller_execution": {

@@ -884,6 +884,7 @@ artifact_contract_issue() {
   fi
 
   if [[ "$req_id" == "vault-kms" && "$artifact_name" == "vault-kms-rotation-evidence.json" ]]; then
+    local evidence_status
     local rotation_status
     local execution_status
     local production_backend
@@ -896,6 +897,7 @@ artifact_contract_issue() {
     local catalog_updated_count
     local action_count
 
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     rotation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     execution_status="$(jq -r '.response.external_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     production_backend="$(jq -r '.response.external_execution.production_backend // false' "$artifact" 2>/dev/null || echo "false")"
@@ -908,6 +910,10 @@ artifact_contract_issue() {
     catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$artifact" 2>/dev/null || echo "0")"
     action_count="$(jq -r 'if ((.response.actions // null) | type) == "array" then (.response.actions | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
 
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'KMS rotation evidence_status=%s' "$evidence_status"
+      return 0
+    fi
     if [[ "$rotation_status" != "validated" ]]; then
       printf 'rotation_status=%s' "$rotation_status"
       return 0
@@ -955,6 +961,7 @@ artifact_contract_issue() {
   fi
 
   if [[ "$req_id" == "vault-kms" && "$artifact_name" == "vault-kms-recovery-evidence.json" ]]; then
+    local evidence_status
     local recovery_status
     local controller_status
     local backend_kind
@@ -965,6 +972,7 @@ artifact_contract_issue() {
     local recovery_target_kind
     local step_count
 
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     recovery_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     backend_kind="$(jq -r '.response.controller_execution.backend_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -975,6 +983,10 @@ artifact_contract_issue() {
     recovery_target_kind="$(jq -r '.response.controller_execution.recovery_target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
 
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'KMS recovery evidence_status=%s' "$evidence_status"
+      return 0
+    fi
     if [[ "$recovery_status" != "validated" ]]; then
       printf 'recovery_status=%s' "$recovery_status"
       return 0
