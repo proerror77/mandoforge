@@ -1795,6 +1795,11 @@ if ! grep -q "zero policy due-run scan count" scripts/verify-stage2-evidence-arc
   exit 1
 fi
 
+if ! grep -q "missing policy due-run checked_at evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject policy due-run evidence without checked_at" >&2
+  exit 1
+fi
+
 if ! grep -q "evidence_status=%s" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive verifier must require captured policy rollout artifacts" >&2
   exit 1

@@ -2533,6 +2533,35 @@ JSON
     "status": "noop",
     "scanned_count": 1,
     "skipped_count": 1,
+    "checked_at": ""
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-due-run-checked-at-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-due-run-checked-at-negative.out 2>/tmp/mandoforge-stage2-archive-policy-due-run-checked-at-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing policy due-run checked_at evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/policy-rollout-due-run-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "noop",
+    "scanned_count": 1,
+    "skipped_count": 1,
     "checked_at": "1970-01-01T00:00:00Z"
   }
 }
