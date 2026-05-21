@@ -1690,6 +1690,11 @@ if ! grep -q "missing Remote Computer state claim evidence" scripts/verify-stage
   exit 1
 fi
 
+if ! grep -q "zero Remote Computer state path evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject Remote Computer state-sync evidence without checked state paths" >&2
+  exit 1
+fi
+
 if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must inspect worker real-cluster evidence" >&2
   exit 1
