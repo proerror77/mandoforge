@@ -253,7 +253,8 @@ write_summary() {
           )
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .tested_at // .timestamp // "") | length > 0)
         )
-    ] | length' "$validation_evidence_file")"
+      | [$deployment_id, $source_tenant, $target_tenant] | @tsv
+    ] | unique | length' "$validation_evidence_file")"
   fi
   rls_enabled="$(jq -r '.rls.enabled // false' "$readiness_file")"
   rls_forced="$(jq -r '.rls.forced // false' "$readiness_file")"

@@ -2095,6 +2095,11 @@ if ! grep -q "unsampled cross-tenant negative test evidence" scripts/verify-stag
   exit 1
 fi
 
+if ! grep -q "duplicate cross-tenant negative test evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject duplicate cross-tenant negative-test pairs" >&2
+  exit 1
+fi
+
 if ! grep -q "missing cross-tenant negative test audit evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject tenant evidence without cross-tenant negative test audit details" >&2
   exit 1

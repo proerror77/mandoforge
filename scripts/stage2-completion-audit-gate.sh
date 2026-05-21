@@ -594,7 +594,8 @@ tenant_negative_test_detail_count() {
         )
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .tested_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$deployment_id, $source_tenant, $target_tenant] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 forced_rls_table_detail_count() {

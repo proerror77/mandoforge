@@ -147,10 +147,11 @@ tenants plus at least two unique audited tenant samples with tenant id plus audi
 id, trace id, run id, or timestamp detail, and confirm RLS enforcement,
 tenant context propagation, nonzero RLS table coverage, forced RLS for every
 reported table with a unique schema/table identity, enabled/forced status, and audit id, trace id,
-run id, or timestamp detail, and a nonzero cross-tenant negative-test count whose
+run id, or timestamp detail, and a nonzero unique cross-tenant negative-test count whose
 details run between the audited sampled tenants and include source tenant,
 target tenant, denied/blocked outcome, and audit id, trace id, run id, or
-timestamp detail. Tenant sample, forced-RLS table, and negative-test detail rows
+timestamp detail. Duplicate source/target tenant pairs do not satisfy reported
+negative-test counts. Tenant sample, forced-RLS table, and negative-test detail rows
 must also carry `deployment_id`, `tenant_deployment_id`, or
 `routing_deployment_id` matching the controller deployment id; a
 single-tenant or Whiskey-only pilot target is inventory evidence, not completion
