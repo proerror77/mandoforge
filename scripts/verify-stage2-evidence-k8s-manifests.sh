@@ -1393,6 +1393,26 @@ if ! grep -q "stale_required_evidence_artifact_count" scripts/verify-stage2-evid
   exit 1
 fi
 
+if ! grep -q "verify_semantic_artifacts" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must independently validate production evidence artifact semantics" >&2
+  exit 1
+fi
+
+if ! grep -q "worker-load-validation-evidence.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must inspect worker real-cluster evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "delivery_mode=.* is not accounting/ERP" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must reject non-ERP finance delivery evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "backend_kind=.* is not production KMS/HSM" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must reject non-production KMS/HSM archive evidence" >&2
+  exit 1
+fi
+
 if grep -R "completion_blocked // true" scripts/stage2-completion-audit-gate.sh scripts/stage2-production-evidence-gate.sh scripts/verify-stage2-evidence-archive.sh >/dev/null; then
   echo "Stage 2 scripts must not use jq // true for completion_blocked because false is a valid value" >&2
   exit 1

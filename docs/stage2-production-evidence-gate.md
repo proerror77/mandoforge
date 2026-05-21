@@ -65,7 +65,7 @@ After the strict evidence and completion-audit Jobs pass, archive the shared evi
 scripts/archive-stage2-production-evidence.sh .mandoforge/stage2-production-evidence-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
 ```
 
-The archive helper writes a `.sha256` checksum sidecar and `.manifest.txt` release manifest, then runs `scripts/verify-stage2-evidence-archive.sh` automatically by default. The verifier checks the tarball checksum and manifest, then extracts `completion-audit/checklist.json`. By default it fails if the checklist is still blocked or any endpoint, artifact, evidence script, evidence Job manifest, or required controller flag is missing. `ALLOW_BLOCKED=1` is only for inventory archive inspection, and `VERIFY_STAGE2_EVIDENCE_ARCHIVE=0` should only be used when debugging the archive helper itself.
+The archive helper writes a `.sha256` checksum sidecar and `.manifest.txt` release manifest, then runs `scripts/verify-stage2-evidence-archive.sh` automatically by default. The verifier checks the tarball checksum and manifest, then extracts `completion-audit/checklist.json`. By default it fails if the checklist is still blocked or any endpoint, artifact, evidence script, evidence Job manifest, or required controller flag is missing. It also independently inspects the archived worker/Remote Computer, tenant routing, policy rollout, Vault/KMS, and finance artifacts so old pilot/mock/single-host/local-hostpath/non-ERP evidence cannot pass only because a checklist says ready. `ALLOW_BLOCKED=1` is only for inventory archive inspection, and `VERIFY_STAGE2_EVIDENCE_ARCHIVE=0` should only be used when debugging the archive helper itself.
 
 For a narrower collector rollout proof, run the dedicated observability collector gate:
 
