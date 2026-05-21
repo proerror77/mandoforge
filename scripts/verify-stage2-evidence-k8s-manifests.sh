@@ -1955,6 +1955,11 @@ if ! grep -q "finance-reconciliation-evidence.json" scripts/verify-stage2-eviden
   exit 1
 fi
 
+if ! grep -q "missing finance reconciliation check evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject finance reconciliation evidence without checks" >&2
+  exit 1
+fi
+
 if ! grep -q "usage-export-csv-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "finance-export-delivery-evidence.json" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require finance CSV and export delivery evidence" >&2
   exit 1
