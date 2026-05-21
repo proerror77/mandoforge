@@ -15,6 +15,7 @@ MAX_EVIDENCE_AGE_HOURS="${STAGE2_EVIDENCE_MAX_AGE_HOURS:-24}"
 FINANCE_DELIVERY_OBSERVER_URL="${FINANCE_EXPORT_DELIVERY_OBSERVER_URL:-}"
 FINANCE_DELIVERY_OBSERVER_TOKEN="${FINANCE_EXPORT_DELIVERY_OBSERVER_TOKEN:-}"
 PRODUCTION_CLUSTER_ID="${MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID:-}"
+PRODUCTION_WORKER_POOL="${MANDOFORGE_STAGE2_WORKER_POOL:-}"
 TENANT_DEPLOYMENT_ID="${MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID:-}"
 POLICY_CONTROLLER_ID="${MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID:-}"
 KMS_BACKEND_ID="${MANDOFORGE_STAGE2_KMS_BACKEND_ID:-}"
@@ -224,6 +225,7 @@ write_production_evidence_run_manifest() {
     --arg subject "$SUBJECT" \
     --arg team_id "${TEAM_ID:-}" \
     --arg production_cluster_id "$PRODUCTION_CLUSTER_ID" \
+    --arg production_worker_pool "$PRODUCTION_WORKER_POOL" \
     --arg tenant_deployment_id "$TENANT_DEPLOYMENT_ID" \
     --arg policy_controller_id "$POLICY_CONTROLLER_ID" \
     --arg kms_backend_id "$KMS_BACKEND_ID" \
@@ -238,7 +240,8 @@ write_production_evidence_run_manifest() {
       team_id: (if $team_id == "" then null else $team_id end),
       expected_targets: {
         worker_remote_computer: {
-          cluster_id: $production_cluster_id
+          cluster_id: $production_cluster_id,
+          worker_pool: $production_worker_pool
         },
         tenant_routing: {
           deployment_id: $tenant_deployment_id

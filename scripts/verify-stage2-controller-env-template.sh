@@ -47,6 +47,7 @@ required_template_vars=(
   MANDOFORGE_KMS_RECOVERY_CONTROLLER_TOKEN
   RUN_STAGE2_SECRET_LIFECYCLE
   MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID
+  MANDOFORGE_STAGE2_WORKER_POOL
   MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_REQUIRED
   MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL
   MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_TOKEN
@@ -202,6 +203,11 @@ fi
 
 if ! grep -q "MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED" "$production_preflight_script"; then
   echo "Stage 2 production evidence preflight must require sidecar replacement evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_STAGE2_WORKER_POOL" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must require an isolated worker pool target identity" >&2
   exit 1
 fi
 

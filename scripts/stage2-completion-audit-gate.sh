@@ -773,6 +773,7 @@ artifact_contract_issue() {
 
   if [[ "$artifact_name" == "production-evidence-run.json" ]]; then
     local expected_cluster_id
+    local expected_worker_pool
     local expected_tenant_deployment_id
     local expected_policy_controller_id
     local expected_kms_backend_id
@@ -781,6 +782,7 @@ artifact_contract_issue() {
     local expected_managed_session_runtime_target_id
 
     expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    expected_worker_pool="$(jq -r '.expected_targets.worker_remote_computer.worker_pool // .expected_targets.worker_remote_computer.pool // .expected_targets.worker_remote_computer.queue // ""' "$artifact" 2>/dev/null || echo "")"
     expected_tenant_deployment_id="$(jq -r '.expected_targets.tenant_routing.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_policy_controller_id="$(jq -r '.expected_targets.policy_rollout.controller_id // ""' "$artifact" 2>/dev/null || echo "")"
     expected_kms_backend_id="$(jq -r '.expected_targets.vault_kms.backend_id // ""' "$artifact" 2>/dev/null || echo "")"
@@ -790,6 +792,10 @@ artifact_contract_issue() {
 
     if [[ "$req_id" == "worker-remote-computer" ]] && ! is_production_identity "$expected_cluster_id"; then
       printf 'expected worker/Remote Computer cluster id=%s is pilot/mock/local' "${expected_cluster_id:-<empty>}"
+      return 0
+    fi
+    if [[ "$req_id" == "worker-remote-computer" ]] && ! is_production_identity "$expected_worker_pool"; then
+      printf 'expected worker/Remote Computer worker_pool=%s is pilot/mock/local' "${expected_worker_pool:-<empty>}"
       return 0
     fi
     if [[ "$req_id" == "tenant-routing" ]] && ! is_production_identity "$expected_tenant_deployment_id"; then
@@ -1761,14 +1767,20 @@ requirement_cross_artifact_issue() {
     local state_cluster_id
     local sidecar_cluster_id
     local summary_worker_cluster_id
+    local expected_worker_pool
+    local worker_pool
+    local summary_worker_pool
     local summary_state_cluster_id
     local summary_sidecar_cluster_id
 
     expected_cluster_id="$(jq -r '.expected_targets.worker_remote_computer.cluster_id // ""' "$run_manifest" 2>/dev/null || echo "")"
+    expected_worker_pool="$(jq -r '.expected_targets.worker_remote_computer.worker_pool // .expected_targets.worker_remote_computer.pool // .expected_targets.worker_remote_computer.queue // ""' "$run_manifest" 2>/dev/null || echo "")"
     worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$worker_artifact" 2>/dev/null || echo "")"
+    worker_pool="$(jq -r '.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // ""' "$worker_artifact" 2>/dev/null || echo "")"
     state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$state_artifact" 2>/dev/null || echo "")"
     sidecar_cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$sidecar_artifact" 2>/dev/null || echo "")"
     summary_worker_cluster_id="$(jq -r '.worker.cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
+    summary_worker_pool="$(jq -r '.worker.worker_pool // .worker.pool_id // .worker.queue // .worker.queue_name // ""' "$summary_artifact" 2>/dev/null || echo "")"
     summary_state_cluster_id="$(jq -r '.remote_computer.state_sync_cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
     summary_sidecar_cluster_id="$(jq -r '.remote_computer.sidecar_cluster_id // ""' "$summary_artifact" 2>/dev/null || echo "")"
 
@@ -1804,6 +1816,18 @@ requirement_cross_artifact_issue() {
     fi
     if [[ -n "$worker_cluster_id" && -n "$summary_worker_cluster_id" && "$worker_cluster_id" != "$summary_worker_cluster_id" ]]; then
       printf 'worker/Remote Computer summary worker cluster id does not match worker evidence'
+      return 0
+    fi
+    if [[ -n "$expected_worker_pool" && -n "$worker_pool" && "$expected_worker_pool" != "$worker_pool" ]]; then
+      printf 'worker_pool does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$expected_worker_pool" && -n "$summary_worker_pool" && "$expected_worker_pool" != "$summary_worker_pool" ]]; then
+      printf 'worker/Remote Computer summary worker_pool does not match production-evidence-run.json'
+      return 0
+    fi
+    if [[ -n "$worker_pool" && -n "$summary_worker_pool" && "$worker_pool" != "$summary_worker_pool" ]]; then
+      printf 'worker/Remote Computer summary worker_pool does not match worker evidence'
       return 0
     fi
     if [[ -n "$state_cluster_id" && -n "$summary_state_cluster_id" && "$state_cluster_id" != "$summary_state_cluster_id" ]]; then

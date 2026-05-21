@@ -257,6 +257,7 @@ check_vault_kms() {
 check_worker_remote_computer() {
   local label="worker-remote-computer"
   require_production_identity MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID "$label"
+  require_production_identity MANDOFORGE_STAGE2_WORKER_POOL "$label"
   require_true MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_REQUIRED "$label"
   require_production_url MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL "$label"
   require_no_whiskey_url MANDOFORGE_WORKER_LOAD_VALIDATION_CONTROLLER_URL "$label"
