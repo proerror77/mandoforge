@@ -2340,6 +2340,11 @@ if ! grep -q "finance_close_step_detail_count" "$finance_script" || ! grep -q "f
   exit 1
 fi
 
+if ! grep -q "finance_close_id" "$finance_script" || ! grep -q "finance close_id is not a true ERP/accounting system identity" "$finance_script"; then
+  echo "Finance evidence script must require a true ERP/accounting close id" >&2
+  exit 1
+fi
+
 if ! grep -q "missing finance close controller action evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject finance close evidence without controller action proof" >&2
   exit 1
@@ -2362,6 +2367,11 @@ fi
 
 if ! grep -q "finance_reconciliation_check_detail_count" "$finance_script" || ! grep -q "finance_reconciliation_check_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "finance_reconciliation_check_detail_count" scripts/verify-stage2-evidence-archive.sh; then
   echo "Finance evidence gates must require audited reconciliation check details" >&2
+  exit 1
+fi
+
+if ! grep -q "finance_reconciliation_id" "$finance_script" || ! grep -q "finance reconciliation_id is not a true ERP/accounting system identity" "$finance_script"; then
+  echo "Finance evidence script must require a true ERP/accounting reconciliation id" >&2
   exit 1
 fi
 

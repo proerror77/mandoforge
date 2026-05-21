@@ -244,10 +244,12 @@ write_summary() {
   local latest_reconciliation_reconciled
   local close_evidence_status
   local close_run_status
+  local close_id
   local close_step_count
   local close_step_detail_count
   local reconciliation_evidence_status
   local reconciliation_run_status
+  local reconciliation_id
   local reconciliation_check_count
   local reconciliation_check_detail_count
   local finance_export_csv_bytes
@@ -289,16 +291,19 @@ write_summary() {
   latest_reconciliation_reconciled="$(jq -r '.production_close.latest_reconciliation_reconciled // false' "$operations_file")"
   close_evidence_status="not_requested"
   close_run_status="not_run"
+  close_id=""
   close_step_count="0"
   close_step_detail_count="0"
   if [[ -s "$close_evidence_file" ]]; then
     close_evidence_status="$(jq -r '.status // "unknown"' "$close_evidence_file")"
     close_run_status="$(jq -r '.response.status // "unknown"' "$close_evidence_file")"
+    close_id="$(jq -r '.response.close_controller_execution.close_id // ""' "$close_evidence_file")"
     close_step_count="$(jq -r 'if ((.response.close_controller_execution.steps // null) | type) == "array" then (.response.close_controller_execution.steps | length) else 0 end' "$close_evidence_file")"
     close_step_detail_count="$(finance_close_step_detail_count "$close_evidence_file")"
   fi
   reconciliation_evidence_status="not_requested"
   reconciliation_run_status="not_run"
+  reconciliation_id=""
   reconciliation_check_count="0"
   reconciliation_check_detail_count="0"
   export_delivery_observer_status="not_observed"
@@ -311,6 +316,7 @@ write_summary() {
   if [[ -s "$reconciliation_evidence_file" ]]; then
     reconciliation_evidence_status="$(jq -r '.status // "unknown"' "$reconciliation_evidence_file")"
     reconciliation_run_status="$(jq -r '.response.status // "unknown"' "$reconciliation_evidence_file")"
+    reconciliation_id="$(jq -r '.response.reconciliation_id // ""' "$reconciliation_evidence_file")"
     reconciliation_check_count="$(jq -r 'if ((.response.checks // null) | type) == "array" then (.response.checks | length) else 0 end' "$reconciliation_evidence_file")"
     reconciliation_check_detail_count="$(finance_reconciliation_check_detail_count "$reconciliation_evidence_file")"
   fi
@@ -364,6 +370,9 @@ write_summary() {
   if [[ "$close_evidence_status" != "captured" || "$close_run_status" != "completed" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! is_finance_system_identity "$close_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ ! "$close_step_count" =~ ^[0-9]+$ || "$close_step_count" == "0" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -371,6 +380,9 @@ write_summary() {
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ "$reconciliation_evidence_status" != "captured" || "$reconciliation_run_status" != "reconciled" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_finance_system_identity "$reconciliation_id"; then
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ ! "$reconciliation_check_count" =~ ^[0-9]+$ || "$reconciliation_check_count" == "0" ]]; then
@@ -436,10 +448,12 @@ write_summary() {
     echo "latest_reconciliation_reconciled=$latest_reconciliation_reconciled"
     echo "finance_close_evidence_status=$close_evidence_status"
     echo "finance_close_run_status=$close_run_status"
+    echo "finance_close_id=$close_id"
     echo "finance_close_step_count=$close_step_count"
     echo "finance_close_step_detail_count=$close_step_detail_count"
     echo "finance_reconciliation_evidence_status=$reconciliation_evidence_status"
     echo "finance_reconciliation_run_status=$reconciliation_run_status"
+    echo "finance_reconciliation_id=$reconciliation_id"
     echo "finance_reconciliation_check_count=$reconciliation_check_count"
     echo "finance_reconciliation_check_detail_count=$reconciliation_check_detail_count"
     echo "finance_controllers=$RUN_FINANCE_CONTROLLERS"
@@ -479,6 +493,9 @@ write_summary() {
     if [[ "$close_evidence_status" != "captured" || "$close_run_status" != "completed" ]]; then
       echo "- finance close evidence is not completed: evidence=$close_evidence_status status=$close_run_status"
     fi
+    if ! is_finance_system_identity "$close_id"; then
+      echo "- finance close_id is not a true ERP/accounting system identity: ${close_id:-<empty>}"
+    fi
     if [[ ! "$close_step_count" =~ ^[0-9]+$ || "$close_step_count" == "0" ]]; then
       echo "- finance close controller did not report any audited close steps"
     fi
@@ -490,6 +507,9 @@ write_summary() {
     fi
     if [[ "$reconciliation_evidence_status" != "captured" || "$reconciliation_run_status" != "reconciled" ]]; then
       echo "- finance reconciliation evidence is not reconciled: evidence=$reconciliation_evidence_status status=$reconciliation_run_status"
+    fi
+    if ! is_finance_system_identity "$reconciliation_id"; then
+      echo "- finance reconciliation_id is not a true ERP/accounting system identity: ${reconciliation_id:-<empty>}"
     fi
     if [[ ! "$reconciliation_check_count" =~ ^[0-9]+$ || "$reconciliation_check_count" == "0" ]]; then
       echo "- finance reconciliation did not report any audited reconciliation checks"
