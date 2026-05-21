@@ -675,6 +675,11 @@ if ! grep -q "tenant_sample_count" scripts/stage2-completion-audit-gate.sh || ! 
   exit 1
 fi
 
+if ! grep -q "unique_tenant_sample_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require distinct audited tenant samples" >&2
+  exit 1
+fi
+
 if ! grep -q "tenant-routing-validation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit tenant routing validation evidence metadata" >&2
   exit 1
@@ -1775,6 +1780,11 @@ if ! grep -q "tenant_sample_count" scripts/verify-stage2-evidence-archive.sh || 
   exit 1
 fi
 
+if ! grep -q "unique_tenant_sample_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive verifier must require distinct audited tenant samples" >&2
+  exit 1
+fi
+
 if ! grep -q "incomplete forced-RLS evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject incomplete forced-RLS tenant evidence" >&2
   exit 1
@@ -1797,6 +1807,11 @@ fi
 
 if ! grep -q "single tenant sample evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject tenant evidence without audited multi-tenant samples" >&2
+  exit 1
+fi
+
+if ! grep -q "duplicate tenant sample evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject duplicate tenant sample evidence" >&2
   exit 1
 fi
 

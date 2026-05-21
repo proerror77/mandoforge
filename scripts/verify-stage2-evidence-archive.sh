@@ -352,6 +352,7 @@ artifact_issue() {
       local target_kind
       local tenant_count
       local tenant_sample_count
+      local unique_tenant_sample_count
       local rls_enforced
       local rls_table_count
       local rls_forced_table_count
@@ -364,6 +365,7 @@ artifact_issue() {
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
       tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$path")"
       tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$path")"
+      unique_tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | unique | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | unique | length) else 0 end' "$path")"
       rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$path")"
       rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$path")"
       rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$path")"
@@ -389,6 +391,10 @@ artifact_issue() {
       fi
       if [[ ! "$tenant_sample_count" =~ ^[0-9]+$ || "$tenant_sample_count" -lt 2 ]]; then
         printf '%s tenant_sample_count=%s is not an audited multi-tenant sample' "$relative_path" "$tenant_sample_count"
+        return 0
+      fi
+      if [[ ! "$unique_tenant_sample_count" =~ ^[0-9]+$ || "$unique_tenant_sample_count" -lt 2 ]]; then
+        printf '%s unique_tenant_sample_count=%s is not an audited multi-tenant sample' "$relative_path" "$unique_tenant_sample_count"
         return 0
       fi
       if [[ "$rls_enforced" != "true" || "$tenant_context_validated" != "true" || "$cross_tenant_negative_tests" != "true" ]]; then
@@ -2682,6 +2688,44 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected single tenant sample evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": ["tenant-a", "tenant-a"],
+      "rls_enforced": true,
+      "rls_table_count": 12,
+      "rls_forced_table_count": 12,
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 3
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-duplicate-sample-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-duplicate-sample-negative.out 2>/tmp/mandoforge-stage2-archive-tenant-duplicate-sample-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate tenant sample evidence to fail" >&2
     exit 1
   fi
 

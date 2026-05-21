@@ -896,6 +896,7 @@ artifact_contract_issue() {
     local target_kind
     local tenant_count
     local tenant_sample_count
+    local unique_tenant_sample_count
     local rls_enforced
     local rls_table_count
     local rls_forced_table_count
@@ -909,6 +910,7 @@ artifact_contract_issue() {
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     tenant_count="$(jq -r '.response.controller_execution.tenant_count // 0' "$artifact" 2>/dev/null || echo "0")"
     tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+    unique_tenant_sample_count="$(jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | unique | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | unique | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
     rls_enforced="$(jq -r '.response.controller_execution.rls_enforced // false' "$artifact" 2>/dev/null || echo "false")"
     rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
     rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
@@ -939,6 +941,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$tenant_sample_count" =~ ^[0-9]+$ || "$tenant_sample_count" -lt 2 ]]; then
       printf 'tenant_sample_count=%s is not an audited multi-tenant sample' "$tenant_sample_count"
+      return 0
+    fi
+    if [[ ! "$unique_tenant_sample_count" =~ ^[0-9]+$ || "$unique_tenant_sample_count" -lt 2 ]]; then
+      printf 'unique_tenant_sample_count=%s is not an audited multi-tenant sample' "$unique_tenant_sample_count"
       return 0
     fi
     if [[ "$rls_enforced" != "true" ]]; then
