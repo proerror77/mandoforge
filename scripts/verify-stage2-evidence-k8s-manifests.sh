@@ -845,6 +845,11 @@ if ! grep -q "backend_id or key_id is pilot/mock/local" "$vault_script"; then
   exit 1
 fi
 
+if ! grep -q "MANDOFORGE_STAGE2_KMS_BACKEND_ID" "$vault_script" || ! grep -q "MANDOFORGE_KMS_KEY_ID" "$vault_script" || ! grep -q "expected_kms_backend_id" "$vault_script" || ! grep -q "expected_kms_key_id" "$vault_script"; then
+  echo "Vault evidence script must bind rotation and recovery evidence to the declared KMS backend and key ids" >&2
+  exit 1
+fi
+
 if ! grep -q "rotation_rotated_count" "$vault_script" || ! grep -q "rotation_catalog_updated_count" "$vault_script" || ! grep -q "rotation_detail_count" "$vault_script" || ! grep -q "rotation_id" "$vault_script"; then
   echo "Vault evidence script must require audited KMS rotation id, rotated count, catalog update count, and key detail count" >&2
   exit 1

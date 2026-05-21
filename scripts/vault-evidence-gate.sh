@@ -7,6 +7,8 @@ ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/vault-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_SECRET_LIFECYCLE="${RUN_STAGE2_SECRET_LIFECYCLE:-1}"
+EXPECTED_KMS_BACKEND_ID="${MANDOFORGE_STAGE2_KMS_BACKEND_ID:-}"
+EXPECTED_KMS_KEY_ID="${MANDOFORGE_KMS_KEY_ID:-}"
 AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
 
 auth_headers=(
@@ -309,6 +311,22 @@ write_summary() {
   if ! is_production_identity "$rotation_backend_id" || ! is_production_identity "$rotation_key_id"; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ -n "$EXPECTED_KMS_BACKEND_ID" ]]; then
+    if ! is_production_identity "$EXPECTED_KMS_BACKEND_ID"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ "$rotation_backend_id" != "$EXPECTED_KMS_BACKEND_ID" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+  fi
+  if [[ -n "$EXPECTED_KMS_KEY_ID" ]]; then
+    if ! is_production_identity "$EXPECTED_KMS_KEY_ID"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ "$rotation_key_id" != "$EXPECTED_KMS_KEY_ID" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+  fi
   if ! is_production_identity "$rotation_id"; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -338,6 +356,16 @@ write_summary() {
   fi
   if ! is_production_identity "$recovery_backend_id" || ! is_production_identity "$recovery_key_id"; then
     blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ -n "$EXPECTED_KMS_BACKEND_ID" ]]; then
+    if [[ "$recovery_backend_id" != "$EXPECTED_KMS_BACKEND_ID" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+  fi
+  if [[ -n "$EXPECTED_KMS_KEY_ID" ]]; then
+    if [[ "$recovery_key_id" != "$EXPECTED_KMS_KEY_ID" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
   fi
   if ! is_production_identity "$recovery_id"; then
     blocked_count="$((blocked_count + 1))"
@@ -374,6 +402,8 @@ write_summary() {
     echo "recovery_environment=$recovery_environment"
     echo "recovery_backend_id=$recovery_backend_id"
     echo "recovery_key_id=$recovery_key_id"
+    echo "expected_kms_backend_id=${EXPECTED_KMS_BACKEND_ID:-<unset>}"
+    echo "expected_kms_key_id=${EXPECTED_KMS_KEY_ID:-<unset>}"
     echo "recovery_id=$recovery_id"
     echo "recovery_target_kind=$recovery_target_kind"
     echo "recovery_step_count=$recovery_step_count"
@@ -435,6 +465,22 @@ write_summary() {
     if ! is_production_identity "$rotation_backend_id" || ! is_production_identity "$rotation_key_id"; then
       echo "- KMS rotation backend_id or key_id is pilot/mock/local: backend_id=${rotation_backend_id:-<empty>} key_id=${rotation_key_id:-<empty>}"
     fi
+    if [[ -n "$EXPECTED_KMS_BACKEND_ID" ]]; then
+      if ! is_production_identity "$EXPECTED_KMS_BACKEND_ID"; then
+        echo "- configured MANDOFORGE_STAGE2_KMS_BACKEND_ID is pilot/mock/local: $EXPECTED_KMS_BACKEND_ID"
+      fi
+      if [[ "$rotation_backend_id" != "$EXPECTED_KMS_BACKEND_ID" ]]; then
+        echo "- KMS rotation backend_id does not match MANDOFORGE_STAGE2_KMS_BACKEND_ID"
+      fi
+    fi
+    if [[ -n "$EXPECTED_KMS_KEY_ID" ]]; then
+      if ! is_production_identity "$EXPECTED_KMS_KEY_ID"; then
+        echo "- configured MANDOFORGE_KMS_KEY_ID is pilot/mock/local: $EXPECTED_KMS_KEY_ID"
+      fi
+      if [[ "$rotation_key_id" != "$EXPECTED_KMS_KEY_ID" ]]; then
+        echo "- KMS rotation key_id does not match MANDOFORGE_KMS_KEY_ID"
+      fi
+    fi
     if ! is_production_identity "$rotation_id"; then
       echo "- KMS rotation did not report a production rotation_id: ${rotation_id:-<empty>}"
     fi
@@ -479,6 +525,12 @@ write_summary() {
     fi
     if ! is_production_identity "$recovery_backend_id" || ! is_production_identity "$recovery_key_id"; then
       echo "- KMS recovery backend_id or key_id is pilot/mock/local: backend_id=${recovery_backend_id:-<empty>} key_id=${recovery_key_id:-<empty>}"
+    fi
+    if [[ -n "$EXPECTED_KMS_BACKEND_ID" && "$recovery_backend_id" != "$EXPECTED_KMS_BACKEND_ID" ]]; then
+      echo "- KMS recovery backend_id does not match MANDOFORGE_STAGE2_KMS_BACKEND_ID"
+    fi
+    if [[ -n "$EXPECTED_KMS_KEY_ID" && "$recovery_key_id" != "$EXPECTED_KMS_KEY_ID" ]]; then
+      echo "- KMS recovery key_id does not match MANDOFORGE_KMS_KEY_ID"
     fi
     if ! is_production_identity "$recovery_id"; then
       echo "- KMS recovery did not report a production recovery_id: ${recovery_id:-<empty>}"
