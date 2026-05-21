@@ -825,6 +825,11 @@ if ! grep -q "vault-kms-rotation-evidence.json" scripts/verify-stage2-evidence-a
   exit 1
 fi
 
+if ! grep -q "zero KMS catalog update evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject KMS rotation evidence with no catalog updates" >&2
+  exit 1
+fi
+
 if ! grep -q "approval-notification-evidence-gate.sh" deploy/stage2-evidence/approval-notification-evidence-job.example.yaml; then
   echo "Approval notification evidence Job does not run the dedicated evidence gate" >&2
   exit 1
