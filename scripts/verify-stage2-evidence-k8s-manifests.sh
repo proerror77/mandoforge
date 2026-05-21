@@ -2010,8 +2010,18 @@ if ! grep -q "finance-close-evidence.json" scripts/verify-stage2-evidence-archiv
   exit 1
 fi
 
+if ! grep -q "invalid finance close step status count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must reject failed finance close controller steps" >&2
+  exit 1
+fi
+
 if ! grep -q "missing finance close controller action evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject finance close evidence without controller action proof" >&2
+  exit 1
+fi
+
+if ! grep -q "invalid finance close step status evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject failed finance close controller steps" >&2
   exit 1
 fi
 

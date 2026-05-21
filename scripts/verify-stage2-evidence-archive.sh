@@ -695,6 +695,7 @@ artifact_issue() {
       local close_status
       local close_id
       local step_count
+      local invalid_step_count
       local action_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       run_status="$(jq -r '.response.status // "unknown"' "$path")"
@@ -702,6 +703,7 @@ artifact_issue() {
       close_status="$(jq -r '.response.close_controller_execution.status // "unknown"' "$path")"
       close_id="$(jq -r '.response.close_controller_execution.close_id // ""' "$path")"
       step_count="$(jq -r 'if ((.response.close_controller_execution.steps // null) | type) == "array" then (.response.close_controller_execution.steps | length) else 0 end' "$path")"
+      invalid_step_count="$(jq -r '[.response.close_controller_execution.steps[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$path")"
       action_count="$(jq -r '[.response.actions[]? | select(. == "usage_finance_close_controller_executed")] | length' "$path")"
       if [[ "$evidence_status" != "captured" || "$run_status" != "completed" ]]; then
         printf '%s evidence_status=%s run_status=%s' "$relative_path" "$evidence_status" "$run_status"
@@ -717,6 +719,10 @@ artifact_issue() {
       fi
       if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
         printf '%s step_count=%s' "$relative_path" "$step_count"
+        return 0
+      fi
+      if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then
+        printf '%s invalid finance close step status count=%s' "$relative_path" "$invalid_step_count"
         return 0
       fi
       if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
@@ -1440,6 +1446,41 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing finance close controller action evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-close-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "completed",
+    "actions": ["usage_finance_close_controller_executed"],
+    "close_controller_configured": true,
+    "close_controller_execution": {
+      "status": "closed",
+      "close_id": "netsuite-close-prod-1",
+      "steps": [
+        {"name": "export-present", "status": "failed"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-close-step-status-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-close-step-status-negative.out 2>/tmp/mandoforge-stage2-archive-finance-close-step-status-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected invalid finance close step status evidence to fail" >&2
     exit 1
   fi
 

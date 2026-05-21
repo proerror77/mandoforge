@@ -448,6 +448,7 @@ artifact_contract_issue() {
     local close_status
     local close_id
     local step_count
+    local invalid_step_count
     local action_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -456,6 +457,7 @@ artifact_contract_issue() {
     close_status="$(jq -r '.response.close_controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     close_id="$(jq -r '.response.close_controller_execution.close_id // ""' "$artifact" 2>/dev/null || echo "")"
     step_count="$(jq -r 'if ((.response.close_controller_execution.steps // null) | type) == "array" then (.response.close_controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+    invalid_step_count="$(jq -r '[.response.close_controller_execution.steps[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$artifact" 2>/dev/null || echo "0")"
     action_count="$(jq -r '[.response.actions[]? | select(. == "usage_finance_close_controller_executed")] | length' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$evidence_status" != "captured" || "$run_status" != "completed" ]]; then
@@ -472,6 +474,10 @@ artifact_contract_issue() {
     fi
     if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
       printf 'finance close step_count=%s' "$step_count"
+      return 0
+    fi
+    if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then
+      printf 'invalid finance close step status count=%s' "$invalid_step_count"
       return 0
     fi
     if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
