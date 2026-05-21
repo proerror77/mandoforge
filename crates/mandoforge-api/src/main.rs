@@ -34024,7 +34024,14 @@ async fn list_execution_jobs(
     let principal =
         authorize_collection_request(&state, &headers, Permission::SessionsRead, "execution_jobs")
             .await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    let worker_environment_id = worker_environment_id_from_headers(&headers)?;
+    let visible_sessions = state.list_sessions_visible_to(&principal).await?;
+    let visible_session_ids: HashSet<_> =
+        visible_sessions.iter().map(|session| session.id).collect();
+    let session_environment_ids: HashMap<_, _> = visible_sessions
+        .iter()
+        .map(|session| (session.id, session.environment_id))
+        .collect();
     Ok(Json(
         state
             .execution_queue
@@ -34032,6 +34039,15 @@ async fn list_execution_jobs(
             .await?
             .into_iter()
             .filter(|job| visible_session_ids.contains(&job.session_id))
+            .filter(|job| {
+                worker_environment_id.map_or(true, |environment_id| {
+                    session_environment_ids
+                        .get(&job.session_id)
+                        .copied()
+                        .flatten()
+                        == Some(environment_id)
+                })
+            })
             .collect(),
     ))
 }
@@ -34047,6 +34063,7 @@ async fn list_session_loop_jobs(
         "session_loop_jobs",
     )
     .await?;
+    let worker_environment_id = worker_environment_id_from_headers(&headers)?;
     let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
     Ok(Json(
         state
@@ -34054,7 +34071,45 @@ async fn list_session_loop_jobs(
             .await?
             .into_iter()
             .filter(|job| visible_session_ids.contains(&job.session_id))
+            .filter(|job| {
+                worker_environment_id.map_or(true, |environment_id| {
+                    job.environment_id == Some(environment_id)
+                })
+            })
             .collect(),
+    ))
+}
+
+fn worker_environment_id_from_headers(headers: &HeaderMap) -> Result<Option<Uuid>, AppError> {
+    let Some(value) = header_value(headers, "x-mandoforge-environment-id")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    Uuid::parse_str(value)
+        .map(Some)
+        .map_err(|_| AppError::bad_request("x-mandoforge-environment-id must be a UUID"))
+}
+
+async fn enforce_worker_environment_binding(
+    state: &AppState,
+    headers: &HeaderMap,
+    session_id: Uuid,
+    job_environment_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let Some(worker_environment_id) = worker_environment_id_from_headers(headers)? else {
+        return Ok(());
+    };
+    let actual_environment_id = match job_environment_id {
+        Some(environment_id) => Some(environment_id),
+        None => state.get_session(session_id).await?.environment_id,
+    };
+    if actual_environment_id == Some(worker_environment_id) {
+        return Ok(());
+    }
+    Err(AppError::not_found(
+        "job not claimable for worker environment",
     ))
 }
 
@@ -37381,6 +37436,8 @@ async fn run_execution_job_route(
     headers: HeaderMap,
 ) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
     authorize_execution_job_run(&state, &headers, id).await?;
+    let job = state.execution_queue.get(id).await?;
+    enforce_worker_environment_binding(&state, &headers, job.session_id, None).await?;
     let worker_id = headers
         .get("x-mandoforge-worker-id")
         .and_then(|value| value.to_str().ok())
@@ -37407,6 +37464,8 @@ async fn run_session_loop_job_route(
 ) -> Result<Json<SessionLoopJob>, AppError> {
     authorize_session_loop_job_run(&state, &headers, id).await?;
     let job = state.get_session_loop_job(id).await?;
+    enforce_worker_environment_binding(&state, &headers, job.session_id, job.environment_id)
+        .await?;
     if !session_accepts_worker_execution(&state, job.session_id).await? {
         let skipped = state
             .discard_session_loop_job(
@@ -46379,6 +46438,236 @@ not json
         )
         .await;
         assert!(listed.iter().any(|item| item.id == environment.id));
+    }
+
+    #[tokio::test]
+    async fn worker_environment_header_filters_session_loop_and_execution_jobs() {
+        let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let environment_a: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Worker Queue A",
+                    "environment_type": "local",
+                    "worker_queue_binding": {"queue": "worker-a"},
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let environment_b: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Worker Queue B",
+                    "environment_type": "local",
+                    "worker_queue_binding": {"queue": "worker-b"},
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        let session_a: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "environment_id": environment_a.id,
+                    "title": "queue A session"
+                }),
+            ),
+        )
+        .await;
+        let session_b: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "environment_id": environment_b.id,
+                    "title": "queue B session"
+                }),
+            ),
+        )
+        .await;
+
+        for session in [&session_a, &session_b] {
+            let _: Vec<SessionEvent> = request_json(
+                app.clone(),
+                json_request(
+                    "POST",
+                    &format!("/api/sessions/{}/events", session.id),
+                    json!({
+                        "events": [{
+                            "type": "user.message",
+                            "payload": {"message": "start loop"}
+                        }]
+                    }),
+                ),
+            )
+            .await;
+        }
+
+        let loop_jobs_for_a: Vec<SessionLoopJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/session-loop-jobs")
+                .header("x-mandoforge-subject", "worker-a")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-environment-id", environment_a.id.to_string())
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            loop_jobs_for_a
+                .iter()
+                .all(|job| job.environment_id == Some(environment_a.id)),
+            "environment A worker should only see A loop jobs: {loop_jobs_for_a:?}"
+        );
+        assert!(
+            loop_jobs_for_a
+                .iter()
+                .any(|job| job.session_id == session_a.id)
+        );
+        assert!(
+            !loop_jobs_for_a
+                .iter()
+                .any(|job| job.session_id == session_b.id)
+        );
+
+        let loop_job_b = session_loop_jobs_for_session(app.clone(), session_b.id)
+            .await
+            .into_iter()
+            .find(|job| job.status == SessionLoopJobStatus::Queued)
+            .expect("environment B loop job");
+        let (status, error) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/session-loop-jobs/{}/run", loop_job_b.id))
+                .header("x-mandoforge-worker-id", "worker-a")
+                .header("x-mandoforge-subject", "worker-a")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-environment-id", environment_a.id.to_string())
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            error["error"],
+            json!("job not claimable for worker environment")
+        );
+
+        for session in [&session_a, &session_b] {
+            let approval_required: Value = request_json(
+                app.clone(),
+                json_request(
+                    "POST",
+                    "/api/tools/file.write/execute",
+                    json!({
+                        "session_id": session.id,
+                        "args": {
+                            "path": "environment-queue.md",
+                            "content": "queued"
+                        }
+                    }),
+                ),
+            )
+            .await;
+            let approval_id = approval_required["approval_id"]
+                .as_str()
+                .expect("approval id");
+            let approved: Approval = request_json(
+                app.clone(),
+                approve_request(format!("/api/approvals/{approval_id}/approve")),
+            )
+            .await;
+            assert_eq!(approved.status, "approved");
+        }
+
+        let execution_jobs_for_a: Vec<execution_queue::ExecutionJob> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .header("x-mandoforge-subject", "worker-a")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-environment-id", environment_a.id.to_string())
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            execution_jobs_for_a
+                .iter()
+                .any(|job| job.session_id == session_a.id)
+        );
+        assert!(
+            !execution_jobs_for_a
+                .iter()
+                .any(|job| job.session_id == session_b.id),
+            "environment A worker should not see B execution jobs: {execution_jobs_for_a:?}"
+        );
+
+        let execution_job_b = request_json::<Vec<execution_queue::ExecutionJob>>(
+            app.clone(),
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .into_iter()
+        .find(|job| job.session_id == session_b.id)
+        .expect("environment B execution job");
+        let (status, error) = request_value(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{}/run", execution_job_b.id))
+                .header("x-mandoforge-worker-id", "worker-a")
+                .header("x-mandoforge-subject", "worker-a")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-environment-id", environment_a.id.to_string())
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            error["error"],
+            json!("job not claimable for worker environment")
+        );
     }
 
     #[tokio::test]

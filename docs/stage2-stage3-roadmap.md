@@ -227,13 +227,15 @@ Acceptance criteria:
 Primary lanes: Lane C and Lane D.
 
 Status: session-loop jobs exist with event cursor windows; approved execution
-completion now re-enters through `execution.completed` events; environment
-placement and any remaining non-worker continuation sources remain.
+completion now re-enters through `execution.completed` events; worker polling can
+bind to an Environment id for session-loop and execution jobs; named pool
+selection and any remaining non-worker continuation sources remain.
 
 Scope:
 
-- Promote environment queue binding into the session-loop claim path, or add an
-  environment work queue above low-level execution jobs.
+- Promote environment queue binding into the session-loop and execution-job
+  claim path, then extend it from Environment-id filtering to named worker pools
+  and autoscaler routing.
 - Keep orchestrator workers claiming session-loop work when user events arrive.
 - Keep the LLM/provider call outside the API request path.
 - Keep approval resolution and execution-job completion routed through

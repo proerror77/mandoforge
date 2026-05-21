@@ -25,6 +25,10 @@ async fn main() -> Result<()> {
     let worker_subject =
         env::var("WORKER_SUBJECT").unwrap_or_else(|_| "mandoforge-worker".to_string());
     let worker_roles = env::var("WORKER_ROLES").unwrap_or_else(|_| "admin".to_string());
+    let worker_environment_id = env::var("WORKER_ENVIRONMENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let api_token = env::var("MANDOFORGE_WORKER_TOKEN")
         .or_else(|_| env::var("MANDOFORGE_DEV_ADMIN_TOKEN"))
         .ok()
@@ -59,7 +63,8 @@ async fn main() -> Result<()> {
         let session_loop_jobs: Vec<SessionLoopJob> = fetch_job_list(
             client
                 .get(format!("{base_url}/api/session-loop-jobs"))
-                .worker_auth(&worker_subject, &worker_roles, api_token.as_deref()),
+                .worker_auth(&worker_subject, &worker_roles, api_token.as_deref())
+                .worker_environment(worker_environment_id.as_deref()),
             "session loop jobs",
         )
         .await;
@@ -72,6 +77,7 @@ async fn main() -> Result<()> {
                 .post(format!("{base_url}/api/session-loop-jobs/{}/run", job.id))
                 .header("x-mandoforge-worker-id", &worker_id)
                 .worker_auth(&worker_subject, &worker_roles, api_token.as_deref())
+                .worker_environment(worker_environment_id.as_deref())
                 .send()
                 .await
                 .with_context(|| format!("run session loop job {}", job.id))?;
@@ -111,7 +117,8 @@ async fn main() -> Result<()> {
         let jobs: Vec<ExecutionJob> = fetch_job_list(
             client
                 .get(format!("{base_url}/api/execution-jobs"))
-                .worker_auth(&worker_subject, &worker_roles, api_token.as_deref()),
+                .worker_auth(&worker_subject, &worker_roles, api_token.as_deref())
+                .worker_environment(worker_environment_id.as_deref()),
             "execution jobs",
         )
         .await;
@@ -124,6 +131,7 @@ async fn main() -> Result<()> {
                 .post(format!("{base_url}/api/execution-jobs/{}/run", job.id))
                 .header("x-mandoforge-worker-id", &worker_id)
                 .worker_auth(&worker_subject, &worker_roles, api_token.as_deref())
+                .worker_environment(worker_environment_id.as_deref())
                 .send()
                 .await
                 .with_context(|| format!("run execution job {}", job.id))?;
@@ -205,6 +213,8 @@ trait WorkerAuthRequestBuilder {
         roles: &str,
         token: Option<&str>,
     ) -> reqwest::RequestBuilder;
+
+    fn worker_environment(self, environment_id: Option<&str>) -> reqwest::RequestBuilder;
 }
 
 impl WorkerAuthRequestBuilder for reqwest::RequestBuilder {
@@ -221,6 +231,14 @@ impl WorkerAuthRequestBuilder for reqwest::RequestBuilder {
             request
         };
         request.header("x-mandoforge-roles", roles)
+    }
+
+    fn worker_environment(self, environment_id: Option<&str>) -> reqwest::RequestBuilder {
+        if let Some(environment_id) = environment_id {
+            self.header("x-mandoforge-environment-id", environment_id)
+        } else {
+            self
+        }
     }
 }
 
@@ -297,5 +315,22 @@ mod tests {
         .await;
 
         assert!(jobs.is_empty());
+    }
+
+    #[test]
+    fn worker_environment_adds_environment_header_when_configured() {
+        let request = reqwest::Client::new()
+            .get("http://127.0.0.1/api/session-loop-jobs")
+            .worker_environment(Some("00000000-0000-4000-8000-000000000001"))
+            .build()
+            .expect("build request");
+
+        assert_eq!(
+            request
+                .headers()
+                .get("x-mandoforge-environment-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("00000000-0000-4000-8000-000000000001")
+        );
     }
 }
