@@ -1769,6 +1769,63 @@ JSON
   }
 }
 JSON
+  cat >"$tmpdir/evidence/vault-kms-recovery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "status": "validated",
+      "backend_kind": "aws_kms",
+      "environment": "production",
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1",
+      "recovery_id": "kms-recovery-1",
+      "recovery_target_kind": "production_kms_backend",
+      "steps": []
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-vault-recovery-steps-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-vault-recovery-steps-negative.out 2>/tmp/mandoforge-stage2-archive-vault-recovery-steps-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing KMS recovery steps to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/vault-kms-recovery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "status": "validated",
+      "backend_kind": "aws_kms",
+      "environment": "production",
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1",
+      "recovery_id": "kms-recovery-1",
+      "recovery_target_kind": "production_kms_backend",
+      "steps": [
+        {"name": "restore-key-material", "status": "validated"},
+        {"name": "verify-secret-consumers", "status": "passed"}
+      ]
+    }
+  }
+}
+JSON
   cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
 {
   "status": "captured",
