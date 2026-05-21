@@ -146,8 +146,9 @@ id, trace id, run id, or timestamp detail, and confirm RLS enforcement,
 tenant context propagation, nonzero RLS table coverage, forced RLS for every
 reported table with a unique schema/table identity, enabled/forced status, and audit id, trace id,
 run id, or timestamp detail, and a nonzero cross-tenant negative-test count whose
-details include source tenant, target tenant, denied/blocked outcome, and audit id,
-trace id, run id, or timestamp detail; a
+details run between the audited sampled tenants and include source tenant,
+target tenant, denied/blocked outcome, and audit id, trace id, run id, or
+timestamp detail; a
 single-tenant or Whiskey-only pilot target is inventory evidence, not completion
 proof. The matching in-cluster template is
 `deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml`, which

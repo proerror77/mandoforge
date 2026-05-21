@@ -213,17 +213,28 @@ write_summary() {
     routing_tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$validation_evidence_file")"
     routing_cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$validation_evidence_file")"
     routing_cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$validation_evidence_file")"
-    routing_cross_tenant_negative_test_detail_count="$(jq -r '[
+    routing_cross_tenant_negative_test_detail_count="$(jq -r '. as $root | [
       (
-        .response.controller_execution.cross_tenant_negative_test_results[]?,
-        .response.controller_execution.cross_tenant_negative_tests_detail[]?,
-        .response.controller_execution.negative_tests[]?
+        $root.response.controller_execution.tenant_samples[]?,
+        $root.response.controller_execution.tenant_ids_sample[]?
       )
+      | if type == "object" then (.tenant_id // .tenant // .id // .name // "") elif type == "string" then . else "" end
+      | select(length > 0)
+    ] | unique as $sampled_tenants | [
+      (
+        $root.response.controller_execution.cross_tenant_negative_test_results[]?,
+        $root.response.controller_execution.cross_tenant_negative_tests_detail[]?,
+        $root.response.controller_execution.negative_tests[]?
+      )
+      | (.source_tenant // .from_tenant // .tenant_id // "") as $source_tenant
+      | (.target_tenant // .to_tenant // .blocked_tenant_id // "") as $target_tenant
       | select(
           type == "object"
-          and ((.source_tenant // .from_tenant // .tenant_id // "") | length > 0)
-          and ((.target_tenant // .to_tenant // .blocked_tenant_id // "") | length > 0)
-          and ((.source_tenant // .from_tenant // .tenant_id // "") != (.target_tenant // .to_tenant // .blocked_tenant_id // ""))
+          and ($source_tenant | length > 0)
+          and ($target_tenant | length > 0)
+          and ($source_tenant != $target_tenant)
+          and (($sampled_tenants | index($source_tenant)) != null)
+          and (($sampled_tenants | index($target_tenant)) != null)
           and (
             ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
             or (.access_granted == false)
@@ -381,7 +392,7 @@ write_summary() {
       echo "- tenant routing controller did not report any audited cross-tenant negative test count"
     fi
     if [[ ! "$routing_cross_tenant_negative_test_detail_count" =~ ^[0-9]+$ || ! "$routing_cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$routing_cross_tenant_negative_test_detail_count" -lt "$routing_cross_tenant_negative_test_count" ]]; then
-      echo "- tenant routing controller did not include cross-tenant negative test details for every counted test: detail_count=$routing_cross_tenant_negative_test_detail_count count=$routing_cross_tenant_negative_test_count"
+      echo "- tenant routing controller did not include audited negative-test details between sampled tenants for every counted test: detail_count=$routing_cross_tenant_negative_test_detail_count count=$routing_cross_tenant_negative_test_count"
     fi
     if [[ "$rls_enabled" != "true" || "$rls_forced" != "true" || "$tenant_context" != "true" ]]; then
       echo "- RLS is not fully enabled, forced, and tenant-context configured"

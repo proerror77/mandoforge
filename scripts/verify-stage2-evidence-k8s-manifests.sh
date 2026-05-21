@@ -660,7 +660,7 @@ if ! grep -q "routing_cross_tenant_negative_tests" "$tenant_script"; then
   exit 1
 fi
 
-if ! grep -q "routing_cross_tenant_negative_test_count" "$tenant_script" || ! grep -q "routing_cross_tenant_negative_test_detail_count" "$tenant_script" || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" "$tenant_script"; then
+if ! grep -q "routing_cross_tenant_negative_test_count" "$tenant_script" || ! grep -q "routing_cross_tenant_negative_test_detail_count" "$tenant_script" || ! grep -q "sampled tenants" "$tenant_script" || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" "$tenant_script"; then
   echo "Tenant isolation evidence script must require audited cross-tenant negative-test counts and details" >&2
   exit 1
 fi
@@ -690,7 +690,7 @@ if ! grep -q "cross_tenant_negative_tests" scripts/stage2-completion-audit-gate.
   exit 1
 fi
 
-if ! grep -q "tenant_sample_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "tenant_sample_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "rls_forced_table_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "unique_forced_rls_table_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" scripts/stage2-completion-audit-gate.sh; then
+if ! grep -q "tenant_sample_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "tenant_sample_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "rls_forced_table_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "unique_forced_rls_table_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "sampled_tenant_negative_test_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require audited tenant samples, forced-RLS table details, and negative-test details" >&2
   exit 1
 fi
@@ -1915,7 +1915,7 @@ if ! grep -q "tenant routing evidence_status" scripts/stage2-completion-audit-ga
   exit 1
 fi
 
-if ! grep -q "tenant_sample_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "tenant_sample_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rls_forced_table_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "unique_forced_rls_table_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cross_tenant_negative_test_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" scripts/verify-stage2-evidence-archive.sh; then
+if ! grep -q "tenant_sample_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "tenant_sample_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "rls_forced_table_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "unique_forced_rls_table_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "sampled_tenant_negative_test_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*tested_at.*timestamp" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive verifier must require audited tenant samples, forced-RLS table details, and negative-test details" >&2
   exit 1
 fi
@@ -1952,6 +1952,11 @@ fi
 
 if ! grep -q "missing cross-tenant negative test detail evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject tenant evidence without cross-tenant negative test details" >&2
+  exit 1
+fi
+
+if ! grep -q "unsampled cross-tenant negative test evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject cross-tenant negative tests for unsampled tenants" >&2
   exit 1
 fi
 

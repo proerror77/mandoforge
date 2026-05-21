@@ -492,17 +492,28 @@ summary_sidecar_checked_pod_detail_count() {
 }
 
 tenant_negative_test_detail_count() {
-  jq -r '[
+  jq -r '. as $root | [
     (
-      .response.controller_execution.cross_tenant_negative_test_results[]?,
-      .response.controller_execution.cross_tenant_negative_tests_detail[]?,
-      .response.controller_execution.negative_tests[]?
+      $root.response.controller_execution.tenant_samples[]?,
+      $root.response.controller_execution.tenant_ids_sample[]?
     )
+    | if type == "object" then (.tenant_id // .tenant // .id // .name // "") elif type == "string" then . else "" end
+    | select(length > 0)
+  ] | unique as $sampled_tenants | [
+    (
+      $root.response.controller_execution.cross_tenant_negative_test_results[]?,
+      $root.response.controller_execution.cross_tenant_negative_tests_detail[]?,
+      $root.response.controller_execution.negative_tests[]?
+    )
+    | (.source_tenant // .from_tenant // .tenant_id // "") as $source_tenant
+    | (.target_tenant // .to_tenant // .blocked_tenant_id // "") as $target_tenant
     | select(
         type == "object"
-        and ((.source_tenant // .from_tenant // .tenant_id // "") | length > 0)
-        and ((.target_tenant // .to_tenant // .blocked_tenant_id // "") | length > 0)
-        and ((.source_tenant // .from_tenant // .tenant_id // "") != (.target_tenant // .to_tenant // .blocked_tenant_id // ""))
+        and ($source_tenant | length > 0)
+        and ($target_tenant | length > 0)
+        and ($source_tenant != $target_tenant)
+        and (($sampled_tenants | index($source_tenant)) != null)
+        and (($sampled_tenants | index($target_tenant)) != null)
         and (
           ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
           or (.access_granted == false)
@@ -1447,7 +1458,7 @@ artifact_contract_issue() {
       return 0
     fi
     if [[ ! "$cross_tenant_negative_test_detail_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_detail_count" -lt "$cross_tenant_negative_test_count" ]]; then
-      printf 'cross_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
+      printf 'sampled_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
       return 0
     fi
     if ! is_production_identity "$deployment_id"; then

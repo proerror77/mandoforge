@@ -214,17 +214,28 @@ managed_session_detail_issue() {
 }
 
 tenant_negative_test_detail_count() {
-  jq -r '[
+  jq -r '. as $root | [
     (
-      .response.controller_execution.cross_tenant_negative_test_results[]?,
-      .response.controller_execution.cross_tenant_negative_tests_detail[]?,
-      .response.controller_execution.negative_tests[]?
+      $root.response.controller_execution.tenant_samples[]?,
+      $root.response.controller_execution.tenant_ids_sample[]?
     )
+    | if type == "object" then (.tenant_id // .tenant // .id // .name // "") elif type == "string" then . else "" end
+    | select(length > 0)
+  ] | unique as $sampled_tenants | [
+    (
+      $root.response.controller_execution.cross_tenant_negative_test_results[]?,
+      $root.response.controller_execution.cross_tenant_negative_tests_detail[]?,
+      $root.response.controller_execution.negative_tests[]?
+    )
+    | (.source_tenant // .from_tenant // .tenant_id // "") as $source_tenant
+    | (.target_tenant // .to_tenant // .blocked_tenant_id // "") as $target_tenant
     | select(
         type == "object"
-        and ((.source_tenant // .from_tenant // .tenant_id // "") | length > 0)
-        and ((.target_tenant // .to_tenant // .blocked_tenant_id // "") | length > 0)
-        and ((.source_tenant // .from_tenant // .tenant_id // "") != (.target_tenant // .to_tenant // .blocked_tenant_id // ""))
+        and ($source_tenant | length > 0)
+        and ($target_tenant | length > 0)
+        and ($source_tenant != $target_tenant)
+        and (($sampled_tenants | index($source_tenant)) != null)
+        and (($sampled_tenants | index($target_tenant)) != null)
         and (
           ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
           or (.access_granted == false)
@@ -829,7 +840,7 @@ artifact_issue() {
         return 0
       fi
       if [[ ! "$cross_tenant_negative_test_detail_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_detail_count" -lt "$cross_tenant_negative_test_count" ]]; then
-        printf '%s cross_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$relative_path" "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
+        printf '%s sampled_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$relative_path" "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
         return 0
       fi
       if ! is_production_identity_value "$deployment_id"; then
@@ -4028,6 +4039,55 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing cross-tenant negative test detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": [
+        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "rls_enforced": true,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 2,
+      "cross_tenant_negative_test_results": [
+        {"source_tenant": "tenant-x", "target_tenant": "tenant-y", "status": "denied", "audit_id": "tenant-negative-x-y-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"source_tenant": "tenant-y", "target_tenant": "tenant-x", "status": "blocked", "audit_id": "tenant-negative-y-x-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-negative-test-unsampled-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-negative-test-unsampled-negative.out 2>/tmp/mandoforge-stage2-archive-tenant-negative-test-unsampled-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected unsampled cross-tenant negative test evidence to fail" >&2
     exit 1
   fi
 
