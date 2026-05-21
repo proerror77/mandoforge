@@ -2335,8 +2335,8 @@ if ! grep -q "invalid finance close step status count" scripts/stage2-completion
   exit 1
 fi
 
-if ! grep -q "finance_close_step_detail_count" "$finance_script" || ! grep -q "finance_close_step_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "finance_close_step_detail_count" scripts/verify-stage2-evidence-archive.sh; then
-  echo "Finance evidence gates must require audited finance close step details" >&2
+if ! grep -q "finance_close_step_detail_count" "$finance_script" || ! grep -q "finance_close_step_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "finance_close_step_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "root_close_id" "$finance_script" || ! grep -q "root_close_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "root_close_id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Finance evidence gates must require audited finance close step details bound to the close id" >&2
   exit 1
 fi
 
@@ -2365,8 +2365,8 @@ if ! grep -q "finance-reconciliation-evidence.json" scripts/verify-stage2-eviden
   exit 1
 fi
 
-if ! grep -q "finance_reconciliation_check_detail_count" "$finance_script" || ! grep -q "finance_reconciliation_check_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "finance_reconciliation_check_detail_count" scripts/verify-stage2-evidence-archive.sh; then
-  echo "Finance evidence gates must require audited reconciliation check details" >&2
+if ! grep -q "finance_reconciliation_check_detail_count" "$finance_script" || ! grep -q "finance_reconciliation_check_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "finance_reconciliation_check_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "root_reconciliation_id" "$finance_script" || ! grep -q "root_reconciliation_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "root_reconciliation_id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Finance evidence gates must require audited reconciliation check details bound to the reconciliation id" >&2
   exit 1
 fi
 

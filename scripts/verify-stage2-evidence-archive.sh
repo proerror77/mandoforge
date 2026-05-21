@@ -521,10 +521,14 @@ finance_delivery_receipt_count() {
 }
 
 finance_close_step_detail_count() {
-  jq -r '[
+  jq -r '
+    (.response.close_controller_execution.close_id // "") as $root_close_id
+    | [
     .response.close_controller_execution.steps[]?
     | select(
         type == "object"
+        and ($root_close_id | length > 0)
+        and ((.close_id // .finance_close_id // "") == $root_close_id)
         and ((.name // .step // .kind // .action // "") | length > 0)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
@@ -533,10 +537,14 @@ finance_close_step_detail_count() {
 }
 
 finance_reconciliation_check_detail_count() {
-  jq -r '[
+  jq -r '
+    (.response.reconciliation_id // "") as $root_reconciliation_id
+    | [
     .response.checks[]?
     | select(
         type == "object"
+        and ($root_reconciliation_id | length > 0)
+        and ((.reconciliation_id // .finance_reconciliation_id // "") == $root_reconciliation_id)
         and ((.name // .check // .kind // "") | length > 0)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
@@ -2017,8 +2025,8 @@ JSON
       "status": "closed",
       "close_id": "netsuite-close-prod-1",
       "steps": [
-        {"name": "export-present", "status": "passed", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "accounting-period-open", "status": "passed", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "export-present", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "accounting-period-open", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -2123,8 +2131,8 @@ JSON
       "status": "closed",
       "close_id": "netsuite-close-prod-1",
       "steps": [
-        {"name": "export-present", "status": "passed", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "accounting-period-open", "status": "passed", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "export-present", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "accounting-period-open", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -2187,8 +2195,8 @@ JSON
       "status": "closed",
       "close_id": "netsuite-close-prod-1",
       "steps": [
-        {"name": "export-present", "status": "passed", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "accounting-period-open", "status": "passed", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "export-present", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "accounting-period-open", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -2201,8 +2209,8 @@ JSON
     "status": "reconciled",
     "reconciliation_id": "netsuite-reconciliation-prod-1",
     "checks": [
-      {"name": "close-evidence", "status": "passed", "audit_id": "finance-reconciliation-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"name": "export-recent", "status": "passed", "audit_id": "finance-reconciliation-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      {"name": "close-evidence", "status": "passed", "reconciliation_id": "netsuite-reconciliation-prod-1", "audit_id": "finance-reconciliation-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"name": "export-recent", "status": "passed", "reconciliation_id": "netsuite-reconciliation-prod-1", "audit_id": "finance-reconciliation-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
     ]
   }
 }
@@ -2302,8 +2310,8 @@ JSON
     "status": "reconciled",
     "reconciliation_id": "netsuite-reconciliation-prod-1",
     "checks": [
-      {"name": "close-evidence", "status": "passed", "audit_id": "finance-reconciliation-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-      {"name": "export-recent", "status": "passed", "audit_id": "finance-reconciliation-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      {"name": "close-evidence", "status": "passed", "reconciliation_id": "netsuite-reconciliation-prod-1", "audit_id": "finance-reconciliation-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"name": "export-recent", "status": "passed", "reconciliation_id": "netsuite-reconciliation-prod-1", "audit_id": "finance-reconciliation-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
     ]
   }
 }
