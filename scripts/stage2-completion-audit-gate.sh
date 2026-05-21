@@ -693,6 +693,7 @@ artifact_contract_issue() {
   fi
 
   if [[ "$req_id" == "policy-rollout" && "$artifact_name" == "policy-rollout-orchestration-validation-evidence.json" ]]; then
+    local evidence_status
     local validation_status
     local controller_status
     local target_kind
@@ -705,6 +706,7 @@ artifact_contract_issue() {
     local deployment_id
     local step_count
 
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     validation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -717,6 +719,10 @@ artifact_contract_issue() {
     deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
     step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
 
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'policy rollout validation evidence_status=%s' "$evidence_status"
+      return 0
+    fi
     if [[ "$validation_status" != "validated" ]]; then
       printf 'validation_status=%s' "$validation_status"
       return 0
@@ -768,14 +774,20 @@ artifact_contract_issue() {
   fi
 
   if [[ "$req_id" == "policy-rollout" && "$artifact_name" == "policy-rollout-due-run-evidence.json" ]]; then
+    local evidence_status
     local due_run_status
     local scanned_count
     local checked_at
 
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     due_run_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     scanned_count="$(jq -r '.response.scanned_count // 0' "$artifact" 2>/dev/null || echo "0")"
     checked_at="$(jq -r '.response.checked_at // ""' "$artifact" 2>/dev/null || echo "")"
 
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'policy due-run evidence_status=%s' "$evidence_status"
+      return 0
+    fi
     if [[ "$due_run_status" != "activated" && "$due_run_status" != "noop" ]]; then
       printf 'due_run_status=%s' "$due_run_status"
       return 0

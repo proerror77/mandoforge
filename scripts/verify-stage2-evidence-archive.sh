@@ -339,6 +339,7 @@ artifact_issue() {
       fi
       ;;
     policy-rollout-orchestration-validation-evidence.json)
+      local evidence_status
       local status
       local controller_status
       local target_kind
@@ -350,6 +351,7 @@ artifact_issue() {
       local policy_store_id
       local deployment_id
       local step_count
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
       status="$(jq -r '.response.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
@@ -361,6 +363,10 @@ artifact_issue() {
       policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$path")"
       deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$path")"
       step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
       if [[ "$status" != "validated" || "$controller_status" != "validated" ]]; then
         printf '%s status=%s controller_status=%s' "$relative_path" "$status" "$controller_status"
         return 0
@@ -403,12 +409,18 @@ artifact_issue() {
       fi
       ;;
     policy-rollout-due-run-evidence.json)
+      local evidence_status
       local due_run_status
       local scanned_count
       local checked_at
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
       due_run_status="$(jq -r '.response.status // "unknown"' "$path")"
       scanned_count="$(jq -r '.response.scanned_count // 0' "$path")"
       checked_at="$(jq -r '.response.checked_at // ""' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
       if [[ "$due_run_status" != "activated" && "$due_run_status" != "noop" ]]; then
         printf '%s due_run_status=%s' "$relative_path" "$due_run_status"
         return 0
@@ -1182,6 +1194,7 @@ JSON
 JSON
   cat >"$tmpdir/evidence/policy-rollout-orchestration-validation-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "status": "validated",
     "controller_execution": {
@@ -1204,6 +1217,7 @@ JSON
 JSON
   cat >"$tmpdir/evidence/policy-rollout-due-run-evidence.json" <<'JSON'
 {
+  "status": "captured",
   "response": {
     "status": "noop",
     "scanned_count": 1,

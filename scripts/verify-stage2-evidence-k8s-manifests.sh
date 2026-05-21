@@ -1145,8 +1145,18 @@ if ! grep -q "policy-rollout-orchestration-validation-evidence.json" scripts/sta
   exit 1
 fi
 
+if ! grep -q "policy rollout validation evidence_status" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must require captured policy rollout validation evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "scanned_count" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must contract-check policy rollout due-run evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "policy due-run evidence_status" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must require captured policy due-run evidence" >&2
   exit 1
 fi
 
@@ -1622,6 +1632,16 @@ fi
 
 if ! grep -q "evidence_status=%s" scripts/verify-stage2-evidence-archive.sh || ! grep -q "validation_status=%s" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive verifier must require captured and validated tenant routing evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "policy-rollout-orchestration-validation-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "policy-rollout-due-run-evidence.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive verifier must inspect policy rollout validation and due-run artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "evidence_status=%s" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive verifier must require captured policy rollout artifacts" >&2
   exit 1
 fi
 
