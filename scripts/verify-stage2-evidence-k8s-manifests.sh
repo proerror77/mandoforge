@@ -650,6 +650,11 @@ if ! grep -q "routing_rls_table_count" "$tenant_script" || ! grep -q "routing_rl
   exit 1
 fi
 
+if ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*validated_at.*timestamp" "$tenant_script"; then
+  echo "Tenant isolation evidence script must require audited forced-RLS table detail evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "routing_cross_tenant_negative_tests" "$tenant_script"; then
   echo "Tenant isolation evidence script must require cross-tenant negative-test evidence" >&2
   exit 1
@@ -1892,6 +1897,11 @@ fi
 
 if ! grep -q "missing forced-RLS table detail evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject tenant evidence without forced-RLS table details" >&2
+  exit 1
+fi
+
+if ! grep -q "missing forced-RLS table audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject tenant evidence without forced-RLS table audit details" >&2
   exit 1
 fi
 

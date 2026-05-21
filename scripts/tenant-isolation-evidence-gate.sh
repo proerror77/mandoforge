@@ -65,6 +65,7 @@ forced_rls_table_detail_count() {
         and ((.schema // .namespace // "public") | length > 0)
         and ((.rls_enabled // .enabled // false) == true)
         and ((.rls_forced // .forced // .force_rls // false) == true)
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1" 2>/dev/null || echo "0"
 }

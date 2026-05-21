@@ -142,8 +142,9 @@ identify a broader multi-tenant deployment (`multi_tenant_deployment`,
 tenants plus at least two unique audited tenant samples with tenant id plus audit
 id, trace id, run id, or timestamp detail, and confirm RLS enforcement,
 tenant context propagation, nonzero RLS table coverage, forced RLS for every
-reported table, and a nonzero cross-tenant negative-test count whose details
-include source tenant, target tenant, denied/blocked outcome, and audit id,
+reported table with table name, enabled/forced status, and audit id, trace id,
+run id, or timestamp detail, and a nonzero cross-tenant negative-test count whose
+details include source tenant, target tenant, denied/blocked outcome, and audit id,
 trace id, run id, or timestamp detail; a
 single-tenant or Whiskey-only pilot target is inventory evidence, not completion
 proof. The matching in-cluster template is
