@@ -1750,6 +1750,11 @@ if ! grep -q "missing tenant context validation evidence" scripts/verify-stage2-
   exit 1
 fi
 
+if ! grep -q "single-tenant deployment evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject single-tenant deployment evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "single tenant sample evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject tenant evidence without audited multi-tenant samples" >&2
   exit 1
