@@ -436,7 +436,8 @@ worker_load_check_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$cluster_id, $root_worker_pool, (.name // .check // .kind // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 summary_worker_load_check_detail_count() {
@@ -461,7 +462,8 @@ summary_worker_load_check_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$cluster_id, $root_worker_pool, (.name // .check // .kind // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 is_distributed_state_backend() {
@@ -1162,6 +1164,7 @@ artifact_contract_issue() {
     local load_validated
     local isolated_worker_pool_configured
     local worker_pool
+    local load_check_count
     local load_check_detail_count
 
     evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -1172,6 +1175,7 @@ artifact_contract_issue() {
     load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$artifact" 2>/dev/null || echo "false")"
     isolated_worker_pool_configured="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$artifact" 2>/dev/null || echo "false")"
     worker_pool="$(jq -r '.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // ""' "$artifact" 2>/dev/null || echo "")"
+    load_check_count="$(jq -r '.response.controller_execution.load_check_count // .response.controller_execution.worker_pool_check_count // .response.controller_execution.validation_check_count // .response.controller_execution.check_count // 0' "$artifact" 2>/dev/null || echo "0")"
     load_check_detail_count="$(worker_load_check_detail_count "$artifact")"
 
     if [[ "$evidence_status" != "captured" ]]; then
@@ -1201,6 +1205,12 @@ artifact_contract_issue() {
     if [[ ! "$load_check_detail_count" =~ ^[0-9]+$ || "$load_check_detail_count" == "0" ]]; then
       printf 'cluster_bound_load_check_detail_count=%s' "$load_check_detail_count"
       return 0
+    fi
+    if [[ "$load_check_count" =~ ^[0-9]+$ && "$load_check_count" -gt 0 ]]; then
+      if [[ ! "$load_check_detail_count" =~ ^[0-9]+$ || "$load_check_detail_count" -lt "$load_check_count" ]]; then
+        printf 'cluster_bound_unique_load_check_detail_count=%s load_check_count=%s' "$load_check_detail_count" "$load_check_count"
+        return 0
+      fi
     fi
     if [[ "$isolated_worker_pool_configured" != "true" ]]; then
       printf 'isolated_worker_pool_configured=%s' "$isolated_worker_pool_configured"

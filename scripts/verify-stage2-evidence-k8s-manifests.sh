@@ -1925,6 +1925,11 @@ if ! grep -q "missing worker load check audit evidence" scripts/verify-stage2-ev
   exit 1
 fi
 
+if ! grep -q "duplicate worker load check detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate worker load-check details" >&2
+  exit 1
+fi
+
 if ! grep -q "single-node worker evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject single-node worker evidence" >&2
   exit 1
@@ -1977,6 +1982,11 @@ fi
 
 if ! grep -q "summary without worker load-check detail evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject combined worker/Remote Computer summaries without worker load-check details" >&2
+  exit 1
+fi
+
+if ! grep -q "summary duplicate worker load check detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate worker load-check details in combined summaries" >&2
   exit 1
 fi
 

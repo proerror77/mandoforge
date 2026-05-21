@@ -105,9 +105,10 @@ and state sync must report a supported distributed filesystem backend such as
 `juicefs`, `cephfs`, or `longhorn-rwx`. Worker evidence must explicitly report
 validated controller execution, real cluster target kind, production cluster id,
 `node_count >= 2`, load validation, isolated worker-pool configuration, and
-worker-pool load-check details in the combined summary with check name, worker
+unique worker-pool load-check details in the combined summary with check name, worker
 pool or queue, passed/validated/completed status, and audit id, trace id, run id,
 or timestamp detail, with each load-check detail bound to the worker cluster id;
+duplicate worker-pool check names do not satisfy reported load-check counts;
 the standalone worker gate also rejects mismatches with
 `MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID`. State-sync evidence must name the
 state claim plus checked state-contract paths with matching per-path cluster id
@@ -196,7 +197,7 @@ For a narrower worker proof, run:
 ./scripts/worker-evidence-gate.sh
 ```
 
-That gate collects worker readiness, runs the bounded worker load-validation endpoint, and writes queue/hardening/autoscaling/load-validation evidence into `.mandoforge/worker-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/worker-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects worker readiness, runs the bounded worker load-validation endpoint, and writes queue/hardening/autoscaling/load-validation evidence into `.mandoforge/worker-evidence/`. Worker load-check details are counted by unique cluster id, worker pool or queue, and check name, so repeated rows cannot satisfy a reported load-check count. The matching in-cluster template is `deploy/stage2-evidence/worker-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
 For a narrower policy-rollout proof, run:
 

@@ -121,7 +121,8 @@ worker_load_check_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$cluster_id, $root_worker_pool, (.name // .check // .kind // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 write_summary() {
@@ -174,6 +175,7 @@ write_summary() {
   local worker_node_count
   local worker_pool
   local worker_cluster_profile
+  local worker_load_check_count
   local worker_load_check_detail_count
   local worker_load_checks_json
   local state_cluster_id
@@ -206,6 +208,7 @@ write_summary() {
   worker_node_count="$(jq -r '.response.controller_execution.node_count // 0' "$worker_validation")"
   worker_pool="$(jq -r '.response.controller_execution.worker_pool // .response.controller_execution.pool_id // .response.controller_execution.queue // .response.controller_execution.queue_name // ""' "$worker_validation")"
   worker_cluster_profile="$(jq -r '.response.controller_execution.cluster_profile // "unknown"' "$worker_validation")"
+  worker_load_check_count="$(jq -r '.response.controller_execution.load_check_count // .response.controller_execution.worker_pool_check_count // .response.controller_execution.validation_check_count // .response.controller_execution.check_count // 0' "$worker_validation")"
   worker_load_check_detail_count="$(worker_load_check_detail_count "$worker_validation")"
   worker_load_checks_json="$(jq -c '
     (.response.controller_execution.cluster_id // "") as $cluster_id
@@ -317,6 +320,9 @@ write_summary() {
   is_production_identity "$worker_cluster_id" || blocked_count=$((blocked_count + 1))
   [[ -n "$worker_pool" ]] || blocked_count=$((blocked_count + 1))
   [[ "$worker_load_check_detail_count" =~ ^[0-9]+$ && "$worker_load_check_detail_count" -gt 0 ]] || blocked_count=$((blocked_count + 1))
+  if [[ "$worker_load_check_count" =~ ^[0-9]+$ && "$worker_load_check_count" -gt 0 ]]; then
+    [[ "$worker_load_check_detail_count" =~ ^[0-9]+$ && "$worker_load_check_detail_count" -ge "$worker_load_check_count" ]] || blocked_count=$((blocked_count + 1))
+  fi
   if [[ -n "$PRODUCTION_CLUSTER_ID" ]]; then
     is_production_identity "$PRODUCTION_CLUSTER_ID" || blocked_count=$((blocked_count + 1))
     [[ "$worker_cluster_id" == "$PRODUCTION_CLUSTER_ID" ]] || blocked_count=$((blocked_count + 1))
@@ -370,6 +376,7 @@ write_summary() {
     --arg worker_node_count "$worker_node_count" \
     --arg worker_pool "$worker_pool" \
     --arg worker_cluster_profile "$worker_cluster_profile" \
+    --arg worker_load_check_count "$worker_load_check_count" \
     --arg worker_load_check_detail_count "$worker_load_check_detail_count" \
     --argjson worker_load_checks "$worker_load_checks_json" \
     --arg state_sync_response_status "$state_sync_response_status" \
@@ -425,6 +432,7 @@ write_summary() {
         node_count: ($worker_node_count | tonumber),
         worker_pool: $worker_pool,
         cluster_profile: $worker_cluster_profile,
+        load_check_count: ($worker_load_check_count | tonumber),
         load_check_detail_count: ($worker_load_check_detail_count | tonumber),
         load_checks: $worker_load_checks
       },
@@ -475,6 +483,7 @@ write_summary() {
     jq -r '"worker_target_kind=\(.worker.target_kind)"' "$summary_json"
     jq -r '"worker_node_count=\(.worker.node_count)"' "$summary_json"
     jq -r '"worker_pool=\(if (.worker.worker_pool // "") | length > 0 then .worker.worker_pool else "<unset>" end)"' "$summary_json"
+    jq -r '"worker_load_check_count=\(.worker.load_check_count)"' "$summary_json"
     jq -r '"worker_load_check_detail_count=\(.worker.load_check_detail_count)"' "$summary_json"
     jq -r '"remote_state_sync_ready=\(.remote_computer.state_sync_ready)"' "$summary_json"
     jq -r '"remote_state_controller_evidence_fresh=\(.remote_computer.state_controller_evidence_fresh)"' "$summary_json"
@@ -511,6 +520,9 @@ write_summary() {
       [[ "$worker_cluster_id" == "$PRODUCTION_CLUSTER_ID" ]] || echo "- worker load validation cluster id does not match MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID"
     fi
     [[ "$worker_load_check_detail_count" =~ ^[0-9]+$ && "$worker_load_check_detail_count" -gt 0 ]] || echo "- worker load validation did not include worker-pool load check details bound to the same cluster and isolated worker_pool"
+    if [[ "$worker_load_check_count" =~ ^[0-9]+$ && "$worker_load_check_count" -gt 0 ]]; then
+      [[ "$worker_load_check_detail_count" =~ ^[0-9]+$ && "$worker_load_check_detail_count" -ge "$worker_load_check_count" ]] || echo "- worker load validation included duplicate or missing worker-pool load check details: worker_load_check_detail_count=$worker_load_check_detail_count worker_load_check_count=$worker_load_check_count"
+    fi
     [[ "$state_sync_evidence_status" == "captured" ]] || echo "- Remote Computer state-sync evidence was not captured: $state_sync_evidence_status"
     is_real_cluster_kind "$state_target_kind" || echo "- Remote Computer state-sync target is not a real cluster kind: $state_target_kind"
     is_multi_node "$state_node_count" || echo "- Remote Computer state-sync did not report a multi-node cluster: node_count=$state_node_count"
