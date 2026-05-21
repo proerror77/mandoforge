@@ -2080,6 +2080,11 @@ if ! grep -q "invalid finance close step status count" scripts/stage2-completion
   exit 1
 fi
 
+if ! grep -q "finance_close_step_detail_count" "$finance_script" || ! grep -q "finance_close_step_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "finance_close_step_detail_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Finance evidence gates must require audited finance close step details" >&2
+  exit 1
+fi
+
 if ! grep -q "missing finance close controller action evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject finance close evidence without controller action proof" >&2
   exit 1
@@ -2090,8 +2095,18 @@ if ! grep -q "invalid finance close step status evidence" scripts/verify-stage2-
   exit 1
 fi
 
+if ! grep -q "missing finance close step audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject finance close steps without audit details" >&2
+  exit 1
+fi
+
 if ! grep -q "finance-reconciliation-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "reconciliation_id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must contract-check finance reconciliation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "finance_reconciliation_check_detail_count" "$finance_script" || ! grep -q "finance_reconciliation_check_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "finance_reconciliation_check_detail_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Finance evidence gates must require audited reconciliation check details" >&2
   exit 1
 fi
 
@@ -2107,6 +2122,11 @@ fi
 
 if ! grep -q "invalid finance reconciliation check status evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject failed finance reconciliation checks" >&2
+  exit 1
+fi
+
+if ! grep -q "missing finance reconciliation check audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject reconciliation checks without audit details" >&2
   exit 1
 fi
 

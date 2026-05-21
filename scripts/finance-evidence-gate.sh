@@ -72,6 +72,30 @@ finance_delivery_receipt_count() {
   ] | length' "$1" 2>/dev/null || echo "0"
 }
 
+finance_close_step_detail_count() {
+  jq -r '[
+    .response.close_controller_execution.steps[]?
+    | select(
+        type == "object"
+        and ((.name // .step // .kind // .action // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
+finance_reconciliation_check_detail_count() {
+  jq -r '[
+    .response.checks[]?
+    | select(
+        type == "object"
+        and ((.name // .check // .kind // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1" 2>/dev/null || echo "0"
+}
+
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
@@ -199,8 +223,12 @@ write_summary() {
   local latest_reconciliation_reconciled
   local close_evidence_status
   local close_run_status
+  local close_step_count
+  local close_step_detail_count
   local reconciliation_evidence_status
   local reconciliation_run_status
+  local reconciliation_check_count
+  local reconciliation_check_detail_count
   local finance_export_csv_bytes
   local export_delivery_evidence_status
   local export_delivery_status
@@ -240,12 +268,18 @@ write_summary() {
   latest_reconciliation_reconciled="$(jq -r '.production_close.latest_reconciliation_reconciled // false' "$operations_file")"
   close_evidence_status="not_requested"
   close_run_status="not_run"
+  close_step_count="0"
+  close_step_detail_count="0"
   if [[ -s "$close_evidence_file" ]]; then
     close_evidence_status="$(jq -r '.status // "unknown"' "$close_evidence_file")"
     close_run_status="$(jq -r '.response.status // "unknown"' "$close_evidence_file")"
+    close_step_count="$(jq -r 'if ((.response.close_controller_execution.steps // null) | type) == "array" then (.response.close_controller_execution.steps | length) else 0 end' "$close_evidence_file")"
+    close_step_detail_count="$(finance_close_step_detail_count "$close_evidence_file")"
   fi
   reconciliation_evidence_status="not_requested"
   reconciliation_run_status="not_run"
+  reconciliation_check_count="0"
+  reconciliation_check_detail_count="0"
   export_delivery_observer_status="not_observed"
   export_delivery_mode="unknown"
   export_delivery_receipt_count="0"
@@ -256,6 +290,8 @@ write_summary() {
   if [[ -s "$reconciliation_evidence_file" ]]; then
     reconciliation_evidence_status="$(jq -r '.status // "unknown"' "$reconciliation_evidence_file")"
     reconciliation_run_status="$(jq -r '.response.status // "unknown"' "$reconciliation_evidence_file")"
+    reconciliation_check_count="$(jq -r 'if ((.response.checks // null) | type) == "array" then (.response.checks | length) else 0 end' "$reconciliation_evidence_file")"
+    reconciliation_check_detail_count="$(finance_reconciliation_check_detail_count "$reconciliation_evidence_file")"
   fi
   finance_export_csv_bytes="0"
   if [[ -s "$export_metadata_file" ]]; then
@@ -304,7 +340,19 @@ write_summary() {
   if [[ "$close_evidence_status" != "captured" || "$close_run_status" != "completed" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ ! "$close_step_count" =~ ^[0-9]+$ || "$close_step_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$close_step_detail_count" =~ ^[0-9]+$ || ! "$close_step_count" =~ ^[0-9]+$ || "$close_step_detail_count" -lt "$close_step_count" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$reconciliation_evidence_status" != "captured" || "$reconciliation_run_status" != "reconciled" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$reconciliation_check_count" =~ ^[0-9]+$ || "$reconciliation_check_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$reconciliation_check_detail_count" =~ ^[0-9]+$ || ! "$reconciliation_check_count" =~ ^[0-9]+$ || "$reconciliation_check_detail_count" -lt "$reconciliation_check_count" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
   if [[ "$finance_export_csv_bytes" == "0" ]]; then
@@ -364,8 +412,12 @@ write_summary() {
     echo "latest_reconciliation_reconciled=$latest_reconciliation_reconciled"
     echo "finance_close_evidence_status=$close_evidence_status"
     echo "finance_close_run_status=$close_run_status"
+    echo "finance_close_step_count=$close_step_count"
+    echo "finance_close_step_detail_count=$close_step_detail_count"
     echo "finance_reconciliation_evidence_status=$reconciliation_evidence_status"
     echo "finance_reconciliation_run_status=$reconciliation_run_status"
+    echo "finance_reconciliation_check_count=$reconciliation_check_count"
+    echo "finance_reconciliation_check_detail_count=$reconciliation_check_detail_count"
     echo "finance_controllers=$RUN_FINANCE_CONTROLLERS"
     echo "finance_export=$RUN_FINANCE_EXPORT"
     echo "finance_export_csv_bytes=$finance_export_csv_bytes"
@@ -400,11 +452,23 @@ write_summary() {
     if [[ "$close_evidence_status" != "captured" || "$close_run_status" != "completed" ]]; then
       echo "- finance close evidence is not completed: evidence=$close_evidence_status status=$close_run_status"
     fi
+    if [[ ! "$close_step_count" =~ ^[0-9]+$ || "$close_step_count" == "0" ]]; then
+      echo "- finance close controller did not report any audited close steps"
+    fi
+    if [[ ! "$close_step_detail_count" =~ ^[0-9]+$ || ! "$close_step_count" =~ ^[0-9]+$ || "$close_step_detail_count" -lt "$close_step_count" ]]; then
+      echo "- finance close controller did not include audited detail for every close step: detail_count=$close_step_detail_count step_count=$close_step_count"
+    fi
     if [[ "$latest_close_controller_closed" != "true" || "$close_controller_evidence_fresh" != "true" ]]; then
       echo "- finance close controller evidence is not closed and fresh"
     fi
     if [[ "$reconciliation_evidence_status" != "captured" || "$reconciliation_run_status" != "reconciled" ]]; then
       echo "- finance reconciliation evidence is not reconciled: evidence=$reconciliation_evidence_status status=$reconciliation_run_status"
+    fi
+    if [[ ! "$reconciliation_check_count" =~ ^[0-9]+$ || "$reconciliation_check_count" == "0" ]]; then
+      echo "- finance reconciliation did not report any audited reconciliation checks"
+    fi
+    if [[ ! "$reconciliation_check_detail_count" =~ ^[0-9]+$ || ! "$reconciliation_check_count" =~ ^[0-9]+$ || "$reconciliation_check_detail_count" -lt "$reconciliation_check_count" ]]; then
+      echo "- finance reconciliation did not include audited detail for every reconciliation check: detail_count=$reconciliation_check_detail_count check_count=$reconciliation_check_count"
     fi
     if [[ "$latest_reconciliation_reconciled" != "true" || "$reconciliation_evidence_fresh" != "true" ]]; then
       echo "- accounting reconciliation controller evidence is not reconciled and fresh"

@@ -253,8 +253,9 @@ That gate collects finance dashboard summary, finance operations readiness,
 finance close/accounting reconciliation controller evidence, CSV export capture,
 export-delivery evidence, and delivery-observer evidence into
 `.mandoforge/finance-evidence/`. It fails closed unless close completed through
-a configured controller with a close id and audited steps, reconciliation is
-reconciled and fresh with a reconciliation id and checks, the CSV is nonempty,
+a configured controller with a close id and audited steps that include audit id,
+trace id, run id, or timestamp detail, reconciliation is reconciled and fresh
+with a reconciliation id and audited checks with matching detail, the CSV is nonempty,
 delivery succeeded to a configured target, and the observer reports an
 accounting/ERP delivery mode such as `accounting_erp`, `erp`, `netsuite`,
 `quickbooks`, `xero`, `sap`, or `oracle_erp`; `lark_drive` and `accept_only` do

@@ -384,6 +384,30 @@ finance_delivery_receipt_count() {
   ] | length' "$1"
 }
 
+finance_close_step_detail_count() {
+  jq -r '[
+    .response.close_controller_execution.steps[]?
+    | select(
+        type == "object"
+        and ((.name // .step // .kind // .action // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1"
+}
+
+finance_reconciliation_check_detail_count() {
+  jq -r '[
+    .response.checks[]?
+    | select(
+        type == "object"
+        and ((.name // .check // .kind // "") | length > 0)
+        and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
+      )
+  ] | length' "$1"
+}
+
 artifact_issue() {
   local root="$1"
   local relative_path="$2"
@@ -1034,6 +1058,7 @@ artifact_issue() {
       local close_status
       local close_id
       local step_count
+      local step_detail_count
       local invalid_step_count
       local action_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
@@ -1042,6 +1067,7 @@ artifact_issue() {
       close_status="$(jq -r '.response.close_controller_execution.status // "unknown"' "$path")"
       close_id="$(jq -r '.response.close_controller_execution.close_id // ""' "$path")"
       step_count="$(jq -r 'if ((.response.close_controller_execution.steps // null) | type) == "array" then (.response.close_controller_execution.steps | length) else 0 end' "$path")"
+      step_detail_count="$(finance_close_step_detail_count "$path")"
       invalid_step_count="$(jq -r '[.response.close_controller_execution.steps[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$path")"
       action_count="$(jq -r '[.response.actions[]? | select(. == "usage_finance_close_controller_executed")] | length' "$path")"
       if [[ "$evidence_status" != "captured" || "$run_status" != "completed" ]]; then
@@ -1060,6 +1086,10 @@ artifact_issue() {
         printf '%s step_count=%s' "$relative_path" "$step_count"
         return 0
       fi
+      if [[ ! "$step_detail_count" =~ ^[0-9]+$ || "$step_detail_count" -lt "$step_count" ]]; then
+        printf '%s step_detail_count=%s step_count=%s' "$relative_path" "$step_detail_count" "$step_count"
+        return 0
+      fi
       if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then
         printf '%s invalid finance close step status count=%s' "$relative_path" "$invalid_step_count"
         return 0
@@ -1074,11 +1104,13 @@ artifact_issue() {
       local reconciliation_status
       local reconciliation_id
       local check_count
+      local check_detail_count
       local invalid_check_count
       evidence_status="$(jq -r '.status // "unknown"' "$path")"
       reconciliation_status="$(jq -r '.response.status // "unknown"' "$path")"
       reconciliation_id="$(jq -r '.response.reconciliation_id // ""' "$path")"
       check_count="$(jq -r 'if ((.response.checks // null) | type) == "array" then (.response.checks | length) else 0 end' "$path")"
+      check_detail_count="$(finance_reconciliation_check_detail_count "$path")"
       invalid_check_count="$(jq -r '[.response.checks[]? | select((.status // "") as $status | ($status != "passed" and $status != "validated" and $status != "completed"))] | length' "$path")"
       if [[ "$evidence_status" != "captured" || "$reconciliation_status" != "reconciled" ]]; then
         printf '%s evidence_status=%s reconciliation_status=%s' "$relative_path" "$evidence_status" "$reconciliation_status"
@@ -1090,6 +1122,10 @@ artifact_issue() {
       fi
       if [[ ! "$check_count" =~ ^[0-9]+$ || "$check_count" == "0" ]]; then
         printf '%s check_count=%s' "$relative_path" "$check_count"
+        return 0
+      fi
+      if [[ ! "$check_detail_count" =~ ^[0-9]+$ || "$check_detail_count" -lt "$check_count" ]]; then
+        printf '%s check_detail_count=%s check_count=%s' "$relative_path" "$check_detail_count" "$check_count"
         return 0
       fi
       if [[ ! "$invalid_check_count" =~ ^[0-9]+$ || "$invalid_check_count" != "0" ]]; then
@@ -1813,8 +1849,8 @@ JSON
       "status": "closed",
       "close_id": "netsuite-close-prod-1",
       "steps": [
-        {"name": "export-present", "status": "passed"},
-        {"name": "accounting-period-open", "status": "passed"}
+        {"name": "export-present", "status": "passed", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "accounting-period-open", "status": "passed", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -1884,8 +1920,43 @@ JSON
       "status": "closed",
       "close_id": "netsuite-close-prod-1",
       "steps": [
-        {"name": "export-present", "status": "passed"},
-        {"name": "accounting-period-open", "status": "passed"}
+        {"name": "export-present", "status": "passed"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-close-step-audit-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-close-step-audit-negative.out 2>/tmp/mandoforge-stage2-archive-finance-close-step-audit-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing finance close step audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-close-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "completed",
+    "actions": ["usage_finance_close_controller_executed"],
+    "close_controller_configured": true,
+    "close_controller_execution": {
+      "status": "closed",
+      "close_id": "netsuite-close-prod-1",
+      "steps": [
+        {"name": "export-present", "status": "passed", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "accounting-period-open", "status": "passed", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -1948,8 +2019,8 @@ JSON
       "status": "closed",
       "close_id": "netsuite-close-prod-1",
       "steps": [
-        {"name": "export-present", "status": "passed"},
-        {"name": "accounting-period-open", "status": "passed"}
+        {"name": "export-present", "status": "passed", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "accounting-period-open", "status": "passed", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -1962,8 +2033,8 @@ JSON
     "status": "reconciled",
     "reconciliation_id": "netsuite-reconciliation-prod-1",
     "checks": [
-      {"name": "close-evidence", "status": "passed"},
-      {"name": "export-recent", "status": "passed"}
+      {"name": "close-evidence", "status": "passed", "audit_id": "finance-reconciliation-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"name": "export-recent", "status": "passed", "audit_id": "finance-reconciliation-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
     ]
   }
 }
@@ -2033,8 +2104,38 @@ JSON
     "status": "reconciled",
     "reconciliation_id": "netsuite-reconciliation-prod-1",
     "checks": [
-      {"name": "close-evidence", "status": "passed"},
-      {"name": "export-recent", "status": "passed"}
+      {"name": "close-evidence", "status": "passed"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-reconciliation-check-audit-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-reconciliation-check-audit-negative.out 2>/tmp/mandoforge-stage2-archive-finance-reconciliation-check-audit-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing finance reconciliation check audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-reconciliation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "reconciled",
+    "reconciliation_id": "netsuite-reconciliation-prod-1",
+    "checks": [
+      {"name": "close-evidence", "status": "passed", "audit_id": "finance-reconciliation-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"name": "export-recent", "status": "passed", "audit_id": "finance-reconciliation-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
     ]
   }
 }
