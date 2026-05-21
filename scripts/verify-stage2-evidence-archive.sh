@@ -372,10 +372,20 @@ policy_due_run_scan_detail_count() {
 }
 
 policy_rollout_step_detail_count() {
-  jq -r '[
+  jq -r '
+    (.response.controller_execution.controller_id // "") as $root_controller_id
+    | (.response.controller_execution.policy_store_id // "") as $root_policy_store_id
+    | (.response.controller_execution.deployment_id // "") as $root_deployment_id
+    | [
     .response.controller_execution.steps[]?
     | select(
         type == "object"
+        and ($root_controller_id | length > 0)
+        and ($root_policy_store_id | length > 0)
+        and ($root_deployment_id | length > 0)
+        and ((.controller_id // .policy_controller_id // "") == $root_controller_id)
+        and ((.policy_store_id // .store_id // "") == $root_policy_store_id)
+        and ((.deployment_id // .policy_deployment_id // "") == $root_deployment_id)
         and ((.name // .step // .kind // .action // "") | length > 0)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
@@ -944,7 +954,7 @@ artifact_issue() {
         return 0
       fi
       if [[ ! "$step_detail_count" =~ ^[0-9]+$ || "$step_detail_count" -lt "$step_count" ]]; then
-        printf '%s step_detail_count=%s step_count=%s' "$relative_path" "$step_detail_count" "$step_count"
+        printf '%s step_detail_count=%s step_count=%s missing controller/policy store/deployment binding' "$relative_path" "$step_detail_count" "$step_count"
         return 0
       fi
       if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then
@@ -1904,8 +1914,8 @@ JSON
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
-        {"name": "due-run-supervision", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "staged-runtime-clear", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "due-run-supervision", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "staged-runtime-clear", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4481,8 +4491,8 @@ JSON
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
-        {"name": "due-run-supervision", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "staged-runtime-clear", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "due-run-supervision", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "staged-runtime-clear", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4522,8 +4532,8 @@ JSON
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
-        {"name": "due-run-supervision", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "staged-runtime-clear", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "due-run-supervision", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "staged-runtime-clear", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4564,8 +4574,8 @@ JSON
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
-        {"name": "due-run-supervision", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "staged-runtime-clear", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "due-run-supervision", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "staged-runtime-clear", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4731,8 +4741,50 @@ JSON
       "policy_store_id": "policy-store-prod-1",
       "deployment_id": "policy-deployment-prod-1",
       "steps": [
-        {"name": "due-run-supervision", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "staged-runtime-clear", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "due-run-supervision", "controller_id": "policy-controller-other", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-policy-step-binding-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-policy-step-binding-negative.out 2>/tmp/mandoforge-stage2-archive-policy-step-binding-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected mismatched policy rollout step binding evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/policy-rollout-orchestration-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "production_policy_controller",
+      "environment": "production",
+      "controller_id": "policy-controller-prod-1",
+      "rollout_scope": "global",
+      "production_policy_store": true,
+      "rollback_supported": true,
+      "rollback_plan_id": "policy-rollback-plan-prod-1",
+      "rollback_checked_at": "1970-01-01T00:00:00Z",
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1",
+      "steps": [
+        {"name": "due-run-supervision", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "staged-runtime-clear", "controller_id": "policy-controller-prod-1", "policy_store_id": "policy-store-prod-1", "deployment_id": "policy-deployment-prod-1", "status": "passed", "audit_id": "policy-audit-prod-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }

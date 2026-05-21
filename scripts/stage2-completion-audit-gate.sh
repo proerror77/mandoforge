@@ -249,10 +249,20 @@ policy_due_run_scan_detail_count() {
 }
 
 policy_rollout_step_detail_count() {
-  jq -r '[
+  jq -r '
+    (.response.controller_execution.controller_id // "") as $root_controller_id
+    | (.response.controller_execution.policy_store_id // "") as $root_policy_store_id
+    | (.response.controller_execution.deployment_id // "") as $root_deployment_id
+    | [
     .response.controller_execution.steps[]?
     | select(
         type == "object"
+        and ($root_controller_id | length > 0)
+        and ($root_policy_store_id | length > 0)
+        and ($root_deployment_id | length > 0)
+        and ((.controller_id // .policy_controller_id // "") == $root_controller_id)
+        and ((.policy_store_id // .store_id // "") == $root_policy_store_id)
+        and ((.deployment_id // .policy_deployment_id // "") == $root_deployment_id)
         and ((.name // .step // .kind // .action // "") | length > 0)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
@@ -1328,7 +1338,7 @@ artifact_contract_issue() {
       return 0
     fi
     if [[ ! "$step_detail_count" =~ ^[0-9]+$ || "$step_detail_count" -lt "$step_count" ]]; then
-      printf 'step_detail_count=%s step_count=%s' "$step_detail_count" "$step_count"
+      printf 'step_detail_count=%s step_count=%s missing controller/policy store/deployment binding' "$step_detail_count" "$step_count"
       return 0
     fi
     if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then

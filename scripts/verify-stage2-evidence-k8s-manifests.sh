@@ -1350,6 +1350,16 @@ if ! grep -q "policy_rollout_step_detail_count" "$policy_rollout_script" || ! gr
   exit 1
 fi
 
+if ! grep -q "policy_controller_id" "$policy_rollout_script" || ! grep -q "policy_controller_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "policy_controller_id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Policy rollout evidence gates must bind orchestration step details to the controller identity" >&2
+  exit 1
+fi
+
+if ! grep -q "store_id" "$policy_rollout_script" || ! grep -q "policy_deployment_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "mismatched policy rollout step binding evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Policy rollout evidence gates must bind orchestration step details to the policy store and deployment" >&2
+  exit 1
+fi
+
 if ! grep -q "policy due-run evidence_status" scripts/stage2-completion-audit-gate.sh; then
   echo "Completion audit gate must require captured policy due-run evidence" >&2
   exit 1
@@ -2032,6 +2042,11 @@ fi
 
 if ! grep -q "missing policy rollout step audit evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 evidence archive self-test must reject policy rollout steps without audit details" >&2
+  exit 1
+fi
+
+if ! grep -q "mismatched policy rollout step binding evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 evidence archive self-test must reject policy rollout steps bound to the wrong controller, store, or deployment" >&2
   exit 1
 fi
 

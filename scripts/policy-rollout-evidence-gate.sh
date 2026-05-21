@@ -91,10 +91,20 @@ policy_due_run_scan_detail_count() {
 }
 
 policy_rollout_step_detail_count() {
-  jq -r '[
+  jq -r '
+    (.response.controller_execution.controller_id // "") as $root_controller_id
+    | (.response.controller_execution.policy_store_id // "") as $root_policy_store_id
+    | (.response.controller_execution.deployment_id // "") as $root_deployment_id
+    | [
     .response.controller_execution.steps[]?
     | select(
         type == "object"
+        and ($root_controller_id | length > 0)
+        and ($root_policy_store_id | length > 0)
+        and ($root_deployment_id | length > 0)
+        and ((.controller_id // .policy_controller_id // "") == $root_controller_id)
+        and ((.policy_store_id // .store_id // "") == $root_policy_store_id)
+        and ((.deployment_id // .policy_deployment_id // "") == $root_deployment_id)
         and ((.name // .step // .kind // .action // "") | length > 0)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
@@ -400,7 +410,7 @@ write_summary() {
       echo "- policy rollout controller did not report any audited orchestration steps"
     fi
     if [[ ! "$controller_step_detail_count" =~ ^[0-9]+$ || ! "$controller_step_count" =~ ^[0-9]+$ || "$controller_step_detail_count" -lt "$controller_step_count" ]]; then
-      echo "- policy rollout controller did not include audited detail for every orchestration step: detail_count=$controller_step_detail_count step_count=$controller_step_count"
+      echo "- policy rollout controller did not include audited detail bound to the controller/policy store/deployment for every orchestration step: detail_count=$controller_step_detail_count step_count=$controller_step_count"
     fi
     if [[ "$validation_status" != "validated" ]]; then
       echo "- policy rollout orchestration validation status is not validated: $validation_status"
