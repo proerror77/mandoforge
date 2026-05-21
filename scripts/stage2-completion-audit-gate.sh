@@ -113,6 +113,7 @@ required_evidence_artifacts_for_requirement() {
       echo "$SOURCE_EVIDENCE_DIR/worker-load-validation-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
+      echo "$SOURCE_EVIDENCE_DIR/worker-remote-computer/summary.json"
       ;;
     approval-notifications)
       echo "$SOURCE_EVIDENCE_DIR/api-approvals-notifications-deployment-validate.json"
@@ -340,6 +341,65 @@ artifact_contract_issue() {
     fi
     if [[ "$req_id" == "managed-session-restart-resume" ]] && ! is_production_identity "$expected_managed_session_runtime_target_id"; then
       printf 'expected managed-session runtime target id=%s is pilot/mock/local' "${expected_managed_session_runtime_target_id:-<empty>}"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "worker-remote-computer" && "$artifact" == */worker-remote-computer/summary.json ]]; then
+    local summary_status
+    local production_blocked
+    local same_cluster_target
+    local worker_cluster_id
+    local state_cluster_id
+    local sidecar_cluster_id
+    local state_backend
+    local state_claim
+    local state_checked_path_count
+    local sidecar_replacement_pods_healthy
+    local sidecar_checked_pod_count
+
+    summary_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    production_blocked="$(jq -r 'if has("production_blocked") then .production_blocked else true end' "$artifact" 2>/dev/null || echo "true")"
+    same_cluster_target="$(jq -r '.same_cluster_target // false' "$artifact" 2>/dev/null || echo "false")"
+    worker_cluster_id="$(jq -r '.worker.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    state_cluster_id="$(jq -r '.remote_computer.state_sync_cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    sidecar_cluster_id="$(jq -r '.remote_computer.sidecar_cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    state_backend="$(jq -r '.remote_computer.distributed_state_backend // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    state_claim="$(jq -r '.remote_computer.state_claim // ""' "$artifact" 2>/dev/null || echo "")"
+    state_checked_path_count="$(jq -r '.remote_computer.checked_path_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    sidecar_replacement_pods_healthy="$(jq -r '.remote_computer.replacement_pods_healthy // false' "$artifact" 2>/dev/null || echo "false")"
+    sidecar_checked_pod_count="$(jq -r '.remote_computer.checked_pod_count // 0' "$artifact" 2>/dev/null || echo "0")"
+
+    if [[ "$summary_status" != "ready" || "$production_blocked" != "false" ]]; then
+      printf 'worker/Remote Computer combined summary status=%s production_blocked=%s' "$summary_status" "$production_blocked"
+      return 0
+    fi
+    if [[ "$same_cluster_target" != "true" ]]; then
+      printf 'worker/Remote Computer combined summary does not prove one shared cluster target'
+      return 0
+    fi
+    if ! is_production_identity "$worker_cluster_id" || ! is_production_identity "$state_cluster_id" || ! is_production_identity "$sidecar_cluster_id"; then
+      printf 'worker/Remote Computer combined summary contains a pilot/mock/local cluster id'
+      return 0
+    fi
+    if ! is_distributed_state_backend "$state_backend"; then
+      printf 'worker/Remote Computer state backend=%s is not distributed' "$state_backend"
+      return 0
+    fi
+    if [[ -z "$state_claim" ]]; then
+      printf 'worker/Remote Computer state claim is missing'
+      return 0
+    fi
+    if [[ ! "$state_checked_path_count" =~ ^[0-9]+$ || "$state_checked_path_count" == "0" ]]; then
+      printf 'worker/Remote Computer checked_path_count=%s' "$state_checked_path_count"
+      return 0
+    fi
+    if [[ "$sidecar_replacement_pods_healthy" != "true" ]]; then
+      printf 'worker/Remote Computer sidecar replacement Pods are not healthy'
+      return 0
+    fi
+    if [[ ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_count" == "0" ]]; then
+      printf 'worker/Remote Computer sidecar checked_pod_count=%s' "$sidecar_checked_pod_count"
       return 0
     fi
   fi

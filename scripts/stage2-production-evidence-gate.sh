@@ -660,6 +660,12 @@ capture_finance_export_delivery_validation() {
     }' >"$delivery_file"
 }
 
+capture_worker_remote_computer_combined_validation() {
+  EVIDENCE_DIR="$EVIDENCE_DIR/worker-remote-computer" \
+    RUN_STAGE2_REMOTE_SIDECAR_RECOVERY="${RUN_STAGE2_REMOTE_SIDECAR_RECOVERY:-1}" \
+    ./scripts/worker-remote-computer-evidence-gate.sh
+}
+
 capture_tenant_routing_validation() {
   local routing_response
   local routing_file="$EVIDENCE_DIR/tenant-routing-validation-evidence.json"
@@ -997,6 +1003,7 @@ run_controller_validations() {
 
   if [[ "${RUN_STAGE2_REMOTE_SIDECAR_RECOVERY:-0}" == "1" ]]; then
     capture_remote_computer_sidecar_recovery_validation
+    capture_worker_remote_computer_combined_validation
   else
     echo "skipping Remote Computer sidecar recovery; set RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 to include replacement evidence" >&2
   fi

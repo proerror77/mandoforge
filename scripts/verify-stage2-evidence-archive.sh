@@ -290,6 +290,62 @@ artifact_issue() {
         return 0
       fi
       ;;
+    worker-remote-computer/summary.json)
+      local summary_status
+      local production_blocked
+      local same_cluster_target
+      local worker_cluster_id
+      local state_cluster_id
+      local sidecar_cluster_id
+      local state_backend
+      local state_claim
+      local state_checked_path_count
+      local sidecar_replacement_pods_healthy
+      local sidecar_checked_pod_count
+      summary_status="$(jq -r '.status // "unknown"' "$path")"
+      production_blocked="$(jq -r 'if has("production_blocked") then .production_blocked else true end' "$path")"
+      same_cluster_target="$(jq -r '.same_cluster_target // false' "$path")"
+      worker_cluster_id="$(jq -r '.worker.cluster_id // ""' "$path")"
+      state_cluster_id="$(jq -r '.remote_computer.state_sync_cluster_id // ""' "$path")"
+      sidecar_cluster_id="$(jq -r '.remote_computer.sidecar_cluster_id // ""' "$path")"
+      state_backend="$(jq -r '.remote_computer.distributed_state_backend // "unknown"' "$path")"
+      state_claim="$(jq -r '.remote_computer.state_claim // ""' "$path")"
+      state_checked_path_count="$(jq -r '.remote_computer.checked_path_count // 0' "$path")"
+      sidecar_replacement_pods_healthy="$(jq -r '.remote_computer.replacement_pods_healthy // false' "$path")"
+      sidecar_checked_pod_count="$(jq -r '.remote_computer.checked_pod_count // 0' "$path")"
+      if [[ "$summary_status" != "ready" || "$production_blocked" != "false" ]]; then
+        printf '%s status=%s production_blocked=%s' "$relative_path" "$summary_status" "$production_blocked"
+        return 0
+      fi
+      if [[ "$same_cluster_target" != "true" ]]; then
+        printf '%s does not prove one shared cluster target' "$relative_path"
+        return 0
+      fi
+      if ! is_production_identity_value "$worker_cluster_id" || ! is_production_identity_value "$state_cluster_id" || ! is_production_identity_value "$sidecar_cluster_id"; then
+        printf '%s contains a pilot/mock/local cluster id' "$relative_path"
+        return 0
+      fi
+      if ! is_distributed_state_backend "$state_backend"; then
+        printf '%s state_backend=%s is not distributed' "$relative_path" "$state_backend"
+        return 0
+      fi
+      if [[ -z "$state_claim" ]]; then
+        printf '%s state_claim is missing' "$relative_path"
+        return 0
+      fi
+      if [[ ! "$state_checked_path_count" =~ ^[0-9]+$ || "$state_checked_path_count" == "0" ]]; then
+        printf '%s checked_path_count=%s' "$relative_path" "$state_checked_path_count"
+        return 0
+      fi
+      if [[ "$sidecar_replacement_pods_healthy" != "true" ]]; then
+        printf '%s replacement_pods_healthy=%s' "$relative_path" "$sidecar_replacement_pods_healthy"
+        return 0
+      fi
+      if [[ ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_count" == "0" ]]; then
+        printf '%s sidecar_checked_pod_count=%s' "$relative_path" "$sidecar_checked_pod_count"
+        return 0
+      fi
+      ;;
     tenant-routing-validation-evidence.json)
       local evidence_status
       local validation_status
@@ -963,6 +1019,7 @@ verify_semantic_artifacts() {
     worker-load-validation-evidence.json
     remote-computer-state-sync-evidence.json
     remote-computer-sidecar-recovery-evidence.json
+    worker-remote-computer/summary.json
     tenant-routing-validation-evidence.json
     policy-rollout-orchestration-validation-evidence.json
     policy-rollout-due-run-evidence.json
@@ -1202,6 +1259,27 @@ JSON
       "replacement_pods_healthy": true,
       "checked_pod_count": 1
     }
+  }
+}
+JSON
+  mkdir -p "$tmpdir/evidence/worker-remote-computer"
+  cat >"$tmpdir/evidence/worker-remote-computer/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "production_blocked": false,
+  "production_blocked_count": 0,
+  "same_cluster_target": true,
+  "worker": {
+    "cluster_id": "prod-cluster-1"
+  },
+  "remote_computer": {
+    "state_sync_cluster_id": "prod-cluster-1",
+    "sidecar_cluster_id": "prod-cluster-1",
+    "distributed_state_backend": "juicefs",
+    "state_claim": "mandoforge-remote-computer-state",
+    "checked_path_count": 6,
+    "replacement_pods_healthy": true,
+    "checked_pod_count": 1
   }
 }
 JSON

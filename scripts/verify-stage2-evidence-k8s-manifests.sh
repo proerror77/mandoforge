@@ -455,6 +455,36 @@ if ! grep -q "worker-remote-computer-evidence-gate.sh" deploy/stage2-evidence/wo
   exit 1
 fi
 
+if ! grep -q "worker-remote-computer-evidence-gate.sh" crates/mandoforge-api/src/main.rs; then
+  echo "Stage 2 readiness must require the combined worker/Remote Computer evidence script" >&2
+  exit 1
+fi
+
+if ! grep -q "worker-remote-computer-evidence-job.example.yaml" crates/mandoforge-api/src/main.rs; then
+  echo "Stage 2 readiness must require the combined worker/Remote Computer evidence Job manifest" >&2
+  exit 1
+fi
+
+if ! grep -q "worker-remote-computer/summary.json" crates/mandoforge-api/src/main.rs; then
+  echo "Stage 2 readiness must require combined worker/Remote Computer summary evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "worker-remote-computer/summary.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require combined worker/Remote Computer summary evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "worker-remote-computer/summary.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require combined worker/Remote Computer summary evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "capture_worker_remote_computer_combined_validation" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must capture combined worker/Remote Computer evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml; then
   echo "Worker/Remote Computer evidence Job must force sidecar recovery evidence capture" >&2
   exit 1

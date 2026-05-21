@@ -5948,10 +5948,12 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             evidence_scripts: vec![
                 "./scripts/worker-evidence-gate.sh",
                 "./scripts/remote-computer-evidence-gate.sh",
+                "./scripts/worker-remote-computer-evidence-gate.sh",
             ],
             evidence_job_manifests: vec![
                 "deploy/stage2-evidence/worker-evidence-job.example.yaml",
                 "deploy/stage2-evidence/remote-computer-evidence-job.example.yaml",
+                "deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml",
             ],
             readiness_endpoints: vec![
                 "/api/execution-jobs/worker-readiness",
@@ -5975,6 +5977,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "worker-load-validation-evidence.json",
                 "remote-computer-state-sync-evidence.json",
                 "remote-computer-sidecar-recovery-evidence.json",
+                "worker-remote-computer/summary.json",
             ],
             required_evidence: vec![
                 "durable queue-backed worker mode is enabled",
