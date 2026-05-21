@@ -49460,6 +49460,9 @@ not json
         assert_eq!(execution["rollout_scope"], "global");
         assert_eq!(execution["production_policy_store"], true);
         assert_eq!(execution["rollback_supported"], true);
+        assert_eq!(execution["policy_store_id"], "policy-store-prod-1");
+        assert_eq!(execution["deployment_id"], "policy-deployment-prod-1");
+        assert_eq!(execution["steps"].as_array().unwrap().len(), 2);
         let payloads = payloads.lock().await;
         assert_eq!(payloads.len(), 1);
         assert_eq!(
@@ -51828,6 +51831,7 @@ not json
             "production_policy_store": true,
             "rollback_supported": true,
             "policy_store_id": "policy-store-prod-1",
+            "deployment_id": "policy-deployment-prod-1",
             "message": "policy rollout orchestration validated",
             "steps": [
                 {"name": "due-run-supervision", "status": "passed"},

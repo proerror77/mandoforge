@@ -127,7 +127,7 @@ No repo-controlled Stage 2 completion gaps remain after the 2026-05-14 controlle
 These items are required before claiming a specific production deployment is validated, but they no longer block the repository-level Stage 2 Governed Runtime Pilot:
 
 1. Run tenant routing evidence against a real multi-tenant deployment with RLS enabled, forced for every reported RLS table, tenant context configured, at least two audited tenant samples, and a nonzero audited cross-tenant negative-test count.
-2. Run policy rollout orchestration against a real production policy controller target.
+2. Run policy rollout orchestration against a real production policy controller target with production policy store/deployment ids, audited orchestration steps, rollback support, and due-run scan evidence.
 3. Run provider gate, rollout, and rollback evidence against real provider deployment targets.
 4. Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend.
 5. Run worker load validation, isolated worker-pool validation, and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem, including state claim/path checks and healthy replacement Pod checks.

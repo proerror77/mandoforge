@@ -335,6 +335,9 @@ artifact_issue() {
       local rollout_scope
       local production_policy_store
       local rollback_supported
+      local policy_store_id
+      local deployment_id
+      local step_count
       status="$(jq -r '.response.status // "unknown"' "$path")"
       controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
@@ -343,6 +346,9 @@ artifact_issue() {
       rollout_scope="$(jq -r '.response.controller_execution.rollout_scope // "unknown"' "$path")"
       production_policy_store="$(jq -r '.response.controller_execution.production_policy_store // false' "$path")"
       rollback_supported="$(jq -r '.response.controller_execution.rollback_supported // false' "$path")"
+      policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$path")"
+      deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$path")"
+      step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$path")"
       if [[ "$status" != "validated" || "$controller_status" != "validated" ]]; then
         printf '%s status=%s controller_status=%s' "$relative_path" "$status" "$controller_status"
         return 0
@@ -369,6 +375,38 @@ artifact_issue() {
       fi
       if [[ "$production_policy_store" != "true" || "$rollback_supported" != "true" ]]; then
         printf '%s policy store or rollback evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if ! is_production_identity_value "$policy_store_id"; then
+        printf '%s policy_store_id=%s is a pilot/mock/local identity' "$relative_path" "${policy_store_id:-<empty>}"
+        return 0
+      fi
+      if ! is_production_identity_value "$deployment_id"; then
+        printf '%s deployment_id=%s is a pilot/mock/local identity' "$relative_path" "${deployment_id:-<empty>}"
+        return 0
+      fi
+      if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
+        printf '%s step_count=%s' "$relative_path" "$step_count"
+        return 0
+      fi
+      ;;
+    policy-rollout-due-run-evidence.json)
+      local due_run_status
+      local scanned_count
+      local checked_at
+      due_run_status="$(jq -r '.response.status // "unknown"' "$path")"
+      scanned_count="$(jq -r '.response.scanned_count // 0' "$path")"
+      checked_at="$(jq -r '.response.checked_at // ""' "$path")"
+      if [[ "$due_run_status" != "activated" && "$due_run_status" != "noop" ]]; then
+        printf '%s due_run_status=%s' "$relative_path" "$due_run_status"
+        return 0
+      fi
+      if [[ ! "$scanned_count" =~ ^[0-9]+$ || "$scanned_count" == "0" ]]; then
+        printf '%s scanned_count=%s' "$relative_path" "$scanned_count"
+        return 0
+      fi
+      if [[ -z "$checked_at" ]]; then
+        printf '%s checked_at is missing' "$relative_path"
         return 0
       fi
       ;;
@@ -727,6 +765,7 @@ verify_semantic_artifacts() {
     remote-computer-sidecar-recovery-evidence.json
     tenant-routing-validation-evidence.json
     policy-rollout-orchestration-validation-evidence.json
+    policy-rollout-due-run-evidence.json
     vault-kms-rotation-evidence.json
     vault-kms-recovery-evidence.json
     finance-export-delivery-observer.json
@@ -988,8 +1027,24 @@ JSON
       "controller_id": "policy-controller-prod-1",
       "rollout_scope": "global",
       "production_policy_store": true,
-      "rollback_supported": true
+      "rollback_supported": true,
+      "policy_store_id": "policy-store-prod-1",
+      "deployment_id": "policy-deployment-prod-1",
+      "steps": [
+        {"name": "due-run-supervision", "status": "passed"},
+        {"name": "staged-runtime-clear", "status": "passed"}
+      ]
     }
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/policy-rollout-due-run-evidence.json" <<'JSON'
+{
+  "response": {
+    "status": "noop",
+    "scanned_count": 1,
+    "skipped_count": 1,
+    "checked_at": "1970-01-01T00:00:00Z"
   }
 }
 JSON

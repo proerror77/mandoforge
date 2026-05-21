@@ -116,6 +116,8 @@ write_summary() {
   local validation_evidence_status
   local due_run_evidence_status
   local due_run_status
+  local due_run_scanned_count
+  local due_run_checked_at
   local production_blocked
   local rollout_active
   local active_revision_id
@@ -135,6 +137,9 @@ write_summary() {
   local controller_rollout_scope
   local controller_production_policy_store
   local controller_rollback_supported
+  local controller_policy_store_id
+  local controller_deployment_id
+  local controller_step_count
   local blocked_count
 
   readiness_status="$(jq -r '.status // "unknown"' "$readiness_file")"
@@ -146,6 +151,9 @@ write_summary() {
   controller_rollout_scope="unknown"
   controller_production_policy_store="false"
   controller_rollback_supported="false"
+  controller_policy_store_id=""
+  controller_deployment_id=""
+  controller_step_count="0"
   if [[ -s "$validation_evidence_file" ]]; then
     validation_evidence_status="$(jq -r '.status // "unknown"' "$validation_evidence_file")"
     validation_status="$(jq -r '.response.status // "unknown"' "$validation_evidence_file")"
@@ -155,12 +163,19 @@ write_summary() {
     controller_rollout_scope="$(jq -r '.response.controller_execution.rollout_scope // "unknown"' "$validation_evidence_file")"
     controller_production_policy_store="$(jq -r '.response.controller_execution.production_policy_store // false' "$validation_evidence_file")"
     controller_rollback_supported="$(jq -r '.response.controller_execution.rollback_supported // false' "$validation_evidence_file")"
+    controller_policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$validation_evidence_file")"
+    controller_deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$validation_evidence_file")"
+    controller_step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$validation_evidence_file")"
   fi
   due_run_evidence_status="not_requested"
   due_run_status="not_run"
+  due_run_scanned_count="0"
+  due_run_checked_at=""
   if [[ -s "$due_run_evidence_file" ]]; then
     due_run_evidence_status="$(jq -r '.status // "unknown"' "$due_run_evidence_file")"
     due_run_status="$(jq -r '.response.status // "unknown"' "$due_run_evidence_file")"
+    due_run_scanned_count="$(jq -r '.response.scanned_count // 0' "$due_run_evidence_file")"
+    due_run_checked_at="$(jq -r '.response.checked_at // ""' "$due_run_evidence_file")"
   fi
   production_blocked="$(jq -r 'if has("production_blocked") then .production_blocked else true end' "$readiness_file")"
   rollout_active="$(jq -r '.rollout_active // false' "$readiness_file")"
@@ -213,6 +228,15 @@ write_summary() {
   if [[ "$controller_rollback_supported" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if ! is_production_identity "$controller_policy_store_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if ! is_production_identity "$controller_deployment_id"; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$controller_step_count" =~ ^[0-9]+$ || "$controller_step_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if [[ "$RUN_POLICY_DUE_RUN" != "1" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -222,6 +246,12 @@ write_summary() {
   if [[ "$due_run_status" != "activated" && "$due_run_status" != "noop" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ ! "$due_run_scanned_count" =~ ^[0-9]+$ || "$due_run_scanned_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ -z "$due_run_checked_at" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "policy_rollout_readiness_status=$readiness_status"
@@ -229,6 +259,8 @@ write_summary() {
     echo "policy_rollout_validation_evidence_status=$validation_evidence_status"
     echo "policy_rollout_due_run_evidence_status=$due_run_evidence_status"
     echo "policy_rollout_due_run_status=$due_run_status"
+    echo "policy_rollout_due_run_scanned_count=$due_run_scanned_count"
+    echo "policy_rollout_due_run_checked_at=$due_run_checked_at"
     echo "production_blocked=$production_blocked"
     echo "production_blocked_count=$blocked_count"
     echo "rollout_active=$rollout_active"
@@ -249,6 +281,9 @@ write_summary() {
     echo "controller_rollout_scope=$controller_rollout_scope"
     echo "controller_production_policy_store=$controller_production_policy_store"
     echo "controller_rollback_supported=$controller_rollback_supported"
+    echo "controller_policy_store_id=$controller_policy_store_id"
+    echo "controller_deployment_id=$controller_deployment_id"
+    echo "controller_step_count=$controller_step_count"
     echo "policy_due_run=$RUN_POLICY_DUE_RUN"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo
@@ -290,6 +325,15 @@ write_summary() {
     if [[ "$controller_rollback_supported" != "true" ]]; then
       echo "- policy rollout controller did not confirm rollback support"
     fi
+    if ! is_production_identity "$controller_policy_store_id"; then
+      echo "- policy rollout controller policy_store_id is pilot/mock/local: ${controller_policy_store_id:-<empty>}"
+    fi
+    if ! is_production_identity "$controller_deployment_id"; then
+      echo "- policy rollout controller deployment_id is pilot/mock/local: ${controller_deployment_id:-<empty>}"
+    fi
+    if [[ ! "$controller_step_count" =~ ^[0-9]+$ || "$controller_step_count" == "0" ]]; then
+      echo "- policy rollout controller did not report any audited orchestration steps"
+    fi
     if [[ "$validation_status" != "validated" ]]; then
       echo "- policy rollout orchestration validation status is not validated: $validation_status"
     fi
@@ -301,6 +345,12 @@ write_summary() {
     fi
     if [[ "$due_run_status" != "activated" && "$due_run_status" != "noop" ]]; then
       echo "- policy due-run status is not activated or noop: $due_run_status"
+    fi
+    if [[ ! "$due_run_scanned_count" =~ ^[0-9]+$ || "$due_run_scanned_count" == "0" ]]; then
+      echo "- policy due-run did not scan any policy revisions: scanned_count=$due_run_scanned_count"
+    fi
+    if [[ -z "$due_run_checked_at" ]]; then
+      echo "- policy due-run did not report checked_at"
     fi
     echo
     echo "validation_issues:"

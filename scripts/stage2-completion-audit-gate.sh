@@ -594,6 +594,9 @@ artifact_contract_issue() {
     local rollout_scope
     local production_policy_store
     local rollback_supported
+    local policy_store_id
+    local deployment_id
+    local step_count
 
     validation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
@@ -603,6 +606,9 @@ artifact_contract_issue() {
     rollout_scope="$(jq -r '.response.controller_execution.rollout_scope // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     production_policy_store="$(jq -r '.response.controller_execution.production_policy_store // false' "$artifact" 2>/dev/null || echo "false")"
     rollback_supported="$(jq -r '.response.controller_execution.rollback_supported // false' "$artifact" 2>/dev/null || echo "false")"
+    policy_store_id="$(jq -r '.response.controller_execution.policy_store_id // ""' "$artifact" 2>/dev/null || echo "")"
+    deployment_id="$(jq -r '.response.controller_execution.deployment_id // ""' "$artifact" 2>/dev/null || echo "")"
+    step_count="$(jq -r 'if ((.response.controller_execution.steps // null) | type) == "array" then (.response.controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$validation_status" != "validated" ]]; then
       printf 'validation_status=%s' "$validation_status"
@@ -638,6 +644,41 @@ artifact_contract_issue() {
     fi
     if [[ "$rollback_supported" != "true" ]]; then
       printf 'rollback_supported=%s' "$rollback_supported"
+      return 0
+    fi
+    if ! is_production_identity "$policy_store_id"; then
+      printf 'policy_store_id=%s is pilot/mock/local' "${policy_store_id:-<empty>}"
+      return 0
+    fi
+    if ! is_production_identity "$deployment_id"; then
+      printf 'deployment_id=%s is pilot/mock/local' "${deployment_id:-<empty>}"
+      return 0
+    fi
+    if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
+      printf 'step_count=%s' "$step_count"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "policy-rollout" && "$artifact_name" == "policy-rollout-due-run-evidence.json" ]]; then
+    local due_run_status
+    local scanned_count
+    local checked_at
+
+    due_run_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    scanned_count="$(jq -r '.response.scanned_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    checked_at="$(jq -r '.response.checked_at // ""' "$artifact" 2>/dev/null || echo "")"
+
+    if [[ "$due_run_status" != "activated" && "$due_run_status" != "noop" ]]; then
+      printf 'due_run_status=%s' "$due_run_status"
+      return 0
+    fi
+    if [[ ! "$scanned_count" =~ ^[0-9]+$ || "$scanned_count" == "0" ]]; then
+      printf 'scanned_count=%s' "$scanned_count"
+      return 0
+    fi
+    if [[ -z "$checked_at" ]]; then
+      printf 'checked_at is missing'
       return 0
     fi
   fi
