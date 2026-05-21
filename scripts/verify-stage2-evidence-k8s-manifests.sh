@@ -825,13 +825,13 @@ if ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*executed_at.
   exit 1
 fi
 
-if ! grep -q "recovery_id" "$vault_script" || ! grep -q "recovery_target_kind" "$vault_script" || ! grep -q "recovery_step_count" "$vault_script" || ! grep -q "kms_recovery_step_detail_count" "$vault_script"; then
+if ! grep -q "recovery_id" "$vault_script" || ! grep -q "recovery_target_kind" "$vault_script" || ! grep -q "recovery_step_count" "$vault_script" || ! grep -q "kms_recovery_step_detail_count" "$vault_script" || ! grep -q "kms_backend_id" "$vault_script" || ! grep -q "recovery_run_id" "$vault_script"; then
   echo "Vault evidence script must require audited KMS recovery id, target kind, and recovery step details" >&2
   exit 1
 fi
 
-if ! grep -q "kms_recovery_step_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "kms_recovery_step_detail_count" scripts/verify-stage2-evidence-archive.sh; then
-  echo "Completion audit and archive verifier must require KMS recovery step audit details" >&2
+if ! grep -q "bound_recovery_step_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "bound_recovery_step_detail_count" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Completion audit and archive verifier must require KMS recovery step details bound to backend, key, and recovery ids" >&2
   exit 1
 fi
 
@@ -932,6 +932,11 @@ fi
 
 if ! grep -q "missing KMS recovery step audit evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject KMS recovery steps without audit details" >&2
+  exit 1
+fi
+
+if ! grep -q "mismatched KMS recovery step binding evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject KMS recovery steps bound to the wrong backend, key, or recovery id" >&2
   exit 1
 fi
 

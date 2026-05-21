@@ -384,10 +384,20 @@ policy_rollout_step_detail_count() {
 }
 
 kms_recovery_step_detail_count() {
-  jq -r '[
+  jq -r '
+    (.response.controller_execution.backend_id // "") as $root_backend_id
+    | (.response.controller_execution.key_id // "") as $root_key_id
+    | (.response.controller_execution.recovery_id // "") as $root_recovery_id
+    | [
     .response.controller_execution.steps[]?
     | select(
         type == "object"
+        and ($root_backend_id | length > 0)
+        and ($root_key_id | length > 0)
+        and ($root_recovery_id | length > 0)
+        and ((.backend_id // .kms_backend_id // "") == $root_backend_id)
+        and ((.key_id // .kms_key_id // "") == $root_key_id)
+        and ((.recovery_id // .recovery_run_id // "") == $root_recovery_id)
         and ((.name // .step // .kind // .action // "") | length > 0)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
@@ -1116,7 +1126,7 @@ artifact_issue() {
         return 0
       fi
       if [[ ! "$step_detail_count" =~ ^[0-9]+$ || "$step_detail_count" -lt "$step_count" ]]; then
-        printf '%s step_detail_count=%s step_count=%s' "$relative_path" "$step_detail_count" "$step_count"
+        printf '%s bound_recovery_step_detail_count=%s step_count=%s' "$relative_path" "$step_detail_count" "$step_count"
         return 0
       fi
       if [[ ! "$invalid_step_count" =~ ^[0-9]+$ || "$invalid_step_count" != "0" ]]; then
@@ -2118,8 +2128,8 @@ JSON
       "recovery_id": "kms-recovery-1",
       "recovery_target_kind": "production_kms_backend",
       "steps": [
-        {"name": "restore-key-material", "status": "validated", "audit_id": "kms-recovery-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "verify-secret-consumers", "status": "passed", "audit_id": "kms-recovery-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "restore-key-material", "status": "validated", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1", "audit_id": "kms-recovery-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "verify-secret-consumers", "status": "passed", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1", "audit_id": "kms-recovery-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3638,7 +3648,7 @@ JSON
       "recovery_id": "kms-recovery-1",
       "recovery_target_kind": "production_kms_backend",
       "steps": [
-        {"name": "restore-key-material", "status": "failed"}
+        {"name": "restore-key-material", "status": "failed", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1"}
       ]
     }
   }
@@ -3676,7 +3686,7 @@ JSON
       "recovery_id": "kms-recovery-1",
       "recovery_target_kind": "production_kms_backend",
       "steps": [
-        {"name": "restore-key-material", "status": "validated"}
+        {"name": "restore-key-material", "status": "validated", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1"}
       ]
     }
   }
@@ -3712,10 +3722,48 @@ JSON
       "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
       "key_id": "key-1",
       "recovery_id": "kms-recovery-1",
+      "recovery_target_kind": "production_kms_backend",
+      "steps": [
+        {"name": "restore-key-material", "status": "validated", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/other-key", "key_id": "other-key", "recovery_id": "kms-recovery-other", "audit_id": "kms-recovery-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-vault-recovery-step-binding-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-vault-recovery-step-binding-negative.out 2>/tmp/mandoforge-stage2-archive-vault-recovery-step-binding-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected mismatched KMS recovery step binding evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/vault-kms-recovery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "status": "validated",
+      "backend_kind": "aws_kms",
+      "environment": "production",
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1",
+      "recovery_id": "kms-recovery-1",
       "recovery_target_kind": "pilot_kms_backend",
       "steps": [
-        {"name": "restore-key-material", "status": "validated", "audit_id": "kms-recovery-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "verify-secret-consumers", "status": "passed", "audit_id": "kms-recovery-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "restore-key-material", "status": "validated", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1", "audit_id": "kms-recovery-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "verify-secret-consumers", "status": "passed", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1", "audit_id": "kms-recovery-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3753,8 +3801,8 @@ JSON
       "recovery_id": "kms-recovery-1",
       "recovery_target_kind": "production_kms_backend",
       "steps": [
-        {"name": "restore-key-material", "status": "validated", "audit_id": "kms-recovery-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"name": "verify-secret-consumers", "status": "passed", "audit_id": "kms-recovery-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"name": "restore-key-material", "status": "validated", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1", "audit_id": "kms-recovery-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "verify-secret-consumers", "status": "passed", "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1", "key_id": "key-1", "recovery_id": "kms-recovery-1", "audit_id": "kms-recovery-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }

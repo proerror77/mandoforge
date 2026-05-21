@@ -172,8 +172,9 @@ confirmation, rotated/validated/completed status, and audit id, trace id, run id
 or timestamp detail, and recovery evidence is captured with fresh validated
 controller evidence for the same class of production backend identity. Recovery
 evidence must also report a production recovery id, production recovery target
-kind, and audited recovery steps with step names, passed/validated/completed
-status, and audit id, trace id, run id, or timestamp detail. The matching in-cluster
+kind, and audited recovery steps with step names, matching backend/key/recovery
+ids, passed/validated/completed status, and audit id, trace id, run id, or
+timestamp detail. The matching in-cluster
 template is `deploy/stage2-evidence/vault-evidence-job.example.yaml`, which
 persists its output under the Stage 2 production evidence PVC.
 
