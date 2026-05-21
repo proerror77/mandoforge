@@ -96,8 +96,12 @@ RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 \
 That gate runs the worker and Remote Computer evidence gates into one
 archive-ready evidence directory, then fails closed unless the same target has
 fresh isolated worker-pool/load-validation evidence, Remote Computer state-sync
-evidence, runner readiness, and sidecar replacement evidence. The matching
-in-cluster template is
+evidence, runner readiness, and sidecar replacement evidence. For the Whiskey
+completion blocker, the controller evidence must also identify the same
+multi-node real cluster across worker load, state sync, and sidecar replacement,
+and state sync must report a supported distributed filesystem backend such as
+`juicefs`, `cephfs`, or `longhorn-rwx`; single-host or local-hostpath evidence
+does not satisfy this proof. The matching in-cluster template is
 `deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml`.
 
 For a narrower provider governance proof, run:

@@ -35577,6 +35577,11 @@ where
         "http_status": http_status.as_u16(),
         "provider_status": controller_status,
         "message": body.get("message").and_then(Value::as_str),
+        "target_kind": body.get("target_kind").and_then(Value::as_str),
+        "cluster_id": body.get("cluster_id").and_then(Value::as_str),
+        "cluster_profile": body.get("cluster_profile").and_then(Value::as_str),
+        "node_count": body.get("node_count").and_then(Value::as_u64),
+        "replacement_scope": body.get("replacement_scope").and_then(Value::as_str),
         "replacement_pods_healthy": body.get("replacement_pods_healthy").and_then(Value::as_bool),
         "checked_pod_count": body.get("checked_pod_count").and_then(Value::as_u64),
     }))
@@ -36103,6 +36108,16 @@ where
         "provider_status": provider_status,
         "state_sync_id": body.get("state_sync_id").and_then(Value::as_str),
         "message": body.get("message").and_then(Value::as_str),
+        "target_kind": body.get("target_kind").and_then(Value::as_str),
+        "cluster_id": body.get("cluster_id").and_then(Value::as_str),
+        "cluster_profile": body.get("cluster_profile").and_then(Value::as_str),
+        "node_count": body.get("node_count").and_then(Value::as_u64),
+        "distributed_state_backend": body
+            .get("distributed_state_backend")
+            .or_else(|| body.get("storage_backend"))
+            .or_else(|| body.get("state_backend"))
+            .and_then(Value::as_str),
+        "state_claim": body.get("state_claim").and_then(Value::as_str),
         "checked_path_count": body.get("checked_path_count").and_then(Value::as_u64),
     }))
 }
@@ -37182,6 +37197,11 @@ where
         "provider_status": controller_status,
         "validation_id": body.get("validation_id").and_then(Value::as_str),
         "message": body.get("message").and_then(Value::as_str),
+        "target_kind": body.get("target_kind").and_then(Value::as_str),
+        "cluster_id": body.get("cluster_id").and_then(Value::as_str),
+        "cluster_profile": body.get("cluster_profile").and_then(Value::as_str),
+        "node_count": body.get("node_count").and_then(Value::as_u64),
+        "worker_pool": body.get("worker_pool").and_then(Value::as_str),
         "load_validated": body.get("load_validated").and_then(Value::as_bool).unwrap_or(validated),
         "isolated_worker_pool_configured": body.get("isolated_worker_pool_configured").and_then(Value::as_bool).unwrap_or(false),
         "observed_replicas": body.get("observed_replicas").cloned().unwrap_or_else(|| json!({})),
@@ -51419,6 +51439,11 @@ not json
         Json(json!({
             "status": "validated",
             "message": "replacement pod sidecars are healthy",
+            "target_kind": "k8s_cluster",
+            "cluster_id": "test-cluster-1",
+            "cluster_profile": "test-multi-node",
+            "node_count": 3,
+            "replacement_scope": "cluster",
             "replacement_pods_healthy": true,
             "checked_pod_count": 1
         }))
@@ -51440,6 +51465,12 @@ not json
             "status": "validated",
             "state_sync_id": "state-sync-1",
             "message": "state sync controller validated shared filesystem contract",
+            "target_kind": "k8s_cluster",
+            "cluster_id": "test-cluster-1",
+            "cluster_profile": "test-multi-node",
+            "node_count": 3,
+            "distributed_state_backend": "juicefs",
+            "state_claim": "mandoforge-remote-computer-state",
             "checked_path_count": 6
         }))
     }
@@ -51570,6 +51601,11 @@ not json
             "status": "validated",
             "validation_id": "worker-load-validation-1",
             "message": "worker autoscaling and isolated pool validated",
+            "target_kind": "k8s_cluster",
+            "cluster_id": "test-cluster-1",
+            "cluster_profile": "test-multi-node",
+            "node_count": 3,
+            "worker_pool": "mandoforge-worker-isolated",
             "load_validated": true,
             "isolated_worker_pool_configured": true,
             "observed_replicas": {

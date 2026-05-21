@@ -453,6 +453,26 @@ if ! grep -q "sidecar_recovery_required" "$worker_remote_computer_script"; then
   exit 1
 fi
 
+if ! grep -q "same_cluster_target" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must require worker and Remote Computer evidence from the same cluster" >&2
+  exit 1
+fi
+
+if ! grep -q "is_real_cluster_kind" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must distinguish real cluster evidence from local/single-host evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "is_distributed_state_backend" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must require distributed state backend evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "juicefs|cephfs|longhorn-rwx" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must allow only supported distributed state backends" >&2
+  exit 1
+fi
+
 if ! grep -q "provider-governance-evidence-gate.sh" deploy/stage2-evidence/provider-governance-evidence-job.example.yaml; then
   echo "Provider governance evidence Job does not run the dedicated evidence gate" >&2
   exit 1
