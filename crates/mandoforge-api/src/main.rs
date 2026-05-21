@@ -95,9 +95,9 @@ use execution::{
 };
 #[cfg(test)]
 use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
+use execution_queue::{ExecutionJob, ExecutionJobStatus, ExecutionQueue};
 #[cfg(test)]
 use execution_queue::{ExecutionJobRequest, ExecutionQueueBackend};
-use execution_queue::{ExecutionJobStatus, ExecutionQueue};
 use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueKind};
 use mcp_gateway::{
     HttpMcpGatewayClient, McpCallRequest, McpGatewayClient, McpGatewayConfig,
@@ -12599,9 +12599,10 @@ async fn enqueue_session_loop(
     Ok(job)
 }
 
-async fn enqueue_session_loop_after_approval(
+async fn enqueue_session_loop_after_approval_event(
     state: &AppState,
     session_id: Uuid,
+    trigger_event_id: Uuid,
     reason: &str,
 ) -> Result<SessionLoopJob, AppError> {
     set_managed_session_status(
@@ -12611,24 +12612,50 @@ async fn enqueue_session_loop_after_approval(
         "approval resolved; session loop queued",
     )
     .await?;
-    let event = state
-        .append_event(
-            "system",
-            None,
-            session_id,
-            "session.loop.resume_requested",
-            json!({"reason": reason}),
-        )
-        .await?;
-    enqueue_session_loop(state, session_id, Some(event.id), reason).await
+    enqueue_session_loop(state, session_id, Some(trigger_event_id), reason).await
 }
 
 async fn continue_session_after_approved_execution(
     state: &AppState,
     session_id: Uuid,
+    job: Option<&ExecutionJob>,
+    approval_event_id: Option<Uuid>,
     reason: &str,
 ) -> Result<(), AppError> {
-    enqueue_session_loop_after_approval(state, session_id, reason).await?;
+    let trigger_event_id = if let Some(job) = job {
+        state
+            .append_event(
+                "worker",
+                Some(job.id),
+                session_id,
+                "execution.completed",
+                json!({
+                    "execution_job_id": job.id,
+                    "approval_id": job.approval_id,
+                    "tool_call_id": job.tool_call_id,
+                    "tool": job.tool_name,
+                    "status": job.status,
+                    "worker_id": job.worker_id,
+                    "reason": reason
+                }),
+            )
+            .await?
+            .id
+    } else if let Some(approval_event_id) = approval_event_id {
+        approval_event_id
+    } else {
+        state
+            .append_event(
+                "system",
+                None,
+                session_id,
+                "session.loop.resume_requested",
+                json!({"reason": reason}),
+            )
+            .await?
+            .id
+    };
+    enqueue_session_loop_after_approval_event(state, session_id, trigger_event_id, reason).await?;
     Ok(())
 }
 
@@ -37364,6 +37391,8 @@ async fn run_execution_job_route(
         continue_session_after_approved_execution(
             &state,
             completed.session_id,
+            Some(&completed),
+            None,
             "approved execution completed",
         )
         .await?;
@@ -37718,7 +37747,7 @@ async fn decide_approval(
         return Err(AppError::bad_request("approval expired"));
     }
     let updated = state.decide_approval(approval_id, status).await?;
-    state
+    let decision_event = state
         .append_event(
             "user",
             Some(approval_id),
@@ -37733,10 +37762,12 @@ async fn decide_approval(
             .execute_approved_tool(&state, &updated)
             .await?;
         match outcome {
-            ExecutionWorkerOutcome::Completed => {
+            ExecutionWorkerOutcome::Completed { job } => {
                 continue_session_after_approved_execution(
                     &state,
                     updated.session_id,
+                    job.as_ref(),
+                    Some(decision_event.id),
                     "approved execution completed",
                 )
                 .await?;
@@ -37835,93 +37866,6 @@ async fn expire_approval_record(state: &AppState, approval_id: Uuid) -> Result<A
         ))
         .await?;
     Ok(updated)
-}
-
-async fn complete_session_after_approval(
-    state: &AppState,
-    session_id: Uuid,
-    reason: &str,
-) -> Result<(), AppError> {
-    set_managed_session_status(state, session_id, SessionStatus::Created, reason).await?;
-    state
-        .append_event(
-            "system",
-            None,
-            session_id,
-            "session.loop.idle",
-            json!({"reason": reason}),
-        )
-        .await?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-async fn resume_provider_after_approval(
-    state: &AppState,
-    session_id: Uuid,
-) -> Result<(), AppError> {
-    let events = state.list_events(session_id).await?;
-    if !events.iter().any(|event| event.event_type == "llm.request") {
-        complete_session_after_approval(state, session_id, "pending approval resolved").await?;
-        return Ok(());
-    }
-
-    set_managed_session_status(
-        state,
-        session_id,
-        SessionStatus::Running,
-        "provider resumed after approval",
-    )
-    .await?;
-    let (provider_label, provider) = provider_client_for_session(state, session_id).await?;
-    let provider_response = run_provider_harness(
-        state,
-        session_id,
-        provider.as_ref(),
-        &provider_label,
-        None,
-        None,
-    )
-    .await?;
-    state
-        .append_event(
-            "agent",
-            None,
-            session_id,
-            "agent.plan",
-            json!({"phase": "approval_resume", "steps": provider_response.plan}),
-        )
-        .await?;
-
-    for tool_call in provider_response.tool_calls {
-        let result = execute_tool_invocation(
-            state,
-            &tool_call.tool_name,
-            ExecuteTool {
-                session_id,
-                args: tool_call.args,
-            },
-        )
-        .await?;
-        if result.get("status").and_then(Value::as_str) == Some("approval_required") {
-            return Ok(());
-        }
-    }
-
-    if let Some(final_message) = provider_response.final_message {
-        state
-            .append_event(
-                "agent",
-                None,
-                session_id,
-                "agent.final",
-                json!({"message": final_message, "resumed_after_approval": true}),
-            )
-            .await?;
-    }
-
-    complete_session_after_approval(state, session_id, "pending approval resolved").await?;
-    Ok(())
 }
 
 fn generic_file_read_summary() -> Value {
@@ -52554,11 +52498,27 @@ not json
         )
         .await;
         assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        let events_after_completion: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let execution_completed_event = events_after_completion
+            .iter()
+            .find(|event| {
+                event.event_type == "execution.completed"
+                    && event.payload["execution_job_id"] == json!(completed.id)
+            })
+            .expect("worker completion should be a durable session event");
         let queued_resume_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
         assert!(
             queued_resume_jobs.iter().any(|job| {
                 job.status == SessionLoopJobStatus::Queued
                     && job.reason == "approved execution completed"
+                    && job.trigger_event_id == Some(execution_completed_event.id)
             }),
             "execution job completion should resume through session loop queue: {queued_resume_jobs:?}"
         );
@@ -57315,10 +57275,23 @@ not json
         assert_eq!(approved.status, "approved");
 
         let queued_after_approval = session_loop_jobs_for_session(app.clone(), session.id).await;
+        let events_after_worker_completion: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let execution_completed_event = events_after_worker_completion
+            .iter()
+            .find(|event| event.event_type == "execution.completed")
+            .expect("approved worker completion should be a durable session event");
         assert!(
             queued_after_approval.iter().any(|job| {
                 matches!(job.status, SessionLoopJobStatus::Queued)
                     && job.reason == "approved execution completed"
+                    && job.trigger_event_id == Some(execution_completed_event.id)
             }),
             "approval should resume through the session-loop queue: {queued_after_approval:?}"
         );
@@ -57361,7 +57334,7 @@ not json
             .map(|event| event.event_type.as_str())
             .collect();
         assert!(event_types_after_approval.contains(&"approval.approved"));
-        assert!(event_types_after_approval.contains(&"session.loop.resume_requested"));
+        assert!(event_types_after_approval.contains(&"execution.completed"));
         assert!(event_types_after_approval.contains(&"session.loop.idle"));
         assert!(event_types_after_approval.contains(&"thread.status_changed"));
         assert!(
@@ -64915,10 +64888,23 @@ not json
         }));
 
         let queued_resume_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let execution_completed_event = events
+            .iter()
+            .find(|event| event.event_type == "execution.completed")
+            .expect("inline approved execution should be a durable completion event");
         assert!(
             queued_resume_jobs.iter().any(|job| {
                 job.status == SessionLoopJobStatus::Queued
                     && job.reason == "approved execution completed"
+                    && job.trigger_event_id == Some(execution_completed_event.id)
             }),
             "approved inline execution should resume through the session-loop queue: {queued_resume_jobs:?}"
         );
@@ -64926,7 +64912,7 @@ not json
             run_next_session_loop_job(app.clone(), session.id, "file-write-resume-worker").await;
         assert_eq!(completed_resume.status, SessionLoopJobStatus::Completed);
 
-        let events: Vec<SessionEvent> = request_json(
+        let events_after_resume: Vec<SessionEvent> = request_json(
             app,
             Request::builder()
                 .uri(format!("/api/sessions/{}/events", session.id))
@@ -64934,18 +64920,22 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert!(events.iter().any(|event| event.event_type == "tool.result"));
         assert!(
-            events
+            events_after_resume
+                .iter()
+                .any(|event| event.event_type == "tool.result")
+        );
+        assert!(
+            events_after_resume
                 .iter()
                 .any(|event| event.event_type == "artifact.created")
         );
-        assert!(events.iter().any(|event| {
+        assert!(events_after_resume.iter().any(|event| {
             event.event_type == "session.loop.idle"
                 && event.payload["reason"] == json!("provider tool loop idled")
         }));
-        assert!(events.iter().any(|event| {
-            event.event_type == "session.loop.resume_requested"
+        assert!(events_after_resume.iter().any(|event| {
+            event.event_type == "execution.completed"
                 && event.payload["reason"] == json!("approved execution completed")
         }));
     }

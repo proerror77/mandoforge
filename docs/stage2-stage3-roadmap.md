@@ -226,8 +226,9 @@ Acceptance criteria:
 
 Primary lanes: Lane C and Lane D.
 
-Status: session-loop jobs exist with event cursor windows; environment placement
-and single-path continuation remain.
+Status: session-loop jobs exist with event cursor windows; approved execution
+completion now re-enters through `execution.completed` events; environment
+placement and any remaining non-worker continuation sources remain.
 
 Scope:
 
@@ -235,8 +236,10 @@ Scope:
   environment work queue above low-level execution jobs.
 - Keep orchestrator workers claiming session-loop work when user events arrive.
 - Keep the LLM/provider call outside the API request path.
-- Route approval resolution and execution-job completion back through
+- Keep approval resolution and execution-job completion routed through
   `session_loop_jobs` instead of directly resuming the provider inline.
+- Route any remaining non-worker tool-result continuation sources through the
+  same event-windowed loop path.
 - Preserve Tool Router, Policy Engine, Approval Engine, event log, artifact, and
   audit paths as authoritative.
 - Keep lower-level execution jobs for actual file, shell, Codex, MCP, and

@@ -255,6 +255,7 @@ Post-pilot enterprise promotions that should stay visible but are not the curren
 - [x] Stage 4.1 follow-up: Make `Environment.runtime_profile_id` the canonical runtime-adapter binding for managed sessions and demote `agent_cli.exec` to a compatibility facade.
 - [x] Stage 4.1 follow-up: Persist runtime turn metadata for Codex CLI resume handles, `--output-schema` validation, usage/timing, collected items, and final-message artifacts.
 - [x] Stage 4.1 follow-up: Persist session-loop event cursor windows with pending sequence ranges and processed high-water marks.
+- [x] Stage 4.1 follow-up: Route approved execution completion back through durable `execution.completed` events and event-windowed session-loop jobs.
 - [x] Stage 4.2: Add Managed Agent Registry fields for manager/specialist kind, runtime profile binding, tool policy, MCP servers, skills, Workflow Pack memberships, Remote Computer profile, semantic scopes, and release state.
 - [x] Stage 4.2: Add Agent Builder / Console surfaces for runtime profile, tools, skills, MCP, Remote Computer profile, and semantic scope selection.
 - [x] Stage 4.3: Add Minimal Semantic Kernel scope fields for project, repo, service, workflow, policy, and memory scope.

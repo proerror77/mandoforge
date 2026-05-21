@@ -73,9 +73,9 @@ pub(crate) trait ExecutionWorker: Send + Sync {
     ) -> Result<ExecutionWorkerOutcome, AppError>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum ExecutionWorkerOutcome {
-    Completed,
+    Completed { job: Option<ExecutionJob> },
     Queued,
 }
 
@@ -93,10 +93,12 @@ impl ExecutionWorker for InlineExecutionWorker {
         approval: &Approval,
     ) -> Result<ExecutionWorkerOutcome, AppError> {
         let Some(job) = enqueue_approved_job(state, approval).await? else {
-            return Ok(ExecutionWorkerOutcome::Completed);
+            return Ok(ExecutionWorkerOutcome::Completed { job: None });
         };
-        run_execution_job(state, job.id, "inline").await?;
-        Ok(ExecutionWorkerOutcome::Completed)
+        let completed = run_execution_job(state, job.id, "inline").await?;
+        Ok(ExecutionWorkerOutcome::Completed {
+            job: Some(completed),
+        })
     }
 }
 
@@ -114,7 +116,7 @@ impl ExecutionWorker for QueueBackedExecutionWorker {
         approval: &Approval,
     ) -> Result<ExecutionWorkerOutcome, AppError> {
         let Some(job) = enqueue_approved_job(state, approval).await? else {
-            return Ok(ExecutionWorkerOutcome::Completed);
+            return Ok(ExecutionWorkerOutcome::Completed { job: None });
         };
         state
             .append_event(
