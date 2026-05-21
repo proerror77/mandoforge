@@ -815,8 +815,18 @@ if ! grep -q "KMS rotation evidence_status" scripts/stage2-completion-audit-gate
   exit 1
 fi
 
+if ! grep -q "external KMS rotation confirmation action missing" scripts/stage2-completion-audit-gate.sh; then
+  echo "Completion audit gate must require explicit KMS rotation confirmation action evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "rotation_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "catalog_updated_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "recovery_target_kind" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require audited KMS rotation and recovery details" >&2
+  exit 1
+fi
+
+if ! grep -q "external KMS rotation confirmation action missing" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require explicit KMS rotation confirmation action evidence" >&2
   exit 1
 fi
 
@@ -832,6 +842,11 @@ fi
 
 if ! grep -q "zero KMS rotated count" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject KMS rotation evidence with no rotated records" >&2
+  exit 1
+fi
+
+if ! grep -q "missing KMS rotation confirmation action evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject KMS rotation evidence without the confirmation action" >&2
   exit 1
 fi
 

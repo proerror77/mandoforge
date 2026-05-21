@@ -990,7 +990,7 @@ artifact_contract_issue() {
     rotation_id="$(jq -r '.response.external_execution.rotation_id // ""' "$artifact" 2>/dev/null || echo "")"
     rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$artifact" 2>/dev/null || echo "0")"
     catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$artifact" 2>/dev/null || echo "0")"
-    action_count="$(jq -r 'if ((.response.actions // null) | type) == "array" then (.response.actions | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+    action_count="$(jq -r '[.response.actions[]? | select(. == "external_kms_rotation_confirmed")] | length' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$evidence_status" != "captured" ]]; then
       printf 'KMS rotation evidence_status=%s' "$evidence_status"
@@ -1037,7 +1037,7 @@ artifact_contract_issue() {
       return 0
     fi
     if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
-      printf 'action_count=%s' "$action_count"
+      printf 'external KMS rotation confirmation action missing'
       return 0
     fi
   fi

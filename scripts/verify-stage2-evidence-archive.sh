@@ -532,7 +532,7 @@ artifact_issue() {
       rotation_id="$(jq -r '.response.external_execution.rotation_id // ""' "$path")"
       rotated_count="$(jq -r '.response.rotated_count // .response.external_execution.rotated_count // 0' "$path")"
       catalog_updated_count="$(jq -r '.response.catalog_updated_count // 0' "$path")"
-      action_count="$(jq -r 'if ((.response.actions // null) | type) == "array" then (.response.actions | length) else 0 end' "$path")"
+      action_count="$(jq -r '[.response.actions[]? | select(. == "external_kms_rotation_confirmed")] | length' "$path")"
       if [[ "$evidence_status" != "captured" ]]; then
         printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
         return 0
@@ -574,7 +574,7 @@ artifact_issue() {
         return 0
       fi
       if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
-        printf '%s action_count=%s' "$relative_path" "$action_count"
+        printf '%s external KMS rotation confirmation action missing' "$relative_path"
         return 0
       fi
       ;;
@@ -2247,6 +2247,45 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected zero KMS rotated count to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/vault-kms-rotation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "external_execution": {
+      "status": "validated",
+      "production_backend": true,
+      "backend_kind": "aws_kms",
+      "environment": "production",
+      "backend_id": "arn:aws:kms:us-east-1:111122223333:key/key-1",
+      "key_id": "key-1",
+      "rotation_id": "kms-rotation-1",
+      "rotated_count": 1
+    },
+    "rotated_count": 1,
+    "catalog_updated_count": 1,
+    "actions": ["rotation_audit_logged"]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-vault-rotation-action-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-vault-rotation-action-negative.out 2>/tmp/mandoforge-stage2-archive-vault-rotation-action-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing KMS rotation confirmation action evidence to fail" >&2
     exit 1
   fi
 
