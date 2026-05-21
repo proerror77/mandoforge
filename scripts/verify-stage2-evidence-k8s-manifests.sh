@@ -1450,6 +1450,26 @@ if ! grep -q "finance-export-delivery-observer.json" scripts/stage2-completion-a
   exit 1
 fi
 
+if ! grep -q "finance-close-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "usage_finance_close_controller_executed" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must contract-check finance close controller evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-reconciliation-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "reconciliation_id" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must contract-check finance reconciliation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "usage-export-csv-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "finance export CSV byte_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require nonempty finance CSV evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-export-delivery-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "finance export delivery byte_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must contract-check finance export delivery evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "true ERP/accounting system identity" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must reject artifact-store finance system ids" >&2
   exit 1
@@ -1642,6 +1662,21 @@ fi
 
 if ! grep -q "delivery_mode=.* is not accounting/ERP" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject non-ERP finance delivery evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-close-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "usage_finance_close_controller_executed" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must contract-check finance close controller evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "finance-reconciliation-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "reconciliation_id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must contract-check finance reconciliation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "usage-export-csv-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "finance-export-delivery-evidence.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require finance CSV and export delivery evidence" >&2
   exit 1
 fi
 

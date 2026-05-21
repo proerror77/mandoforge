@@ -377,6 +377,113 @@ artifact_contract_issue() {
     fi
   fi
 
+  if [[ "$req_id" == "finance-close" && "$artifact_name" == "finance-close-evidence.json" ]]; then
+    local evidence_status
+    local run_status
+    local close_configured
+    local close_status
+    local close_id
+    local step_count
+    local action_count
+
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    run_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    close_configured="$(jq -r '.response.close_controller_configured // false' "$artifact" 2>/dev/null || echo "false")"
+    close_status="$(jq -r '.response.close_controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    close_id="$(jq -r '.response.close_controller_execution.close_id // ""' "$artifact" 2>/dev/null || echo "")"
+    step_count="$(jq -r 'if ((.response.close_controller_execution.steps // null) | type) == "array" then (.response.close_controller_execution.steps | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+    action_count="$(jq -r '[.response.actions[]? | select(. == "usage_finance_close_controller_executed")] | length' "$artifact" 2>/dev/null || echo "0")"
+
+    if [[ "$evidence_status" != "captured" || "$run_status" != "completed" ]]; then
+      printf 'finance close evidence=%s run_status=%s' "$evidence_status" "$run_status"
+      return 0
+    fi
+    if [[ "$close_configured" != "true" || "$close_status" != "closed" ]]; then
+      printf 'finance close controller configured=%s status=%s' "$close_configured" "$close_status"
+      return 0
+    fi
+    if ! is_finance_system_identity "$close_id"; then
+      printf 'finance close_id=%s is not a true ERP/accounting system identity' "${close_id:-<empty>}"
+      return 0
+    fi
+    if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
+      printf 'finance close step_count=%s' "$step_count"
+      return 0
+    fi
+    if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
+      printf 'finance close controller action missing'
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "finance-close" && "$artifact_name" == "finance-reconciliation-evidence.json" ]]; then
+    local evidence_status
+    local reconciliation_status
+    local reconciliation_id
+    local check_count
+
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    reconciliation_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    reconciliation_id="$(jq -r '.response.reconciliation_id // ""' "$artifact" 2>/dev/null || echo "")"
+    check_count="$(jq -r 'if ((.response.checks // null) | type) == "array" then (.response.checks | length) else 0 end' "$artifact" 2>/dev/null || echo "0")"
+
+    if [[ "$evidence_status" != "captured" || "$reconciliation_status" != "reconciled" ]]; then
+      printf 'finance reconciliation evidence=%s status=%s' "$evidence_status" "$reconciliation_status"
+      return 0
+    fi
+    if ! is_finance_system_identity "$reconciliation_id"; then
+      printf 'finance reconciliation_id=%s is not a true ERP/accounting system identity' "${reconciliation_id:-<empty>}"
+      return 0
+    fi
+    if [[ ! "$check_count" =~ ^[0-9]+$ || "$check_count" == "0" ]]; then
+      printf 'finance reconciliation check_count=%s' "$check_count"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "finance-close" && "$artifact_name" == "usage-export-csv-evidence.json" ]]; then
+    local http_status
+    local byte_count
+
+    http_status="$(jq -r '.http_status // 0' "$artifact" 2>/dev/null || echo "0")"
+    byte_count="$(jq -r '.byte_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    if [[ ! "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+      printf 'finance export CSV http_status=%s' "$http_status"
+      return 0
+    fi
+    if [[ ! "$byte_count" =~ ^[0-9]+$ || "$byte_count" == "0" ]]; then
+      printf 'finance export CSV byte_count=%s' "$byte_count"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "finance-close" && "$artifact_name" == "finance-export-delivery-evidence.json" ]]; then
+    local evidence_status
+    local delivery_status
+    local delivered
+    local target_configured
+    local byte_count
+
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    delivery_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    delivered="$(jq -r '.response.delivered // false' "$artifact" 2>/dev/null || echo "false")"
+    target_configured="$(jq -r '.response.target_configured // false' "$artifact" 2>/dev/null || echo "false")"
+    byte_count="$(jq -r '.response.bytes // 0' "$artifact" 2>/dev/null || echo "0")"
+
+    if [[ "$evidence_status" != "captured" || "$delivery_status" != "delivered" || "$delivered" != "true" ]]; then
+      printf 'finance export delivery evidence=%s status=%s delivered=%s' "$evidence_status" "$delivery_status" "$delivered"
+      return 0
+    fi
+    if [[ "$target_configured" != "true" ]]; then
+      printf 'finance export delivery target_configured=%s' "$target_configured"
+      return 0
+    fi
+    if [[ ! "$byte_count" =~ ^[0-9]+$ || "$byte_count" == "0" ]]; then
+      printf 'finance export delivery byte_count=%s' "$byte_count"
+      return 0
+    fi
+  fi
+
   if [[ "$req_id" == "managed-session-restart-resume" && "$artifact_name" == "managed-session-restart-resume-evidence.json" ]]; then
     local status
     local target_id

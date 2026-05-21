@@ -560,6 +560,102 @@ artifact_issue() {
         return 0
       fi
       ;;
+    finance-close-evidence.json)
+      local evidence_status
+      local run_status
+      local close_configured
+      local close_status
+      local close_id
+      local step_count
+      local action_count
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
+      run_status="$(jq -r '.response.status // "unknown"' "$path")"
+      close_configured="$(jq -r '.response.close_controller_configured // false' "$path")"
+      close_status="$(jq -r '.response.close_controller_execution.status // "unknown"' "$path")"
+      close_id="$(jq -r '.response.close_controller_execution.close_id // ""' "$path")"
+      step_count="$(jq -r 'if ((.response.close_controller_execution.steps // null) | type) == "array" then (.response.close_controller_execution.steps | length) else 0 end' "$path")"
+      action_count="$(jq -r '[.response.actions[]? | select(. == "usage_finance_close_controller_executed")] | length' "$path")"
+      if [[ "$evidence_status" != "captured" || "$run_status" != "completed" ]]; then
+        printf '%s evidence_status=%s run_status=%s' "$relative_path" "$evidence_status" "$run_status"
+        return 0
+      fi
+      if [[ "$close_configured" != "true" || "$close_status" != "closed" ]]; then
+        printf '%s close_configured=%s close_status=%s' "$relative_path" "$close_configured" "$close_status"
+        return 0
+      fi
+      if ! is_finance_system_identity_value "$close_id"; then
+        printf '%s close_id=%s is not a true ERP/accounting system identity' "$relative_path" "${close_id:-<empty>}"
+        return 0
+      fi
+      if [[ ! "$step_count" =~ ^[0-9]+$ || "$step_count" == "0" ]]; then
+        printf '%s step_count=%s' "$relative_path" "$step_count"
+        return 0
+      fi
+      if [[ ! "$action_count" =~ ^[0-9]+$ || "$action_count" == "0" ]]; then
+        printf '%s close controller action missing' "$relative_path"
+        return 0
+      fi
+      ;;
+    finance-reconciliation-evidence.json)
+      local evidence_status
+      local reconciliation_status
+      local reconciliation_id
+      local check_count
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
+      reconciliation_status="$(jq -r '.response.status // "unknown"' "$path")"
+      reconciliation_id="$(jq -r '.response.reconciliation_id // ""' "$path")"
+      check_count="$(jq -r 'if ((.response.checks // null) | type) == "array" then (.response.checks | length) else 0 end' "$path")"
+      if [[ "$evidence_status" != "captured" || "$reconciliation_status" != "reconciled" ]]; then
+        printf '%s evidence_status=%s reconciliation_status=%s' "$relative_path" "$evidence_status" "$reconciliation_status"
+        return 0
+      fi
+      if ! is_finance_system_identity_value "$reconciliation_id"; then
+        printf '%s reconciliation_id=%s is not a true ERP/accounting system identity' "$relative_path" "${reconciliation_id:-<empty>}"
+        return 0
+      fi
+      if [[ ! "$check_count" =~ ^[0-9]+$ || "$check_count" == "0" ]]; then
+        printf '%s check_count=%s' "$relative_path" "$check_count"
+        return 0
+      fi
+      ;;
+    usage-export-csv-evidence.json)
+      local http_status
+      local byte_count
+      http_status="$(jq -r '.http_status // 0' "$path")"
+      byte_count="$(jq -r '.byte_count // 0' "$path")"
+      if [[ ! "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+        printf '%s http_status=%s' "$relative_path" "$http_status"
+        return 0
+      fi
+      if [[ ! "$byte_count" =~ ^[0-9]+$ || "$byte_count" == "0" ]]; then
+        printf '%s byte_count=%s' "$relative_path" "$byte_count"
+        return 0
+      fi
+      ;;
+    finance-export-delivery-evidence.json)
+      local evidence_status
+      local delivery_status
+      local delivered
+      local target_configured
+      local byte_count
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
+      delivery_status="$(jq -r '.response.status // "unknown"' "$path")"
+      delivered="$(jq -r '.response.delivered // false' "$path")"
+      target_configured="$(jq -r '.response.target_configured // false' "$path")"
+      byte_count="$(jq -r '.response.bytes // 0' "$path")"
+      if [[ "$evidence_status" != "captured" || "$delivery_status" != "delivered" || "$delivered" != "true" ]]; then
+        printf '%s evidence_status=%s delivery_status=%s delivered=%s' "$relative_path" "$evidence_status" "$delivery_status" "$delivered"
+        return 0
+      fi
+      if [[ "$target_configured" != "true" ]]; then
+        printf '%s target_configured=%s' "$relative_path" "$target_configured"
+        return 0
+      fi
+      if [[ ! "$byte_count" =~ ^[0-9]+$ || "$byte_count" == "0" ]]; then
+        printf '%s byte_count=%s' "$relative_path" "$byte_count"
+        return 0
+      fi
+      ;;
     managed-session-restart-resume-evidence.json)
       local status
       local target_id
@@ -818,6 +914,10 @@ verify_semantic_artifacts() {
     policy-rollout-due-run-evidence.json
     vault-kms-rotation-evidence.json
     vault-kms-recovery-evidence.json
+    finance-close-evidence.json
+    finance-reconciliation-evidence.json
+    usage-export-csv-evidence.json
+    finance-export-delivery-evidence.json
     finance-export-delivery-observer.json
     managed-session-restart-resume-evidence.json
   )
@@ -1135,6 +1235,54 @@ JSON
         {"name": "verify-secret-consumers", "status": "passed"}
       ]
     }
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/finance-close-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "completed",
+    "actions": ["usage_finance_close_controller_executed"],
+    "close_controller_configured": true,
+    "close_controller_execution": {
+      "status": "closed",
+      "close_id": "netsuite-close-prod-1",
+      "steps": [
+        {"name": "export-present", "status": "passed"},
+        {"name": "accounting-period-open", "status": "passed"}
+      ]
+    }
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/finance-reconciliation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "reconciled",
+    "reconciliation_id": "netsuite-reconciliation-prod-1",
+    "checks": [
+      {"name": "close-evidence", "status": "passed"},
+      {"name": "export-recent", "status": "passed"}
+    ]
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/usage-export-csv-evidence.json" <<'JSON'
+{
+  "http_status": 200,
+  "byte_count": 128
+}
+JSON
+  cat >"$tmpdir/evidence/finance-export-delivery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "delivered",
+    "delivered": true,
+    "target_configured": true,
+    "bytes": 128
   }
 }
 JSON

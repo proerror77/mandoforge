@@ -245,12 +245,13 @@ FINANCE_EXPORT_DELIVERY_OBSERVER_URL=https://controller.example.com/finance/heal
 That gate collects finance dashboard summary, finance operations readiness,
 finance close/accounting reconciliation controller evidence, CSV export capture,
 export-delivery evidence, and delivery-observer evidence into
-`.mandoforge/finance-evidence/`. It fails closed unless close completed,
-reconciliation is reconciled and fresh, the CSV is nonempty, delivery succeeded
-to a configured target, and the observer reports an accounting/ERP delivery mode
-such as `accounting_erp`, `erp`, `netsuite`, `quickbooks`, `xero`, `sap`, or
-`oracle_erp`; `lark_drive` and `accept_only` do not satisfy the ERP proof. The
-observer must also report a stable system id through `system_id`,
+`.mandoforge/finance-evidence/`. It fails closed unless close completed through
+a configured controller with a close id and audited steps, reconciliation is
+reconciled and fresh with a reconciliation id and checks, the CSV is nonempty,
+delivery succeeded to a configured target, and the observer reports an
+accounting/ERP delivery mode such as `accounting_erp`, `erp`, `netsuite`,
+`quickbooks`, `xero`, `sap`, or `oracle_erp`; `lark_drive` and `accept_only` do
+not satisfy the ERP proof. The observer must also report a stable system id through `system_id`,
 `erp_system_id`, `accounting_system_id`, or `target_id`, and that value must
 match `MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID` in the all-up archive manifest. The
 matching in-cluster template is
