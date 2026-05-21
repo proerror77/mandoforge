@@ -620,6 +620,41 @@ forced_rls_table_detail_count() {
   ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
+expected_tenant_rls_table_count() {
+  jq -r '[.expected_targets.tenant_routing.rls_tables[]? | select(type == "string" and length > 0) | ascii_downcase] | unique | length' "$1" 2>/dev/null || echo "0"
+}
+
+expected_tenant_rls_table_coverage_count() {
+  jq -r --slurpfile manifest "$2" '
+    ($manifest[0].expected_targets.tenant_routing.rls_tables
+      // []
+      | map(select(type == "string" and length > 0) | ascii_downcase)
+      | unique) as $expected
+    | .response.controller_execution.deployment_id as $deployment_id
+    | [
+      (
+        .response.controller_execution.rls_tables[]?,
+        .response.controller_execution.rls_table_details[]?,
+        .response.controller_execution.rls_table_checks[]?,
+        .response.controller_execution.forced_rls_tables[]?
+      )
+      | select(
+          type == "object"
+          and ((.table // .table_name // .relation // .name // "") | length > 0)
+          and ((.schema // .namespace // "public") | length > 0)
+          and ((.rls_enabled // .enabled // false) == true)
+          and ((.rls_forced // .forced // .force_rls // false) == true)
+          and (($deployment_id // "") | length > 0)
+          and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
+          and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
+        )
+      | (((.schema // .namespace // "public") + "." + (.table // .table_name // .relation // .name)) | ascii_downcase)
+    ] | unique as $actual
+    | [$expected[] | select(. as $table | $actual | index($table))]
+    | unique
+    | length' "$1" 2>/dev/null || echo "0"
+}
+
 tenant_sample_count() {
   jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$1" 2>/dev/null || echo "0"
 }
@@ -1505,6 +1540,8 @@ artifact_contract_issue() {
     local rls_table_count
     local rls_forced_table_count
     local rls_table_detail_count
+    local expected_rls_table_count
+    local expected_rls_table_coverage_count
     local tenant_context_validated
     local cross_tenant_negative_tests
     local cross_tenant_negative_test_count
@@ -1522,6 +1559,8 @@ artifact_contract_issue() {
     rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
     rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$artifact" 2>/dev/null || echo "0")"
     rls_table_detail_count="$(forced_rls_table_detail_count "$artifact")"
+    expected_rls_table_count="$(expected_tenant_rls_table_count "$SOURCE_EVIDENCE_DIR/production-evidence-run.json")"
+    expected_rls_table_coverage_count="$(expected_tenant_rls_table_coverage_count "$artifact" "$SOURCE_EVIDENCE_DIR/production-evidence-run.json")"
     tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$artifact" 2>/dev/null || echo "false")"
     cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$artifact" 2>/dev/null || echo "false")"
     cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$artifact" 2>/dev/null || echo "0")"
@@ -1575,6 +1614,12 @@ artifact_contract_issue() {
     if [[ ! "$rls_table_detail_count" =~ ^[0-9]+$ || "$rls_table_detail_count" -lt "$rls_table_count" ]]; then
       printf 'deployment_bound_unique_forced_rls_table_detail_count=%s rls_table_count=%s' "$rls_table_detail_count" "$rls_table_count"
       return 0
+    fi
+    if [[ "$expected_rls_table_count" =~ ^[0-9]+$ && "$expected_rls_table_count" -gt 0 ]]; then
+      if [[ ! "$expected_rls_table_coverage_count" =~ ^[0-9]+$ || "$expected_rls_table_coverage_count" -lt "$expected_rls_table_count" ]]; then
+        printf 'expected_forced_rls_table_coverage_count=%s expected_rls_table_count=%s' "$expected_rls_table_coverage_count" "$expected_rls_table_count"
+        return 0
+      fi
     fi
     if [[ "$tenant_context_validated" != "true" ]]; then
       printf 'tenant_context_validated=%s' "$tenant_context_validated"

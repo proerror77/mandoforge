@@ -301,6 +301,41 @@ forced_rls_table_detail_count() {
   ] | unique | length' "$1"
 }
 
+expected_tenant_rls_table_count() {
+  jq -r '[.expected_targets.tenant_routing.rls_tables[]? | select(type == "string" and length > 0) | ascii_downcase] | unique | length' "$1" 2>/dev/null || echo "0"
+}
+
+expected_tenant_rls_table_coverage_count() {
+  jq -r --slurpfile manifest "$2" '
+    ($manifest[0].expected_targets.tenant_routing.rls_tables
+      // []
+      | map(select(type == "string" and length > 0) | ascii_downcase)
+      | unique) as $expected
+    | .response.controller_execution.deployment_id as $deployment_id
+    | [
+      (
+        .response.controller_execution.rls_tables[]?,
+        .response.controller_execution.rls_table_details[]?,
+        .response.controller_execution.rls_table_checks[]?,
+        .response.controller_execution.forced_rls_tables[]?
+      )
+      | select(
+          type == "object"
+          and ((.table // .table_name // .relation // .name // "") | length > 0)
+          and ((.schema // .namespace // "public") | length > 0)
+          and ((.rls_enabled // .enabled // false) == true)
+          and ((.rls_forced // .forced // .force_rls // false) == true)
+          and (($deployment_id // "") | length > 0)
+          and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
+          and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
+        )
+      | (((.schema // .namespace // "public") + "." + (.table // .table_name // .relation // .name)) | ascii_downcase)
+    ] | unique as $actual
+    | [$expected[] | select(. as $table | $actual | index($table))]
+    | unique
+    | length' "$1" 2>/dev/null || echo "0"
+}
+
 tenant_sample_count() {
   jq -r 'if ((.response.controller_execution.tenant_samples // null) | type) == "array" then (.response.controller_execution.tenant_samples | length) elif ((.response.controller_execution.tenant_ids_sample // null) | type) == "array" then (.response.controller_execution.tenant_ids_sample | length) else 0 end' "$1"
 }
@@ -889,6 +924,8 @@ artifact_issue() {
       local rls_table_count
       local rls_forced_table_count
       local rls_table_detail_count
+      local expected_rls_table_count
+      local expected_rls_table_coverage_count
       local tenant_context_validated
       local cross_tenant_negative_tests
       local cross_tenant_negative_test_count
@@ -905,6 +942,8 @@ artifact_issue() {
       rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$path")"
       rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$path")"
       rls_table_detail_count="$(forced_rls_table_detail_count "$path")"
+      expected_rls_table_count="$(expected_tenant_rls_table_count "$root/production-evidence-run.json")"
+      expected_rls_table_coverage_count="$(expected_tenant_rls_table_coverage_count "$path" "$root/production-evidence-run.json")"
       tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$path")"
       cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$path")"
       cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$path")"
@@ -953,6 +992,12 @@ artifact_issue() {
       if [[ ! "$rls_table_detail_count" =~ ^[0-9]+$ || "$rls_table_detail_count" -lt "$rls_table_count" ]]; then
         printf '%s deployment_bound_unique_forced_rls_table_detail_count=%s rls_table_count=%s' "$relative_path" "$rls_table_detail_count" "$rls_table_count"
         return 0
+      fi
+      if [[ "$expected_rls_table_count" =~ ^[0-9]+$ && "$expected_rls_table_count" -gt 0 ]]; then
+        if [[ ! "$expected_rls_table_coverage_count" =~ ^[0-9]+$ || "$expected_rls_table_coverage_count" -lt "$expected_rls_table_count" ]]; then
+          printf '%s expected_forced_rls_table_coverage_count=%s expected_rls_table_count=%s' "$relative_path" "$expected_rls_table_coverage_count" "$expected_rls_table_count"
+          return 0
+        fi
       fi
       if [[ ! "$cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_count" == "0" ]]; then
         printf '%s cross_tenant_negative_test_count=%s' "$relative_path" "$cross_tenant_negative_test_count"
@@ -1924,7 +1969,8 @@ JSON
       "state_backend": "juicefs"
     },
     "tenant_routing": {
-      "deployment_id": "tenant-routing-prod-1"
+      "deployment_id": "tenant-routing-prod-1",
+      "rls_tables": ["public.sessions", "public.session_events"]
     },
     "policy_rollout": {
       "controller_id": "policy-controller-prod-1"
@@ -2147,7 +2193,8 @@ JSON
       "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
-      "deployment_id": "tenant-routing-prod-1"
+      "deployment_id": "tenant-routing-prod-1",
+      "rls_tables": ["public.sessions", "public.session_events"]
     },
     "policy_rollout": {
       "controller_id": "policy-controller-prod-1"
@@ -2194,7 +2241,8 @@ JSON
       "state_claim": "mandoforge-remote-computer-state"
     },
     "tenant_routing": {
-      "deployment_id": "tenant-routing-prod-1"
+      "deployment_id": "tenant-routing-prod-1",
+      "rls_tables": ["public.sessions", "public.session_events"]
     },
     "policy_rollout": {
       "controller_id": "policy-controller-prod-1"
@@ -2667,6 +2715,87 @@ JSON
     echo "archive_sha256=$sha"
   } >"${archive}.manifest.txt"
   verify_archive "$archive"
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": [
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "rls_enforced": true,
+      "rls_table_count": 1,
+      "rls_forced_table_count": 1,
+      "rls_table_details": [
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 2,
+      "cross_tenant_negative_test_results": [
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-expected-rls-table-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-expected-rls-table-negative.out 2>/tmp/mandoforge-stage2-archive-tenant-expected-rls-table-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing configured tenant RLS table evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": [
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "rls_enforced": true,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 2,
+      "cross_tenant_negative_test_results": [
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
 
   cat >"$tmpdir/evidence/finance-export-delivery-evidence.json" <<'JSON'
 {

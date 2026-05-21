@@ -150,7 +150,8 @@ tenants plus at least two unique audited tenant samples with tenant id plus audi
 id, trace id, run id, or timestamp detail, and confirm RLS enforcement,
 tenant context propagation, nonzero RLS table coverage, forced RLS for every
 reported table with a unique schema/table identity, enabled/forced status, and audit id, trace id,
-run id, or timestamp detail, and a nonzero unique cross-tenant negative-test count whose
+run id, or timestamp detail. Forced-RLS table details must cover every schema.table
+listed in `MANDOFORGE_STAGE2_TENANT_RLS_TABLES`, and the response must include a nonzero unique cross-tenant negative-test count whose
 details run between the audited sampled tenants and include source tenant,
 target tenant, denied/blocked outcome, and audit id, trace id, run id, or
 timestamp detail. Duplicate source/target tenant pairs do not satisfy reported

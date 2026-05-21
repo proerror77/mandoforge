@@ -2265,6 +2265,11 @@ if ! grep -q "summary state backend does not match production-evidence-run.json"
   exit 1
 fi
 
+if ! grep -q "expected_forced_rls_table_coverage_count" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must bind tenant RLS evidence to the expected table set" >&2
+  exit 1
+fi
+
 if ! grep -q "do not share one cluster id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must reject mixed-cluster worker/Remote Computer evidence" >&2
   exit 1
@@ -2297,6 +2302,11 @@ fi
 
 if ! grep -q "summary state backend mismatch" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject combined worker/Remote Computer summaries with mismatched state backends" >&2
+  exit 1
+fi
+
+if ! grep -q "missing configured tenant RLS table evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject missing configured tenant RLS table evidence" >&2
   exit 1
 fi
 

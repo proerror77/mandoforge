@@ -18,6 +18,7 @@ required_template_vars=(
   ALLOW_BLOCKED
   MANDOFORGE_STAGE2_TEAM_ID
   MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID
+  MANDOFORGE_STAGE2_TENANT_RLS_TABLES
   MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED
   MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL
   MANDOFORGE_TENANT_ROUTING_CONTROLLER_TOKEN
@@ -210,6 +211,11 @@ fi
 
 if ! grep -q "MANDOFORGE_STAGE2_WORKER_POOL" "$production_preflight_script"; then
   echo "Stage 2 production evidence preflight must require an isolated worker pool target identity" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_STAGE2_TENANT_RLS_TABLES" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must require expected tenant RLS table coverage" >&2
   exit 1
 fi
 

@@ -7,6 +7,7 @@ ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/tenant-isolation-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 EXPECTED_TENANT_DEPLOYMENT_ID="${MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID:-}"
+EXPECTED_TENANT_RLS_TABLES="${MANDOFORGE_STAGE2_TENANT_RLS_TABLES:-}"
 AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
 
 auth_headers=(
@@ -72,6 +73,48 @@ forced_rls_table_detail_count() {
       )
     | [(.schema // .namespace // "public"), (.table // .table_name // .relation // .name)] | @tsv
   ] | unique | length' "$1" 2>/dev/null || echo "0"
+}
+
+expected_rls_table_count() {
+  jq -rn --arg tables "$1" '
+    $tables
+    | split(",")
+    | map(gsub("^\\s+|\\s+$"; ""))
+    | map(select(length > 0))
+    | unique
+    | length'
+}
+
+expected_rls_table_coverage_count() {
+  jq -r --arg tables "$2" '
+    ($tables
+      | split(",")
+      | map(gsub("^\\s+|\\s+$"; "") | ascii_downcase)
+      | map(select(length > 0))
+      | unique) as $expected
+    | .response.controller_execution.deployment_id as $deployment_id
+    | [
+      (
+        .response.controller_execution.rls_tables[]?,
+        .response.controller_execution.rls_table_details[]?,
+        .response.controller_execution.rls_table_checks[]?,
+        .response.controller_execution.forced_rls_tables[]?
+      )
+      | select(
+          type == "object"
+          and ((.table // .table_name // .relation // .name // "") | length > 0)
+          and ((.schema // .namespace // "public") | length > 0)
+          and ((.rls_enabled // .enabled // false) == true)
+          and ((.rls_forced // .forced // .force_rls // false) == true)
+          and (($deployment_id // "") | length > 0)
+          and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
+          and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
+        )
+      | (((.schema // .namespace // "public") + "." + (.table // .table_name // .relation // .name)) | ascii_downcase)
+    ] | unique as $actual
+    | [$expected[] | select(. as $table | $actual | index($table))]
+    | unique
+    | length' "$1" 2>/dev/null || echo "0"
 }
 
 tenant_sample_count() {
@@ -168,6 +211,8 @@ write_summary() {
   local routing_rls_table_count
   local routing_rls_forced_table_count
   local routing_forced_rls_table_detail_count
+  local expected_rls_table_count
+  local expected_rls_table_coverage_count
   local routing_tenant_context_validated
   local routing_cross_tenant_negative_tests
   local routing_cross_tenant_negative_test_count
@@ -197,6 +242,8 @@ write_summary() {
   routing_rls_table_count="0"
   routing_rls_forced_table_count="0"
   routing_forced_rls_table_detail_count="0"
+  expected_rls_table_count="0"
+  expected_rls_table_coverage_count="0"
   routing_tenant_context_validated="false"
   routing_cross_tenant_negative_tests="false"
   routing_cross_tenant_negative_test_count="0"
@@ -215,6 +262,10 @@ write_summary() {
     routing_rls_table_count="$(jq -r '.response.controller_execution.rls_table_count // .response.controller_execution.rls_enabled_table_count // 0' "$validation_evidence_file")"
     routing_rls_forced_table_count="$(jq -r '.response.controller_execution.rls_forced_table_count // .response.controller_execution.forced_rls_table_count // 0' "$validation_evidence_file")"
     routing_forced_rls_table_detail_count="$(forced_rls_table_detail_count "$validation_evidence_file")"
+    if [[ -n "$EXPECTED_TENANT_RLS_TABLES" ]]; then
+      expected_rls_table_count="$(expected_rls_table_count "$EXPECTED_TENANT_RLS_TABLES")"
+      expected_rls_table_coverage_count="$(expected_rls_table_coverage_count "$validation_evidence_file" "$EXPECTED_TENANT_RLS_TABLES")"
+    fi
     routing_tenant_context_validated="$(jq -r '.response.controller_execution.tenant_context_validated // false' "$validation_evidence_file")"
     routing_cross_tenant_negative_tests="$(jq -r '.response.controller_execution.cross_tenant_negative_tests // false' "$validation_evidence_file")"
     routing_cross_tenant_negative_test_count="$(jq -r '.response.controller_execution.cross_tenant_negative_test_count // .response.controller_execution.negative_test_count // 0' "$validation_evidence_file")"
@@ -312,6 +363,13 @@ write_summary() {
   if [[ ! "$routing_forced_rls_table_detail_count" =~ ^[0-9]+$ || ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_forced_rls_table_detail_count" -lt "$routing_rls_table_count" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ -n "$EXPECTED_TENANT_RLS_TABLES" ]]; then
+    if [[ ! "$expected_rls_table_count" =~ ^[0-9]+$ || "$expected_rls_table_count" == "0" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    elif [[ ! "$expected_rls_table_coverage_count" =~ ^[0-9]+$ || "$expected_rls_table_coverage_count" -lt "$expected_rls_table_count" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+  fi
   if [[ "$routing_tenant_context_validated" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -347,6 +405,9 @@ write_summary() {
     echo "routing_rls_table_count=$routing_rls_table_count"
     echo "routing_rls_forced_table_count=$routing_rls_forced_table_count"
     echo "routing_forced_rls_table_detail_count=$routing_forced_rls_table_detail_count"
+    echo "expected_tenant_rls_tables=${EXPECTED_TENANT_RLS_TABLES:-<unset>}"
+    echo "expected_tenant_rls_table_count=$expected_rls_table_count"
+    echo "expected_tenant_rls_table_coverage_count=$expected_rls_table_coverage_count"
     echo "routing_tenant_context_validated=$routing_tenant_context_validated"
     echo "routing_cross_tenant_negative_tests=$routing_cross_tenant_negative_tests"
     echo "routing_cross_tenant_negative_test_count=$routing_cross_tenant_negative_test_count"
@@ -411,6 +472,13 @@ write_summary() {
     fi
     if [[ ! "$routing_forced_rls_table_detail_count" =~ ^[0-9]+$ || ! "$routing_rls_table_count" =~ ^[0-9]+$ || "$routing_forced_rls_table_detail_count" -lt "$routing_rls_table_count" ]]; then
       echo "- tenant routing controller did not include unique forced-RLS table details bound to the routing deployment for every reported table: unique_detail_count=$routing_forced_rls_table_detail_count total=$routing_rls_table_count"
+    fi
+    if [[ -n "$EXPECTED_TENANT_RLS_TABLES" ]]; then
+      if [[ ! "$expected_rls_table_count" =~ ^[0-9]+$ || "$expected_rls_table_count" == "0" ]]; then
+        echo "- configured MANDOFORGE_STAGE2_TENANT_RLS_TABLES did not list any expected tables"
+      elif [[ ! "$expected_rls_table_coverage_count" =~ ^[0-9]+$ || "$expected_rls_table_coverage_count" -lt "$expected_rls_table_count" ]]; then
+        echo "- tenant routing controller did not include forced-RLS details for every configured expected table: covered=$expected_rls_table_coverage_count expected=$expected_rls_table_count"
+      fi
     fi
     if [[ "$routing_tenant_context_validated" != "true" ]]; then
       echo "- tenant routing controller did not confirm tenant context propagation"

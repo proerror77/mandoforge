@@ -127,6 +127,29 @@ require_distributed_state_backend() {
   fi
 }
 
+require_rls_table_list() {
+  local key="$1"
+  local label="$2"
+  local value
+  local table
+  local -a tables
+  value="$(trim "$(env_value "$key")")"
+  if [[ -z "$value" ]]; then
+    record_fail "$label: $key must list expected schema.table RLS coverage"
+    return
+  fi
+
+  IFS=',' read -r -a tables <<<"$value"
+  for table in "${tables[@]}"; do
+    table="$(trim "$table")"
+    if [[ ! "$table" =~ ^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      record_fail "$label: $key entry must be schema.table: ${table:-<empty>}"
+      return
+    fi
+  done
+  record_pass "$label: $key lists expected schema.table RLS coverage"
+}
+
 require_finance_system_identity() {
   local key="$1"
   local label="$2"
@@ -244,6 +267,7 @@ check_global() {
 check_tenant() {
   local label="tenant-routing"
   require_production_identity MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID "$label"
+  require_rls_table_list MANDOFORGE_STAGE2_TENANT_RLS_TABLES "$label"
   require_true MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED "$label"
   require_production_url MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL "$label"
   require_no_whiskey_url MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL "$label"
