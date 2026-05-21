@@ -317,7 +317,10 @@ finance_delivery_receipt_count() {
           receipt_id: (.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id),
           system_id: (.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id),
           status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "delivered"),
-          record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0)
+          record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0),
+          audit_id: (.export_state.latest_delivery_audit_id // .export_state.latest_audit_id // .export_state.audit_id),
+          run_id: (.export_state.latest_delivery_run_id // .export_state.latest_run_id // .export_state.run_id),
+          posted_at: (.export_state.latest_posted_at // .export_state.latest_delivered_at // .export_state.latest_timestamp // .export_state.posted_at // .export_state.delivered_at // .export_state.timestamp)
         }
       else empty end
     )
@@ -327,6 +330,7 @@ finance_delivery_receipt_count() {
         and ((.system_id // .erp_system_id // .accounting_system_id // .target_id // "") | length > 0)
         and ((.status // .result // "") | ascii_downcase | IN("delivered", "posted", "accepted", "completed", "reconciled", "validated"))
         and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .posted_at // .delivered_at // .received_at // .accepted_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1" 2>/dev/null || echo "0"
 }

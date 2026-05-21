@@ -407,7 +407,10 @@ finance_delivery_receipt_count() {
           receipt_id: (.export_state.latest_delivery_receipt_id // .export_state.latest_receipt_id // .export_state.latest_erp_batch_id // .export_state.latest_batch_id),
           system_id: (.export_state.system_id // .export_state.erp_system_id // .export_state.accounting_system_id // .export_state.target_id),
           status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "delivered"),
-          record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0)
+          record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0),
+          audit_id: (.export_state.latest_delivery_audit_id // .export_state.latest_audit_id // .export_state.audit_id),
+          run_id: (.export_state.latest_delivery_run_id // .export_state.latest_run_id // .export_state.run_id),
+          posted_at: (.export_state.latest_posted_at // .export_state.latest_delivered_at // .export_state.latest_timestamp // .export_state.posted_at // .export_state.delivered_at // .export_state.timestamp)
         }
       else empty end
     )
@@ -417,6 +420,7 @@ finance_delivery_receipt_count() {
         and ((.system_id // .erp_system_id // .accounting_system_id // .target_id // "") | length > 0)
         and ((.status // .result // "") | ascii_downcase | IN("delivered", "posted", "accepted", "completed", "reconciled", "validated"))
         and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // .posted_at // .delivered_at // .received_at // .accepted_at // .timestamp // "") | length > 0)
       )
   ] | length' "$1"
 }
@@ -2212,7 +2216,7 @@ JSON
     "system_id": "netsuite-prod-1",
     "delivery_count": 1,
     "delivery_receipts": [
-      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "status": "posted", "record_count": 1}
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
     ]
   }
 }
@@ -3031,6 +3035,37 @@ JSON
     "delivery_count": 1,
     "delivery_receipts": [
       {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "status": "posted", "record_count": 1}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-delivery-receipt-audit-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-delivery-receipt-audit.out 2>/tmp/mandoforge-stage2-archive-finance-delivery-receipt-audit.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing finance delivery receipt audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-export-delivery-observer.json" <<'JSON'
+{
+  "status": "ok",
+  "export_state": {
+    "delivery_mode": "netsuite",
+    "system_id": "netsuite-prod-1",
+    "delivery_count": 1,
+    "delivery_receipts": [
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"}
     ]
   }
 }

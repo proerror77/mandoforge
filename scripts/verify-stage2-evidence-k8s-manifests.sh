@@ -2160,7 +2160,7 @@ if ! grep -q "finance_export_delivery_system_id" "$finance_script"; then
   exit 1
 fi
 
-if ! grep -q "finance_export_delivery_receipt_count" "$finance_script"; then
+if ! grep -q "finance_export_delivery_receipt_count" "$finance_script" || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*posted_at.*delivered_at.*received_at.*accepted_at.*timestamp" "$finance_script"; then
   echo "finance evidence script must record ERP/accounting delivery receipt details" >&2
   exit 1
 fi
@@ -2170,18 +2170,23 @@ if ! grep -q "true ERP/accounting system identity" "$finance_script"; then
   exit 1
 fi
 
-if ! grep -q "delivery_receipt_count" scripts/stage2-completion-audit-gate.sh; then
+if ! grep -q "delivery_receipt_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*posted_at.*delivered_at.*received_at.*accepted_at.*timestamp" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require ERP/accounting delivery receipt details" >&2
   exit 1
 fi
 
-if ! grep -q "delivery_receipt_count" scripts/verify-stage2-evidence-archive.sh; then
+if ! grep -q "delivery_receipt_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*posted_at.*delivered_at.*received_at.*accepted_at.*timestamp" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require ERP/accounting delivery receipt details" >&2
   exit 1
 fi
 
 if ! grep -q "missing finance delivery receipt evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject finance delivery without ERP/accounting receipt details" >&2
+  exit 1
+fi
+
+if ! grep -q "missing finance delivery receipt audit evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject finance delivery receipts without audit or posting details" >&2
   exit 1
 fi
 
