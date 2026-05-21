@@ -1935,6 +1935,11 @@ if ! grep -q "missing Remote Computer checked path detail evidence" scripts/veri
   exit 1
 fi
 
+if ! grep -q "duplicate Remote Computer checked path detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate Remote Computer checked path details" >&2
+  exit 1
+fi
+
 if ! grep -q "mismatched Remote Computer checked path claim evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject Remote Computer checked path details bound to a different state claim" >&2
   exit 1
@@ -1955,8 +1960,23 @@ if ! grep -q "missing sidecar checked Pod audit evidence" scripts/verify-stage2-
   exit 1
 fi
 
+if ! grep -q "duplicate sidecar checked Pod detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate sidecar checked Pod details" >&2
+  exit 1
+fi
+
 if ! grep -q "summary without worker load-check detail evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject combined worker/Remote Computer summaries without worker load-check details" >&2
+  exit 1
+fi
+
+if ! grep -q "summary duplicate checked path detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate checked path details in combined summaries" >&2
+  exit 1
+fi
+
+if ! grep -q "summary duplicate sidecar checked Pod detail evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate sidecar checked Pod details in combined summaries" >&2
   exit 1
 fi
 

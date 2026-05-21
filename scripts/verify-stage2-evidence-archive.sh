@@ -116,7 +116,8 @@ remote_state_checked_path_detail_count() {
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$cluster_id, $state_claim, (.path // .state_path // .name // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 summary_checked_path_detail_count() {
@@ -136,7 +137,8 @@ summary_checked_path_detail_count() {
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$cluster_id, $state_claim, (.path // .state_path // .name // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 sidecar_checked_pod_detail_count() {
@@ -154,7 +156,8 @@ sidecar_checked_pod_detail_count() {
         and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$cluster_id, (.pod // .pod_name // .name // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 summary_sidecar_checked_pod_detail_count() {
@@ -172,7 +175,8 @@ summary_sidecar_checked_pod_detail_count() {
         and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$cluster_id, (.pod // .pod_name // .name // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 is_nonnegative_integer() {
@@ -3006,6 +3010,44 @@ JSON
       "cluster_id": "prod-cluster-1",
       "distributed_state_backend": "juicefs",
       "state_claim": "mandoforge-remote-computer-state",
+      "checked_path_count": 2,
+      "checked_paths": [
+        {"cluster_id": "prod-cluster-1", "path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"cluster_id": "prod-cluster-1", "path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-2", "checked_at": "1970-01-01T00:00:01Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-remote-state-path-duplicate-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-remote-state-path-duplicate-negative.out 2>/tmp/mandoforge-stage2-archive-remote-state-path-duplicate-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate Remote Computer checked path detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/remote-computer-state-sync-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "controller_execution": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "distributed_state_backend": "juicefs",
+      "state_claim": "mandoforge-remote-computer-state",
       "checked_path_count": 1,
       "checked_paths": [
         {"cluster_id": "prod-cluster-1", "path": "/agent-state/session-events", "state_claim": "mandoforge-remote-computer-state"}
@@ -3193,6 +3235,44 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing sidecar checked Pod detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "validation_result": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "replacement_scope": "cluster",
+      "replacement_pods_healthy": true,
+      "checked_pod_count": 2,
+      "checked_pods": [
+        {"cluster_id": "prod-cluster-1", "pod": "remote-computer-sidecar-prod-1", "status": "running", "audit_id": "sidecar-pod-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"cluster_id": "prod-cluster-1", "pod": "remote-computer-sidecar-prod-1", "status": "running", "audit_id": "sidecar-pod-audit-2", "checked_at": "1970-01-01T00:00:01Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-sidecar-pod-duplicate-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-sidecar-pod-duplicate-negative.out 2>/tmp/mandoforge-stage2-archive-sidecar-pod-duplicate-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate sidecar checked Pod detail evidence to fail" >&2
     exit 1
   fi
 
@@ -5419,6 +5499,106 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected summary checked path claim mismatch to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/worker-remote-computer/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "production_blocked": false,
+  "production_blocked_count": 0,
+  "same_cluster_target": true,
+  "worker": {
+    "cluster_id": "prod-cluster-1",
+    "worker_pool": "prod-workers",
+    "load_check_detail_count": 1,
+    "load_checks": [
+      {"cluster_id": "prod-cluster-1", "name": "queue-isolated", "worker_pool": "prod-workers", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ]
+  },
+  "remote_computer": {
+    "state_sync_cluster_id": "prod-cluster-1",
+    "sidecar_cluster_id": "prod-cluster-1",
+    "distributed_state_backend": "juicefs",
+    "state_claim": "mandoforge-remote-computer-state",
+    "checked_path_count": 2,
+    "checked_paths": [
+      {"cluster_id": "prod-cluster-1", "path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"cluster_id": "prod-cluster-1", "path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-2", "checked_at": "1970-01-01T00:00:01Z"}
+    ],
+    "replacement_pods_healthy": true,
+    "checked_pod_count": 1,
+    "checked_pods": [
+      {"cluster_id": "prod-cluster-1", "pod": "remote-computer-sidecar-prod-1", "status": "running", "audit_id": "sidecar-pod-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-summary-duplicate-path-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-summary-duplicate-path-negative.out 2>/tmp/mandoforge-stage2-archive-summary-duplicate-path-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected summary duplicate checked path detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/worker-remote-computer/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "production_blocked": false,
+  "production_blocked_count": 0,
+  "same_cluster_target": true,
+  "worker": {
+    "cluster_id": "prod-cluster-1",
+    "worker_pool": "prod-workers",
+    "load_check_detail_count": 1,
+    "load_checks": [
+      {"cluster_id": "prod-cluster-1", "name": "queue-isolated", "worker_pool": "prod-workers", "status": "validated", "audit_id": "worker-load-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ]
+  },
+  "remote_computer": {
+    "state_sync_cluster_id": "prod-cluster-1",
+    "sidecar_cluster_id": "prod-cluster-1",
+    "distributed_state_backend": "juicefs",
+    "state_claim": "mandoforge-remote-computer-state",
+    "checked_path_count": 1,
+    "checked_paths": [
+      {"cluster_id": "prod-cluster-1", "path": "/agent-state/session-events", "status": "validated", "state_claim": "mandoforge-remote-computer-state", "audit_id": "state-path-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+    ],
+    "replacement_pods_healthy": true,
+    "checked_pod_count": 2,
+    "checked_pods": [
+      {"cluster_id": "prod-cluster-1", "pod": "remote-computer-sidecar-prod-1", "status": "running", "audit_id": "sidecar-pod-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"cluster_id": "prod-cluster-1", "pod": "remote-computer-sidecar-prod-1", "status": "running", "audit_id": "sidecar-pod-audit-2", "checked_at": "1970-01-01T00:00:01Z"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-summary-duplicate-sidecar-pod-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-summary-duplicate-sidecar-pod-negative.out 2>/tmp/mandoforge-stage2-archive-summary-duplicate-sidecar-pod-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected summary duplicate sidecar checked Pod detail evidence to fail" >&2
     exit 1
   fi
 

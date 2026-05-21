@@ -488,7 +488,8 @@ remote_state_checked_path_detail_count() {
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$cluster_id, $state_claim, (.path // .state_path // .name // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 summary_checked_path_detail_count() {
@@ -508,7 +509,8 @@ summary_checked_path_detail_count() {
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$cluster_id, $state_claim, (.path // .state_path // .name // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 sidecar_checked_pod_detail_count() {
@@ -526,7 +528,8 @@ sidecar_checked_pod_detail_count() {
         and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$cluster_id, (.pod // .pod_name // .name // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 summary_sidecar_checked_pod_detail_count() {
@@ -544,7 +547,8 @@ summary_sidecar_checked_pod_detail_count() {
         and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$cluster_id, (.pod // .pod_name // .name // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 tenant_negative_test_detail_count() {

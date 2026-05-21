@@ -191,7 +191,8 @@ write_summary() {
           and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
         )
-    ] | length' "$state_sync_evidence_file")"
+      | [$cluster_id, $state_claim, (.path // .state_path // .name // "")] | @tsv
+    ] | unique | length' "$state_sync_evidence_file")"
   fi
   sidecar_recovery_evidence_status="not_requested"
   sidecar_recovery_run_status="not_run"
@@ -227,7 +228,8 @@ write_summary() {
           and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
         )
-    ] | length' "$sidecar_recovery_evidence_file")"
+      | [$cluster_id, (.pod // .pod_name // .name // "")] | @tsv
+    ] | unique | length' "$sidecar_recovery_evidence_file")"
   fi
   blocked_count="$(jq -r '[
       .production_state_sync.production_blocked,

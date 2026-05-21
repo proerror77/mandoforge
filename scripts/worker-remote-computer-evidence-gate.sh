@@ -257,7 +257,7 @@ write_summary() {
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
   ]' "$state_sync")"
-  state_checked_path_detail_count="$(jq -r 'length' <<<"$state_checked_paths_json")"
+  state_checked_path_detail_count="$(jq -r '[.[] | [(.cluster_id // .state_sync_cluster_id // .target_cluster_id // ""), (.state_claim // .claim // .pvc // .persistent_volume_claim // ""), (.path // .state_path // .name // "")] | @tsv] | unique | length' <<<"$state_checked_paths_json")"
   state_cluster_profile="$(jq -r '.response.controller_execution.cluster_profile // "unknown"' "$state_sync")"
   sidecar_recovery_ready="$(jq -r '.sidecar_recovery.status == "ready"' "$remote_readiness")"
   sidecar_recovery_evidence_status="not_requested"
@@ -296,7 +296,7 @@ write_summary() {
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
         )
     ]' "$sidecar_recovery")"
-    sidecar_checked_pod_detail_count="$(jq -r 'length' <<<"$sidecar_checked_pods_json")"
+    sidecar_checked_pod_detail_count="$(jq -r '[.[] | [(.cluster_id // .sidecar_cluster_id // .target_cluster_id // ""), (.pod // .pod_name // .name // "")] | @tsv] | unique | length' <<<"$sidecar_checked_pods_json")"
   fi
   runner_ready="$(jq -r '(.configured == true) and (((.status // "") == "ready") or ((.status // "") == "dry_run_ready") or ((.status // "") == "live_ready"))' "$runner_readiness")"
   same_cluster_target="false"
@@ -485,7 +485,7 @@ write_summary() {
     jq -r '"distributed_state_backend=\(.remote_computer.distributed_state_backend)"' "$summary_json"
     jq -r '"remote_state_claim=\(.remote_computer.state_claim)"' "$summary_json"
     jq -r '"remote_state_checked_path_count=\(.remote_computer.checked_path_count)"' "$summary_json"
-    jq -r '"remote_state_checked_path_detail_count=\(.remote_computer.checked_paths | length)"' "$summary_json"
+    jq -r '"remote_state_checked_path_detail_count=\([.remote_computer.checked_paths[]? | [(.cluster_id // .state_sync_cluster_id // .target_cluster_id // ""), (.state_claim // .claim // .pvc // .persistent_volume_claim // ""), (.path // .state_path // .name // "")] | @tsv] | unique | length)"' "$summary_json"
     jq -r '"remote_runner_ready=\(.remote_computer.runner_ready)"' "$summary_json"
     jq -r '"sidecar_recovery_required=\(.remote_computer.sidecar_recovery_required)"' "$summary_json"
     jq -r '"sidecar_recovery_ready=\(.remote_computer.sidecar_recovery_ready)"' "$summary_json"
@@ -498,7 +498,7 @@ write_summary() {
     jq -r '"sidecar_replacement_scope=\(.remote_computer.sidecar_replacement_scope)"' "$summary_json"
     jq -r '"sidecar_replacement_pods_healthy=\(.remote_computer.replacement_pods_healthy)"' "$summary_json"
     jq -r '"sidecar_checked_pod_count=\(.remote_computer.checked_pod_count)"' "$summary_json"
-    jq -r '"sidecar_checked_pod_detail_count=\(.remote_computer.checked_pods | length)"' "$summary_json"
+    jq -r '"sidecar_checked_pod_detail_count=\([.remote_computer.checked_pods[]? | [(.cluster_id // .sidecar_cluster_id // .target_cluster_id // ""), (.pod // .pod_name // .name // "")] | @tsv] | unique | length)"' "$summary_json"
     jq -r '"same_cluster_target=\(.same_cluster_target)"' "$summary_json"
     echo
     echo "real_cluster_blocking_reasons:"
