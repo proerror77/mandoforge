@@ -6,12 +6,19 @@ SUBJECT="${MANDOFORGE_STAGE2_GATE_SUBJECT:-vault-evidence-gate}"
 ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/vault-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
-RUN_SECRET_LIFECYCLE="${RUN_STAGE2_SECRET_LIFECYCLE:-0}"
+RUN_SECRET_LIFECYCLE="${RUN_STAGE2_SECRET_LIFECYCLE:-1}"
+AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
 
 auth_headers=(
-  -H "x-mandoforge-subject: $SUBJECT"
-  -H "x-mandoforge-roles: $ROLES"
 )
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -64,12 +71,18 @@ write_summary() {
   local status
   local provider_status
   local health_status
+  local kms_provider
   local kms_status
+  local kms_configured
+  local kms_endpoint_configured
+  local rotation_latest_validated
   local rotation_status
   local recovery_status
   local recovery_evidence_status
   local recovery_validation_status
   local recovery_controller_fresh
+  local recovery_controller_validated
+  local recovery_rotation_validated
   local recovery_controller_age_hours
   local rotation_evidence_status
   local rotation_run_status
@@ -78,10 +91,16 @@ write_summary() {
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
   provider_status="$(jq -r '.secret_provider.status // "unknown"' "$readiness_file")"
   health_status="$(jq -r '.status // "unknown"' "$health_file")"
+  kms_provider="$(jq -r '.kms.provider // "reserved"' "$readiness_file")"
   kms_status="$(jq -r '.kms.status // "unknown"' "$readiness_file")"
+  kms_configured="$(jq -r '.kms.configured // false' "$readiness_file")"
+  kms_endpoint_configured="$(jq -r '.kms.endpoint_configured // false' "$readiness_file")"
   rotation_status="$(jq -r '.production_rotation.status // "unknown"' "$readiness_file")"
+  rotation_latest_validated="$(jq -r '.production_rotation.latest_rotation_validated // false' "$readiness_file")"
   recovery_status="$(jq -r '.production_recovery.status // "unknown"' "$readiness_file")"
   recovery_controller_fresh="$(jq -r '.production_recovery.controller_evidence_fresh // false' "$readiness_file")"
+  recovery_controller_validated="$(jq -r '.production_recovery.latest_controller_validated // false' "$readiness_file")"
+  recovery_rotation_validated="$(jq -r '.production_recovery.latest_rotation_validated // false' "$readiness_file")"
   recovery_controller_age_hours="$(jq -r '.production_recovery.latest_controller_age_hours // "none"' "$readiness_file")"
   recovery_evidence_status="missing"
   recovery_validation_status="unknown"
@@ -97,19 +116,52 @@ write_summary() {
   fi
   blocked_count="$(jq -r '[
       .production_rotation.production_blocked,
-      .production_recovery.production_blocked
+      .production_recovery.production_blocked,
+      (.secret_provider.status != "ready"),
+      (.kms.provider == "reserved"),
+      (.kms.status != "ready"),
+      (.kms.configured != true),
+      (.kms.endpoint_configured != true),
+      (.production_rotation.latest_rotation_validated != true),
+      (.production_recovery.latest_rotation_validated != true),
+      (.production_recovery.latest_controller_validated != true),
+      (.production_recovery.controller_evidence_fresh != true)
     ] | map(select(. == true)) | length' "$readiness_file")"
+  if [[ "$health_status" != "ready" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$RUN_SECRET_LIFECYCLE" != "1" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$recovery_evidence_status" != "captured" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$recovery_validation_status" != "validated" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$rotation_evidence_status" != "captured" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$rotation_run_status" != "validated" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "vault_readiness_status=$status"
     echo "vault_health_status=$health_status"
     echo "secret_provider_status=$provider_status"
+    echo "kms_provider=$kms_provider"
     echo "kms_status=$kms_status"
+    echo "kms_configured=$kms_configured"
+    echo "kms_endpoint_configured=$kms_endpoint_configured"
     echo "production_rotation_status=$rotation_status"
+    echo "production_rotation_latest_validated=$rotation_latest_validated"
     echo "production_recovery_status=$recovery_status"
     echo "recovery_evidence_status=$recovery_evidence_status"
     echo "recovery_validation_status=$recovery_validation_status"
     echo "recovery_controller_evidence_fresh=$recovery_controller_fresh"
+    echo "recovery_controller_validated=$recovery_controller_validated"
+    echo "recovery_rotation_validated=$recovery_rotation_validated"
     echo "recovery_controller_age_hours=$recovery_controller_age_hours"
     echo "rotation_evidence_status=$rotation_evidence_status"
     echo "rotation_run_status=$rotation_run_status"
@@ -122,9 +174,42 @@ write_summary() {
     echo
     echo "rotation_blocking_reasons:"
     jq -r '.production_rotation.blocking_reasons[]? | "- \(.)"' "$readiness_file"
+    if [[ "$provider_status" != "ready" ]]; then
+      echo "- Vault secret provider is not ready: $provider_status"
+    fi
+    if [[ "$health_status" != "ready" ]]; then
+      echo "- Vault health endpoint is not ready: $health_status"
+    fi
+    if [[ "$kms_provider" == "reserved" || "$kms_status" != "ready" || "$kms_configured" != "true" || "$kms_endpoint_configured" != "true" ]]; then
+      echo "- external KMS/HSM backend is not fully configured: provider=$kms_provider status=$kms_status configured=$kms_configured endpoint=$kms_endpoint_configured"
+    fi
+    if [[ "$RUN_SECRET_LIFECYCLE" != "1" ]]; then
+      echo "- KMS rotation evidence capture is disabled"
+    fi
+    if [[ "$rotation_evidence_status" != "captured" ]]; then
+      echo "- KMS rotation evidence was not captured"
+    fi
+    if [[ "$rotation_run_status" != "validated" ]]; then
+      echo "- KMS rotation status is not validated: $rotation_run_status"
+    fi
     echo
     echo "recovery_blocking_reasons:"
     jq -r '.production_recovery.blocking_reasons[]? | "- \(.)"' "$readiness_file"
+    if [[ "$recovery_evidence_status" != "captured" ]]; then
+      echo "- KMS recovery evidence was not captured"
+    fi
+    if [[ "$recovery_validation_status" != "validated" ]]; then
+      echo "- KMS recovery validation status is not validated: $recovery_validation_status"
+    fi
+    if [[ "$recovery_rotation_validated" != "true" ]]; then
+      echo "- KMS recovery readiness does not reference validated rotation evidence"
+    fi
+    if [[ "$recovery_controller_validated" != "true" ]]; then
+      echo "- KMS recovery controller evidence is not validated"
+    fi
+    if [[ "$recovery_controller_fresh" != "true" ]]; then
+      echo "- KMS recovery controller evidence is not fresh"
+    fi
   } >"$summary_file"
 
   cat "$summary_file"

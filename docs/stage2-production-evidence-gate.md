@@ -131,7 +131,13 @@ RUN_STAGE2_SECRET_LIFECYCLE=1 \
 ./scripts/vault-evidence-gate.sh
 ```
 
-That gate collects Vault readiness, Vault health, KMS recovery validation, and optional KMS rotation evidence into `.mandoforge/vault-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/vault-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects Vault readiness, Vault health, KMS recovery validation, and
+KMS rotation evidence into `.mandoforge/vault-evidence/`. It fails closed unless
+Vault is healthy, the secret provider is ready, the KMS/HSM backend is external
+and ready, rotation evidence is captured and validated, and recovery evidence is
+captured with fresh validated controller evidence. The matching in-cluster
+template is `deploy/stage2-evidence/vault-evidence-job.example.yaml`, which
+persists its output under the Stage 2 production evidence PVC.
 
 For a narrower approval-notification proof, run:
 

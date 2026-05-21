@@ -563,6 +563,21 @@ if ! grep -q "RUN_STAGE2_SECRET_LIFECYCLE" "$vault_script"; then
   exit 1
 fi
 
+if ! grep -q "RUN_STAGE2_SECRET_LIFECYCLE.*:-1" "$vault_script"; then
+  echo "Vault evidence script must default to KMS rotation evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_SECRET_LIFECYCLE" deploy/stage2-evidence/vault-evidence-job.example.yaml; then
+  echo "Vault evidence Job must configure secret lifecycle evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q 'value: "1"' deploy/stage2-evidence/vault-evidence-job.example.yaml; then
+  echo "Vault evidence Job must enable secret lifecycle evidence capture" >&2
+  exit 1
+fi
+
 if ! grep -q "vault-kms-rotation-evidence.json" "$vault_script"; then
   echo "Vault evidence script must write explicit KMS rotation evidence metadata" >&2
   exit 1
@@ -570,6 +585,21 @@ fi
 
 if ! grep -q "vault-kms-rotation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit KMS rotation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "kms_provider.*reserved" "$vault_script"; then
+  echo "Vault evidence script must fail closed on reserved KMS provider" >&2
+  exit 1
+fi
+
+if ! grep -q "rotation_run_status.*validated" "$vault_script"; then
+  echo "Vault evidence script must require validated KMS rotation evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "recovery_controller_validated" "$vault_script"; then
+  echo "Vault evidence script must verify validated recovery controller evidence" >&2
   exit 1
 fi
 
