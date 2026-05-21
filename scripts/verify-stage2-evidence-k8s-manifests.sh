@@ -445,6 +445,11 @@ if ! grep -q "sidecar_replacement_pods_healthy" "$remote_computer_script" || ! g
   exit 1
 fi
 
+if ! grep -q "state_sync_cluster_id.*target_cluster_id" "$remote_computer_script" || ! grep -q "sidecar_cluster_id.*target_cluster_id" "$remote_computer_script"; then
+  echo "Remote Computer evidence script must bind state path and sidecar Pod details to their cluster ids" >&2
+  exit 1
+fi
+
 if ! grep -q "sidecar_target_kind" "$remote_computer_script" || ! grep -q "sidecar_node_count" "$remote_computer_script" || ! grep -q "sidecar_replacement_scope" "$remote_computer_script"; then
   echo "Remote Computer evidence script must require real cluster-wide sidecar replacement evidence" >&2
   exit 1
@@ -517,6 +522,11 @@ fi
 
 if ! grep -q "load_validated" "$worker_remote_computer_script" || ! grep -q "worker_load_check_detail_count" "$worker_remote_computer_script" || ! grep -q "worker_load_checks" "$worker_remote_computer_script"; then
   echo "Worker/Remote Computer evidence script must verify and summarize worker load validation detail evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "worker_cluster_id.*target_cluster_id" "$worker_remote_computer_script" || ! grep -q "state_sync_cluster_id.*target_cluster_id" "$worker_remote_computer_script" || ! grep -q "sidecar_cluster_id.*target_cluster_id" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must bind load-check, state-path, and sidecar Pod details to the shared cluster ids" >&2
   exit 1
 fi
 
@@ -1032,6 +1042,11 @@ fi
 
 if ! grep -q "audit_id.*audit_log_id.*trace_id.*run_id.*checked_at.*executed_at.*validated_at.*timestamp" "$worker_script"; then
   echo "Worker evidence script must require audited worker load-check details" >&2
+  exit 1
+fi
+
+if ! grep -q "worker_cluster_id.*target_cluster_id" "$worker_script"; then
+  echo "Worker evidence script must bind load-check detail rows to the controller cluster id" >&2
   exit 1
 fi
 
@@ -1825,8 +1840,13 @@ if ! grep -q "worker-load-validation-evidence.json" scripts/verify-stage2-eviden
   exit 1
 fi
 
-if ! grep -q "load_validated" scripts/verify-stage2-evidence-archive.sh || ! grep -q "summary_worker_load_check_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_path_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "checked_pod_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "persistent_volume_claim" scripts/verify-stage2-evidence-archive.sh || ! grep -q "passed.*validated.*completed.*ready.*exists.*mounted.*available.*ok.*healthy.*accessible.*readable.*writable" scripts/verify-stage2-evidence-archive.sh; then
+if ! grep -q "load_validated" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cluster_bound_summary_worker_load_check_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cluster_bound_checked_path_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "cluster_bound_sidecar_checked_pod_detail_count" scripts/verify-stage2-evidence-archive.sh || ! grep -q "persistent_volume_claim" scripts/verify-stage2-evidence-archive.sh || ! grep -q "passed.*validated.*completed.*ready.*exists.*mounted.*available.*ok.*healthy.*accessible.*readable.*writable" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require audited worker load, state-contract path detail, and sidecar replacement Pod detail evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "worker_cluster_id.*target_cluster_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "state_sync_cluster_id.*target_cluster_id" scripts/verify-stage2-evidence-archive.sh || ! grep -q "sidecar_cluster_id.*target_cluster_id" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must bind worker and Remote Computer detail rows to their cluster ids" >&2
   exit 1
 fi
 
@@ -1905,13 +1925,23 @@ if ! grep -q "summary without worker load-check detail evidence" scripts/verify-
   exit 1
 fi
 
+if ! grep -q "summary detail cluster mismatch" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject combined summaries with detail rows from a different cluster" >&2
+  exit 1
+fi
+
 if ! grep -q "worker-load-validation-evidence.json" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must inspect worker real-cluster evidence" >&2
   exit 1
 fi
 
-if ! grep -q "load_validated" scripts/stage2-completion-audit-gate.sh || ! grep -q "summary_worker_load_check_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_path_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "checked_pod_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "persistent_volume_claim" scripts/stage2-completion-audit-gate.sh || ! grep -q "passed.*validated.*completed.*ready.*exists.*mounted.*available.*ok.*healthy.*accessible.*readable.*writable" scripts/stage2-completion-audit-gate.sh; then
+if ! grep -q "load_validated" scripts/stage2-completion-audit-gate.sh || ! grep -q "cluster_bound_summary_worker_load_check_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "cluster_bound_checked_path_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "cluster_bound_checked_pod_detail_count" scripts/stage2-completion-audit-gate.sh || ! grep -q "persistent_volume_claim" scripts/stage2-completion-audit-gate.sh || ! grep -q "passed.*validated.*completed.*ready.*exists.*mounted.*available.*ok.*healthy.*accessible.*readable.*writable" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit must require audited worker load, state-contract path detail, and sidecar replacement Pod detail evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "worker_cluster_id.*target_cluster_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "state_sync_cluster_id.*target_cluster_id" scripts/stage2-completion-audit-gate.sh || ! grep -q "sidecar_cluster_id.*target_cluster_id" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must bind worker and Remote Computer detail rows to their cluster ids" >&2
   exit 1
 fi
 

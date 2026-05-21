@@ -88,7 +88,7 @@ is_production_identity() {
 }
 
 worker_load_check_detail_count() {
-  jq -r '[
+  jq -r '(.response.controller_execution.cluster_id // "") as $cluster_id | [
     (
       .response.controller_execution.load_checks[]?,
       .response.controller_execution.worker_pool_checks[]?,
@@ -100,6 +100,8 @@ worker_load_check_detail_count() {
         type == "object"
         and ((.name // .check // .kind // "") | length > 0)
         and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
+        and (($cluster_id // "") | length > 0)
+        and ((.cluster_id // .worker_cluster_id // .target_cluster_id // "") == $cluster_id)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -233,7 +235,7 @@ write_summary() {
       echo "- worker load-validation controller did not report load_validated=true"
     fi
     if [[ ! "$load_validation_check_detail_count" =~ ^[0-9]+$ || "$load_validation_check_detail_count" == "0" ]]; then
-      echo "- worker load-validation controller did not report audited worker-pool load check details"
+      echo "- worker load-validation controller did not report audited worker-pool load check details bound to the same cluster"
     fi
     if [[ "$load_validation_controller_isolated_pool" != "true" ]]; then
       echo "- worker load-validation controller did not report isolated_worker_pool_configured=true"

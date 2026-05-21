@@ -174,7 +174,7 @@ write_summary() {
     state_sync_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // "unknown"' "$state_sync_evidence_file")"
     state_sync_state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$state_sync_evidence_file")"
     state_sync_checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$state_sync_evidence_file")"
-    state_sync_checked_path_detail_count="$(jq -r '(.response.controller_execution.state_claim // "") as $state_claim | [
+    state_sync_checked_path_detail_count="$(jq -r '(.response.controller_execution.state_claim // "") as $state_claim | (.response.controller_execution.cluster_id // "") as $cluster_id | [
       (
         .response.controller_execution.checked_paths[]?,
         .response.controller_execution.checked_state_paths[]?,
@@ -183,8 +183,10 @@ write_summary() {
       | select(
           type == "object"
           and ($state_claim | length > 0)
+          and (($cluster_id // "") | length > 0)
           and ((.path // .state_path // .name // "") | length > 0)
           and ((.state_claim // .claim // .pvc // .persistent_volume_claim // "") == $state_claim)
+          and ((.cluster_id // .state_sync_cluster_id // .target_cluster_id // "") == $cluster_id)
           and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
         )
@@ -210,7 +212,7 @@ write_summary() {
     sidecar_replacement_scope="$(jq -r '.response.validation_result.replacement_scope // "unknown"' "$sidecar_recovery_evidence_file")"
     sidecar_replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$sidecar_recovery_evidence_file")"
     sidecar_checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$sidecar_recovery_evidence_file")"
-    sidecar_checked_pod_detail_count="$(jq -r '[
+    sidecar_checked_pod_detail_count="$(jq -r '(.response.validation_result.cluster_id // "") as $cluster_id | [
       (
         .response.validation_result.checked_pods[]?,
         .response.validation_result.replacement_pods[]?,
@@ -219,6 +221,8 @@ write_summary() {
       | select(
           type == "object"
           and ((.pod // .pod_name // .name // "") | length > 0)
+          and (($cluster_id // "") | length > 0)
+          and ((.cluster_id // .sidecar_cluster_id // .target_cluster_id // "") == $cluster_id)
           and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
         )
@@ -353,7 +357,7 @@ write_summary() {
       echo "- state-sync controller did not report any checked state contract paths: checked_path_count=$state_sync_checked_path_count"
     fi
     if [[ ! "$state_sync_checked_path_detail_count" =~ ^[0-9]+$ || ! "$state_sync_checked_path_count" =~ ^[0-9]+$ || "$state_sync_checked_path_detail_count" -lt "$state_sync_checked_path_count" ]]; then
-      echo "- state-sync controller did not include checked path details for every counted path: checked_path_detail_count=$state_sync_checked_path_detail_count checked_path_count=$state_sync_checked_path_count"
+      echo "- state-sync controller did not include checked path details bound to the same cluster and state claim for every counted path: checked_path_detail_count=$state_sync_checked_path_detail_count checked_path_count=$state_sync_checked_path_count"
     fi
     if [[ "$RUN_SIDECAR_RECOVERY" == "1" ]]; then
       if [[ "$sidecar_validation_status" != "validated" ]]; then
@@ -378,7 +382,7 @@ write_summary() {
         echo "- sidecar recovery validation did not report any checked Pods: checked_pod_count=$sidecar_checked_pod_count"
       fi
       if [[ ! "$sidecar_checked_pod_detail_count" =~ ^[0-9]+$ || ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_detail_count" -lt "$sidecar_checked_pod_count" ]]; then
-        echo "- sidecar recovery validation did not include checked Pod details for every counted Pod: checked_pod_detail_count=$sidecar_checked_pod_detail_count checked_pod_count=$sidecar_checked_pod_count"
+        echo "- sidecar recovery validation did not include checked Pod details bound to the same cluster for every counted Pod: checked_pod_detail_count=$sidecar_checked_pod_detail_count checked_pod_count=$sidecar_checked_pod_count"
       fi
     fi
     echo

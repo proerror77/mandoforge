@@ -99,7 +99,7 @@ is_production_identity() {
 }
 
 worker_load_check_detail_count() {
-  jq -r '[
+  jq -r '(.response.controller_execution.cluster_id // "") as $cluster_id | [
     (
       .response.controller_execution.load_checks[]?,
       .response.controller_execution.worker_pool_checks[]?,
@@ -111,6 +111,8 @@ worker_load_check_detail_count() {
         type == "object"
         and ((.name // .check // .kind // "") | length > 0)
         and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
+        and (($cluster_id // "") | length > 0)
+        and ((.cluster_id // .worker_cluster_id // .target_cluster_id // "") == $cluster_id)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -198,7 +200,7 @@ write_summary() {
   worker_node_count="$(jq -r '.response.controller_execution.node_count // 0' "$worker_validation")"
   worker_cluster_profile="$(jq -r '.response.controller_execution.cluster_profile // "unknown"' "$worker_validation")"
   worker_load_check_detail_count="$(worker_load_check_detail_count "$worker_validation")"
-  worker_load_checks_json="$(jq -c '[
+  worker_load_checks_json="$(jq -c '(.response.controller_execution.cluster_id // "") as $cluster_id | [
     (
       .response.controller_execution.load_checks[]?,
       .response.controller_execution.worker_pool_checks[]?,
@@ -210,6 +212,8 @@ write_summary() {
         type == "object"
         and ((.name // .check // .kind // "") | length > 0)
         and ((.worker_pool // .pool_id // .queue // .queue_name // "") | length > 0)
+        and (($cluster_id // "") | length > 0)
+        and ((.cluster_id // .worker_cluster_id // .target_cluster_id // "") == $cluster_id)
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -225,7 +229,7 @@ write_summary() {
   state_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // "unknown"' "$state_sync")"
   state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$state_sync")"
   state_checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$state_sync")"
-  state_checked_paths_json="$(jq -c '(.response.controller_execution.state_claim // "") as $state_claim | [
+  state_checked_paths_json="$(jq -c '(.response.controller_execution.state_claim // "") as $state_claim | (.response.controller_execution.cluster_id // "") as $cluster_id | [
     (
       .response.controller_execution.checked_paths[]?,
       .response.controller_execution.checked_state_paths[]?,
@@ -234,8 +238,10 @@ write_summary() {
     | select(
         type == "object"
         and ($state_claim | length > 0)
+        and (($cluster_id // "") | length > 0)
         and ((.path // .state_path // .name // "") | length > 0)
         and ((.state_claim // .claim // .pvc // .persistent_volume_claim // "") == $state_claim)
+        and ((.cluster_id // .state_sync_cluster_id // .target_cluster_id // "") == $cluster_id)
         and ((.status // .result // .health // "") | ascii_downcase | IN("passed", "validated", "completed", "ready", "exists", "mounted", "available", "ok", "healthy", "accessible", "readable", "writable"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
@@ -264,7 +270,7 @@ write_summary() {
     sidecar_replacement_scope="$(jq -r '.response.validation_result.replacement_scope // "unknown"' "$sidecar_recovery")"
     sidecar_replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$sidecar_recovery")"
     sidecar_checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$sidecar_recovery")"
-    sidecar_checked_pods_json="$(jq -c '[
+    sidecar_checked_pods_json="$(jq -c '(.response.validation_result.cluster_id // "") as $cluster_id | [
       (
         .response.validation_result.checked_pods[]?,
         .response.validation_result.replacement_pods[]?,
@@ -273,6 +279,8 @@ write_summary() {
       | select(
           type == "object"
           and ((.pod // .pod_name // .name // "") | length > 0)
+          and (($cluster_id // "") | length > 0)
+          and ((.cluster_id // .sidecar_cluster_id // .target_cluster_id // "") == $cluster_id)
           and ((.status // .phase // .health // "") | ascii_downcase | IN("running", "ready", "healthy", "succeeded", "validated"))
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
         )
@@ -477,7 +485,7 @@ write_summary() {
     is_distributed_state_backend "$state_backend" || echo "- Remote Computer state backend is not a supported distributed filesystem: $state_backend"
     [[ -n "$state_claim" ]] || echo "- Remote Computer state-sync did not report a state claim"
     [[ "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_count" -gt 0 ]] || echo "- Remote Computer state-sync did not report any checked state contract paths: checked_path_count=$state_checked_path_count"
-    [[ "$state_checked_path_detail_count" =~ ^[0-9]+$ && "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_detail_count" -ge "$state_checked_path_count" ]] || echo "- Remote Computer state-sync did not include checked path details for every counted path: checked_path_detail_count=$state_checked_path_detail_count checked_path_count=$state_checked_path_count"
+    [[ "$state_checked_path_detail_count" =~ ^[0-9]+$ && "$state_checked_path_count" =~ ^[0-9]+$ && "$state_checked_path_detail_count" -ge "$state_checked_path_count" ]] || echo "- Remote Computer state-sync did not include checked path details bound to the same cluster and state claim for every counted path: checked_path_detail_count=$state_checked_path_detail_count checked_path_count=$state_checked_path_count"
     [[ "$same_cluster_target" == "true" ]] || echo "- worker, state-sync, and sidecar evidence do not share the same cluster id"
     if [[ "$RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" == "1" ]]; then
       [[ "$sidecar_recovery_evidence_status" == "captured" ]] || echo "- sidecar replacement evidence was not captured: $sidecar_recovery_evidence_status"
@@ -488,7 +496,7 @@ write_summary() {
       [[ "$sidecar_replacement_scope" == "cluster" ]] || echo "- sidecar replacement scope is not cluster-wide: $sidecar_replacement_scope"
       [[ "$sidecar_replacement_pods_healthy" == "true" ]] || echo "- sidecar replacement validation did not report healthy replacement Pods"
       [[ "$sidecar_checked_pod_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_count" -gt 0 ]] || echo "- sidecar replacement validation did not report any checked Pods: checked_pod_count=$sidecar_checked_pod_count"
-      [[ "$sidecar_checked_pod_detail_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_detail_count" -ge "$sidecar_checked_pod_count" ]] || echo "- sidecar replacement validation did not include checked Pod details for every counted Pod: checked_pod_detail_count=$sidecar_checked_pod_detail_count checked_pod_count=$sidecar_checked_pod_count"
+      [[ "$sidecar_checked_pod_detail_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_count" =~ ^[0-9]+$ && "$sidecar_checked_pod_detail_count" -ge "$sidecar_checked_pod_count" ]] || echo "- sidecar replacement validation did not include checked Pod details bound to the same cluster for every counted Pod: checked_pod_detail_count=$sidecar_checked_pod_detail_count checked_pod_count=$sidecar_checked_pod_count"
     fi
     jq -r '"evidence_dir=\(.evidence_dir)"' "$summary_json"
   } >"$summary_txt"

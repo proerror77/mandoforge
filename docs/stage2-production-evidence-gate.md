@@ -107,13 +107,14 @@ validated controller execution, real cluster target kind, production cluster id,
 `node_count >= 2`, load validation, isolated worker-pool configuration, and
 worker-pool load-check details in the combined summary with check name, worker
 pool or queue, passed/validated/completed status, and audit id, trace id, run id,
-or timestamp detail;
+or timestamp detail, with each load-check detail bound to the worker cluster id;
 the standalone worker gate also rejects mismatches with
 `MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID`. State-sync evidence must name the
-state claim plus checked state-contract paths with matching per-path state-claim
-identity, passed statuses, and audit id,
+state claim plus checked state-contract paths with matching per-path cluster id
+and state-claim identity, passed statuses, and audit id,
 trace id, run id, or timestamp detail, and sidecar validation must report
-healthy replacement Pods plus checked Pod counts with the same audit detail; single-host, local-hostpath,
+healthy replacement Pods plus checked Pod counts with the same cluster id and
+audit detail; single-host, local-hostpath,
 or shape-only controller evidence does not satisfy this proof.
 The matching in-cluster template is
 `deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml`.
