@@ -6,6 +6,7 @@ SUBJECT="${MANDOFORGE_STAGE2_GATE_SUBJECT:-tenant-isolation-evidence-gate}"
 ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/tenant-isolation-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
+EXPECTED_TENANT_DEPLOYMENT_ID="${MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID:-}"
 AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-}"
 
 auth_headers=(
@@ -278,6 +279,14 @@ write_summary() {
   if ! is_production_identity "$routing_deployment_id"; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ -n "$EXPECTED_TENANT_DEPLOYMENT_ID" ]]; then
+    if ! is_production_identity "$EXPECTED_TENANT_DEPLOYMENT_ID"; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ "$routing_deployment_id" != "$EXPECTED_TENANT_DEPLOYMENT_ID" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+  fi
   if ! has_multiple_tenants "$routing_tenant_count"; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -327,6 +336,7 @@ write_summary() {
     echo "routing_validation_status=$routing_validation_status"
     echo "routing_target_kind=$routing_target_kind"
     echo "routing_deployment_id=$routing_deployment_id"
+    echo "expected_tenant_deployment_id=${EXPECTED_TENANT_DEPLOYMENT_ID:-<unset>}"
     echo "routing_environment=$routing_environment"
     echo "routing_tenant_count=$routing_tenant_count"
     echo "routing_tenant_sample_count=$routing_tenant_sample_count"
@@ -368,6 +378,14 @@ write_summary() {
     fi
     if ! is_production_identity "$routing_deployment_id"; then
       echo "- tenant routing deployment id is pilot/mock/local: ${routing_deployment_id:-<empty>}"
+    fi
+    if [[ -n "$EXPECTED_TENANT_DEPLOYMENT_ID" ]]; then
+      if ! is_production_identity "$EXPECTED_TENANT_DEPLOYMENT_ID"; then
+        echo "- configured MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID is pilot/mock/local: $EXPECTED_TENANT_DEPLOYMENT_ID"
+      fi
+      if [[ "$routing_deployment_id" != "$EXPECTED_TENANT_DEPLOYMENT_ID" ]]; then
+        echo "- tenant routing deployment id does not match MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID"
+      fi
     fi
     if ! has_multiple_tenants "$routing_tenant_count"; then
       echo "- tenant routing controller did not report multiple tenants: tenant_count=$routing_tenant_count"

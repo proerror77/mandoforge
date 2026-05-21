@@ -695,6 +695,11 @@ if ! grep -q "routing_deployment_id" "$tenant_script" || ! grep -q "pilot/mock/l
   exit 1
 fi
 
+if ! grep -q "MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID" "$tenant_script" || ! grep -q "expected_tenant_deployment_id" "$tenant_script"; then
+  echo "Tenant isolation evidence script must bind routing evidence to the declared tenant deployment id" >&2
+  exit 1
+fi
+
 if ! grep -q "routing_rls_enforced" "$tenant_script"; then
   echo "Tenant isolation evidence script must require controller-confirmed RLS enforcement" >&2
   exit 1
