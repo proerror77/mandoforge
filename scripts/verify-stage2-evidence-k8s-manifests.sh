@@ -1350,6 +1350,11 @@ if ! grep -q "controller id is pilot/mock/local" "$policy_rollout_script"; then
   exit 1
 fi
 
+if ! grep -q "MANDOFORGE_STAGE2_POLICY_CONTROLLER_ID" "$policy_rollout_script" || ! grep -q "expected_policy_controller_id" "$policy_rollout_script"; then
+  echo "Policy rollout evidence script must bind controller evidence to the declared production controller id" >&2
+  exit 1
+fi
+
 if ! grep -q "production_policy_store" "$policy_rollout_script"; then
   echo "Policy rollout evidence script must require production policy store evidence" >&2
   exit 1
