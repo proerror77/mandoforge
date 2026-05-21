@@ -547,7 +547,8 @@ finance_delivery_receipt_count() {
           and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .posted_at // .delivered_at // .received_at // .accepted_at // .timestamp // "") | length > 0)
         )
-    ] | length' "$1"
+      | [$root_system_id, $root_file_name, ($root_byte_count | tostring), (.receipt_id // .receipt // .batch_id // .erp_batch_id // .delivery_id // .posting_id // "")] | @tsv
+    ] | unique | length' "$1"
 }
 
 finance_close_step_detail_count() {
@@ -563,7 +564,8 @@ finance_close_step_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$root_close_id, (.name // .step // .kind // .action // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 finance_reconciliation_check_detail_count() {
@@ -579,7 +581,8 @@ finance_reconciliation_check_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1"
+    | [$root_reconciliation_id, (.name // .check // .kind // "")] | @tsv
+  ] | unique | length' "$1"
 }
 
 artifact_issue() {
@@ -2179,6 +2182,42 @@ JSON
       "close_id": "netsuite-close-prod-1",
       "steps": [
         {"name": "export-present", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"name": "export-present", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:01Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-close-step-duplicate-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-close-step-duplicate-negative.out 2>/tmp/mandoforge-stage2-archive-finance-close-step-duplicate-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate finance close step evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-close-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "completed",
+    "actions": ["usage_finance_close_controller_executed"],
+    "close_controller_configured": true,
+    "close_controller_execution": {
+      "status": "closed",
+      "close_id": "netsuite-close-prod-1",
+      "steps": [
+        {"name": "export-present", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
         {"name": "accounting-period-open", "status": "passed", "close_id": "netsuite-close-prod-1", "audit_id": "finance-close-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
@@ -2347,6 +2386,37 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing finance reconciliation check audit evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-reconciliation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "reconciled",
+    "reconciliation_id": "netsuite-reconciliation-prod-1",
+    "checks": [
+      {"name": "close-evidence", "status": "passed", "reconciliation_id": "netsuite-reconciliation-prod-1", "audit_id": "finance-reconciliation-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+      {"name": "close-evidence", "status": "passed", "reconciliation_id": "netsuite-reconciliation-prod-1", "audit_id": "finance-reconciliation-audit-2", "checked_at": "1970-01-01T00:00:01Z"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-reconciliation-check-duplicate-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-reconciliation-check-duplicate-negative.out 2>/tmp/mandoforge-stage2-archive-finance-reconciliation-check-duplicate-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate finance reconciliation check evidence to fail" >&2
     exit 1
   fi
 
@@ -3587,6 +3657,40 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected mismatched finance delivery receipt export evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/finance-export-delivery-observer.json" <<'JSON'
+{
+  "status": "ok",
+  "export_state": {
+    "delivery_mode": "netsuite",
+    "system_id": "netsuite-prod-1",
+    "latest_file_name": "mandoforge-usage-export.csv",
+    "latest_bytes": 128,
+    "delivery_count": 2,
+    "delivery_receipts": [
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "file_name": "mandoforge-usage-export.csv", "byte_count": 128, "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:00Z", "audit_id": "finance-delivery-audit-1"},
+      {"receipt_id": "netsuite-receipt-prod-1", "system_id": "netsuite-prod-1", "file_name": "mandoforge-usage-export.csv", "byte_count": 128, "status": "posted", "record_count": 1, "posted_at": "1970-01-01T00:00:01Z", "audit_id": "finance-delivery-audit-2"}
+    ]
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-finance-delivery-receipt-duplicate-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-delivery-receipt-duplicate.out 2>/tmp/mandoforge-stage2-archive-finance-delivery-receipt-duplicate.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected duplicate finance delivery receipt evidence to fail" >&2
     exit 1
   fi
 

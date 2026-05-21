@@ -362,7 +362,8 @@ finance_delivery_receipt_count() {
           and (((.record_count // .posted_record_count // .line_count // .row_count // .entry_count // 0) | tonumber? // 0) > 0)
           and ((.audit_id // .audit_log_id // .trace_id // .run_id // .posted_at // .delivered_at // .received_at // .accepted_at // .timestamp // "") | length > 0)
         )
-    ] | length' "$1" 2>/dev/null || echo "0"
+      | [$root_system_id, $root_file_name, ($root_byte_count | tostring), (.receipt_id // .receipt // .batch_id // .erp_batch_id // .delivery_id // .posting_id // "")] | @tsv
+    ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 finance_close_step_detail_count() {
@@ -378,7 +379,8 @@ finance_close_step_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$root_close_id, (.name // .step // .kind // .action // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 finance_reconciliation_check_detail_count() {
@@ -394,7 +396,8 @@ finance_reconciliation_check_detail_count() {
         and ((.status // .result // "") | ascii_downcase | IN("passed", "validated", "completed"))
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .executed_at // .timestamp // "") | length > 0)
       )
-  ] | length' "$1" 2>/dev/null || echo "0"
+    | [$root_reconciliation_id, (.name // .check // .kind // "")] | @tsv
+  ] | unique | length' "$1" 2>/dev/null || echo "0"
 }
 
 is_real_cluster_kind() {

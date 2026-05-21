@@ -273,15 +273,15 @@ That gate collects finance dashboard summary, finance operations readiness,
 finance close/accounting reconciliation controller evidence, CSV export capture,
 export-delivery evidence, and delivery-observer evidence into
 `.mandoforge/finance-evidence/`. It fails closed unless close completed through
-a configured controller with a close id and audited steps that include audit id,
+a configured controller with a close id and unique audited steps that include audit id,
 trace id, run id, or timestamp detail, reconciliation is reconciled and fresh
-with a reconciliation id and audited checks with matching detail, the CSV is nonempty,
+with a reconciliation id and unique audited checks with matching detail, the CSV is nonempty,
 delivery succeeded to a configured target, and the observer reports an
 accounting/ERP delivery mode such as `accounting_erp`, `erp`, `netsuite`,
 `quickbooks`, `xero`, `sap`, or `oracle_erp`; `lark_drive` and `accept_only` do
 not satisfy the ERP proof. The observer must also report a stable system id through `system_id`,
 `erp_system_id`, `accounting_system_id`, or `target_id`, and ERP/accounting
-delivery receipts must include receipt id, system id, posted/accepted status,
+delivery receipts must include unique receipt id, system id, posted/accepted status,
 current export file name and byte count,
 record count, and audit id, run id, or posting timestamp detail. The system id must
 match `MANDOFORGE_STAGE2_FINANCE_SYSTEM_ID` in the all-up archive manifest. The

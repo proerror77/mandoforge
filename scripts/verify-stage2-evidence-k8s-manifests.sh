@@ -2390,6 +2390,11 @@ if ! grep -q "missing finance close step audit evidence" scripts/verify-stage2-e
   exit 1
 fi
 
+if ! grep -q "duplicate finance close step evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate finance close steps" >&2
+  exit 1
+fi
+
 if ! grep -q "finance-reconciliation-evidence.json" scripts/verify-stage2-evidence-archive.sh || ! grep -q "reconciliation_id" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must contract-check finance reconciliation evidence" >&2
   exit 1
@@ -2422,6 +2427,11 @@ fi
 
 if ! grep -q "missing finance reconciliation check audit evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject reconciliation checks without audit details" >&2
+  exit 1
+fi
+
+if ! grep -q "duplicate finance reconciliation check evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate finance reconciliation checks" >&2
   exit 1
 fi
 
@@ -2487,6 +2497,11 @@ fi
 
 if ! grep -q "mismatched finance delivery receipt export evidence" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier self-test must reject delivery receipts for a different export file" >&2
+  exit 1
+fi
+
+if ! grep -q "duplicate finance delivery receipt evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject duplicate ERP/accounting delivery receipts" >&2
   exit 1
 fi
 
