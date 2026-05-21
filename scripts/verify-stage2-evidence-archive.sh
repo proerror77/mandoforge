@@ -1777,6 +1777,40 @@ JSON
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
       "replacement_scope": "cluster",
+      "replacement_pods_healthy": false,
+      "checked_pod_count": 1
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-sidecar-health-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-sidecar-health-negative.out 2>/tmp/mandoforge-stage2-archive-sidecar-health-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected unhealthy sidecar replacement Pod evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/remote-computer-sidecar-recovery-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "validation_result": {
+      "status": "validated",
+      "target_kind": "k8s_cluster",
+      "node_count": 3,
+      "cluster_id": "prod-cluster-1",
+      "replacement_scope": "cluster",
       "replacement_pods_healthy": true,
       "checked_pod_count": 1
     }

@@ -1810,6 +1810,11 @@ if ! grep -q "zero sidecar checked Pod count" scripts/verify-stage2-evidence-arc
   exit 1
 fi
 
+if ! grep -q "unhealthy sidecar replacement Pod evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject unhealthy sidecar replacement Pod evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "production-evidence-run.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must write a run identity manifest" >&2
   exit 1
