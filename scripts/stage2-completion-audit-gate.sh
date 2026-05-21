@@ -510,12 +510,17 @@ summary_sidecar_checked_pod_detail_count() {
 }
 
 tenant_negative_test_detail_count() {
-  jq -r '. as $root | [
+  jq -r '. as $root | ($root.response.controller_execution.deployment_id // "") as $deployment_id | [
     (
       $root.response.controller_execution.tenant_samples[]?,
       $root.response.controller_execution.tenant_ids_sample[]?
     )
-    | if type == "object" then (.tenant_id // .tenant // .id // .name // "") elif type == "string" then . else "" end
+    | select(
+        type == "object"
+        and (($deployment_id // "") | length > 0)
+        and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
+      )
+    | (.tenant_id // .tenant // .id // .name // "")
     | select(length > 0)
   ] | unique as $sampled_tenants | [
     (
@@ -532,6 +537,8 @@ tenant_negative_test_detail_count() {
         and ($source_tenant != $target_tenant)
         and (($sampled_tenants | index($source_tenant)) != null)
         and (($sampled_tenants | index($target_tenant)) != null)
+        and (($deployment_id // "") | length > 0)
+        and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
         and (
           ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
           or (.access_granted == false)
@@ -542,7 +549,7 @@ tenant_negative_test_detail_count() {
 }
 
 forced_rls_table_detail_count() {
-  jq -r '[
+  jq -r '.response.controller_execution.deployment_id as $deployment_id | [
     (
       .response.controller_execution.rls_tables[]?,
       .response.controller_execution.rls_table_details[]?,
@@ -555,6 +562,8 @@ forced_rls_table_detail_count() {
         and ((.schema // .namespace // "public") | length > 0)
         and ((.rls_enabled // .enabled // false) == true)
         and ((.rls_forced // .forced // .force_rls // false) == true)
+        and (($deployment_id // "") | length > 0)
+        and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
     | [(.schema // .namespace // "public"), (.table // .table_name // .relation // .name)] | @tsv
@@ -577,7 +586,7 @@ unique_tenant_sample_count() {
 }
 
 tenant_sample_detail_count() {
-  jq -r '[
+  jq -r '.response.controller_execution.deployment_id as $deployment_id | [
     (
       .response.controller_execution.tenant_samples[]?,
       .response.controller_execution.tenant_ids_sample[]?
@@ -585,6 +594,8 @@ tenant_sample_detail_count() {
     | select(
         type == "object"
         and ((.tenant_id // .tenant // .id // .name // "") | length > 0)
+        and (($deployment_id // "") | length > 0)
+        and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
         and (
           ((.status // .result // .outcome // "") | ascii_downcase | IN("sampled", "validated", "passed", "observed", "checked"))
           or (.validated == true)
@@ -1454,7 +1465,7 @@ artifact_contract_issue() {
       return 0
     fi
     if [[ ! "$tenant_sample_detail_count" =~ ^[0-9]+$ || "$tenant_sample_detail_count" -lt "$tenant_sample_count" ]]; then
-      printf 'tenant_sample_detail_count=%s tenant_sample_count=%s' "$tenant_sample_detail_count" "$tenant_sample_count"
+      printf 'deployment_bound_tenant_sample_detail_count=%s tenant_sample_count=%s' "$tenant_sample_detail_count" "$tenant_sample_count"
       return 0
     fi
     if [[ "$rls_enforced" != "true" ]]; then
@@ -1470,7 +1481,7 @@ artifact_contract_issue() {
       return 0
     fi
     if [[ ! "$rls_table_detail_count" =~ ^[0-9]+$ || "$rls_table_detail_count" -lt "$rls_table_count" ]]; then
-      printf 'unique_forced_rls_table_detail_count=%s rls_table_count=%s' "$rls_table_detail_count" "$rls_table_count"
+      printf 'deployment_bound_unique_forced_rls_table_detail_count=%s rls_table_count=%s' "$rls_table_detail_count" "$rls_table_count"
       return 0
     fi
     if [[ "$tenant_context_validated" != "true" ]]; then
@@ -1486,7 +1497,7 @@ artifact_contract_issue() {
       return 0
     fi
     if [[ ! "$cross_tenant_negative_test_detail_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_detail_count" -lt "$cross_tenant_negative_test_count" ]]; then
-      printf 'sampled_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
+      printf 'deployment_bound_sampled_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
       return 0
     fi
     if ! is_production_identity "$deployment_id"; then

@@ -148,7 +148,9 @@ reported table with a unique schema/table identity, enabled/forced status, and a
 run id, or timestamp detail, and a nonzero cross-tenant negative-test count whose
 details run between the audited sampled tenants and include source tenant,
 target tenant, denied/blocked outcome, and audit id, trace id, run id, or
-timestamp detail; a
+timestamp detail. Tenant sample, forced-RLS table, and negative-test detail rows
+must also carry `deployment_id`, `tenant_deployment_id`, or
+`routing_deployment_id` matching the controller deployment id; a
 single-tenant or Whiskey-only pilot target is inventory evidence, not completion
 proof. The matching in-cluster template is
 `deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml`, which

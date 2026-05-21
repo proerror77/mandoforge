@@ -214,12 +214,17 @@ managed_session_detail_issue() {
 }
 
 tenant_negative_test_detail_count() {
-  jq -r '. as $root | [
+  jq -r '. as $root | ($root.response.controller_execution.deployment_id // "") as $deployment_id | [
     (
       $root.response.controller_execution.tenant_samples[]?,
       $root.response.controller_execution.tenant_ids_sample[]?
     )
-    | if type == "object" then (.tenant_id // .tenant // .id // .name // "") elif type == "string" then . else "" end
+    | select(
+        type == "object"
+        and (($deployment_id // "") | length > 0)
+        and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
+      )
+    | (.tenant_id // .tenant // .id // .name // "")
     | select(length > 0)
   ] | unique as $sampled_tenants | [
     (
@@ -236,6 +241,8 @@ tenant_negative_test_detail_count() {
         and ($source_tenant != $target_tenant)
         and (($sampled_tenants | index($source_tenant)) != null)
         and (($sampled_tenants | index($target_tenant)) != null)
+        and (($deployment_id // "") | length > 0)
+        and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
         and (
           ((.status // .result // .outcome // "") | ascii_downcase | IN("passed", "blocked", "denied", "rejected", "prevented", "forbidden"))
           or (.access_granted == false)
@@ -246,7 +253,7 @@ tenant_negative_test_detail_count() {
 }
 
 forced_rls_table_detail_count() {
-  jq -r '[
+  jq -r '.response.controller_execution.deployment_id as $deployment_id | [
     (
       .response.controller_execution.rls_tables[]?,
       .response.controller_execution.rls_table_details[]?,
@@ -259,6 +266,8 @@ forced_rls_table_detail_count() {
         and ((.schema // .namespace // "public") | length > 0)
         and ((.rls_enabled // .enabled // false) == true)
         and ((.rls_forced // .forced // .force_rls // false) == true)
+        and (($deployment_id // "") | length > 0)
+        and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
         and ((.audit_id // .audit_log_id // .trace_id // .run_id // .checked_at // .validated_at // .timestamp // "") | length > 0)
       )
     | [(.schema // .namespace // "public"), (.table // .table_name // .relation // .name)] | @tsv
@@ -281,7 +290,7 @@ unique_tenant_sample_count() {
 }
 
 tenant_sample_detail_count() {
-  jq -r '[
+  jq -r '.response.controller_execution.deployment_id as $deployment_id | [
     (
       .response.controller_execution.tenant_samples[]?,
       .response.controller_execution.tenant_ids_sample[]?
@@ -289,6 +298,8 @@ tenant_sample_detail_count() {
     | select(
         type == "object"
         and ((.tenant_id // .tenant // .id // .name // "") | length > 0)
+        and (($deployment_id // "") | length > 0)
+        and ((.deployment_id // .tenant_deployment_id // .routing_deployment_id // "") == $deployment_id)
         and (
           ((.status // .result // .outcome // "") | ascii_downcase | IN("sampled", "validated", "passed", "observed", "checked"))
           or (.validated == true)
@@ -844,7 +855,7 @@ artifact_issue() {
         return 0
       fi
       if [[ ! "$tenant_sample_detail_count" =~ ^[0-9]+$ || "$tenant_sample_detail_count" -lt "$tenant_sample_count" ]]; then
-        printf '%s tenant_sample_detail_count=%s tenant_sample_count=%s' "$relative_path" "$tenant_sample_detail_count" "$tenant_sample_count"
+        printf '%s deployment_bound_tenant_sample_detail_count=%s tenant_sample_count=%s' "$relative_path" "$tenant_sample_detail_count" "$tenant_sample_count"
         return 0
       fi
       if [[ "$rls_enforced" != "true" || "$tenant_context_validated" != "true" || "$cross_tenant_negative_tests" != "true" ]]; then
@@ -860,7 +871,7 @@ artifact_issue() {
         return 0
       fi
       if [[ ! "$rls_table_detail_count" =~ ^[0-9]+$ || "$rls_table_detail_count" -lt "$rls_table_count" ]]; then
-        printf '%s unique_forced_rls_table_detail_count=%s rls_table_count=%s' "$relative_path" "$rls_table_detail_count" "$rls_table_count"
+        printf '%s deployment_bound_unique_forced_rls_table_detail_count=%s rls_table_count=%s' "$relative_path" "$rls_table_detail_count" "$rls_table_count"
         return 0
       fi
       if [[ ! "$cross_tenant_negative_test_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_count" == "0" ]]; then
@@ -868,7 +879,7 @@ artifact_issue() {
         return 0
       fi
       if [[ ! "$cross_tenant_negative_test_detail_count" =~ ^[0-9]+$ || "$cross_tenant_negative_test_detail_count" -lt "$cross_tenant_negative_test_count" ]]; then
-        printf '%s sampled_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$relative_path" "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
+        printf '%s deployment_bound_sampled_tenant_negative_test_detail_count=%s cross_tenant_negative_test_count=%s' "$relative_path" "$cross_tenant_negative_test_detail_count" "$cross_tenant_negative_test_count"
         return 0
       fi
       if ! is_production_identity_value "$deployment_id"; then
@@ -1882,23 +1893,23 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3877,8 +3888,8 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
@@ -3887,9 +3898,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3923,8 +3934,8 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
@@ -3933,9 +3944,9 @@ JSON
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -3969,23 +3980,23 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4019,23 +4030,23 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4069,15 +4080,64 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-2", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "tenant_context_validated": true,
+      "cross_tenant_negative_tests": true,
+      "cross_tenant_negative_test_count": 2,
+      "cross_tenant_negative_test_results": [
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-2", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "blocked", "audit_id": "tenant-negative-b-a-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+      ]
+    }
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-tenant-deployment-detail-binding-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-tenant-deployment-detail-binding-negative.out 2>/tmp/mandoforge-stage2-archive-tenant-deployment-detail-binding-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected mismatched tenant deployment detail evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
+{
+  "status": "captured",
+  "response": {
+    "status": "validated",
+    "controller_execution": {
+      "target_kind": "production_multi_tenant",
+      "deployment_id": "tenant-routing-prod-1",
+      "tenant_count": 2,
+      "tenant_samples": [
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+      ],
+      "rls_enforced": true,
+      "rls_table_count": 2,
+      "rls_forced_table_count": 2,
+      "rls_table_details": [
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": false,
@@ -4114,15 +4174,15 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
@@ -4159,22 +4219,22 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 2,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-x", "target_tenant": "tenant-y", "status": "denied", "audit_id": "tenant-negative-x-y-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-y", "target_tenant": "tenant-x", "status": "blocked", "audit_id": "tenant-negative-y-x-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-x", "target_tenant": "tenant-y", "status": "denied", "audit_id": "tenant-negative-x-y-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-y", "target_tenant": "tenant-x", "status": "blocked", "audit_id": "tenant-negative-y-x-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4208,21 +4268,21 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 1,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied"}
       ]
     }
   }
@@ -4256,23 +4316,23 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": false,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4306,23 +4366,23 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 1,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4356,22 +4416,22 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4405,23 +4465,23 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4459,16 +4519,16 @@ JSON
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
@@ -4502,23 +4562,23 @@ JSON
       "deployment_id": "tenant-routing-prod-1",
       "tenant_count": 2,
       "tenant_samples": [
-        {"tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-a", "status": "validated", "audit_id": "tenant-sample-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "tenant_id": "tenant-b", "status": "validated", "audit_id": "tenant-sample-audit-2", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "rls_enforced": true,
       "rls_table_count": 2,
       "rls_forced_table_count": 2,
       "rls_table_details": [
-        {"schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
-        {"schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "sessions", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "schema": "public", "table": "session_events", "rls_enabled": true, "rls_forced": true, "audit_id": "rls-table-audit-1", "checked_at": "1970-01-01T00:00:00Z"}
       ],
       "tenant_context_validated": true,
       "cross_tenant_negative_tests": true,
       "cross_tenant_negative_test_count": 3,
       "cross_tenant_negative_test_results": [
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
-        {"source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "denied", "audit_id": "tenant-negative-a-b-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-b", "target_tenant": "tenant-a", "status": "denied", "audit_id": "tenant-negative-b-a-denied", "checked_at": "1970-01-01T00:00:00Z"},
+        {"deployment_id": "tenant-routing-prod-1", "source_tenant": "tenant-a", "target_tenant": "tenant-b", "status": "blocked", "audit_id": "tenant-negative-a-b-blocked", "checked_at": "1970-01-01T00:00:00Z"}
       ]
     }
   }
