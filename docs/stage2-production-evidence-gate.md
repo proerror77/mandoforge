@@ -85,6 +85,21 @@ RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 \
 
 That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
+For the current Whiskey pilot blocker, run the combined worker/Remote Computer
+gate:
+
+```bash
+RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 \
+./scripts/worker-remote-computer-evidence-gate.sh
+```
+
+That gate runs the worker and Remote Computer evidence gates into one
+archive-ready evidence directory, then fails closed unless the same target has
+fresh isolated worker-pool/load-validation evidence, Remote Computer state-sync
+evidence, runner readiness, and sidecar replacement evidence. The matching
+in-cluster template is
+`deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml`.
+
 For a narrower provider governance proof, run:
 
 ```bash

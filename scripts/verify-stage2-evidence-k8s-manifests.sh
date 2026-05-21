@@ -14,6 +14,7 @@ manifests=(
   deploy/stage2-evidence/stage2-completion-audit-job.example.yaml
   deploy/stage2-evidence/observability-collector-evidence-job.example.yaml
   deploy/stage2-evidence/remote-computer-evidence-job.example.yaml
+  deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml
   deploy/stage2-evidence/provider-governance-evidence-job.example.yaml
   deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml
   deploy/stage2-evidence/vault-evidence-job.example.yaml
@@ -29,6 +30,7 @@ manifests=(
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
 remote_computer_script="scripts/remote-computer-evidence-gate.sh"
+worker_remote_computer_script="scripts/worker-remote-computer-evidence-gate.sh"
 provider_script="scripts/provider-governance-evidence-gate.sh"
 tenant_script="scripts/tenant-isolation-evidence-gate.sh"
 vault_script="scripts/vault-evidence-gate.sh"
@@ -73,6 +75,11 @@ fi
 
 if [[ ! -x "$remote_computer_script" ]]; then
   echo "missing executable Remote Computer evidence script: $remote_computer_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$worker_remote_computer_script" ]]; then
+  echo "missing executable worker/Remote Computer evidence script: $worker_remote_computer_script" >&2
   exit 1
 fi
 
@@ -193,6 +200,11 @@ fi
 
 if ! grep -q "name: mandoforge-remote-computer-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
   echo "Stage 2 production evidence kustomize render is missing the Remote Computer evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-worker-remote-computer-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+  echo "Stage 2 production evidence kustomize render is missing the worker/Remote Computer evidence Job" >&2
   exit 1
 fi
 
@@ -403,6 +415,41 @@ fi
 
 if ! grep -q "remote-computer-sidecar-recovery-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit Remote Computer sidecar recovery evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "worker-remote-computer-evidence-gate.sh" deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml; then
+  echo "Worker/Remote Computer evidence Job does not run the combined evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml; then
+  echo "Worker/Remote Computer evidence Job must force sidecar recovery evidence capture" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml; then
+  echo "Worker/Remote Computer evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "worker-evidence-gate.sh" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must run the worker evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "remote-computer-evidence-gate.sh" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must run the Remote Computer evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q "isolated_worker_pool_configured" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must verify isolated worker-pool evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "sidecar_recovery_required" "$worker_remote_computer_script"; then
+  echo "Worker/Remote Computer evidence script must require sidecar recovery evidence" >&2
   exit 1
 fi
 
