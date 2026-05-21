@@ -213,7 +213,7 @@ managed_session_detail_issue() {
     printf 'session-loop event cursor window evidence incomplete'
     return 0
   fi
-  if ! is_nonnegative_integer "$processed_before" || ! is_nonnegative_integer "$processed_after" || [[ "$processed_after" -lt "$processed_before" || "$processed_after" -lt "$pending_end" ]]; then
+  if ! is_nonnegative_integer "$processed_before" || ! is_nonnegative_integer "$processed_after" || [[ "$processed_after" != "$processed_before" || "$processed_after" -lt "$pending_end" ]]; then
     printf 'processed event cursor sequence evidence incomplete'
     return 0
   fi
@@ -2536,6 +2536,67 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected missing managed-session processed cursor evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/managed-session-restart-resume-evidence.json" <<'JSON'
+{
+  "status": "validated",
+  "target": {
+    "id": "managed-session-runtime-prod-1",
+    "kind": "managed_session_runtime"
+  },
+  "session_loop": {
+    "enqueue_event_persisted": true,
+    "worker_drain_observed": true,
+    "pending_event_seq_start": 41,
+    "pending_event_seq_end": 42
+  },
+  "restart": {
+    "api_restarted": true,
+    "worker_restarted": true
+  },
+  "resume": {
+    "session_state_resumed": true,
+    "processed_event_seq_preserved": true,
+    "processed_event_seq_before_restart": 42,
+    "processed_event_seq_after_resume": 43
+  },
+  "thread_lineage": {
+    "preserved": true,
+    "original_thread_id": "thread-prod-1",
+    "resumed_thread_id": "thread-prod-1"
+  },
+  "lease_fencing": {
+    "finalization_fenced": true,
+    "stale_worker_rejected": true,
+    "active_worker_lease_id": "lease-active-prod-1",
+    "stale_worker_lease_id": "lease-stale-prod-1",
+    "stale_rejection_reason": "stale lease generation rejected"
+  },
+  "runtime_turn": {
+    "completed": true,
+    "final_message_preserved": true,
+    "turn_id": "turn-prod-1",
+    "final_message": "managed session restart resume validated"
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-managed-session-cursor-drift-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-managed-session-cursor-drift-negative.out 2>/tmp/mandoforge-stage2-archive-managed-session-cursor-drift-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected managed-session processed cursor drift evidence to fail" >&2
     exit 1
   fi
 

@@ -681,7 +681,7 @@ managed_session_detail_issue() {
     printf 'session-loop event cursor window evidence incomplete'
     return 0
   fi
-  if ! is_nonnegative_integer "$processed_before" || ! is_nonnegative_integer "$processed_after" || [[ "$processed_after" -lt "$processed_before" || "$processed_after" -lt "$pending_end" ]]; then
+  if ! is_nonnegative_integer "$processed_before" || ! is_nonnegative_integer "$processed_after" || [[ "$processed_after" != "$processed_before" || "$processed_after" -lt "$pending_end" ]]; then
     printf 'processed event cursor sequence evidence incomplete'
     return 0
   fi
