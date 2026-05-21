@@ -198,7 +198,7 @@
 
 Current Whiskey production-like pilot blocker:
 
-- [ ] Run isolated worker-pool validation and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem.
+- [ ] Run isolated worker-pool validation and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem, including load-validated worker pool checks, state claim/path checks, and healthy replacement Pod checks.
 
 Post-pilot enterprise promotions that should stay visible but are not the current Whiskey pilot blocker:
 

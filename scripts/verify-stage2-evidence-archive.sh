@@ -135,12 +135,22 @@ artifact_issue() {
 
   case "$relative_path" in
     worker-load-validation-evidence.json)
+      local controller_status
       local target_kind
       local node_count
       local cluster_id
+      local load_validated
+      local isolated_worker_pool_configured
+      controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
       node_count="$(jq -r '.response.controller_execution.node_count // 0' "$path")"
       cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$path")"
+      load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$path")"
+      isolated_worker_pool_configured="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$path")"
+      if [[ "$controller_status" != "validated" ]]; then
+        printf '%s controller_status=%s' "$relative_path" "$controller_status"
+        return 0
+      fi
       if ! is_real_cluster_kind "$target_kind"; then
         printf '%s target_kind=%s is not a real cluster' "$relative_path" "$target_kind"
         return 0
@@ -157,16 +167,34 @@ artifact_issue() {
         printf '%s cluster_id=%s is a pilot/mock/local identity' "$relative_path" "$cluster_id"
         return 0
       fi
+      if [[ "$load_validated" != "true" ]]; then
+        printf '%s load_validated=%s' "$relative_path" "$load_validated"
+        return 0
+      fi
+      if [[ "$isolated_worker_pool_configured" != "true" ]]; then
+        printf '%s isolated_worker_pool_configured=%s' "$relative_path" "$isolated_worker_pool_configured"
+        return 0
+      fi
       ;;
     remote-computer-state-sync-evidence.json)
+      local controller_status
       local target_kind
       local node_count
       local state_backend
       local cluster_id
+      local state_claim
+      local checked_path_count
+      controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$path")"
       node_count="$(jq -r '.response.controller_execution.node_count // 0' "$path")"
       state_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // "unknown"' "$path")"
       cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$path")"
+      state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$path")"
+      checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$path")"
+      if [[ "$controller_status" != "validated" ]]; then
+        printf '%s controller_status=%s' "$relative_path" "$controller_status"
+        return 0
+      fi
       if ! is_real_cluster_kind "$target_kind"; then
         printf '%s target_kind=%s is not a real cluster' "$relative_path" "$target_kind"
         return 0
@@ -187,6 +215,14 @@ artifact_issue() {
         printf '%s cluster_id=%s is a pilot/mock/local identity' "$relative_path" "$cluster_id"
         return 0
       fi
+      if [[ -z "$state_claim" ]]; then
+        printf '%s state_claim is missing' "$relative_path"
+        return 0
+      fi
+      if [[ ! "$checked_path_count" =~ ^[0-9]+$ || "$checked_path_count" == "0" ]]; then
+        printf '%s checked_path_count=%s' "$relative_path" "$checked_path_count"
+        return 0
+      fi
       ;;
     remote-computer-sidecar-recovery-evidence.json)
       local status
@@ -194,11 +230,15 @@ artifact_issue() {
       local node_count
       local replacement_scope
       local cluster_id
+      local replacement_pods_healthy
+      local checked_pod_count
       status="$(jq -r '.response.validation_result.status // "unknown"' "$path")"
       target_kind="$(jq -r '.response.validation_result.target_kind // "unknown"' "$path")"
       node_count="$(jq -r '.response.validation_result.node_count // 0' "$path")"
       replacement_scope="$(jq -r '.response.validation_result.replacement_scope // "unknown"' "$path")"
       cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$path")"
+      replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$path")"
+      checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$path")"
       if [[ "$status" != "validated" ]]; then
         printf '%s validation_status=%s' "$relative_path" "$status"
         return 0
@@ -221,6 +261,14 @@ artifact_issue() {
       fi
       if ! is_production_identity_value "$cluster_id"; then
         printf '%s cluster_id=%s is a pilot/mock/local identity' "$relative_path" "$cluster_id"
+        return 0
+      fi
+      if [[ "$replacement_pods_healthy" != "true" ]]; then
+        printf '%s replacement_pods_healthy=%s' "$relative_path" "$replacement_pods_healthy"
+        return 0
+      fi
+      if [[ ! "$checked_pod_count" =~ ^[0-9]+$ || "$checked_pod_count" == "0" ]]; then
+        printf '%s checked_pod_count=%s' "$relative_path" "$checked_pod_count"
         return 0
       fi
       ;;
@@ -844,9 +892,12 @@ JSON
 {
   "response": {
     "controller_execution": {
+      "status": "validated",
       "target_kind": "k8s_cluster",
       "node_count": 3,
-      "cluster_id": "prod-cluster-1"
+      "cluster_id": "prod-cluster-1",
+      "load_validated": true,
+      "isolated_worker_pool_configured": true
     }
   }
 }
@@ -882,10 +933,13 @@ JSON
 {
   "response": {
     "controller_execution": {
+      "status": "validated",
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
-      "distributed_state_backend": "juicefs"
+      "distributed_state_backend": "juicefs",
+      "state_claim": "mandoforge-remote-computer-state",
+      "checked_path_count": 6
     }
   }
 }
@@ -898,7 +952,9 @@ JSON
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "prod-cluster-1",
-      "replacement_scope": "cluster"
+      "replacement_scope": "cluster",
+      "replacement_pods_healthy": true,
+      "checked_pod_count": 1
     }
   }
 }
@@ -1119,9 +1175,12 @@ JSON
 {
   "response": {
     "controller_execution": {
+      "status": "validated",
       "target_kind": "k8s_cluster",
       "node_count": 3,
-      "cluster_id": "whiskey-pilot-cluster"
+      "cluster_id": "whiskey-pilot-cluster",
+      "load_validated": true,
+      "isolated_worker_pool_configured": true
     }
   }
 }
@@ -1130,10 +1189,13 @@ JSON
 {
   "response": {
     "controller_execution": {
+      "status": "validated",
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "whiskey-pilot-cluster",
-      "distributed_state_backend": "juicefs"
+      "distributed_state_backend": "juicefs",
+      "state_claim": "mandoforge-remote-computer-state",
+      "checked_path_count": 6
     }
   }
 }
@@ -1146,7 +1208,9 @@ JSON
       "target_kind": "k8s_cluster",
       "node_count": 3,
       "cluster_id": "whiskey-pilot-cluster",
-      "replacement_scope": "cluster"
+      "replacement_scope": "cluster",
+      "replacement_pods_healthy": true,
+      "checked_pod_count": 1
     }
   }
 }

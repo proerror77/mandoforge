@@ -130,7 +130,7 @@ These items are required before claiming a specific production deployment is val
 2. Run policy rollout orchestration against a real production policy controller target.
 3. Run provider gate, rollout, and rollback evidence against real provider deployment targets.
 4. Run Vault/KMS/HSM rotation and recovery evidence against a real secret backend.
-5. Run worker load validation, isolated worker-pool validation, and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem.
+5. Run worker load validation, isolated worker-pool validation, and Remote Computer state-sync / sidecar replacement evidence against a real cluster and distributed state filesystem, including state claim/path checks and healthy replacement Pod checks.
 6. Run approval notification delivery evidence against real webhook, Slack, or email provider targets.
 7. Run MCP connector deployment, rollout, and rollback evidence against a real team connector target.
 8. Run Codex App Server deployment and ops evidence against a real App Server target.

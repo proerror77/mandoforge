@@ -83,7 +83,7 @@ RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 \
 ./scripts/remote-computer-evidence-gate.sh
 ```
 
-That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
+That gate collects `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, `POST /api/remote-computers/state-sync/validate`, and optional sidecar recovery evidence into `.mandoforge/remote-computer-evidence/`. The state-sync controller must validate the shared state claim and report a nonzero checked state-contract path count. When sidecar recovery is enabled, the sidecar validation controller must confirm healthy replacement Pods and a nonzero checked Pod count. The matching in-cluster template is `deploy/stage2-evidence/remote-computer-evidence-job.example.yaml`, which persists its output under the Stage 2 production evidence PVC.
 
 For the current Whiskey pilot blocker, run the combined worker/Remote Computer
 gate:
@@ -100,8 +100,12 @@ evidence, runner readiness, and sidecar replacement evidence. For the Whiskey
 completion blocker, the controller evidence must also identify the same
 multi-node real cluster across worker load, state sync, and sidecar replacement,
 and state sync must report a supported distributed filesystem backend such as
-`juicefs`, `cephfs`, or `longhorn-rwx`; single-host or local-hostpath evidence
-does not satisfy this proof. The matching in-cluster template is
+`juicefs`, `cephfs`, or `longhorn-rwx`. Worker evidence must explicitly report
+load validation and isolated worker-pool configuration, state-sync evidence must
+name the state claim plus checked state-contract paths, and sidecar validation
+must report healthy replacement Pods plus checked Pod counts; single-host,
+local-hostpath, or shape-only controller evidence does not satisfy this proof.
+The matching in-cluster template is
 `deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml`.
 
 For a narrower provider governance proof, run:

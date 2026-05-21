@@ -451,14 +451,24 @@ artifact_contract_issue() {
   fi
 
   if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "worker-load-validation-evidence.json" ]]; then
+    local controller_status
     local target_kind
     local node_count
     local cluster_id
+    local load_validated
+    local isolated_worker_pool_configured
 
+    controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     node_count="$(jq -r '.response.controller_execution.node_count // 0' "$artifact" 2>/dev/null || echo "0")"
     cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    load_validated="$(jq -r '.response.controller_execution.load_validated // false' "$artifact" 2>/dev/null || echo "false")"
+    isolated_worker_pool_configured="$(jq -r '.response.controller_execution.isolated_worker_pool_configured // false' "$artifact" 2>/dev/null || echo "false")"
 
+    if [[ "$controller_status" != "validated" ]]; then
+      printf 'worker controller_status=%s' "$controller_status"
+      return 0
+    fi
     if ! is_real_cluster_kind "$target_kind"; then
       printf 'target_kind=%s is not a real cluster' "$target_kind"
       return 0
@@ -471,19 +481,37 @@ artifact_contract_issue() {
       printf 'cluster_id=%s is pilot/mock/local' "${cluster_id:-<empty>}"
       return 0
     fi
+    if [[ "$load_validated" != "true" ]]; then
+      printf 'load_validated=%s' "$load_validated"
+      return 0
+    fi
+    if [[ "$isolated_worker_pool_configured" != "true" ]]; then
+      printf 'isolated_worker_pool_configured=%s' "$isolated_worker_pool_configured"
+      return 0
+    fi
   fi
 
   if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "remote-computer-state-sync-evidence.json" ]]; then
+    local controller_status
     local target_kind
     local node_count
     local state_backend
     local cluster_id
+    local state_claim
+    local checked_path_count
 
+    controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_kind="$(jq -r '.response.controller_execution.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     node_count="$(jq -r '.response.controller_execution.node_count // 0' "$artifact" 2>/dev/null || echo "0")"
     state_backend="$(jq -r '.response.controller_execution.distributed_state_backend // .response.controller_execution.storage_backend // .response.controller_execution.state_backend // .response.controller_execution.provider // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$artifact" 2>/dev/null || echo "")"
+    checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$artifact" 2>/dev/null || echo "0")"
 
+    if [[ "$controller_status" != "validated" ]]; then
+      printf 'state-sync controller_status=%s' "$controller_status"
+      return 0
+    fi
     if ! is_real_cluster_kind "$target_kind"; then
       printf 'target_kind=%s is not a real cluster' "$target_kind"
       return 0
@@ -500,6 +528,14 @@ artifact_contract_issue() {
       printf 'cluster_id=%s is pilot/mock/local' "${cluster_id:-<empty>}"
       return 0
     fi
+    if [[ -z "$state_claim" ]]; then
+      printf 'state_claim is missing'
+      return 0
+    fi
+    if [[ ! "$checked_path_count" =~ ^[0-9]+$ || "$checked_path_count" == "0" ]]; then
+      printf 'checked_path_count=%s' "$checked_path_count"
+      return 0
+    fi
   fi
 
   if [[ "$req_id" == "worker-remote-computer" && "$artifact_name" == "remote-computer-sidecar-recovery-evidence.json" ]]; then
@@ -508,12 +544,16 @@ artifact_contract_issue() {
     local node_count
     local replacement_scope
     local cluster_id
+    local replacement_pods_healthy
+    local checked_pod_count
 
     validation_status="$(jq -r '.response.validation_result.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     target_kind="$(jq -r '.response.validation_result.target_kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     node_count="$(jq -r '.response.validation_result.node_count // 0' "$artifact" 2>/dev/null || echo "0")"
     replacement_scope="$(jq -r '.response.validation_result.replacement_scope // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
     cluster_id="$(jq -r '.response.validation_result.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$artifact" 2>/dev/null || echo "false")"
+    checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$artifact" 2>/dev/null || echo "0")"
 
     if [[ "$validation_status" != "validated" ]]; then
       printf 'validation_status=%s' "$validation_status"
@@ -533,6 +573,14 @@ artifact_contract_issue() {
     fi
     if ! is_production_identity "$cluster_id"; then
       printf 'cluster_id=%s is pilot/mock/local' "${cluster_id:-<empty>}"
+      return 0
+    fi
+    if [[ "$replacement_pods_healthy" != "true" ]]; then
+      printf 'replacement_pods_healthy=%s' "$replacement_pods_healthy"
+      return 0
+    fi
+    if [[ ! "$checked_pod_count" =~ ^[0-9]+$ || "$checked_pod_count" == "0" ]]; then
+      printf 'checked_pod_count=%s' "$checked_pod_count"
       return 0
     fi
   fi

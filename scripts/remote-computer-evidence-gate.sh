@@ -82,10 +82,16 @@ write_summary() {
   local runner_message
   local state_sync_evidence_status
   local state_sync_validation_status
+  local state_sync_controller_status
   local state_sync_controller_fresh
   local state_sync_controller_age_hours
+  local state_sync_state_claim
+  local state_sync_checked_path_count
   local sidecar_recovery_evidence_status
   local sidecar_recovery_run_status
+  local sidecar_validation_status
+  local sidecar_replacement_pods_healthy
+  local sidecar_checked_pod_count
   local blocked_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
@@ -105,11 +111,25 @@ write_summary() {
     state_sync_evidence_status="$(jq -r '.status // "unknown"' "$state_sync_evidence_file")"
     state_sync_validation_status="$(jq -r '.response.status // "unknown"' "$state_sync_evidence_file")"
   fi
+  state_sync_controller_status="unknown"
+  state_sync_state_claim=""
+  state_sync_checked_path_count="0"
+  if [[ -s "$state_sync_evidence_file" ]]; then
+    state_sync_controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$state_sync_evidence_file")"
+    state_sync_state_claim="$(jq -r '.response.controller_execution.state_claim // ""' "$state_sync_evidence_file")"
+    state_sync_checked_path_count="$(jq -r '.response.controller_execution.checked_path_count // 0' "$state_sync_evidence_file")"
+  fi
   sidecar_recovery_evidence_status="not_requested"
   sidecar_recovery_run_status="not_run"
+  sidecar_validation_status="not_requested"
+  sidecar_replacement_pods_healthy="false"
+  sidecar_checked_pod_count="0"
   if [[ -s "$sidecar_recovery_evidence_file" ]]; then
     sidecar_recovery_evidence_status="$(jq -r '.status // "unknown"' "$sidecar_recovery_evidence_file")"
     sidecar_recovery_run_status="$(jq -r '.response.status // "unknown"' "$sidecar_recovery_evidence_file")"
+    sidecar_validation_status="$(jq -r '.response.validation_result.status // "unknown"' "$sidecar_recovery_evidence_file")"
+    sidecar_replacement_pods_healthy="$(jq -r '.response.validation_result.replacement_pods_healthy // false' "$sidecar_recovery_evidence_file")"
+    sidecar_checked_pod_count="$(jq -r '.response.validation_result.checked_pod_count // 0' "$sidecar_recovery_evidence_file")"
   fi
   blocked_count="$(jq -r '[
       .production_state_sync.production_blocked,
@@ -117,6 +137,26 @@ write_summary() {
     ] | map(select(. == true)) | length' "$readiness_file")"
   if [[ "$runner_ready" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$state_sync_controller_status" != "validated" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ -z "$state_sync_state_claim" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ ! "$state_sync_checked_path_count" =~ ^[0-9]+$ || "$state_sync_checked_path_count" == "0" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
+  if [[ "$RUN_SIDECAR_RECOVERY" == "1" ]]; then
+    if [[ "$sidecar_validation_status" != "validated" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ "$sidecar_replacement_pods_healthy" != "true" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
+    if [[ ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_count" == "0" ]]; then
+      blocked_count="$((blocked_count + 1))"
+    fi
   fi
 
   {
@@ -130,10 +170,16 @@ write_summary() {
     echo "runner_ready=$runner_ready"
     echo "state_sync_evidence_status=$state_sync_evidence_status"
     echo "state_sync_validation_status=$state_sync_validation_status"
+    echo "state_sync_controller_status=$state_sync_controller_status"
     echo "state_sync_controller_evidence_fresh=$state_sync_controller_fresh"
     echo "state_sync_controller_age_hours=$state_sync_controller_age_hours"
+    echo "state_sync_state_claim=$state_sync_state_claim"
+    echo "state_sync_checked_path_count=$state_sync_checked_path_count"
     echo "sidecar_recovery_evidence_status=$sidecar_recovery_evidence_status"
     echo "sidecar_recovery_run_status=$sidecar_recovery_run_status"
+    echo "sidecar_validation_status=$sidecar_validation_status"
+    echo "sidecar_replacement_pods_healthy=$sidecar_replacement_pods_healthy"
+    echo "sidecar_checked_pod_count=$sidecar_checked_pod_count"
     echo "production_blocked_count=$blocked_count"
     echo "evidence_dir=$EVIDENCE_DIR"
     echo "sidecar_recovery_run=$RUN_SIDECAR_RECOVERY"
@@ -145,6 +191,26 @@ write_summary() {
     jq -r '.production_state_sync.blocking_reasons[]? | "- \(.)"' "$readiness_file"
     if [[ "$runner_ready" != "true" ]]; then
       echo "- remote computer runner is not ready: status=$runner_status configured=$runner_configured message=$runner_message"
+    fi
+    if [[ "$state_sync_controller_status" != "validated" ]]; then
+      echo "- state-sync controller did not validate the distributed state contract: $state_sync_controller_status"
+    fi
+    if [[ -z "$state_sync_state_claim" ]]; then
+      echo "- state-sync controller did not report a state claim"
+    fi
+    if [[ ! "$state_sync_checked_path_count" =~ ^[0-9]+$ || "$state_sync_checked_path_count" == "0" ]]; then
+      echo "- state-sync controller did not report any checked state contract paths: checked_path_count=$state_sync_checked_path_count"
+    fi
+    if [[ "$RUN_SIDECAR_RECOVERY" == "1" ]]; then
+      if [[ "$sidecar_validation_status" != "validated" ]]; then
+        echo "- sidecar recovery validation controller did not validate replacement: $sidecar_validation_status"
+      fi
+      if [[ "$sidecar_replacement_pods_healthy" != "true" ]]; then
+        echo "- sidecar recovery validation did not report healthy replacement Pods"
+      fi
+      if [[ ! "$sidecar_checked_pod_count" =~ ^[0-9]+$ || "$sidecar_checked_pod_count" == "0" ]]; then
+        echo "- sidecar recovery validation did not report any checked Pods: checked_pod_count=$sidecar_checked_pod_count"
+      fi
     fi
     echo
     echo "runbook_actions:"
