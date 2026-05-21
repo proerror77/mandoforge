@@ -242,6 +242,17 @@ Live final gate with Docker Desktop:
 RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh
 ```
 
+Postgres-backed restart/resume core evidence:
+
+```bash
+START_POSTGRES=1 ./scripts/managed-session-restart-resume-core-gate.sh
+```
+
+This gate requires Docker Desktop or an existing `DATABASE_URL`. It writes
+session-event, tool-call, audit-log, restart/resume, cursor, thread-lineage, and
+runtime-turn evidence under
+`.mandoforge/managed-session-restart-resume-core-evidence/`.
+
 Static UI smoke:
 
 ```bash

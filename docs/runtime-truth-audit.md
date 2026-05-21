@@ -31,6 +31,7 @@ a second execution stack.
 | Approval and tool-result loopback | Approval decisions and queued execution completion write durable events and enqueue session-loop continuation. | Approval, execution job, and session-loop tests. |
 | Streaming replay and reconnect | `/api/sessions/:id/stream` supports `?after_seq=`, `Last-Event-ID`, SSE event ids, replay, and live push for newly appended events. | `stream_events`, `stream_after_seq`, and session stream tests. |
 | Environment worker binding | Workers can bind session-loop and execution-job claim/run paths to an Environment id or worker pool/queue. | `WORKER_ENVIRONMENT_ID`, `WORKER_POOL`, `WORKER_QUEUE`, and worker binding route guards. |
+| Restart/resume core drill | A local Postgres-backed gate enqueues a managed session event, restarts the API, drains the queued session-loop and execution jobs with a restarted worker, verifies processed cursor advancement, thread lineage, approval/execution loopback, stale-worker rejection, and runtime adapter final-message evidence. | `scripts/managed-session-restart-resume-core-gate.sh`. |
 
 ## Important Gaps
 
@@ -43,9 +44,8 @@ a second execution stack.
   `MANDOFORGE_EXECUTION_WORKER=queue` and external workers.
 - Codex App Server uses the normalized taxonomy, but richer native payload
   support can still be added as that adapter surface grows.
-- Any specific deployment readiness claim still needs restart/resume evidence
-  for that target: enqueue event, drain worker, restart API/worker, preserve
-  processed cursor, preserve thread lineage, and respect lease fencing.
+- Any specific deployment readiness claim still needs the same restart/resume
+  evidence against that target, not only the local core drill.
 
 ## Next Core Work
 

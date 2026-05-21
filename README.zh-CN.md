@@ -242,6 +242,16 @@ Docker Desktop 可用时：
 RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh
 ```
 
+Postgres-backed restart/resume core evidence：
+
+```bash
+START_POSTGRES=1 ./scripts/managed-session-restart-resume-core-gate.sh
+```
+
+这个 gate 需要 Docker Desktop 或已有 `DATABASE_URL`。它会把 session event、
+tool call、audit log、restart/resume、cursor、thread lineage 和 runtime turn
+证据写到 `.mandoforge/managed-session-restart-resume-core-evidence/`。
+
 常驻 worker / runtime session loop：
 
 ```bash

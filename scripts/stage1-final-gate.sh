@@ -35,6 +35,7 @@ cargo test -p mandoforge-api -- --test-threads=1
 bash -n scripts/smoke.sh
 bash -n scripts/stage1-demo.sh
 bash -n scripts/agent-os-core-evidence-gate.sh
+bash -n scripts/managed-session-restart-resume-core-gate.sh
 bash -n scripts/verify-runtime-adapter-turn-metadata.sh
 bash -n scripts/seed-platform-events.sh
 bash -n scripts/verify-postgres-sql-query.sh
