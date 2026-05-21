@@ -1629,6 +1629,89 @@ JSON
   } >"${archive}.manifest.txt"
   verify_archive "$archive"
 
+  cat >"$tmpdir/evidence/managed-session-restart-resume-evidence.json" <<'JSON'
+{
+  "status": "validated",
+  "target": {
+    "id": "managed-session-runtime-prod-1",
+    "kind": "managed_session_runtime"
+  },
+  "session_loop": {
+    "enqueue_event_persisted": true,
+    "worker_drain_observed": true
+  },
+  "restart": {
+    "api_restarted": true,
+    "worker_restarted": true
+  },
+  "resume": {
+    "session_state_resumed": true,
+    "processed_event_seq_preserved": false
+  },
+  "thread_lineage": {
+    "preserved": true
+  },
+  "lease_fencing": {
+    "finalization_fenced": true,
+    "stale_worker_rejected": true
+  },
+  "runtime_turn": {
+    "completed": true,
+    "final_message_preserved": true
+  }
+}
+JSON
+  archive="$tmpdir/stage2-evidence-managed-session-cursor-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-managed-session-cursor-negative.out 2>/tmp/mandoforge-stage2-archive-managed-session-cursor-negative.err
+  local negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing managed-session processed cursor evidence to fail" >&2
+    exit 1
+  fi
+
+  cat >"$tmpdir/evidence/managed-session-restart-resume-evidence.json" <<'JSON'
+{
+  "status": "validated",
+  "target": {
+    "id": "managed-session-runtime-prod-1",
+    "kind": "managed_session_runtime"
+  },
+  "session_loop": {
+    "enqueue_event_persisted": true,
+    "worker_drain_observed": true
+  },
+  "restart": {
+    "api_restarted": true,
+    "worker_restarted": true
+  },
+  "resume": {
+    "session_state_resumed": true,
+    "processed_event_seq_preserved": true
+  },
+  "thread_lineage": {
+    "preserved": true
+  },
+  "lease_fencing": {
+    "finalization_fenced": true,
+    "stale_worker_rejected": true
+  },
+  "runtime_turn": {
+    "completed": true,
+    "final_message_preserved": true
+  }
+}
+JSON
+
   cat >"$tmpdir/evidence/worker-load-validation-evidence.json" <<'JSON'
 {
   "status": "captured",
@@ -1655,7 +1738,7 @@ JSON
   } >"${archive}.manifest.txt"
   set +e
   "$0" "$archive" >/tmp/mandoforge-stage2-archive-worker-single-node-negative.out 2>/tmp/mandoforge-stage2-archive-worker-single-node-negative.err
-  local negative_status="$?"
+  negative_status="$?"
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected single-node worker evidence to fail" >&2

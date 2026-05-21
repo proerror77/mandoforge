@@ -1895,6 +1895,11 @@ if ! grep -q "managed-session runtime target id" scripts/verify-stage2-evidence-
   exit 1
 fi
 
+if ! grep -q "missing managed-session processed cursor evidence" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier self-test must reject managed-session restart/resume evidence without processed cursor preservation" >&2
+  exit 1
+fi
+
 if ! grep -q "MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID" scripts/stage2-production-evidence-preflight.sh; then
   echo "Stage 2 preflight must require a managed-session runtime target id" >&2
   exit 1
