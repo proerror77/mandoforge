@@ -165,7 +165,11 @@ api_post /api/agents "$(
     tools: ["approval.request"],
     semantic_scopes: {
       project_scope: "mandoforge",
-      workflow_scope: "work-item-manager-plan"
+      repo_scope: "mandoforge",
+      service_scope: "mandoforge-api",
+      workflow_scope: "work-item-manager-plan",
+      policy_scope: "approval-required",
+      memory_scope: "engineering"
     }
   }'
 )" >"$manager_file"
@@ -181,7 +185,11 @@ api_post /api/agents "$(
     tools: ["agent_cli.exec"],
     semantic_scopes: {
       project_scope: "mandoforge",
-      workflow_scope: "work-item-manager-plan"
+      repo_scope: "mandoforge",
+      service_scope: "mandoforge-api",
+      workflow_scope: "work-item-manager-plan",
+      policy_scope: "approval-required",
+      memory_scope: "engineering"
     }
   }'
 )" >"$specialist_file"
@@ -389,7 +397,7 @@ jq -e --arg object_key "work_item:$work_item_id" --arg source_uri "mandoforge://
   any(.[]; .object_key == $object_key
     and .object_type == "work_item"
     and .source_uri == $source_uri
-    and .trust_level == "system_verified"
+    and .trust_level == "source_attested"
     and .freshness == "current"
     and .semantic_scopes.workflow_scope == "work-item-manager-plan")
 ' "$semantic_objects_file" >/dev/null
@@ -397,7 +405,7 @@ jq -e --arg object_key "work_item:$work_item_id" --arg source_uri "mandoforge://
 jq -e --arg object_key "work_item:$work_item_id" '
   any(.retrieved_objects[]; .object_key == $object_key
     and .object_type == "work_item"
-    and .trust_level == "system_verified")
+    and .trust_level == "source_attested")
 ' "$context_packet_file" >/dev/null
 
 jq -e --arg work_item_id "$work_item_id" --arg assignment_id "$assignment_id" --arg review_id "$review_id" --arg manager_plan_id "$manager_plan_id" --arg squad_assignment_id "$squad_assignment_id" --arg squad_id "$squad_id" --arg subject "$SUBJECT" '

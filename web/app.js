@@ -3826,6 +3826,22 @@ function renderWorkItems() {
   const managerPlans = state.selectedWorkItemManagerPlans ?? [];
   const teammates = state.agentTeammates ?? [];
   const squads = state.squads ?? [];
+  const assignedAgentIds = new Set(
+    assignments
+      .filter((assignment) => assignment.assignee_kind === "agent")
+      .map((assignment) => String(assignment.assignee_id)),
+  );
+  const assignedSquadIds = new Set(
+    assignments
+      .filter((assignment) => assignment.assignee_kind === "squad")
+      .map((assignment) => String(assignment.assignee_id)),
+  );
+  const assignedTeammates = teammates.filter(
+    (teammate) =>
+      (teammate.agent_id && assignedAgentIds.has(String(teammate.agent_id))) ||
+      assignedAgentIds.has(String(teammate.id)),
+  );
+  const assignedSquads = squads.filter((squad) => assignedSquadIds.has(String(squad.id)));
   workItemDetailRoot.innerHTML = `
     <div class="work-item-heading">
       <div>
@@ -3902,33 +3918,37 @@ function renderWorkItems() {
         : `<div class="muted">No activity recorded.</div>`
     }
     <h4>Teammates / Squads</h4>
-    <div class="table-wrap">
-      <table class="compact-table">
-        <thead><tr><th>Type</th><th>Name</th><th>Status</th><th>ID</th></tr></thead>
-        <tbody>
-          ${teammates
-            .map(
-              (teammate) => `<tr>
-                <td>teammate</td>
-                <td>${escapeHtml(teammate.display_name)}</td>
-                <td>${escapeHtml(teammate.status)}</td>
-                <td>${escapeHtml(teammate.id)}</td>
-              </tr>`,
-            )
-            .join("")}
-          ${squads
-            .map(
-              (squad) => `<tr>
-                <td>squad</td>
-                <td>${escapeHtml(squad.name)}</td>
-                <td>${escapeHtml(squad.status)}</td>
-                <td>${escapeHtml(squad.id)}</td>
-              </tr>`,
-            )
-            .join("")}
-        </tbody>
-      </table>
-    </div>
+    ${
+      assignedTeammates.length || assignedSquads.length
+        ? `<div class="table-wrap">
+            <table class="compact-table">
+              <thead><tr><th>Type</th><th>Name</th><th>Status</th><th>ID</th></tr></thead>
+              <tbody>
+                ${assignedTeammates
+                  .map(
+                    (teammate) => `<tr>
+                      <td>teammate</td>
+                      <td>${escapeHtml(teammate.display_name)}</td>
+                      <td>${escapeHtml(teammate.status)}</td>
+                      <td>${escapeHtml(teammate.id)}</td>
+                    </tr>`,
+                  )
+                  .join("")}
+                ${assignedSquads
+                  .map(
+                    (squad) => `<tr>
+                      <td>squad</td>
+                      <td>${escapeHtml(squad.name)}</td>
+                      <td>${escapeHtml(squad.status)}</td>
+                      <td>${escapeHtml(squad.id)}</td>
+                    </tr>`,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>`
+        : `<div class="muted">No teammate or squad assignments for this WorkItem.</div>`
+    }
   `;
 }
 

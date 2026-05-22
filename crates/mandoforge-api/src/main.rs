@@ -14609,17 +14609,24 @@ fn semantic_object_matches_scope(object: &SemanticObject, semantic_scopes: &Valu
     let Some(agent_scopes) = semantic_scopes.as_object() else {
         return false;
     };
-    object_scopes.iter().any(|(key, object_value)| {
-        object_value
-            .as_str()
-            .filter(|value| !value.trim().is_empty())
-            .is_some_and(|object_scope| {
-                agent_scopes
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .is_some_and(|agent_scope| agent_scope == object_scope)
-            })
-    })
+    let mut matched_scope_count = 0usize;
+    for (key, object_value) in object_scopes {
+        let Some(object_scope) = object_value.as_str().map(str::trim) else {
+            continue;
+        };
+        if object_scope.is_empty() {
+            continue;
+        }
+        matched_scope_count += 1;
+        let matches = agent_scopes
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|agent_scope| agent_scope.trim() == object_scope);
+        if !matches {
+            return false;
+        }
+    }
+    matched_scope_count > 0
 }
 
 fn semantic_object_rank(object: &ContextPacketSemanticObject) -> i32 {
@@ -14750,16 +14757,17 @@ fn semantic_scope_keys(scopes: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+const REQUIRED_SEMANTIC_SCOPE_KEYS: [&str; 6] = [
+    "project_scope",
+    "repo_scope",
+    "service_scope",
+    "workflow_scope",
+    "policy_scope",
+    "memory_scope",
+];
+
 fn missing_semantic_scope_keys(scopes: &Value) -> Vec<String> {
-    const REQUIRED: [&str; 6] = [
-        "project_scope",
-        "repo_scope",
-        "service_scope",
-        "workflow_scope",
-        "policy_scope",
-        "memory_scope",
-    ];
-    REQUIRED
+    REQUIRED_SEMANTIC_SCOPE_KEYS
         .into_iter()
         .filter(|key| {
             scopes
@@ -17111,6 +17119,7 @@ async fn create_work_item(
         resource_id: None,
     };
     state.authorizer.authorize(&principal, &request).await?;
+    validate_work_item_semantic_scopes(&input.metadata)?;
     let work_item = state.create_work_item(input).await?;
     state
         .append_work_item_activity_entry(
@@ -17156,12 +17165,7 @@ async fn project_work_item_semantic_object(
     state: &AppState,
     work_item: &WorkItem,
 ) -> Result<(), AppError> {
-    let Some(semantic_scopes) = work_item
-        .metadata
-        .get("semantic_scopes")
-        .filter(|value| value.is_object())
-        .cloned()
-    else {
+    let Some(semantic_scopes) = validate_work_item_semantic_scopes(&work_item.metadata)? else {
         return Ok(());
     };
     let source_uri = format!("mandoforge://work-items/{}", work_item.id);
@@ -17199,7 +17203,7 @@ async fn project_work_item_semantic_object(
                 "work_item_id": work_item.id,
                 "observed_at": work_item.created_at,
             }),
-            trust_level: "system_verified".to_string(),
+            trust_level: "source_attested".to_string(),
             freshness: "current".to_string(),
             status: "active".to_string(),
         })
@@ -17228,6 +17232,25 @@ async fn project_work_item_semantic_object(
         ))
         .await?;
     Ok(())
+}
+
+fn validate_work_item_semantic_scopes(metadata: &Value) -> Result<Option<Value>, AppError> {
+    let Some(semantic_scopes) = metadata.get("semantic_scopes") else {
+        return Ok(None);
+    };
+    if !semantic_scopes.is_object() {
+        return Err(AppError::bad_request(
+            "work item metadata.semantic_scopes must be a JSON object",
+        ));
+    }
+    let missing = missing_semantic_scope_keys(semantic_scopes);
+    if !missing.is_empty() {
+        return Err(AppError::bad_request(format!(
+            "work item metadata.semantic_scopes missing required scope keys: {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(Some(semantic_scopes.clone()))
 }
 
 async fn list_work_item_assignments(
@@ -57676,7 +57699,7 @@ not json
             .find(|object| object.object_key == format!("work_item:{work_item_id}"))
             .expect("work item semantic object should be retrieved");
         assert_eq!(projected.object_type, "work_item");
-        assert_eq!(projected.trust_level, "system_verified");
+        assert_eq!(projected.trust_level, "source_attested");
         assert_eq!(projected.freshness, "current");
         assert_eq!(
             projected.source_uri.as_deref(),
@@ -57714,6 +57737,143 @@ not json
                 && log.resource_type == "semantic_object"
                 && log.details["work_item_id"] == json!(work_item_id)
         }));
+    }
+
+    #[tokio::test]
+    async fn work_item_semantic_projection_requires_complete_semantic_scopes() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+
+        let (status, error) = request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Incomplete semantic scopes",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {
+                        "semantic_scopes": {
+                            "project_scope": "mandoforge",
+                            "repo_scope": "mandoforge",
+                            "service_scope": "mandoforge-api"
+                        }
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = error["error"].as_str().unwrap_or_default();
+        assert!(message.contains("metadata.semantic_scopes"));
+        assert!(message.contains("workflow_scope"));
+        assert!(message.contains("policy_scope"));
+        assert!(message.contains("memory_scope"));
+    }
+
+    #[tokio::test]
+    async fn work_item_semantic_projection_does_not_leak_across_partial_scope_match() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let work_item_scopes = json!({
+            "project_scope": "mandoforge",
+            "repo_scope": "mandoforge",
+            "service_scope": "mandoforge-api",
+            "workflow_scope": "work-item-context",
+            "policy_scope": "approval-required",
+            "memory_scope": "engineering"
+        });
+        let agent_scopes = json!({
+            "project_scope": "mandoforge",
+            "repo_scope": "mandoforge",
+            "service_scope": "mandoforge-api",
+            "workflow_scope": "incident-response",
+            "policy_scope": "read-only",
+            "memory_scope": "operations"
+        });
+        let work_item: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Scoped WorkItem context",
+                    "description": "This WorkItem must only feed matching runtime contexts.",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {
+                        "semantic_scopes": work_item_scopes
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item_id = work_item["id"].as_str().expect("work item id");
+
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Mismatched Context Agent",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.read"],
+                    "tool_policy": {"read_only": true},
+                    "workflow_pack_ids": ["coding-pack"],
+                    "semantic_scopes": agent_scopes,
+                    "release_state": "active"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "context packet should not include mismatched WorkItem",
+                    "message": "Do not leak WorkItems across semantic scopes."
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let packet: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/context-packet", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert!(
+            packet
+                .retrieved_objects
+                .iter()
+                .all(|object| object.object_key != format!("work_item:{work_item_id}"))
+        );
     }
 
     #[tokio::test]
