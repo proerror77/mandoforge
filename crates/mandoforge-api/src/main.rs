@@ -92,10 +92,10 @@ use eval_judge::{EvalJudgeClient, EvalJudgeConfig, HttpEvalJudgeClient};
 use eval_judge::{EvalJudgeRequest, EvalJudgeResponse, ReservedEvalJudgeClient};
 use execution::{
     ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker, QueueBackedExecutionWorker,
-    run_execution_job,
+    run_execution_job, truncate_output,
 };
 #[cfg(test)]
-use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
+use execution::{codex_jsonl_event_type, parse_codex_jsonl};
 #[cfg(test)]
 use execution_queue::{ExecutionJobRequest, ExecutionQueueBackend};
 use execution_queue::{ExecutionJobStatus, ExecutionQueue};
@@ -128,6 +128,7 @@ use secrets::{
 };
 #[cfg(test)]
 use shell_runner::docker_shell_args;
+use shell_runner::{shell_command, shell_runner};
 use store_backend::{MemoryStore, StoreBackend};
 
 #[derive(Clone)]
@@ -4843,6 +4844,7 @@ trait ToolExecutor: Send + Sync {
 struct FileReadTool;
 struct SqlSchemaTool;
 struct SqlQueryTool;
+struct ShellExecTool;
 struct ArtifactCreateTool;
 struct ApprovalRequestTool;
 struct McpCallTool;
@@ -14955,6 +14957,70 @@ impl ToolExecutor for SqlQueryTool {
 }
 
 #[async_trait]
+impl ToolExecutor for ShellExecTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "shell.exec",
+            risk: "high",
+            description: "Run a low-risk read-only shell command without approval",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        _tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        if !host_shell_exec_allowed_for_inline_tool() {
+            return Err(AppError::bad_request(
+                "host shell.exec is disabled; use Remote Computer execution or set MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1",
+            ));
+        }
+        let command = input
+            .args
+            .get("command")
+            .or_else(|| input.args.get("cmd"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::bad_request("shell.exec requires command"))?;
+        let workspace = state.workspace_root.join(input.session_id.to_string());
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .map_err(|error| {
+                AppError::bad_request(format!("failed to prepare session workspace: {error}"))
+            })?;
+        let runner = shell_runner();
+        let mut process = shell_command(&runner, &workspace, command);
+        let output = tokio::time::timeout(Duration::from_secs(30), process.output())
+            .await
+            .map_err(|_| AppError::bad_request("shell.exec timed out"))?
+            .map_err(|error| AppError::bad_request(format!("failed to execute shell.exec: {error}")))?;
+        let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout), 64 * 1024);
+        let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr), 64 * 1024);
+        let result = json!({
+            "command": command,
+            "runner": runner,
+            "workspace": workspace.display().to_string(),
+            "exit_code": output.status.code(),
+            "stdout": stdout.text,
+            "stderr": stderr.text,
+            "stdout_original_bytes": stdout.original_bytes,
+            "stderr_original_bytes": stderr.original_bytes,
+            "stdout_truncated": stdout.truncated,
+            "stderr_truncated": stderr.truncated,
+        });
+        if output.status.success() {
+            Ok(result)
+        } else {
+            Err(AppError::bad_request(format!(
+                "shell.exec exited unsuccessfully: {:?}",
+                result
+            )))
+        }
+    }
+}
+
+#[async_trait]
 impl ToolExecutor for ArtifactCreateTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
@@ -15201,6 +15267,7 @@ fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
         Box::new(ApprovalRequestTool),
         Box::new(FileReadTool),
         Box::new(McpCallTool),
+        Box::new(ShellExecTool),
         Box::new(SqlSchemaTool),
         Box::new(SqlQueryTool),
     ];
@@ -15208,6 +15275,12 @@ fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
         .into_iter()
         .map(|tool| (tool.descriptor().name, tool))
         .collect()
+}
+
+fn host_shell_exec_allowed_for_inline_tool() -> bool {
+    std::env::var("MANDOFORGE_ALLOW_HOST_SHELL_EXEC")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 fn tool_descriptors() -> Vec<ToolDescriptor> {
@@ -15220,11 +15293,6 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
             name: "file.write",
             risk: "medium",
             description: "Write files inside the session workspace after approval",
-        },
-        ToolDescriptor {
-            name: "shell.exec",
-            risk: "high",
-            description: "Run a shell command in a controlled workspace after approval",
         },
         ToolDescriptor {
             name: "codex.exec",
@@ -15515,7 +15583,8 @@ async fn execute_tool_invocation(
 ) -> Result<Value, AppError> {
     let agent_version = state.agent_version_for_session(input.session_id).await?;
     let policy = state.policy_for_session(input.session_id).await;
-    let policy_decision = policy.evaluate_tool_for_agent_version(name, &agent_version);
+    let policy_decision =
+        policy.evaluate_tool_for_agent_version_with_args(name, &input.args, &agent_version);
     let session = state.get_session(input.session_id).await?;
     let agent = state.get_agent(session.agent_id).await?;
     let semantic_context_gate = evaluate_semantic_context_gate(
@@ -62283,6 +62352,15 @@ not json
         assert_eq!(shell.decision, "requires_approval");
         assert_eq!(shell.risk_level, "high");
 
+        let pwd = policy.evaluate_tool_with_args("shell.exec", &json!({"command": "pwd"}));
+        assert_eq!(pwd.decision, "allowed");
+        assert_eq!(pwd.risk_level, "low");
+
+        let destructive_shell =
+            policy.evaluate_tool_with_args("shell.exec", &json!({"command": "rm -rf /tmp/x"}));
+        assert_eq!(destructive_shell.decision, "requires_approval");
+        assert_eq!(destructive_shell.risk_level, "high");
+
         let secret = policy.evaluate_tool("secret.read");
         assert_eq!(secret.decision, "denied");
 
@@ -62320,7 +62398,7 @@ not json
             json_request(
                 "POST",
                 "/api/tools/shell.exec/execute",
-                json!({"session_id": session.id, "args": {"command": "pwd"}}),
+                json!({"session_id": session.id, "args": {"command": "rm -rf /tmp/mandoforge-policy-test"}}),
             ),
         )
         .await;
