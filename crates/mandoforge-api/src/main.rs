@@ -96,9 +96,9 @@ use execution::{
 };
 #[cfg(test)]
 use execution::{codex_jsonl_event_type, parse_codex_jsonl, truncate_output};
-use execution_queue::{ExecutionJob, ExecutionJobStatus, ExecutionQueue};
 #[cfg(test)]
 use execution_queue::{ExecutionJobRequest, ExecutionQueueBackend};
+use execution_queue::{ExecutionJobStatus, ExecutionQueue};
 use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueKind};
 use mcp_gateway::{
     HttpMcpGatewayClient, McpCallRequest, McpGatewayClient, McpGatewayConfig,
@@ -13072,23 +13072,7 @@ async fn enqueue_session_loop(
     Ok(job)
 }
 
-async fn enqueue_session_loop_after_approval_event(
-    state: &AppState,
-    session_id: Uuid,
-    trigger_event_id: Uuid,
-    reason: &str,
-) -> Result<SessionLoopJob, AppError> {
-    set_managed_session_status(
-        state,
-        session_id,
-        SessionStatus::Idle,
-        "approval resolved; session loop queued",
-    )
-    .await?;
-    enqueue_session_loop(state, session_id, Some(trigger_event_id), reason).await
-}
-
-async fn project_session_event_to_loop(
+pub(crate) async fn project_session_event_to_loop(
     state: &AppState,
     event: &SessionEvent,
 ) -> Result<Option<SessionLoopJob>, AppError> {
@@ -13110,74 +13094,6 @@ async fn project_session_event_to_loop(
     enqueue_session_loop(state, event.session_id, Some(event.id), reason)
         .await
         .map(Some)
-}
-
-async fn continue_session_after_approved_execution(
-    state: &AppState,
-    session_id: Uuid,
-    job: Option<&ExecutionJob>,
-    approval_event: Option<&SessionEvent>,
-    reason: &str,
-) -> Result<(), AppError> {
-    let trigger_event = if let Some(job) = job {
-        seed_session_loop_window_at_latest_tool_result(state, session_id, job.tool_call_id).await?;
-        state
-            .append_event(
-                "worker",
-                Some(job.id),
-                session_id,
-                "execution.completed",
-                json!({
-                    "execution_job_id": job.id,
-                    "approval_id": job.approval_id,
-                    "tool_call_id": job.tool_call_id,
-                    "tool": job.tool_name,
-                    "status": job.status,
-                    "worker_id": job.worker_id,
-                    "reason": reason
-                }),
-            )
-            .await?
-    } else if let Some(approval_event) = approval_event {
-        approval_event.clone()
-    } else {
-        state
-            .append_event(
-                "system",
-                None,
-                session_id,
-                "session.loop.resume_requested",
-                json!({"reason": reason}),
-            )
-            .await?
-    };
-    if trigger_event.event_type == "session.loop.resume_requested" {
-        enqueue_session_loop_after_approval_event(state, session_id, trigger_event.id, reason)
-            .await?;
-    } else {
-        project_session_event_to_loop(state, &trigger_event).await?;
-    };
-    Ok(())
-}
-
-async fn seed_session_loop_window_at_latest_tool_result(
-    state: &AppState,
-    session_id: Uuid,
-    tool_call_id: Uuid,
-) -> Result<(), AppError> {
-    let events = state.list_events(session_id).await?;
-    if let Some(tool_result_event) = events.iter().rev().find(|event| {
-        event.event_type == "tool.result"
-            && event
-                .payload
-                .get("tool_call_id")
-                .and_then(Value::as_str)
-                .and_then(|value| Uuid::parse_str(value).ok())
-                == Some(tool_call_id)
-    }) {
-        project_session_event_to_loop(state, tool_result_event).await?;
-    }
-    Ok(())
 }
 
 async fn run_session_loop(state: &AppState, job: &SessionLoopJob) -> Result<Session, AppError> {
@@ -39030,16 +38946,6 @@ async fn run_execution_job_route(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("api");
     let completed = run_execution_job(&state, id, worker_id).await?;
-    if completed.status == ExecutionJobStatus::Completed {
-        continue_session_after_approved_execution(
-            &state,
-            completed.session_id,
-            Some(&completed),
-            None,
-            "approved execution completed",
-        )
-        .await?;
-    }
     Ok(Json(completed))
 }
 
@@ -39413,14 +39319,9 @@ async fn decide_approval(
             .await?;
         match outcome {
             ExecutionWorkerOutcome::Completed { job } => {
-                continue_session_after_approved_execution(
-                    &state,
-                    updated.session_id,
-                    job.as_ref(),
-                    Some(&decision_event),
-                    "approved execution completed",
-                )
-                .await?;
+                if job.is_none() {
+                    project_session_event_to_loop(&state, &decision_event).await?;
+                }
             }
             ExecutionWorkerOutcome::Queued => {
                 set_managed_session_status(
@@ -48813,6 +48714,94 @@ not json
                     && job["environment_id"] == json!(environment_a.id)
             }),
             "execution job must keep the enqueue-time environment snapshot: {execution_jobs_for_a:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_execution_job_emits_completion_event_and_projects_loop_without_route() {
+        let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state.clone());
+        let agent = state
+            .list_agents()
+            .await
+            .expect("list seeded agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "direct execution lifecycle"}),
+            ),
+        )
+        .await;
+
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "path": "direct-lifecycle.md",
+                        "content": "completed outside route"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = Uuid::parse_str(
+            approval_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval id");
+        let approved: Approval = request_json(
+            app,
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+
+        let job = state
+            .execution_queue
+            .list()
+            .await
+            .expect("list execution jobs")
+            .into_iter()
+            .find(|job| job.approval_id == approved.id)
+            .expect("queued execution job");
+        assert_eq!(job.status, ExecutionJobStatus::Queued);
+
+        let completed = run_execution_job(&state, job.id, "direct-worker")
+            .await
+            .expect("run execution job directly");
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+
+        let events = state.list_events(session.id).await.expect("list events");
+        let execution_completed_event = events
+            .iter()
+            .find(|event| {
+                event.event_type == "execution.completed"
+                    && event.payload["execution_job_id"] == json!(completed.id)
+            })
+            .expect("execution lifecycle should emit durable completion event");
+        let queued_resume_jobs = state
+            .list_session_loop_jobs()
+            .await
+            .expect("list session loop jobs");
+        assert!(
+            queued_resume_jobs.iter().any(|job| {
+                job.session_id == session.id
+                    && job.status == SessionLoopJobStatus::Queued
+                    && job.reason == "approved execution completed"
+                    && job.trigger_event_id == Some(execution_completed_event.id)
+            }),
+            "execution lifecycle should project completion event to session loop: {queued_resume_jobs:?}"
         );
     }
 

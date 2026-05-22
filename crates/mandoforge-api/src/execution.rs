@@ -468,6 +468,7 @@ pub(crate) async fn run_execution_job(
             json!({"execution_job_status": "completed"}),
         )
         .await?;
+        record_execution_completed_event(state, &completed).await?;
         Ok(completed)
     } else {
         let error = result.expect_err("checked error");
@@ -480,6 +481,51 @@ pub(crate) async fn run_execution_job(
         )
         .await
     }
+}
+
+async fn record_execution_completed_event(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<(), AppError> {
+    let event = state
+        .append_event(
+            "worker",
+            Some(job.id),
+            job.session_id,
+            "execution.completed",
+            json!({
+                "execution_job_id": job.id,
+                "approval_id": job.approval_id,
+                "tool_call_id": job.tool_call_id,
+                "tool": job.tool_name,
+                "status": job.status,
+                "worker_id": job.worker_id,
+                "reason": "approved execution completed"
+            }),
+        )
+        .await?;
+    project_latest_tool_result_for_execution_job(state, job).await?;
+    crate::project_session_event_to_loop(state, &event).await?;
+    Ok(())
+}
+
+async fn project_latest_tool_result_for_execution_job(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<(), AppError> {
+    let events = state.list_events(job.session_id).await?;
+    if let Some(tool_result_event) = events.iter().rev().find(|event| {
+        event.event_type == "tool.result"
+            && event
+                .payload
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                == Some(job.tool_call_id)
+    }) {
+        crate::project_session_event_to_loop(state, tool_result_event).await?;
+    }
+    Ok(())
 }
 
 async fn retry_or_fail_started_execution_job(
