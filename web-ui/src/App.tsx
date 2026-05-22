@@ -317,7 +317,12 @@ function Row({ title, detail }: { title: string; detail: string }) {
 }
 
 function preferredAgent(agents: Agent[]): Agent | undefined {
-  return agents.find((agent) => agent.release_state === "active") ?? agents[0];
+  return (
+    agents.find((agent) => agent.release_state === "active" && agent.tools.length > 0) ??
+    agents.find((agent) => agent.tools.length > 0) ??
+    agents.find((agent) => agent.release_state === "active") ??
+    agents[0]
+  );
 }
 
 function titleFromTask(task: string): string {

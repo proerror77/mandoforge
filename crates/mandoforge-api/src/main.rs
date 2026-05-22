@@ -14972,11 +14972,6 @@ impl ToolExecutor for ShellExecTool {
         input: &ExecuteTool,
         _tool_call: &ToolCall,
     ) -> Result<Value, AppError> {
-        if !host_shell_exec_allowed_for_inline_tool() {
-            return Err(AppError::bad_request(
-                "host shell.exec is disabled; use Remote Computer execution or set MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1",
-            ));
-        }
         let command = input
             .args
             .get("command")
@@ -14989,6 +14984,26 @@ impl ToolExecutor for ShellExecTool {
             .map_err(|error| {
                 AppError::bad_request(format!("failed to prepare session workspace: {error}"))
             })?;
+        if low_risk_pwd_command(command) {
+            let workspace_text = workspace.display().to_string();
+            return Ok(json!({
+                "command": command,
+                "runner": "internal",
+                "workspace": workspace_text,
+                "exit_code": 0,
+                "stdout": format!("{workspace_text}\n"),
+                "stderr": "",
+                "stdout_original_bytes": workspace_text.len() + 1,
+                "stderr_original_bytes": 0,
+                "stdout_truncated": false,
+                "stderr_truncated": false,
+            }));
+        }
+        if !host_shell_exec_allowed_for_inline_tool() {
+            return Err(AppError::bad_request(
+                "host shell.exec is disabled; use Remote Computer execution or set MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1",
+            ));
+        }
         let runner = shell_runner();
         let mut process = shell_command(&runner, &workspace, command);
         let output = tokio::time::timeout(Duration::from_secs(30), process.output())
@@ -15281,6 +15296,10 @@ fn host_shell_exec_allowed_for_inline_tool() -> bool {
     std::env::var("MANDOFORGE_ALLOW_HOST_SHELL_EXEC")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
+}
+
+fn low_risk_pwd_command(command: &str) -> bool {
+    matches!(command.trim(), "pwd" | "pwd -P" | "pwd -L")
 }
 
 fn tool_descriptors() -> Vec<ToolDescriptor> {
