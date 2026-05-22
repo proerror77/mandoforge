@@ -7,13 +7,14 @@ use crate::store_backend::StoreBackend;
 use crate::store_rows::{
     mcp_server_from_row, membership_from_row, organization_from_row, project_from_row,
     provider_access_from_row, provider_record_from_row, team_from_row, tenant_invitation_from_row,
-    work_item_from_row,
+    work_item_assignment_from_row, work_item_from_row,
 };
 use crate::{
     AppError, AppState, CreateMcpServerRecord, CreateMembership, CreateOrganization, CreateProject,
     CreateProviderAccess, CreateProviderRecord, CreateTeam, CreateTenantInvitation, CreateWorkItem,
-    McpServerRecord, Membership, Organization, Project, ProviderAccess, ProviderRecord, Role, Team,
-    TenantInvitation, UpdateMcpServerRecord, UpdateProviderAccess, WorkItem,
+    CreateWorkItemAssignment, McpServerRecord, Membership, Organization, Project, ProviderAccess,
+    ProviderRecord, Role, Team, TenantInvitation, UpdateMcpServerRecord, UpdateProviderAccess,
+    WorkItem, WorkItemAssignment,
 };
 
 impl AppState {
@@ -464,6 +465,107 @@ impl AppState {
         Ok(work_item)
     }
 
+    pub(crate) async fn list_work_item_assignments(
+        &self,
+        work_item_id: Uuid,
+    ) -> Result<Vec<WorkItemAssignment>, AppError> {
+        self.ensure_work_item_exists(work_item_id).await?;
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut assignments: Vec<_> = inner
+                    .read()
+                    .await
+                    .work_item_assignments
+                    .values()
+                    .filter(|assignment| {
+                        assignment.work_item_id == work_item_id && assignment.archived_at.is_none()
+                    })
+                    .cloned()
+                    .collect();
+                assignments.sort_by_key(|assignment| assignment.created_at);
+                assignments.reverse();
+                Ok(assignments)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, work_item_id, assignee_kind, assignee_id, role, status, assigned_by,
+                            metadata, created_at, updated_at, archived_at
+                     FROM work_item_assignments
+                     WHERE tenant_id = $1
+                       AND work_item_id = $2
+                       AND archived_at IS NULL
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.current_tenant_id())
+                .bind(work_item_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(work_item_assignment_from_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_work_item_assignment(
+        &self,
+        work_item_id: Uuid,
+        input: CreateWorkItemAssignment,
+        assigned_by: Option<String>,
+    ) -> Result<WorkItemAssignment, AppError> {
+        self.ensure_work_item_exists(work_item_id).await?;
+        let assignee_kind = normalize_work_item_assignment_assignee_kind(&input.assignee_kind)?;
+        let assignee_id = required_text(input.assignee_id, "assignment assignee_id")?;
+        let role = normalize_work_item_assignment_role(&input.role)?;
+        let status = normalize_work_item_assignment_status(&input.status)?;
+        let now = Utc::now();
+        let assignment = WorkItemAssignment {
+            id: Uuid::new_v4(),
+            work_item_id,
+            assignee_kind,
+            assignee_id,
+            role,
+            status,
+            assigned_by: assigned_by.and_then(optional_text),
+            metadata: input.metadata,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .work_item_assignments
+                    .insert(assignment.id, assignment.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO work_item_assignments
+                         (id, tenant_id, work_item_id, assignee_kind, assignee_id, role, status,
+                          assigned_by, metadata, created_at, updated_at, archived_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                )
+                .bind(assignment.id)
+                .bind(self.current_tenant_id())
+                .bind(assignment.work_item_id)
+                .bind(&assignment.assignee_kind)
+                .bind(&assignment.assignee_id)
+                .bind(&assignment.role)
+                .bind(&assignment.status)
+                .bind(&assignment.assigned_by)
+                .bind(&assignment.metadata)
+                .bind(assignment.created_at)
+                .bind(assignment.updated_at)
+                .bind(assignment.archived_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(assignment)
+    }
+
     async fn validate_work_item_scope(&self, input: &CreateWorkItem) -> Result<(), AppError> {
         if let Some(organization_id) = input.organization_id {
             self.ensure_organization_exists(organization_id).await?;
@@ -493,6 +595,40 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    async fn ensure_work_item_exists(&self, work_item_id: Uuid) -> Result<(), AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let active = inner
+                    .read()
+                    .await
+                    .work_items
+                    .get(&work_item_id)
+                    .is_some_and(|work_item| work_item.archived_at.is_none());
+                if active {
+                    Ok(())
+                } else {
+                    Err(AppError::not_found("active work item not found"))
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let exists: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1
+                     FROM work_items
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND archived_at IS NULL",
+                )
+                .bind(self.current_tenant_id())
+                .bind(work_item_id)
+                .fetch_optional(pool)
+                .await?;
+                exists
+                    .map(|_| ())
+                    .ok_or_else(|| AppError::not_found("active work item not found"))
+            }
+        }
     }
 
     pub(crate) async fn archive_organization(
@@ -2411,6 +2547,36 @@ fn normalize_work_item_priority(value: &str) -> Result<String, AppError> {
         "low" | "normal" | "high" | "urgent" => Ok(normalized),
         other => Err(AppError::bad_request(format!(
             "unsupported work item priority value: {other}"
+        ))),
+    }
+}
+
+fn normalize_work_item_assignment_assignee_kind(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "user" | "agent" | "squad" | "team" => Ok(normalized),
+        other => Err(AppError::bad_request(format!(
+            "unsupported assignment assignee_kind value: {other}"
+        ))),
+    }
+}
+
+fn normalize_work_item_assignment_role(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "owner" | "contributor" | "reviewer" | "observer" => Ok(normalized),
+        other => Err(AppError::bad_request(format!(
+            "unsupported assignment role value: {other}"
+        ))),
+    }
+}
+
+fn normalize_work_item_assignment_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "assigned" | "in_progress" | "blocked" | "review" | "done" | "canceled" => Ok(normalized),
+        other => Err(AppError::bad_request(format!(
+            "unsupported assignment status value: {other}"
         ))),
     }
 }

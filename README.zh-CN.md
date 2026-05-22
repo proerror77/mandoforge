@@ -199,9 +199,9 @@ Runtime 对齐状态记录在 [Claude Managed Agents Alignment](docs/claude-mana
 和 [Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md)。核心 runtime contract
 现在围绕可恢复的 idle session、基于 event cursor 的 loop processing、live
 streaming、Environment-bound worker claim 和 lease-fenced job finalization 展开。
-第一个 WorkItem intake 切片现在已经能持久化 collaboration work 并写入 audit
-evidence；下一步主线应该继续往 Assignment、Manager Agent planning、Semantic
-Objects 推进，而不是继续扩展旁支部署验证包。
+第一个 WorkItem intake 和 assignment-routing 切片现在已经能持久化 collaboration
+work 并写入 audit evidence；下一步主线应该继续往 Manager Agent planning、Review、
+Semantic Objects 推进，而不是继续扩展旁支部署验证包。
 
 ## 本地运行
 

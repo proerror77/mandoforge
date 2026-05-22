@@ -3670,6 +3670,33 @@ struct CreateWorkItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkItemAssignment {
+    id: Uuid,
+    work_item_id: Uuid,
+    assignee_kind: String,
+    assignee_id: String,
+    role: String,
+    status: String,
+    assigned_by: Option<String>,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkItemAssignment {
+    assignee_kind: String,
+    assignee_id: String,
+    #[serde(default = "default_work_item_assignment_role")]
+    role: String,
+    #[serde(default = "default_work_item_assignment_status")]
+    status: String,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Membership {
     id: Uuid,
     user_id: String,
@@ -5139,6 +5166,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/work-items",
             get(list_work_items).post(create_work_item),
+        )
+        .route(
+            "/api/work-items/{id}/assignments",
+            get(list_work_item_assignments).post(create_work_item_assignment),
         )
         .route(
             "/api/teams/{id}/provider-access",
@@ -16760,6 +16791,61 @@ async fn create_work_item(
         ))
         .await?;
     Ok(Json(work_item))
+}
+
+async fn list_work_item_assignments(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkItemAssignment>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "work_item",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_work_item_assignments(id).await?))
+}
+
+async fn create_work_item_assignment(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateWorkItemAssignment>,
+) -> Result<Json<WorkItemAssignment>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::SessionsWrite,
+        resource_type: "work_item".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    let assignment = state
+        .create_work_item_assignment(id, input, Some(principal.subject_id.clone()))
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "work_item.assignment_created",
+            "work_item_assignment",
+            Some(assignment.id),
+            json!({
+                "subject": principal.subject_id,
+                "work_item_id": assignment.work_item_id,
+                "assignee_kind": assignment.assignee_kind,
+                "assignee_id": assignment.assignee_id,
+                "role": assignment.role,
+                "status": assignment.status,
+                "assigned_by": assignment.assigned_by
+            }),
+        ))
+        .await?;
+    Ok(Json(assignment))
 }
 
 async fn list_memberships(
@@ -38919,6 +39005,14 @@ fn default_work_item_status() -> String {
 
 fn default_work_item_priority() -> String {
     "normal".to_string()
+}
+
+fn default_work_item_assignment_role() -> String {
+    "owner".to_string()
+}
+
+fn default_work_item_assignment_status() -> String {
+    "assigned".to_string()
 }
 
 fn default_semantic_source_status() -> String {
@@ -63588,6 +63682,94 @@ not json
                 .as_str()
                 .is_some_and(|message| message.contains("project not found for organization"))
         );
+    }
+
+    #[tokio::test]
+    async fn work_item_assignments_create_list_and_audit_collaboration_routing() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+
+        let work_item: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Route managed runtime metadata work",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {"layer": "collaboration"}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item_id = work_item["id"].as_str().expect("work item id");
+
+        let assignment_payload = json!({
+            "assignee_kind": "agent",
+            "assignee_id": "runtime-specialist",
+            "role": "owner",
+            "metadata": {
+                "routing_reason": "runtime metadata follow-up",
+                "requires_runtime_evidence": true
+            }
+        });
+        let (status, assignment) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/work-items/{work_item_id}/assignments"),
+                assignment_payload.clone(),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(assignment["work_item_id"], json!(work_item_id));
+        assert_eq!(assignment["assignee_kind"], json!("agent"));
+        assert_eq!(assignment["assignee_id"], json!("runtime-specialist"));
+        assert_eq!(assignment["role"], json!("owner"));
+        assert_eq!(assignment["status"], json!("assigned"));
+        assert_eq!(assignment["assigned_by"], json!("admin-1"));
+        let assignment_id = assignment["id"].as_str().expect("assignment id");
+
+        let assignments: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{work_item_id}/assignments"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(assignments.iter().any(|listed| {
+            listed["id"] == json!(assignment_id)
+                && listed["metadata"]["requires_runtime_evidence"] == json!(true)
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "work_item.assignment_created"
+                && log.resource_type == "work_item_assignment"
+                && log.resource_id == Some(Uuid::parse_str(assignment_id).expect("uuid"))
+                && log.details["work_item_id"] == json!(work_item_id)
+                && log.details["assignee_kind"] == json!("agent")
+                && log.details["assignee_id"] == json!("runtime-specialist")
+        }));
     }
 
     #[tokio::test]

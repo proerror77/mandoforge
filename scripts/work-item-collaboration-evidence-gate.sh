@@ -73,7 +73,9 @@ mkdir -p "$EVIDENCE_DIR"
 curl -fsS "$BASE_URL/healthz" >/dev/null
 
 created_file="$EVIDENCE_DIR/work-item-created.json"
+assignment_file="$EVIDENCE_DIR/work-item-assignment-created.json"
 list_file="$EVIDENCE_DIR/work-items.json"
+assignment_list_file="$EVIDENCE_DIR/work-item-assignments.json"
 audit_file="$EVIDENCE_DIR/audit-logs.json"
 summary_file="$EVIDENCE_DIR/summary.txt"
 
@@ -93,7 +95,23 @@ api_post /api/work-items "$(
 )" >"$created_file"
 
 work_item_id="$(jq -r '.id' "$created_file")"
+api_post "/api/work-items/$work_item_id/assignments" "$(
+  jq -nc --arg run_id "$RUN_ID" '{
+    assignee_kind: "agent",
+    assignee_id: "runtime-specialist",
+    role: "owner",
+    metadata: {
+      gate: "work-item-collaboration-evidence",
+      layer: "collaboration",
+      routing_reason: ("runtime evidence follow-up " + $run_id),
+      requires_runtime_evidence: true
+    }
+  }'
+)" >"$assignment_file"
+
+assignment_id="$(jq -r '.id' "$assignment_file")"
 api_get /api/work-items >"$list_file"
+api_get "/api/work-items/$work_item_id/assignments" >"$assignment_list_file"
 api_get /api/audit-logs >"$audit_file"
 
 jq -e --arg id "$work_item_id" --arg run_id "$RUN_ID" '
@@ -108,6 +126,19 @@ jq -e --arg id "$work_item_id" '
   any(.[]; .id == $id and .metadata.layer == "collaboration")
 ' "$list_file" >/dev/null
 
+jq -e --arg id "$assignment_id" --arg work_item_id "$work_item_id" '
+  .id == $id
+  and .work_item_id == $work_item_id
+  and .assignee_kind == "agent"
+  and .assignee_id == "runtime-specialist"
+  and .status == "assigned"
+  and .metadata.requires_runtime_evidence == true
+' "$assignment_file" >/dev/null
+
+jq -e --arg id "$assignment_id" '
+  any(.[]; .id == $id and .metadata.layer == "collaboration")
+' "$assignment_list_file" >/dev/null
+
 jq -e --arg id "$work_item_id" --arg subject "$SUBJECT" '
   any(.[]; .action == "work_item.created"
     and .resource_type == "work_item"
@@ -116,11 +147,23 @@ jq -e --arg id "$work_item_id" --arg subject "$SUBJECT" '
     and .details.source == "manual")
 ' "$audit_file" >/dev/null
 
+jq -e --arg id "$assignment_id" --arg work_item_id "$work_item_id" '
+  any(.[]; .action == "work_item.assignment_created"
+    and .resource_type == "work_item_assignment"
+    and .resource_id == $id
+    and .details.work_item_id == $work_item_id
+    and .details.assignee_kind == "agent"
+    and .details.assignee_id == "runtime-specialist")
+' "$audit_file" >/dev/null
+
 {
   echo "work_item_collaboration_status=validated"
   echo "work_item_id=$work_item_id"
+  echo "assignment_id=$assignment_id"
   echo "created_file=$created_file"
+  echo "assignment_file=$assignment_file"
   echo "list_file=$list_file"
+  echo "assignment_list_file=$assignment_list_file"
   echo "audit_file=$audit_file"
 } | tee "$summary_file"
 

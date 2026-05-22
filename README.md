@@ -198,10 +198,10 @@ Runtime alignment is tracked in
 [Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md). The core runtime
 contract now centers on resumable idle sessions, event-cursor loop processing,
 live streaming, Environment-bound worker claims, and lease-fenced job
-finalization. The first WorkItem intake slice now persists collaboration work
-and audit evidence; the next product work should continue upward into
-Assignments, Manager Agent planning, and Semantic Objects rather than sideways
-into deployment-evidence tracks.
+finalization. The first WorkItem intake and assignment-routing slice now
+persists collaboration work and audit evidence; the next product work should
+continue upward into Manager Agent planning, Reviews, and Semantic Objects
+rather than sideways into deployment-evidence tracks.
 
 ## Run Locally
 

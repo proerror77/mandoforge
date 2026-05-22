@@ -59,7 +59,10 @@ The first Collaboration Layer slice is now in place:
 
 - `/api/work-items` creates and lists first-class WorkItems.
 - WorkItem creation persists source, priority, status, scope, and metadata.
-- WorkItem intake writes `work_item.created` audit evidence and is covered by
+- `/api/work-items/:id/assignments` routes WorkItems to users, agents, squads,
+  or teams.
+- WorkItem intake and routing write `work_item.created` and
+  `work_item.assignment_created` audit evidence and are covered by
   `scripts/work-item-collaboration-evidence-gate.sh`.
 
 ## Near-Term Priority
