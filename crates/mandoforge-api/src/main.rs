@@ -52892,7 +52892,26 @@ not json
                 turn_id: turn_id.to_string(),
                 thread_id: Some("thread-1".to_string()),
                 status: Some(status.clone()),
-                result: json!({"message": status}),
+                result: if status == "completed" {
+                    json!({
+                        "message": status,
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "file.read",
+                                "arguments": {"path": "README.md"}
+                            }
+                        }],
+                        "usage": {
+                            "prompt_tokens": 45,
+                            "completion_tokens": 12,
+                            "total_tokens": 57
+                        }
+                    })
+                } else {
+                    json!({"message": status})
+                },
             })
         }
 
@@ -55292,6 +55311,17 @@ not json
                 && event.payload["item"]["result"]["message"] == "completed"
         }));
         assert!(events.iter().any(|event| {
+            event.event_type == "runtime.tool_call"
+                && event.payload["runtime_type"] == "codex_app_server"
+                && event.payload["tool_call"]["id"] == "call-1"
+                && event.payload["tool_call"]["function"]["name"] == "file.read"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.usage"
+                && event.payload["runtime_type"] == "codex_app_server"
+                && event.payload["usage"]["total_tokens"] == json!(57)
+        }));
+        assert!(events.iter().any(|event| {
             event.event_type == "runtime.final"
                 && event.payload["runtime_type"] == "codex_app_server"
                 && event.payload["final_message"] == "completed"
@@ -55301,6 +55331,8 @@ not json
             event.event_type == "runtime.turn.completed"
                 && event.payload["runtime_type"] == "codex_app_server"
                 && event.payload["status"] == "completed"
+                && event.payload["usage"]["total_tokens"] == json!(57)
+                && event.payload["tool_call_count"] == json!(1)
                 && event.payload["final_artifact_id"].is_string()
         }));
 

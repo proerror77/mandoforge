@@ -2857,6 +2857,28 @@ async fn record_codex_app_server_runtime_turn_completed(
     poll_attempts: u32,
 ) -> Result<(), AppError> {
     let usage = runtime_adapter_usage(&turn.result);
+    let tool_calls = codex_app_server_tool_calls(&turn.result);
+    for (index, tool_call) in tool_calls.iter().enumerate() {
+        state
+            .append_event(
+                "runtime_adapter",
+                Some(run_id),
+                session_id,
+                "runtime.tool_call",
+                json!({
+                    "profile": "codex-app-server",
+                    "runtime_type": "codex_app_server",
+                    "source": "codex_app_server",
+                    "source_operation": "turn.completed",
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "turn_id": turn.turn_id,
+                    "tool_call_index": index,
+                    "tool_call": tool_call,
+                }),
+            )
+            .await?;
+    }
     if let Some(usage) = usage.as_ref() {
         state
             .append_event(
@@ -2959,6 +2981,7 @@ async fn record_codex_app_server_runtime_turn_completed(
                 "status": status,
                 "poll_attempts": poll_attempts,
                 "usage": usage,
+                "tool_call_count": tool_calls.len(),
                 "final_artifact_id": artifact.id,
             }),
         )
@@ -2998,6 +3021,26 @@ fn codex_app_server_final_message(result: &Value) -> Option<String> {
     } else {
         None
     }
+}
+
+fn codex_app_server_tool_calls(result: &Value) -> Vec<Value> {
+    [
+        result.get("tool_calls"),
+        result.get("toolCalls"),
+        result.pointer("/result/tool_calls"),
+        result.pointer("/result/toolCalls"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(Value::as_array)
+    .map(|calls| {
+        calls
+            .iter()
+            .filter(|call| !call.is_null())
+            .cloned()
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn non_empty_string(value: &str) -> Option<String> {
