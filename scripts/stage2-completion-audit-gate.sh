@@ -7,6 +7,7 @@ ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 SOURCE_EVIDENCE_DIR="${SOURCE_EVIDENCE_DIR:-${STAGE2_EVIDENCE_DIR:-.mandoforge/stage2-production-evidence}}"
 AUDIT_DIR="${AUDIT_DIR:-.mandoforge/stage2-completion-audit}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
+INCLUDE_ENTERPRISE_OPTIONAL="${INCLUDE_ENTERPRISE_OPTIONAL:-0}"
 TEAM_ID="${MANDOFORGE_STAGE2_TEAM_ID:-}"
 CONTROLLER_ENV_TEMPLATE="${CONTROLLER_ENV_TEMPLATE:-deploy/stage2-evidence/stage2-production-controllers.env.example}"
 CONTROLLER_SECRET_TEMPLATE="${CONTROLLER_SECRET_TEMPLATE:-deploy/stage2-evidence/stage2-controller-env-secret.example.yaml}"
@@ -2103,12 +2104,28 @@ total_unresolved=0
 total_missing_evidence_scripts=0
 total_missing_evidence_job_manifests=0
 total_missing_required_flags=0
+optional_missing_readiness=0
+optional_missing_validation=0
+optional_missing_required_evidence=0
+optional_stale_readiness=0
+optional_stale_validation=0
+optional_stale_required_evidence=0
+optional_unresolved=0
+optional_missing_evidence_scripts=0
+optional_missing_evidence_job_manifests=0
+optional_missing_required_flags=0
 
 while IFS= read -r encoded; do
   req_json="$(printf '%s' "$encoded" | base64 -d)"
   req_id="$(jq -r '.id' <<<"$req_json")"
   req_title="$(jq -r '.title' <<<"$req_json")"
   req_gap="$(jq -r '.gap' <<<"$req_json")"
+  req_category="$(jq -r '.category // "stage2_production"' <<<"$req_json")"
+  req_required_for_core="$(jq -r 'if has("required_for_core") then .required_for_core else true end' <<<"$req_json")"
+  req_enforced="true"
+  if [[ "$req_required_for_core" == "false" && "$INCLUDE_ENTERPRISE_OPTIONAL" != "1" ]]; then
+    req_enforced="false"
+  fi
   production_target="$(jq -r '.production_target' <<<"$req_json")"
 
   readiness_declared="$tmp_dir/$req_id.readiness-declared"
@@ -2294,19 +2311,34 @@ while IFS= read -r encoded; do
   validation_artifact_count="$(grep -c . "$validation_artifacts" || true)"
   required_evidence_artifact_count="$(grep -c . "$present_required_evidence_artifacts" || true)"
 
-  total_missing_readiness=$((total_missing_readiness + missing_readiness_count))
-  total_missing_validation=$((total_missing_validation + missing_validation_count))
-  total_missing_required_evidence=$((total_missing_required_evidence + missing_required_evidence_count))
-  total_stale_readiness=$((total_stale_readiness + stale_readiness_count))
-  total_stale_validation=$((total_stale_validation + stale_validation_count))
-  total_stale_required_evidence=$((total_stale_required_evidence + stale_required_evidence_count))
-  total_unresolved=$((total_unresolved + unresolved_count))
-  total_missing_evidence_scripts=$((total_missing_evidence_scripts + missing_evidence_script_count))
-  total_missing_evidence_job_manifests=$((total_missing_evidence_job_manifests + missing_evidence_job_manifest_count))
-  total_missing_required_flags=$((total_missing_required_flags + missing_required_flag_count))
+  if [[ "$req_enforced" == "true" ]]; then
+    total_missing_readiness=$((total_missing_readiness + missing_readiness_count))
+    total_missing_validation=$((total_missing_validation + missing_validation_count))
+    total_missing_required_evidence=$((total_missing_required_evidence + missing_required_evidence_count))
+    total_stale_readiness=$((total_stale_readiness + stale_readiness_count))
+    total_stale_validation=$((total_stale_validation + stale_validation_count))
+    total_stale_required_evidence=$((total_stale_required_evidence + stale_required_evidence_count))
+    total_unresolved=$((total_unresolved + unresolved_count))
+    total_missing_evidence_scripts=$((total_missing_evidence_scripts + missing_evidence_script_count))
+    total_missing_evidence_job_manifests=$((total_missing_evidence_job_manifests + missing_evidence_job_manifest_count))
+    total_missing_required_flags=$((total_missing_required_flags + missing_required_flag_count))
+  else
+    optional_missing_readiness=$((optional_missing_readiness + missing_readiness_count))
+    optional_missing_validation=$((optional_missing_validation + missing_validation_count))
+    optional_missing_required_evidence=$((optional_missing_required_evidence + missing_required_evidence_count))
+    optional_stale_readiness=$((optional_stale_readiness + stale_readiness_count))
+    optional_stale_validation=$((optional_stale_validation + stale_validation_count))
+    optional_stale_required_evidence=$((optional_stale_required_evidence + stale_required_evidence_count))
+    optional_unresolved=$((optional_unresolved + unresolved_count))
+    optional_missing_evidence_scripts=$((optional_missing_evidence_scripts + missing_evidence_script_count))
+    optional_missing_evidence_job_manifests=$((optional_missing_evidence_job_manifests + missing_evidence_job_manifest_count))
+    optional_missing_required_flags=$((optional_missing_required_flags + missing_required_flag_count))
+  fi
 
   req_status="blocked"
-  if [[ "$completion_blocked" != "true" && "$missing_readiness_count" == "0" && "$missing_validation_count" == "0" && "$missing_required_evidence_count" == "0" && "$missing_evidence_script_count" == "0" && "$missing_evidence_job_manifest_count" == "0" && "$missing_required_flag_count" == "0" ]]; then
+  if [[ "$req_enforced" == "false" ]]; then
+    req_status="optional"
+  elif [[ "$completion_blocked" != "true" && "$missing_readiness_count" == "0" && "$missing_validation_count" == "0" && "$missing_required_evidence_count" == "0" && "$missing_evidence_script_count" == "0" && "$missing_evidence_job_manifest_count" == "0" && "$missing_required_flag_count" == "0" ]]; then
     req_status="ready"
   fi
 
@@ -2314,6 +2346,9 @@ while IFS= read -r encoded; do
     --arg id "$req_id" \
     --arg title "$req_title" \
     --arg gap "$req_gap" \
+    --arg category "$req_category" \
+    --argjson required_for_core "$req_required_for_core" \
+    --argjson enforced "$req_enforced" \
     --arg production_target "$production_target" \
     --arg status "$req_status" \
     --argjson evidence_scripts "$(json_array_from_file "$evidence_scripts")" \
@@ -2351,6 +2386,9 @@ while IFS= read -r encoded; do
     '{
       id: $id,
       title: $title,
+      category: $category,
+      required_for_core: $required_for_core,
+      enforced: $enforced,
       gap: $gap,
       production_target: $production_target,
       status: $status,
@@ -2413,6 +2451,16 @@ jq -s \
   --argjson missing_evidence_script_count "$total_missing_evidence_scripts" \
   --argjson missing_evidence_job_manifest_count "$total_missing_evidence_job_manifests" \
   --argjson missing_required_flag_count "$total_missing_required_flags" \
+  --argjson optional_missing_readiness_endpoint_count "$optional_missing_readiness" \
+  --argjson optional_missing_validation_endpoint_count "$optional_missing_validation" \
+  --argjson optional_missing_required_evidence_artifact_count "$optional_missing_required_evidence" \
+  --argjson optional_stale_readiness_artifact_count "$optional_stale_readiness" \
+  --argjson optional_stale_validation_artifact_count "$optional_stale_validation" \
+  --argjson optional_stale_required_evidence_artifact_count "$optional_stale_required_evidence" \
+  --argjson optional_unresolved_endpoint_count "$optional_unresolved" \
+  --argjson optional_missing_evidence_script_count "$optional_missing_evidence_scripts" \
+  --argjson optional_missing_evidence_job_manifest_count "$optional_missing_evidence_job_manifests" \
+  --argjson optional_missing_required_flag_count "$optional_missing_required_flags" \
   '{
     generated_at: $generated_at,
     base_url: $base_url,
@@ -2436,6 +2484,16 @@ jq -s \
     missing_evidence_script_count: $missing_evidence_script_count,
     missing_evidence_job_manifest_count: $missing_evidence_job_manifest_count,
     missing_required_flag_count: $missing_required_flag_count,
+    optional_missing_readiness_endpoint_count: $optional_missing_readiness_endpoint_count,
+    optional_missing_validation_endpoint_count: $optional_missing_validation_endpoint_count,
+    optional_missing_required_evidence_artifact_count: $optional_missing_required_evidence_artifact_count,
+    optional_stale_readiness_artifact_count: $optional_stale_readiness_artifact_count,
+    optional_stale_validation_artifact_count: $optional_stale_validation_artifact_count,
+    optional_stale_required_evidence_artifact_count: $optional_stale_required_evidence_artifact_count,
+    optional_unresolved_endpoint_count: $optional_unresolved_endpoint_count,
+    optional_missing_evidence_script_count: $optional_missing_evidence_script_count,
+    optional_missing_evidence_job_manifest_count: $optional_missing_evidence_job_manifest_count,
+    optional_missing_required_flag_count: $optional_missing_required_flag_count,
     requirements: .
   }' "$requirements_jsonl" >"$checklist_json"
 
@@ -2463,6 +2521,16 @@ checklist_md="$AUDIT_DIR/checklist.md"
   echo "- missing_evidence_script_count: $total_missing_evidence_scripts"
   echo "- missing_evidence_job_manifest_count: $total_missing_evidence_job_manifests"
   echo "- missing_required_flag_count: $total_missing_required_flags"
+  echo "- optional_missing_readiness_endpoint_count: $optional_missing_readiness"
+  echo "- optional_missing_validation_endpoint_count: $optional_missing_validation"
+  echo "- optional_missing_required_evidence_artifact_count: $optional_missing_required_evidence"
+  echo "- optional_stale_readiness_artifact_count: $optional_stale_readiness"
+  echo "- optional_stale_validation_artifact_count: $optional_stale_validation"
+  echo "- optional_stale_required_evidence_artifact_count: $optional_stale_required_evidence"
+  echo "- optional_unresolved_endpoint_count: $optional_unresolved"
+  echo "- optional_missing_evidence_script_count: $optional_missing_evidence_scripts"
+  echo "- optional_missing_evidence_job_manifest_count: $optional_missing_evidence_job_manifests"
+  echo "- optional_missing_required_flag_count: $optional_missing_required_flags"
   echo
   echo "## Requirements"
   jq -r '
@@ -2470,6 +2538,9 @@ checklist_md="$AUDIT_DIR/checklist.md"
     | "### " + .id + "\n"
       + "- title: " + .title + "\n"
       + "- status: " + .status + "\n"
+      + "- category: " + .category + "\n"
+      + "- required_for_core: " + (.required_for_core | tostring) + "\n"
+      + "- enforced: " + (.enforced | tostring) + "\n"
       + "- production_target: " + .production_target + "\n"
       + "- missing_readiness_count: " + (.missing_readiness_count | tostring) + "\n"
       + "- missing_validation_count: " + (.missing_validation_count | tostring) + "\n"

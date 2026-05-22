@@ -8,6 +8,7 @@ SCHEDULER_TOKEN="${MANDOFORGE_SCHEDULER_TOKEN:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/stage2-production-evidence}"
 RUN_VALIDATIONS="${RUN_STAGE2_PRODUCTION_VALIDATIONS:-0}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
+INCLUDE_ENTERPRISE_OPTIONAL="${INCLUDE_ENTERPRISE_OPTIONAL:-0}"
 TEAM_ID="${MANDOFORGE_STAGE2_TEAM_ID:-}"
 VERIFY_VALIDATION_COVERAGE="${VERIFY_STAGE2_VALIDATION_COVERAGE:-0}"
 RUN_COMPLETION_AUDIT="${RUN_STAGE2_COMPLETION_AUDIT:-1}"
@@ -82,6 +83,10 @@ local_validation_endpoint_enabled() {
       return 0
       ;;
   esac
+}
+
+enterprise_optional_enabled() {
+  [[ "$INCLUDE_ENTERPRISE_OPTIONAL" == "1" ]]
 }
 
 file_mtime_epoch() {
@@ -967,13 +972,21 @@ capture_policy_rollout_due_run() {
 }
 
 run_controller_validations() {
-  capture_tenant_routing_validation
+  if enterprise_optional_enabled; then
+    capture_tenant_routing_validation
+  else
+    echo "skipping optional enterprise tenant routing validation; set INCLUDE_ENTERPRISE_OPTIONAL=1 to include tenant/RLS evidence" >&2
+  fi
   fetch_json POST /api/providers/policy-gate/run >/dev/null
   fetch_json POST /api/providers/deployment/validate >/dev/null
-  capture_policy_rollout_orchestration_validation
-  capture_vault_kms_recovery_validation
-  capture_worker_load_validation
-  capture_remote_computer_state_sync_validation
+  if enterprise_optional_enabled; then
+    capture_policy_rollout_orchestration_validation
+    capture_vault_kms_recovery_validation
+    capture_worker_load_validation
+    capture_remote_computer_state_sync_validation
+  else
+    echo "skipping optional enterprise policy/Vault/real-cluster validations; set INCLUDE_ENTERPRISE_OPTIONAL=1 to include them" >&2
+  fi
   fetch_json POST /api/approvals/notifications/deployment/validate >/dev/null
   fetch_json POST /api/approvals/notifications/ops/validate >/dev/null
   fetch_json POST /api/codex-app-server/deployment/validate >/dev/null
@@ -1012,10 +1025,10 @@ run_controller_validations() {
     echo "skipping MCP connector rollback; set RUN_STAGE2_MCP_ROLLBACK=1 to include rollback evidence" >&2
   fi
 
-  if [[ "${RUN_STAGE2_SECRET_LIFECYCLE:-0}" == "1" ]]; then
+  if enterprise_optional_enabled && [[ "${RUN_STAGE2_SECRET_LIFECYCLE:-0}" == "1" ]]; then
     capture_vault_kms_rotation_validation
   else
-    echo "skipping KMS rotation run; set RUN_STAGE2_SECRET_LIFECYCLE=1 to include secret lifecycle evidence" >&2
+    echo "skipping optional KMS rotation run; set INCLUDE_ENTERPRISE_OPTIONAL=1 and RUN_STAGE2_SECRET_LIFECYCLE=1 to include secret lifecycle evidence" >&2
   fi
 
   if [[ "${RUN_STAGE2_PROVIDER_ROLLOUT:-0}" == "1" ]]; then
@@ -1025,17 +1038,17 @@ run_controller_validations() {
     echo "skipping provider production rollout/rollback; set RUN_STAGE2_PROVIDER_ROLLOUT=1 to include provider rollout evidence" >&2
   fi
 
-  if [[ "${RUN_STAGE2_POLICY_DUE_RUN:-0}" == "1" ]]; then
+  if enterprise_optional_enabled && [[ "${RUN_STAGE2_POLICY_DUE_RUN:-0}" == "1" ]]; then
     capture_policy_rollout_due_run
   else
-    echo "skipping policy rollout due-run; set RUN_STAGE2_POLICY_DUE_RUN=1 to include policy due-run evidence" >&2
+    echo "skipping optional policy rollout due-run; set INCLUDE_ENTERPRISE_OPTIONAL=1 and RUN_STAGE2_POLICY_DUE_RUN=1 to include policy due-run evidence" >&2
   fi
 
-  if [[ "${RUN_STAGE2_REMOTE_SIDECAR_RECOVERY:-0}" == "1" ]]; then
+  if enterprise_optional_enabled && [[ "${RUN_STAGE2_REMOTE_SIDECAR_RECOVERY:-0}" == "1" ]]; then
     capture_remote_computer_sidecar_recovery_validation
     capture_worker_remote_computer_combined_validation
   else
-    echo "skipping Remote Computer sidecar recovery; set RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 to include replacement evidence" >&2
+    echo "skipping optional Remote Computer sidecar recovery; set INCLUDE_ENTERPRISE_OPTIONAL=1 and RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 to include replacement evidence" >&2
   fi
 
   if [[ "${RUN_STAGE2_APPROVAL_DELIVERY:-0}" == "1" ]]; then
@@ -1062,14 +1075,14 @@ run_controller_validations() {
     echo "skipping observability remediation run; set RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 to include remediation evidence" >&2
   fi
 
-  if [[ "${RUN_STAGE2_FINANCE_CONTROLLERS:-0}" == "1" ]]; then
+  if enterprise_optional_enabled && [[ "${RUN_STAGE2_FINANCE_CONTROLLERS:-0}" == "1" ]]; then
     capture_finance_close_validation
     capture_finance_reconciliation_validation
   else
-    echo "skipping finance close/reconciliation controllers; set RUN_STAGE2_FINANCE_CONTROLLERS=1 to include accounting evidence" >&2
+    echo "skipping optional finance close/reconciliation controllers; set INCLUDE_ENTERPRISE_OPTIONAL=1 and RUN_STAGE2_FINANCE_CONTROLLERS=1 to include accounting evidence" >&2
   fi
 
-  if [[ "${RUN_STAGE2_FINANCE_EXPORT:-0}" == "1" ]]; then
+  if enterprise_optional_enabled && [[ "${RUN_STAGE2_FINANCE_EXPORT:-0}" == "1" ]]; then
     fetch_file GET /api/usage/export.csv "$EVIDENCE_DIR/api-usage-export.csv" "$EVIDENCE_DIR/usage-export-csv-evidence.json"
     capture_finance_export_delivery_validation
     if [[ -z "$FINANCE_DELIVERY_OBSERVER_URL" && -n "$FINANCE_DELIVERY_OBSERVER_TOKEN" && -n "${MANDOFORGE_USAGE_EXPORT_WEBHOOK_URL:-}" ]]; then
@@ -1080,7 +1093,7 @@ run_controller_validations() {
       capture_finance_delivery_observer_validation "$FINANCE_DELIVERY_OBSERVER_URL"
     fi
   else
-    echo "skipping finance export capture; set RUN_STAGE2_FINANCE_EXPORT=1 to include CSV and delivery evidence" >&2
+    echo "skipping optional finance export capture; set INCLUDE_ENTERPRISE_OPTIONAL=1 and RUN_STAGE2_FINANCE_EXPORT=1 to include CSV and delivery evidence" >&2
   fi
 }
 
@@ -1121,7 +1134,7 @@ verify_readiness_inventory_coverage() {
     else
       missing+=("$resolved")
     fi
-  done < <(jq -r '.evidence_requirements[]?.readiness_endpoints[]?' "$readiness_file" | sort -u)
+  done < <(jq -r --arg include "$INCLUDE_ENTERPRISE_OPTIONAL" '.evidence_requirements[]? | select((.required_for_core // true) != false or $include == "1") | .readiness_endpoints[]?' "$readiness_file" | sort -u)
 
   if (( ${#missing[@]} > 0 )); then
     printf 'stage2 evidence gate did not collect declared readiness endpoint: %s\n' "${missing[@]}" >&2
@@ -1185,7 +1198,7 @@ write_endpoint_coverage() {
     else
       echo "$resolved" >>"$missing_file"
     fi
-  done < <(jq -r ".evidence_requirements[]?.${field}[]?" "$readiness_file" | sort -u)
+  done < <(jq -r --arg include "$INCLUDE_ENTERPRISE_OPTIONAL" ".evidence_requirements[]? | select((.required_for_core // true) != false or \$include == \"1\") | .${field}[]?" "$readiness_file" | sort -u)
 
   missing_count="$(grep -c . "$missing_file" || true)"
   stale_count="$(grep -c . "$stale_file" || true)"
