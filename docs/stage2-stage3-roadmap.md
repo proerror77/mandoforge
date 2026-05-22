@@ -70,11 +70,15 @@ The first Collaboration Layer slice is now in place:
   second runtime orchestrator.
 - `/api/work-items/:id/manager-plans` exposes Manager Agent planning records
   bound to the WorkItem without starting specialist runtime execution.
+- WorkItems with `metadata.semantic_scopes` are projected into `semantic_objects`
+  as `work_item:*` records so context packets can retrieve Collaboration Layer
+  work as runtime context.
 - WorkItem intake, routing, review, activity, Agent Teammate/Squad, and Manager
-  Plan binding write `work_item.created`, `work_item.assignment_created`,
-  `work_item.review_created`, `agent_teammate.created`, `squad.created`,
-  `squad.member_added`, `manager_plan.created`, and `manager_plan.reviewed`
-  audit/activity evidence and are covered by
+  Plan binding, and WorkItem semantic projection write `work_item.created`,
+  `work_item.assignment_created`, `work_item.review_created`,
+  `agent_teammate.created`, `squad.created`, `squad.member_added`,
+  `manager_plan.created`, `manager_plan.reviewed`, and
+  `work_item.semantic_object_projected` audit/activity evidence and are covered by
   `scripts/work-item-collaboration-evidence-gate.sh`.
 
 ## Near-Term Priority

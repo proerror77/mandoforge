@@ -17148,7 +17148,86 @@ async fn create_work_item(
             }),
         ))
         .await?;
+    project_work_item_semantic_object(&state, &work_item).await?;
     Ok(Json(work_item))
+}
+
+async fn project_work_item_semantic_object(
+    state: &AppState,
+    work_item: &WorkItem,
+) -> Result<(), AppError> {
+    let Some(semantic_scopes) = work_item
+        .metadata
+        .get("semantic_scopes")
+        .filter(|value| value.is_object())
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let source_uri = format!("mandoforge://work-items/{}", work_item.id);
+    let object_key = format!("work_item:{}", work_item.id);
+    let result = state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: None,
+            object_type: "work_item".to_string(),
+            object_key: object_key.clone(),
+            title: work_item.title.clone(),
+            summary: work_item.description.clone().unwrap_or_else(|| {
+                format!(
+                    "WorkItem {} from {} with {} priority.",
+                    work_item.id, work_item.source, work_item.priority
+                )
+            }),
+            content: json!({
+                "work_item_id": work_item.id,
+                "organization_id": work_item.organization_id,
+                "team_id": work_item.team_id,
+                "project_id": work_item.project_id,
+                "title": work_item.title.clone(),
+                "description": work_item.description.clone(),
+                "source": work_item.source.clone(),
+                "source_url": work_item.source_url.clone(),
+                "status": work_item.status.clone(),
+                "priority": work_item.priority.clone(),
+                "assignee": work_item.assignee.clone(),
+                "metadata": work_item.metadata.clone(),
+            }),
+            semantic_scopes,
+            source_uri: Some(source_uri.clone()),
+            provenance: json!({
+                "source": "work_item.created",
+                "work_item_id": work_item.id,
+                "observed_at": work_item.created_at,
+            }),
+            trust_level: "system_verified".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        })
+        .await;
+    let semantic_object = match result {
+        Ok(object) => object,
+        Err(error) if error.message.contains("already exists") => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            Some(work_item.id),
+            "work_item.semantic_object_projected",
+            "semantic_object",
+            Some(semantic_object.id),
+            json!({
+                "work_item_id": work_item.id,
+                "semantic_object_id": semantic_object.id,
+                "object_key": object_key,
+                "source_uri": source_uri,
+                "trust_level": semantic_object.trust_level,
+                "freshness": semantic_object.freshness,
+            }),
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn list_work_item_assignments(
@@ -57505,6 +57584,135 @@ not json
                 && log.resource_id == Some(packet_v1.id)
                 && log.details["version"] == json!(1)
                 && log.details["retrieved_object_count"] == json!(1)
+        }));
+    }
+
+    #[tokio::test]
+    async fn work_item_semantic_projection_feeds_context_packets() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let semantic_scopes = json!({
+            "project_scope": "mandoforge",
+            "repo_scope": "mandoforge",
+            "service_scope": "mandoforge-api",
+            "workflow_scope": "work-item-context",
+            "policy_scope": "approval-required",
+            "memory_scope": "engineering"
+        });
+        let work_item: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Project WorkItem into context",
+                    "description": "Make Collaboration Layer work visible to runtime context packets.",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {
+                        "layer": "collaboration",
+                        "semantic_scopes": semantic_scopes
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item_id = work_item["id"].as_str().expect("work item id");
+
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "WorkItem Context Agent",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.read"],
+                    "tool_policy": {"read_only": true},
+                    "workflow_pack_ids": ["coding-pack"],
+                    "semantic_scopes": semantic_scopes,
+                    "release_state": "active"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "context packet should include WorkItem",
+                    "message": "Use the WorkItem as Collaboration Layer context."
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let packet: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/context-packet", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let projected = packet
+            .retrieved_objects
+            .iter()
+            .find(|object| object.object_key == format!("work_item:{work_item_id}"))
+            .expect("work item semantic object should be retrieved");
+        assert_eq!(projected.object_type, "work_item");
+        assert_eq!(projected.trust_level, "system_verified");
+        assert_eq!(projected.freshness, "current");
+        assert_eq!(
+            projected.source_uri.as_deref(),
+            Some(format!("mandoforge://work-items/{work_item_id}").as_str())
+        );
+
+        let semantic_objects: Vec<SemanticObject> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-objects")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            semantic_objects
+                .iter()
+                .any(|object| object.object_key == format!("work_item:{work_item_id}"))
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "work_item.semantic_object_projected"
+                && log.resource_type == "semantic_object"
+                && log.details["work_item_id"] == json!(work_item_id)
         }));
     }
 

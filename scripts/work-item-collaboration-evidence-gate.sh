@@ -84,10 +84,12 @@ squad_assignment_file="$EVIDENCE_DIR/work-item-squad-assignment-created.json"
 manager_session_file="$EVIDENCE_DIR/manager-session-created.json"
 manager_plan_file="$EVIDENCE_DIR/manager-plan-created.json"
 manager_plan_review_file="$EVIDENCE_DIR/manager-plan-reviewed.json"
+context_packet_file="$EVIDENCE_DIR/manager-context-packet.json"
 list_file="$EVIDENCE_DIR/work-items.json"
 assignment_list_file="$EVIDENCE_DIR/work-item-assignments.json"
 review_list_file="$EVIDENCE_DIR/work-item-reviews.json"
 activity_file="$EVIDENCE_DIR/work-item-activity.json"
+semantic_objects_file="$EVIDENCE_DIR/semantic-objects.json"
 teammate_list_file="$EVIDENCE_DIR/agent-teammates.json"
 squad_list_file="$EVIDENCE_DIR/squads.json"
 squad_member_list_file="$EVIDENCE_DIR/squad-members.json"
@@ -106,7 +108,15 @@ api_post /api/work-items "$(
     metadata: {
       gate: "work-item-collaboration-evidence",
       layer: "collaboration",
-      runtime_evidence_required: true
+      runtime_evidence_required: true,
+      semantic_scopes: {
+        project_scope: "mandoforge",
+        repo_scope: "mandoforge",
+        service_scope: "mandoforge-api",
+        workflow_scope: "work-item-manager-plan",
+        policy_scope: "approval-required",
+        memory_scope: "engineering"
+      }
     }
   }'
 )" >"$created_file"
@@ -273,10 +283,13 @@ api_post "/api/work-items/$work_item_id/assignments" "$(
 )" >"$squad_assignment_file"
 squad_assignment_id="$(jq -r '.id' "$squad_assignment_file")"
 
+api_post "/api/sessions/$manager_session_id/context-packet" "{}" >"$context_packet_file"
+
 api_get /api/work-items >"$list_file"
 api_get "/api/work-items/$work_item_id/assignments" >"$assignment_list_file"
 api_get "/api/work-items/$work_item_id/reviews" >"$review_list_file"
 api_get "/api/work-items/$work_item_id/activity" >"$activity_file"
+api_get /api/semantic-objects >"$semantic_objects_file"
 api_get /api/agent-teammates >"$teammate_list_file"
 api_get /api/squads >"$squad_list_file"
 api_get "/api/squads/$squad_id/members" >"$squad_member_list_file"
@@ -290,6 +303,7 @@ jq -e --arg id "$work_item_id" --arg run_id "$RUN_ID" '
   and .status == "open"
   and .priority == "high"
   and .metadata.runtime_evidence_required == true
+  and .metadata.semantic_scopes.workflow_scope == "work-item-manager-plan"
 ' "$created_file" >/dev/null
 
 jq -e --arg id "$work_item_id" '
@@ -370,6 +384,21 @@ jq -e --arg id "$squad_member_id" --arg teammate_id "$teammate_id" '
   and .[0].id == $id
   and .[0].teammate_id == $teammate_id
 ' "$squad_member_list_file" >/dev/null
+
+jq -e --arg object_key "work_item:$work_item_id" --arg source_uri "mandoforge://work-items/$work_item_id" '
+  any(.[]; .object_key == $object_key
+    and .object_type == "work_item"
+    and .source_uri == $source_uri
+    and .trust_level == "system_verified"
+    and .freshness == "current"
+    and .semantic_scopes.workflow_scope == "work-item-manager-plan")
+' "$semantic_objects_file" >/dev/null
+
+jq -e --arg object_key "work_item:$work_item_id" '
+  any(.retrieved_objects[]; .object_key == $object_key
+    and .object_type == "work_item"
+    and .trust_level == "system_verified")
+' "$context_packet_file" >/dev/null
 
 jq -e --arg work_item_id "$work_item_id" --arg assignment_id "$assignment_id" --arg review_id "$review_id" --arg manager_plan_id "$manager_plan_id" --arg squad_assignment_id "$squad_assignment_id" --arg squad_id "$squad_id" --arg subject "$SUBJECT" '
   length == 6
@@ -484,6 +513,13 @@ jq -e --arg id "$squad_member_id" --arg squad_id "$squad_id" --arg teammate_id "
     and .details.teammate_id == $teammate_id)
 ' "$audit_file" >/dev/null
 
+jq -e --arg work_item_id "$work_item_id" --arg object_key "work_item:$work_item_id" '
+  any(.[]; .action == "work_item.semantic_object_projected"
+    and .resource_type == "semantic_object"
+    and .details.work_item_id == $work_item_id
+    and .details.object_key == $object_key)
+' "$audit_file" >/dev/null
+
 {
   echo "work_item_collaboration_status=validated"
   echo "work_item_id=$work_item_id"
@@ -497,6 +533,7 @@ jq -e --arg id "$squad_member_id" --arg squad_id "$squad_id" --arg teammate_id "
   echo "squad_member_id=$squad_member_id"
   echo "manager_session_id=$manager_session_id"
   echo "manager_plan_id=$manager_plan_id"
+  echo "context_packet_id=$(jq -r '.id' "$context_packet_file")"
   echo "created_file=$created_file"
   echo "assignment_file=$assignment_file"
   echo "squad_assignment_file=$squad_assignment_file"
@@ -509,10 +546,12 @@ jq -e --arg id "$squad_member_id" --arg squad_id "$squad_id" --arg teammate_id "
   echo "manager_session_file=$manager_session_file"
   echo "manager_plan_file=$manager_plan_file"
   echo "manager_plan_review_file=$manager_plan_review_file"
+  echo "context_packet_file=$context_packet_file"
   echo "list_file=$list_file"
   echo "assignment_list_file=$assignment_list_file"
   echo "review_list_file=$review_list_file"
   echo "activity_file=$activity_file"
+  echo "semantic_objects_file=$semantic_objects_file"
   echo "teammate_list_file=$teammate_list_file"
   echo "squad_list_file=$squad_list_file"
   echo "squad_member_list_file=$squad_member_list_file"
