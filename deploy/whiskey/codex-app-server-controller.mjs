@@ -289,12 +289,12 @@ async function startTurn(threadId, body) {
             run.status = "failed";
             run.result.error = "Codex App Server thread entered systemError";
             run.completed_at = new Date().toISOString();
-            try {
-              socket.close();
-            } catch {
-              // Nothing to do: the run is already terminal.
-            }
           }
+        }
+        if (payload.method === "error") {
+          run.status = "failed";
+          run.result.error = payload.params?.error?.message || "Codex App Server error";
+          run.completed_at = new Date().toISOString();
         }
         if (payload.method === "turn/completed") {
           const turn = payload.params?.turn || {};

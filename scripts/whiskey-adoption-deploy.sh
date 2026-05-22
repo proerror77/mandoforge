@@ -292,12 +292,22 @@ if [[ -z \"\$docker_gateway_ip\" ]]; then
   echo 'docker0 gateway IP is required for container-to-host Codex App Server wiring' >&2
   exit 1
 fi
-if ! ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_WS_PORT$\"; then
-  command -v codex >/dev/null 2>&1 || { echo 'codex CLI is required for Whiskey Codex App Server WS target' >&2; exit 1; }
-  nohup codex app-server --listen ws://\$docker_gateway_ip:$CODEX_WS_PORT > '$REMOTE_ROOT/codex-app-server-ws.log' 2>&1 &
-  echo \$! > '$REMOTE_ROOT/codex-app-server-ws.pid'
-  sleep 2
+if [[ -f '$REMOTE_ROOT/codex-app-server-ws.pid' ]]; then
+  kill \$(cat '$REMOTE_ROOT/codex-app-server-ws.pid') >/dev/null 2>&1 || true
+  rm -f '$REMOTE_ROOT/codex-app-server-ws.pid'
+  sleep 1
 fi
+if command -v lsof >/dev/null 2>&1; then
+  codex_ws_pid=\$(lsof -tiTCP:$CODEX_WS_PORT -sTCP:LISTEN 2>/dev/null || true)
+  if [[ -n \"\$codex_ws_pid\" ]]; then
+    kill \$codex_ws_pid >/dev/null 2>&1 || true
+    sleep 1
+  fi
+fi
+command -v codex >/dev/null 2>&1 || { echo 'codex CLI is required for Whiskey Codex App Server WS target' >&2; exit 1; }
+nohup codex app-server --listen ws://\$docker_gateway_ip:$CODEX_WS_PORT > '$REMOTE_ROOT/codex-app-server-ws.log' 2>&1 &
+echo \$! > '$REMOTE_ROOT/codex-app-server-ws.pid'
+sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_WS_PORT$\" || { cat '$REMOTE_ROOT/codex-app-server-ws.log' >&2; exit 1; }
 if [[ -f '$REMOTE_ROOT/codex-app-server-controller.pid' ]]; then
   kill \$(cat '$REMOTE_ROOT/codex-app-server-controller.pid') >/dev/null 2>&1 || true
