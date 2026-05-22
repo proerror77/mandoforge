@@ -436,7 +436,7 @@ remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"
 if [[ "$PULL_IMAGE" == "1" ]]; then
   remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' pull"
 fi
-remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d postgres otel-collector && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d --force-recreate api worker && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' ps"
+remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d postgres otel-collector && docker volume create '${COMPOSE_PROJECT}_workspace-data' >/dev/null && docker run --rm -u 0 -v '${COMPOSE_PROJECT}_workspace-data:/data' debian:trixie-slim sh -c 'chown -R 1000:1000 /data' && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d --force-recreate api worker && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' ps"
 
 ssh "$REMOTE_HOST" "bash -lc $(printf '%q' "$remote_cmd")"
 
