@@ -9712,7 +9712,7 @@ async fn add_message(
     )
     .await?;
     let event = append_user_message_event(&state, id, input.message).await?;
-    enqueue_session_loop(&state, id, Some(event.id), "user.message").await?;
+    project_session_event_to_loop(&state, &event).await?;
     Ok(Json(event))
 }
 
@@ -9731,24 +9731,10 @@ async fn send_session_events(
     )
     .await?;
     let mut stored_events = Vec::new();
-    let mut session_loop_trigger_event_id = None;
-    let mut session_loop_reason = None;
     for event in input.events {
         let stored = append_incoming_session_event(&state, id, event).await?;
-        if session_event_triggers_loop(&stored.event_type) {
-            session_loop_trigger_event_id = Some(stored.id);
-            session_loop_reason = Some(stored.event_type.clone());
-        }
+        project_session_event_to_loop(&state, &stored).await?;
         stored_events.push(stored);
-    }
-    if session_loop_trigger_event_id.is_some() {
-        enqueue_session_loop(
-            &state,
-            id,
-            session_loop_trigger_event_id,
-            session_loop_reason.as_deref().unwrap_or("user.message"),
-        )
-        .await?;
     }
     Ok(Json(stored_events))
 }
@@ -9828,9 +9814,17 @@ async fn append_incoming_session_event(
     }
 }
 
-fn session_event_triggers_loop(event_type: &str) -> bool {
-    matches!(event_type, "user.message" | "user.custom_tool_result")
-        || is_session_goal_event(event_type)
+fn session_loop_reason_for_event(event_type: &str) -> Option<&str> {
+    if is_session_goal_event(event_type) {
+        return Some(event_type);
+    }
+    match event_type {
+        "user.message" | "user.custom_tool_result" | "tool.result" => Some(event_type),
+        "approval.approved" => Some("approval approved"),
+        "approval.rejected" => Some("approval rejected"),
+        "execution.completed" => Some("approved execution completed"),
+        _ => None,
+    }
 }
 
 fn is_session_goal_event(event_type: &str) -> bool {
@@ -13094,14 +13088,38 @@ async fn enqueue_session_loop_after_approval_event(
     enqueue_session_loop(state, session_id, Some(trigger_event_id), reason).await
 }
 
+async fn project_session_event_to_loop(
+    state: &AppState,
+    event: &SessionEvent,
+) -> Result<Option<SessionLoopJob>, AppError> {
+    let Some(reason) = session_loop_reason_for_event(&event.event_type) else {
+        return Ok(None);
+    };
+    if matches!(
+        event.event_type.as_str(),
+        "approval.approved" | "approval.rejected" | "execution.completed"
+    ) {
+        set_managed_session_status(
+            state,
+            event.session_id,
+            SessionStatus::Idle,
+            "durable event projected to session loop",
+        )
+        .await?;
+    }
+    enqueue_session_loop(state, event.session_id, Some(event.id), reason)
+        .await
+        .map(Some)
+}
+
 async fn continue_session_after_approved_execution(
     state: &AppState,
     session_id: Uuid,
     job: Option<&ExecutionJob>,
-    approval_event_id: Option<Uuid>,
+    approval_event: Option<&SessionEvent>,
     reason: &str,
 ) -> Result<(), AppError> {
-    let trigger_event_id = if let Some(job) = job {
+    let trigger_event = if let Some(job) = job {
         seed_session_loop_window_at_latest_tool_result(state, session_id, job.tool_call_id).await?;
         state
             .append_event(
@@ -13120,9 +13138,8 @@ async fn continue_session_after_approved_execution(
                 }),
             )
             .await?
-            .id
-    } else if let Some(approval_event_id) = approval_event_id {
-        approval_event_id
+    } else if let Some(approval_event) = approval_event {
+        approval_event.clone()
     } else {
         state
             .append_event(
@@ -13133,9 +13150,13 @@ async fn continue_session_after_approved_execution(
                 json!({"reason": reason}),
             )
             .await?
-            .id
     };
-    enqueue_session_loop_after_approval_event(state, session_id, trigger_event_id, reason).await?;
+    if trigger_event.event_type == "session.loop.resume_requested" {
+        enqueue_session_loop_after_approval_event(state, session_id, trigger_event.id, reason)
+            .await?;
+    } else {
+        project_session_event_to_loop(state, &trigger_event).await?;
+    };
     Ok(())
 }
 
@@ -13154,9 +13175,7 @@ async fn seed_session_loop_window_at_latest_tool_result(
                 .and_then(|value| Uuid::parse_str(value).ok())
                 == Some(tool_call_id)
     }) {
-        state
-            .enqueue_session_loop_job(session_id, Some(tool_result_event.id), "tool.result")
-            .await?;
+        project_session_event_to_loop(state, tool_result_event).await?;
     }
     Ok(())
 }
@@ -15861,13 +15880,7 @@ async fn execute_tool_invocation(
         )
         .await?;
     if status == "completed" && origin == ToolInvocationOrigin::ManualRoute {
-        enqueue_session_loop(
-            state,
-            input.session_id,
-            Some(result_event.id),
-            "tool.result",
-        )
-        .await?;
+        project_session_event_to_loop(state, &result_event).await?;
     }
     state
         .append_event(
@@ -39404,7 +39417,7 @@ async fn decide_approval(
                     &state,
                     updated.session_id,
                     job.as_ref(),
-                    Some(decision_event.id),
+                    Some(&decision_event),
                     "approved execution completed",
                 )
                 .await?;
@@ -39420,13 +39433,7 @@ async fn decide_approval(
             }
         }
     } else if status == "rejected" {
-        enqueue_session_loop_after_approval_event(
-            &state,
-            updated.session_id,
-            decision_event.id,
-            "approval rejected",
-        )
-        .await?;
+        project_session_event_to_loop(&state, &decision_event).await?;
     }
     state
         .append_audit_log(new_audit_log(
@@ -39473,13 +39480,7 @@ async fn record_rejected_approval_tool_result(
             }),
         )
         .await?;
-    state
-        .enqueue_session_loop_job(
-            approval.session_id,
-            Some(tool_result_event.id),
-            "tool.result",
-        )
-        .await?;
+    project_session_event_to_loop(state, &tool_result_event).await?;
     state
         .append_event(
             "agent",
@@ -60207,6 +60208,39 @@ not json
                 .expect("valid request"),
         )
         .await
+    }
+
+    #[test]
+    fn session_loop_projection_covers_durable_runtime_events() {
+        assert_eq!(
+            session_loop_reason_for_event("user.message"),
+            Some("user.message")
+        );
+        assert_eq!(
+            session_loop_reason_for_event("user.custom_tool_result"),
+            Some("user.custom_tool_result")
+        );
+        assert_eq!(
+            session_loop_reason_for_event("session.goal.updated"),
+            Some("session.goal.updated")
+        );
+        assert_eq!(
+            session_loop_reason_for_event("tool.result"),
+            Some("tool.result")
+        );
+        assert_eq!(
+            session_loop_reason_for_event("approval.approved"),
+            Some("approval approved")
+        );
+        assert_eq!(
+            session_loop_reason_for_event("approval.rejected"),
+            Some("approval rejected")
+        );
+        assert_eq!(
+            session_loop_reason_for_event("execution.completed"),
+            Some("approved execution completed")
+        );
+        assert_eq!(session_loop_reason_for_event("agent.final"), None);
     }
 
     #[tokio::test]
