@@ -92,6 +92,14 @@ const state = {
   organizations: [],
   teams: [],
   projects: [],
+  workItems: [],
+  selectedWorkItemId: "",
+  selectedWorkItemAssignments: [],
+  selectedWorkItemReviews: [],
+  selectedWorkItemActivity: [],
+  selectedWorkItemManagerPlans: [],
+  agentTeammates: [],
+  squads: [],
   memberships: [],
   tenantInvitations: [],
   tenantIsolationReadiness: null,
@@ -208,6 +216,8 @@ const tenantIsolationReadinessRoot = document.querySelector("#tenant-isolation-r
 const validateTenantRoutingButton = document.querySelector("#validate-tenant-routing");
 const teamRoot = document.querySelector("#teams");
 const projectRoot = document.querySelector("#projects");
+const workItemRoot = document.querySelector("#work-items");
+const workItemDetailRoot = document.querySelector("#work-item-detail");
 const membershipRoot = document.querySelector("#memberships");
 const tenantInvitationRoot = document.querySelector("#tenant-invitations");
 const agentForm = document.querySelector("#agent-form");
@@ -2024,6 +2034,9 @@ async function refreshOps() {
       ["approvalNotificationChannelPolicies", "/api/approvals/notification-channel-policies"],
       ["approvalNotificationRouting", "/api/approvals/notification-routing/summary"],
       ["approvalNotificationRuns", "/api/approvals/notifications/runs"],
+      ["workItems", "/api/work-items"],
+      ["agentTeammates", "/api/agent-teammates"],
+      ["squads", "/api/squads"],
     ]),
   );
   try {
@@ -2076,7 +2089,44 @@ async function refreshOps() {
     state.projects = [];
     state.providerAccess = [];
   }
+  const workItems = state.workItems ?? [];
+  if (
+    state.selectedWorkItemId &&
+    !workItems.some((workItem) => workItem.id === state.selectedWorkItemId)
+  ) {
+    state.selectedWorkItemId = "";
+  }
+  if (!state.selectedWorkItemId && workItems[0]) {
+    state.selectedWorkItemId = workItems[0].id;
+  }
+  await refreshSelectedWorkItemDetails(false);
   renderOps();
+}
+
+async function refreshSelectedWorkItemDetails(render = true) {
+  if (!state.selectedWorkItemId) {
+    state.selectedWorkItemAssignments = [];
+    state.selectedWorkItemReviews = [];
+    state.selectedWorkItemActivity = [];
+    state.selectedWorkItemManagerPlans = [];
+    if (render) renderWorkItems();
+    return;
+  }
+  Object.assign(
+    state,
+    await apiSettledEntries([
+      ["selectedWorkItemAssignments", `/api/work-items/${state.selectedWorkItemId}/assignments`],
+      ["selectedWorkItemReviews", `/api/work-items/${state.selectedWorkItemId}/reviews`],
+      ["selectedWorkItemActivity", `/api/work-items/${state.selectedWorkItemId}/activity`],
+      ["selectedWorkItemManagerPlans", `/api/work-items/${state.selectedWorkItemId}/manager-plans`],
+    ]),
+  );
+  if (render) renderWorkItems();
+}
+
+async function setWorkItemId(workItemId) {
+  state.selectedWorkItemId = workItemId;
+  await refreshSelectedWorkItemDetails();
 }
 
 async function refreshAgentReleases(render = true) {
@@ -2241,6 +2291,7 @@ function renderOps() {
   renderRemoteComputerReadiness();
   renderExecutionJobs();
   renderCodexAppServer();
+  renderWorkItems();
   const stage2Readiness = state.stage2Readiness || {};
   const stage2OpenGaps = stage2Readiness.open_gaps || [];
   const stage2EvidenceRequirements = stage2Readiness.evidence_requirements || [];
@@ -3737,6 +3788,148 @@ function renderTenantGovernance() {
       acceptTenantInvitation(button.dataset.acceptInvitation),
     );
   });
+}
+
+function renderWorkItems() {
+  if (!workItemRoot || !workItemDetailRoot) {
+    return;
+  }
+  const workItems = state.workItems ?? [];
+  const selected = workItems.find((workItem) => workItem.id === state.selectedWorkItemId);
+  workItemRoot.innerHTML = workItems.length
+    ? workItems
+        .map(
+          (workItem) => `
+            <div class="item">
+              <button class="item-button${workItem.id === state.selectedWorkItemId ? " selected" : ""}" data-work-item="${escapeHtml(workItem.id)}">
+                <strong>${escapeHtml(workItem.title)}</strong>
+                <span>${escapeHtml(workItem.status)} · ${escapeHtml(workItem.priority)} · ${escapeHtml(workItem.source)}</span>
+                <span>${escapeHtml(workItem.id)}</span>
+              </button>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="muted">No WorkItems yet</div>`;
+  workItemRoot.querySelectorAll("[data-work-item]").forEach((button) => {
+    button.addEventListener("click", () => setWorkItemId(button.dataset.workItem));
+  });
+
+  if (!selected) {
+    workItemDetailRoot.innerHTML = `<div class="muted">Select a WorkItem to inspect assignments, reviews, activity, and manager plans.</div>`;
+    return;
+  }
+
+  const assignments = state.selectedWorkItemAssignments ?? [];
+  const reviews = state.selectedWorkItemReviews ?? [];
+  const activity = state.selectedWorkItemActivity ?? [];
+  const managerPlans = state.selectedWorkItemManagerPlans ?? [];
+  const teammates = state.agentTeammates ?? [];
+  const squads = state.squads ?? [];
+  workItemDetailRoot.innerHTML = `
+    <div class="work-item-heading">
+      <div>
+        <h3>${escapeHtml(selected.title)}</h3>
+        <div class="muted">${escapeHtml(selected.status)} · ${escapeHtml(selected.priority)} · ${escapeHtml(selected.id)}</div>
+      </div>
+      <span class="status">${escapeHtml(selected.source)}</span>
+    </div>
+    <div class="metric-grid compact-metrics">
+      <div class="metric"><span>Assignments</span><strong>${formatInteger(assignments.length)}</strong></div>
+      <div class="metric"><span>Reviews</span><strong>${formatInteger(reviews.length)}</strong></div>
+      <div class="metric"><span>Activity</span><strong>${formatInteger(activity.length)}</strong></div>
+      <div class="metric"><span>Plans</span><strong>${formatInteger(managerPlans.length)}</strong></div>
+    </div>
+    <h4>Assignments</h4>
+    ${
+      assignments.length
+        ? `<div class="table-wrap"><table class="compact-table">
+            <thead><tr><th>Kind</th><th>Assignee</th><th>Role</th><th>Status</th></tr></thead>
+            <tbody>
+              ${assignments
+                .map(
+                  (assignment) => `<tr>
+                    <td>${escapeHtml(assignment.assignee_kind)}</td>
+                    <td>${escapeHtml(assignment.assignee_id)}</td>
+                    <td>${escapeHtml(assignment.role)}</td>
+                    <td>${escapeHtml(assignment.status)}</td>
+                  </tr>`,
+                )
+                .join("")}
+            </tbody>
+          </table></div>`
+        : `<div class="muted">No assignments recorded.</div>`
+    }
+    <h4>Manager Plans</h4>
+    ${
+      managerPlans.length
+        ? managerPlans
+            .map(
+              (plan) => `<div class="item">
+                <strong>${escapeHtml(plan.status)} · ${escapeHtml(plan.risk_classification)}</strong>
+                <div class="muted">${escapeHtml(plan.id)} · manager ${escapeHtml(plan.manager_agent_id)}</div>
+              </div>`,
+            )
+            .join("")
+        : `<div class="muted">No manager plans bound to this WorkItem.</div>`
+    }
+    <h4>Reviews</h4>
+    ${
+      reviews.length
+        ? reviews
+            .map(
+              (review) => `<div class="item">
+                <strong>${escapeHtml(review.status)}${review.decision ? ` · ${escapeHtml(review.decision)}` : ""}</strong>
+                <div class="muted">${escapeHtml(review.reviewer_kind)} ${escapeHtml(review.reviewer_id)}</div>
+                <div>${escapeHtml(review.summary || "")}</div>
+              </div>`,
+            )
+            .join("")
+        : `<div class="muted">No reviews recorded.</div>`
+    }
+    <h4>Activity Feed</h4>
+    ${
+      activity.length
+        ? activity
+            .map(
+              (entry) => `<div class="item">
+                <strong>${escapeHtml(entry.event_type)}</strong>
+                <div>${escapeHtml(entry.summary)}</div>
+                <div class="muted">${escapeHtml(entry.created_at)} · ${escapeHtml(entry.subject_type || "work_item")} ${escapeHtml(entry.subject_id || selected.id)}</div>
+              </div>`,
+            )
+            .join("")
+        : `<div class="muted">No activity recorded.</div>`
+    }
+    <h4>Teammates / Squads</h4>
+    <div class="table-wrap">
+      <table class="compact-table">
+        <thead><tr><th>Type</th><th>Name</th><th>Status</th><th>ID</th></tr></thead>
+        <tbody>
+          ${teammates
+            .map(
+              (teammate) => `<tr>
+                <td>teammate</td>
+                <td>${escapeHtml(teammate.display_name)}</td>
+                <td>${escapeHtml(teammate.status)}</td>
+                <td>${escapeHtml(teammate.id)}</td>
+              </tr>`,
+            )
+            .join("")}
+          ${squads
+            .map(
+              (squad) => `<tr>
+                <td>squad</td>
+                <td>${escapeHtml(squad.name)}</td>
+                <td>${escapeHtml(squad.status)}</td>
+                <td>${escapeHtml(squad.id)}</td>
+              </tr>`,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function renderTenantIsolationReadiness() {
