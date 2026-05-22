@@ -164,6 +164,7 @@ pub(crate) struct ExecutionQueueState {
 pub(crate) struct ExecutionJob {
     pub(crate) id: Uuid,
     pub(crate) session_id: Uuid,
+    pub(crate) environment_id: Option<Uuid>,
     pub(crate) approval_id: Uuid,
     pub(crate) tool_call_id: Uuid,
     pub(crate) tool_name: String,
@@ -216,6 +217,7 @@ impl FromStr for ExecutionJobStatus {
 
 pub(crate) struct ExecutionJobRequest {
     pub(crate) session_id: Uuid,
+    pub(crate) environment_id: Option<Uuid>,
     pub(crate) approval_id: Uuid,
     pub(crate) tool_call_id: Uuid,
     pub(crate) tool_name: String,
@@ -230,6 +232,7 @@ fn new_execution_job(request: ExecutionJobRequest) -> ExecutionJob {
     ExecutionJob {
         id: Uuid::new_v4(),
         session_id: request.session_id,
+        environment_id: request.environment_id,
         approval_id: request.approval_id,
         tool_call_id: request.tool_call_id,
         tool_name: request.tool_name,
@@ -257,6 +260,7 @@ fn execution_job_from_row(row: PgRow) -> Result<ExecutionJob, AppError> {
     Ok(ExecutionJob {
         id: row.try_get("id")?,
         session_id: row.try_get("session_id")?,
+        environment_id: row.try_get("environment_id").unwrap_or(None),
         approval_id: row.try_get("approval_id")?,
         tool_call_id: row.try_get("tool_call_id")?,
         tool_name: row.try_get("tool_name")?,
@@ -465,12 +469,13 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
         let job = new_execution_job(request);
         sqlx::query(
             "INSERT INTO execution_jobs
-                (id, tenant_id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                (id, tenant_id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         )
         .bind(job.id)
         .bind(self.current_tenant_id())
         .bind(job.session_id)
+        .bind(job.environment_id)
         .bind(job.approval_id)
         .bind(job.tool_call_id)
         .bind(&job.tool_name)
@@ -526,7 +531,7 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
                  lease_expires_at = NULL,
                  last_error = $1
              WHERE tenant_id = $2 AND id = $3
-             RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+             RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
         )
         .bind(error)
         .bind(self.current_tenant_id())
@@ -552,7 +557,7 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
                  lease_expires_at = NULL,
                  last_error = $1
              WHERE tenant_id = $2 AND id = $3 AND status = 'running' AND worker_id = $4
-             RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+             RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
         )
         .bind(error)
         .bind(self.current_tenant_id())
@@ -566,7 +571,7 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
 
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError> {
         let rows = sqlx::query(
-            "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error
+            "SELECT id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error
              FROM execution_jobs
              WHERE tenant_id = $1
              ORDER BY enqueued_at ASC",
@@ -579,7 +584,7 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
 
     async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         let row = sqlx::query(
-            "SELECT id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error
+            "SELECT id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error
              FROM execution_jobs
              WHERE tenant_id = $1 AND id = $2",
         )
@@ -606,7 +611,7 @@ impl PostgresExecutionQueue {
                  WHERE tenant_id = $2
                    AND id = $3
                    AND (status = 'queued' OR (status = 'running' AND lease_expires_at < now()))
-                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+                 RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(worker_id.unwrap_or("api"))
             .bind(self.current_tenant_id())
@@ -617,7 +622,7 @@ impl PostgresExecutionQueue {
                 "UPDATE execution_jobs
                  SET status = $1, completed_at = COALESCE(completed_at, now()), lease_expires_at = NULL
                  WHERE tenant_id = $2 AND id = $3
-                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+                 RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(status.as_str())
             .bind(self.current_tenant_id())
@@ -628,7 +633,7 @@ impl PostgresExecutionQueue {
                 "UPDATE execution_jobs
                  SET status = 'queued', started_at = NULL, completed_at = NULL, worker_id = NULL, lease_expires_at = NULL
                  WHERE tenant_id = $1 AND id = $2
-                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+                 RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(self.current_tenant_id())
             .bind(job_id)
@@ -651,7 +656,7 @@ impl PostgresExecutionQueue {
                 "UPDATE execution_jobs
                  SET status = $1, completed_at = COALESCE(completed_at, now()), lease_expires_at = NULL, last_error = COALESCE($2, last_error)
                  WHERE tenant_id = $3 AND id = $4 AND status = 'running' AND worker_id = $5
-                 RETURNING id, session_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+                 RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(status.as_str())
             .bind(last_error)

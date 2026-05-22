@@ -56,6 +56,8 @@ pub(crate) struct RedisExecutionJobPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) job_id: Option<Uuid>,
     pub(crate) session_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) environment_id: Option<Uuid>,
     pub(crate) approval_id: Uuid,
     pub(crate) tool_call_id: Uuid,
     pub(crate) tool_name: String,
@@ -155,6 +157,7 @@ impl RedisExecutionJobPayload {
         Self {
             job_id: None,
             session_id: request.session_id,
+            environment_id: request.environment_id,
             approval_id: request.approval_id,
             tool_call_id: request.tool_call_id,
             tool_name: request.tool_name.clone(),
@@ -166,6 +169,7 @@ impl RedisExecutionJobPayload {
         Self {
             job_id: Some(job.id),
             session_id: job.session_id,
+            environment_id: job.environment_id,
             approval_id: job.approval_id,
             tool_call_id: job.tool_call_id,
             tool_name: job.tool_name.clone(),
@@ -178,6 +182,7 @@ impl RedisExecutionJobPayload {
         ExecutionJob {
             id: self.job_id.unwrap_or_else(Uuid::new_v4),
             session_id: self.session_id,
+            environment_id: self.environment_id,
             approval_id: self.approval_id,
             tool_call_id: self.tool_call_id,
             tool_name: self.tool_name,
@@ -197,6 +202,7 @@ impl RedisExecutionJobPayload {
         json!({
             "job_id": self.job_id,
             "session_id": self.session_id,
+            "environment_id": self.environment_id,
             "approval_id": self.approval_id,
             "tool_call_id": self.tool_call_id,
             "tool_name": self.tool_name,
@@ -1147,6 +1153,7 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         let job = ExecutionJob {
             id: Uuid::new_v4(),
             session_id: request.session_id,
+            environment_id: request.environment_id,
             approval_id: request.approval_id,
             tool_call_id: request.tool_call_id,
             tool_name: request.tool_name.clone(),
@@ -1512,6 +1519,11 @@ mod tests {
             session_id: "00000000-0000-4000-8000-000000000001"
                 .parse()
                 .expect("session id"),
+            environment_id: Some(
+                "00000000-0000-4000-8000-000000000004"
+                    .parse()
+                    .expect("environment id"),
+            ),
             approval_id: "00000000-0000-4000-8000-000000000002"
                 .parse()
                 .expect("approval id"),
@@ -1529,6 +1541,9 @@ mod tests {
         assert_eq!(command.args[1], "*");
         assert_eq!(command.args[2], "payload");
         assert!(command.args[3].contains("\"tool_name\":\"codex.exec\""));
+        assert!(
+            command.args[3].contains("\"environment_id\":\"00000000-0000-4000-8000-000000000004\"")
+        );
         assert!(command.args[3].contains("00000000-0000-4000-8000-000000000001"));
     }
 
@@ -1652,6 +1667,7 @@ mod tests {
             session_id: "00000000-0000-4000-8000-000000000001"
                 .parse()
                 .expect("session id"),
+            environment_id: None,
             approval_id: "00000000-0000-4000-8000-000000000002"
                 .parse()
                 .expect("approval id"),
@@ -1779,6 +1795,7 @@ mod tests {
         let job = queue
             .enqueue(ExecutionJobRequest {
                 session_id: Uuid::new_v4(),
+                environment_id: None,
                 approval_id: Uuid::new_v4(),
                 tool_call_id: Uuid::new_v4(),
                 tool_name: "file.write".to_string(),
@@ -1983,6 +2000,7 @@ mod tests {
             session_id: "00000000-0000-4000-8000-000000000001"
                 .parse()
                 .expect("session id"),
+            environment_id: None,
             approval_id: "00000000-0000-4000-8000-000000000002"
                 .parse()
                 .expect("approval id"),
@@ -2026,6 +2044,7 @@ mod tests {
                 session_id: "00000000-0000-4000-8000-000000000001"
                     .parse()
                     .expect("session id"),
+                environment_id: None,
                 approval_id: "00000000-0000-4000-8000-000000000002"
                     .parse()
                     .expect("approval id"),
@@ -2075,6 +2094,7 @@ mod tests {
         let queue = BrokerExecutionQueue::nats(config);
         let request = ExecutionJobRequest {
             session_id: Uuid::new_v4(),
+            environment_id: None,
             approval_id: Uuid::new_v4(),
             tool_call_id: Uuid::new_v4(),
             tool_name: "codex.exec".to_string(),

@@ -139,11 +139,13 @@ async fn enqueue_approved_job(
         return Ok(None);
     };
     let tool_call = state.get_tool_call(tool_call_id).await?;
+    let environment_id = state.get_session(approval.session_id).await?.environment_id;
     Ok(Some(
         state
             .execution_queue
             .enqueue(ExecutionJobRequest {
                 session_id: approval.session_id,
+                environment_id,
                 approval_id: approval.id,
                 tool_call_id,
                 tool_name: tool_call.tool_name,
@@ -970,8 +972,7 @@ async fn remote_computer_environment_contract_for_job(
     state: &AppState,
     job: &ExecutionJob,
 ) -> Result<Option<RemoteComputerEnvironmentContract>, AppError> {
-    let session = state.get_session(job.session_id).await?;
-    let Some(environment_id) = session.environment_id else {
+    let Some(environment_id) = job.environment_id else {
         return Ok(None);
     };
     let environment = state.get_environment(environment_id).await?;

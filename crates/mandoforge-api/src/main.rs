@@ -35473,10 +35473,6 @@ async fn list_execution_jobs(
     let visible_sessions = state.list_sessions_visible_to(&principal).await?;
     let visible_session_ids: HashSet<_> =
         visible_sessions.iter().map(|session| session.id).collect();
-    let session_environment_ids: HashMap<_, _> = visible_sessions
-        .iter()
-        .map(|session| (session.id, session.environment_id))
-        .collect();
     Ok(Json(
         state
             .execution_queue
@@ -35486,22 +35482,14 @@ async fn list_execution_jobs(
             .filter(|job| visible_session_ids.contains(&job.session_id))
             .filter(|job| {
                 worker_environment_id.map_or(true, |environment_id| {
-                    session_environment_ids
-                        .get(&job.session_id)
-                        .copied()
-                        .flatten()
-                        == Some(environment_id)
+                    job.environment_id == Some(environment_id)
                 })
             })
             .filter(|job| {
                 worker_pool.as_ref().is_none_or(|_| {
-                    session_environment_ids
-                        .get(&job.session_id)
-                        .copied()
-                        .flatten()
-                        .is_some_and(|environment_id| {
-                            worker_pool_environment_ids.contains(&environment_id)
-                        })
+                    job.environment_id.is_some_and(|environment_id| {
+                        worker_pool_environment_ids.contains(&environment_id)
+                    })
                 })
             })
             .collect(),
@@ -38989,8 +38977,9 @@ async fn run_execution_job_route(
 ) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
     authorize_execution_job_run(&state, &headers, id).await?;
     let job = state.execution_queue.get(id).await?;
-    enforce_worker_environment_binding(&state, &headers, job.session_id, None).await?;
-    enforce_worker_pool_binding(&state, &headers, job.session_id, None).await?;
+    enforce_worker_environment_binding(&state, &headers, job.session_id, job.environment_id)
+        .await?;
+    enforce_worker_pool_binding(&state, &headers, job.session_id, job.environment_id).await?;
     let worker_id = headers
         .get("x-mandoforge-worker-id")
         .and_then(|value| value.to_str().ok())
@@ -42973,8 +42962,10 @@ not json
     #[tokio::test]
     async fn execution_queue_tracks_job_lifecycle() {
         let queue = ExecutionQueue::default();
+        let environment_id = Uuid::new_v4();
         let request = ExecutionJobRequest {
             session_id: Uuid::new_v4(),
+            environment_id: Some(environment_id),
             approval_id: Uuid::new_v4(),
             tool_call_id: Uuid::new_v4(),
             tool_name: "codex.exec".to_string(),
@@ -42983,6 +42974,7 @@ not json
 
         let queued = queue.enqueue(request).await.expect("queue job");
         assert_eq!(queued.status, ExecutionJobStatus::Queued);
+        assert_eq!(queued.environment_id, Some(environment_id));
         assert_eq!(queue.list().await.expect("list jobs").len(), 1);
 
         let running = queue
@@ -43001,6 +42993,7 @@ not json
         let fenced = queue
             .enqueue(ExecutionJobRequest {
                 session_id: Uuid::new_v4(),
+                environment_id: None,
                 approval_id: Uuid::new_v4(),
                 tool_call_id: Uuid::new_v4(),
                 tool_name: "shell.exec".to_string(),
@@ -43041,6 +43034,7 @@ not json
         let retryable = queue
             .enqueue(ExecutionJobRequest {
                 session_id: Uuid::new_v4(),
+                environment_id: None,
                 approval_id: Uuid::new_v4(),
                 tool_call_id: Uuid::new_v4(),
                 tool_name: "codex.exec".to_string(),
@@ -43084,6 +43078,7 @@ not json
         let cancelable = queue
             .enqueue(ExecutionJobRequest {
                 session_id: Uuid::new_v4(),
+                environment_id: None,
                 approval_id: Uuid::new_v4(),
                 tool_call_id: Uuid::new_v4(),
                 tool_name: "shell.exec".to_string(),
@@ -43103,6 +43098,7 @@ not json
             let queue = BrokerExecutionQueue::new(kind);
             let request = ExecutionJobRequest {
                 session_id: Uuid::new_v4(),
+                environment_id: None,
                 approval_id: Uuid::new_v4(),
                 tool_call_id: Uuid::new_v4(),
                 tool_name: "file.write".to_string(),
@@ -48584,6 +48580,12 @@ not json
         assert!(
             execution_jobs_for_a
                 .iter()
+                .all(|job| job.environment_id == Some(environment_a.id)),
+            "environment A worker should only see A execution jobs: {execution_jobs_for_a:?}"
+        );
+        assert!(
+            execution_jobs_for_a
+                .iter()
                 .any(|job| job.session_id == session_a.id)
         );
         assert!(
@@ -48603,6 +48605,12 @@ not json
                 .expect("valid request"),
         )
         .await;
+        assert!(
+            execution_jobs_for_pool_a
+                .iter()
+                .all(|job| job.environment_id == Some(environment_a.id)),
+            "worker pool A should only see execution jobs bound to A: {execution_jobs_for_pool_a:?}"
+        );
         assert!(
             execution_jobs_for_pool_a
                 .iter()
@@ -48661,6 +48669,119 @@ not json
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(error["error"], json!("job not claimable for worker pool"));
+    }
+
+    #[tokio::test]
+    async fn execution_job_environment_is_snapshotted_at_enqueue() {
+        let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state.clone());
+        let agents = state.list_agents().await.expect("list seeded agents");
+        let agent = agents.first().expect("seeded agent");
+        let environment_a: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Snapshot Queue A",
+                    "environment_type": "local",
+                    "worker_queue_binding": {"queue": "snapshot-a"},
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let environment_b: Environment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Snapshot Queue B",
+                    "environment_type": "local",
+                    "worker_queue_binding": {"queue": "snapshot-b"},
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "environment_id": environment_a.id,
+                    "title": "execution environment snapshot"
+                }),
+            ),
+        )
+        .await;
+
+        let approval_required: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "path": "snapshot.md",
+                        "content": "queued"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_required["approval_id"]
+            .as_str()
+            .expect("approval id");
+        let approved: Approval = request_json(
+            app.clone(),
+            approve_request(format!("/api/approvals/{approval_id}/approve")),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+
+        if let StoreBackend::Memory(inner) = &state.store {
+            let mut store = inner.write().await;
+            store
+                .sessions
+                .get_mut(&session.id)
+                .expect("stored session")
+                .environment_id = Some(environment_b.id);
+        }
+
+        let execution_jobs_for_a: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/execution-jobs")
+                .header("x-mandoforge-subject", "worker-a")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-environment-id", environment_a.id.to_string())
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            execution_jobs_for_a.iter().any(|job| {
+                job["session_id"] == json!(session.id)
+                    && job["environment_id"] == json!(environment_a.id)
+            }),
+            "execution job must keep the enqueue-time environment snapshot: {execution_jobs_for_a:?}"
+        );
     }
 
     #[tokio::test]
