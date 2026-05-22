@@ -1,7 +1,12 @@
 FROM rust:1.91-slim AS builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release -p mandoforge-api --bins
+ARG CARGO_BUILD_JOBS
+RUN if [ -n "$CARGO_BUILD_JOBS" ]; then \
+      cargo build --release -p mandoforge-api --bins --jobs "$CARGO_BUILD_JOBS"; \
+    else \
+      cargo build --release -p mandoforge-api --bins; \
+    fi
 
 FROM debian:trixie-slim
 WORKDIR /app

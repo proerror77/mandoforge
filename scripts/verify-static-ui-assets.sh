@@ -2,8 +2,7 @@
 set -euo pipefail
 
 INDEX_FILE="${INDEX_FILE:-web/index.html}"
-APP_FILE="${APP_FILE:-web/app.js}"
-STYLE_FILE="${STYLE_FILE:-web/styles.css}"
+ASSET_DIR="${ASSET_DIR:-web/assets}"
 
 require_file() {
   if [[ ! -s "$1" ]]; then
@@ -21,7 +20,7 @@ require_text() {
   fi
 }
 
-for command in node grep; do
+for command in find grep sed; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "missing required command: $command" >&2
     exit 1
@@ -29,181 +28,58 @@ for command in node grep; do
 done
 
 require_file "$INDEX_FILE"
-require_file "$APP_FILE"
-require_file "$STYLE_FILE"
-
-node --check "$APP_FILE" >/dev/null
-
-index_patterns=(
-  "demo-overview"
-  "Primary Agent OS navigation"
-  "开始一个任务"
-  "查看运行记录"
-  "Session Threads"
-  "managed-session-workspace"
-  "Managed Session Workspace"
-  "Blocking Actions"
-  "Event Stream"
-  "检查系统状态"
-  "orchestrator-form"
-  "workspace-tabs"
-  "开始任务"
-  "系统状态"
-  "运行记录"
-  "高级设置"
-  "检查 Whiskey runtime 状态"
-  "agent-builder-section"
-  "panel-advanced"
-  "Tenant Governance"
-  "Providers"
-  "Vault"
-  "Approval Governance"
-  "Policy Console"
-  "Eval Runs"
-  "MCP Servers"
-  "Worker Dashboard"
-  "Remote Computers"
-  "Codex App Server"
-  "Governance"
-  "Stage 2"
-  "Runtime Profile ID"
-  "Skill IDs"
-  "MCP Server IDs"
-  "Remote Computer Profile JSON"
-  "Semantic Scopes JSON"
-  "Managed Agent Console"
-  "Environments"
-  "Runtime Profiles"
-  "Register Remote Computer"
-  "Create Remote Lease"
-  "Attach Remote Lease"
-  "Record Sidecar Heartbeat"
-  "Assign Remote Lease"
-  "Dry-run Runner"
-  "Mutate Runner"
-  "Reclaim Stale Remote Computers"
-)
-
-app_patterns=(
-  "renderDemoOverview"
-  "renderInfraOverview"
-  "runOrchestrator"
-  "renderSessionThreads"
-  "renderManagedSessionWorkspace"
-  "/api/sessions/\${state.session.id}/threads"
-  "Blocking Actions"
-  "Event Stream"
-  "applyTaskTemplate"
-  "setWorkspaceTab"
-  "Whiskey Demo Entry"
-  "不是聊天框"
-  "stage2Readiness"
-  "evidence_requirements"
-  "evidence_scripts"
-  "evidence_job_manifests"
-  "required_flags"
-  "required_artifacts"
-  "controller_evidence_fresh"
-  "latest_controller_age_hours"
-  "createRemoteComputer"
-  "createRemoteComputerLease"
-  "attachRemoteComputerLease"
-  "recordRemoteSidecarHeartbeat"
-  "artifact_discovery_sidecar_config"
-  "dryRunRemoteRunner"
-  "mutateRemoteRunner"
-  "assignExecutionJobRemoteLease"
-  "cancelExecutionJob"
-  "releaseRemoteComputerAttachment"
-  "agentRuntimeProfiles"
-  "agentRuntimeProfileReleaseGates"
-  "environments"
-  "/api/environments"
-  "renderManagedAgentConsole"
-  "confirmDestructiveAction"
-  "/api/agent-runtime-profiles"
-  "/api/agent-runtime-profile-release-gates"
-  "/api/stage2/readiness"
-  "/api/remote-computers/runner/dry-run"
-  "/api/remote-computers/runner/mutate"
-  "/api/remote-computers/sidecars/heartbeats"
-  "/api/execution-jobs/"
-)
-
-style_patterns=(
-  "overflow-wrap: anywhere"
-  ".demo-overview"
-  ".thread-list"
-  ".thread-card"
-  ".managed-session-workspace"
-  ".managed-session-grid"
-  ".managed-session-card"
-  ".managed-session-columns"
-  ".side-nav"
-  ".entry-map"
-  ".current-run"
-  ".workspace-tabs"
-  ".orchestrator-form"
-  ".run-guide"
-  ".task-examples"
-  ".run-aftercare"
-  ".workspace-panel.is-hidden"
-  ".demo-status-grid"
-  ".demo-flow"
-  ".agent-builder-section"
-  ".workspace-panel.is-hidden"
-  ".compact-agent"
-  ".compact-approval"
-  "details"
-  "overflow-x: auto"
-  "grid-template-columns: 1fr"
-)
-
-for pattern in "${index_patterns[@]}"; do
-  require_text "$INDEX_FILE" "$pattern"
-done
-
-for pattern in "${app_patterns[@]}"; do
-  require_text "$APP_FILE" "$pattern"
-done
-
-for pattern in "${style_patterns[@]}"; do
-  require_text "$STYLE_FILE" "$pattern"
-done
-
-if grep -q "window.prompt" "$APP_FILE"; then
-  echo "static UI must use explicit forms instead of window.prompt" >&2
+if [[ ! -d "$ASSET_DIR" ]]; then
+  echo "missing static UI asset directory: $ASSET_DIR" >&2
   exit 1
 fi
 
-destructive_confirm_patterns=(
-  "confirmDestructiveAction(\"Delete membership?\""
-  "confirmDestructiveAction(\"Archive organization?\""
-  "confirmDestructiveAction(\"Delete organization?\""
-  "confirmDestructiveAction(\"Archive team?\""
-  "confirmDestructiveAction(\"Delete team?\""
-  "confirmDestructiveAction(\"Archive project?\""
-  "confirmDestructiveAction(\"Delete project?\""
-  "confirmDestructiveAction(\"Archive approval notification policy?\""
-  "confirmDestructiveAction(\"Archive provider access?\""
-  "confirmDestructiveAction(\"Rollback agent release?\""
-  "confirmDestructiveAction(\"Rollback provider production rollout?\""
-  "confirmDestructiveAction(\"Cancel staged policy rollout?\""
-  "confirmDestructiveAction(\"Rollback active policy?\""
-  "confirmDestructiveAction(\"Apply MCP rollout?\""
-  "confirmDestructiveAction(\"Rollback MCP rollout?\""
-  "confirmDestructiveAction(\"Cancel execution job?\""
-  "confirmDestructiveAction(\"Mutate remote runner?\""
-  "confirmDestructiveAction(\"Release remote attachment?\""
-  "confirmDestructiveAction(\`Set remote lease to"
-  "confirmDestructiveAction(\"Reclaim stale remote computers?\""
-  "confirmDestructiveAction(\"Release remote state lock?\""
-  "confirmDestructiveAction(\`Set MCP server status to"
-  "confirmDestructiveAction(\`Set provider status to"
+asset_refs=()
+while IFS= read -r asset_ref; do
+  asset_refs+=("$asset_ref")
+done < <(grep -Eo '/assets/[^"]+\.(js|css)' "$INDEX_FILE" | sort -u)
+if [[ "${#asset_refs[@]}" -eq 0 ]]; then
+  echo "static UI asset check failed: $INDEX_FILE does not reference Vite assets" >&2
+  exit 1
+fi
+
+for asset_ref in "${asset_refs[@]}"; do
+  require_file "web${asset_ref}"
+done
+
+require_text "$INDEX_FILE" "MandoForge Agent OS Console"
+require_text "$INDEX_FILE" "id=\"root\""
+
+js_asset_count="$(find "$ASSET_DIR" -maxdepth 1 -type f -name '*.js' | wc -l | tr -d ' ')"
+css_asset_count="$(find "$ASSET_DIR" -maxdepth 1 -type f -name '*.css' | wc -l | tr -d ' ')"
+if [[ "$js_asset_count" -lt 1 || "$css_asset_count" -lt 1 ]]; then
+  echo "static UI asset check failed: expected at least one JS and one CSS asset" >&2
+  exit 1
+fi
+
+asset_patterns=(
+  "MandoForge Co-Work"
+  "Managed agent observability"
+  "Agents running"
+  "Live log stream"
+  "Approvals"
+  "Tool calls"
+  "Artifacts"
+  "Start task"
+  "/api/sessions"
+  "/api/approvals"
+  "/api/tool-calls"
 )
 
-for pattern in "${destructive_confirm_patterns[@]}"; do
-  require_text "$APP_FILE" "$pattern"
+for pattern in "${asset_patterns[@]}"; do
+  if ! grep -R -q "$pattern" "$ASSET_DIR"; then
+    echo "static UI asset check failed: $ASSET_DIR missing pattern: $pattern" >&2
+    exit 1
+  fi
 done
+
+if grep -R -q "window.prompt" "$ASSET_DIR"; then
+  echo "static UI must not use window.prompt" >&2
+  exit 1
+fi
 
 echo "static UI asset verification ok"

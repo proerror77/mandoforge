@@ -10,11 +10,31 @@ on:
       publish_image:
         description: Push the built image to GHCR
         required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      deploy_whiskey:
+        description: SSH to Whiskey and restart the adoption stack with this image
+        required: false
         default: "false"
         type: choice
         options:
           - "false"
           - "true"
+      whiskey_remote_host:
+        description: Whiskey SSH host or IP; falls back to WHISKEY_REMOTE_HOST secret
+        required: false
+        default: ""
+      whiskey_remote_user:
+        description: Whiskey SSH user; falls back to WHISKEY_REMOTE_USER secret, then root
+        required: false
+        default: ""
+      whiskey_remote_root:
+        description: Whiskey deployment root
+        required: false
+        default: /opt/mandoforge-adoption
 
 concurrency:
   group: deploy-${{ github.ref }}
@@ -34,11 +54,64 @@ jobs:
     environment: stage2-production
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - name: Build web UI
+        run: |
+          npm ci --prefix web-ui
+          npm run build --prefix web-ui
+          scripts/verify-static-ui-assets.sh
       - name: Build image
-        run: docker build -t "$IMAGE_NAME:${{ inputs.image_tag }}" .
+        run: docker build --platform linux/amd64 -t "$IMAGE_NAME:${{ inputs.image_tag }}" .
       - name: Login to GHCR
-        if: inputs.publish_image == 'true'
+        if: inputs.publish_image == 'true' || inputs.deploy_whiskey == 'true'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Push image
-        if: inputs.publish_image == 'true'
+        if: inputs.publish_image == 'true' || inputs.deploy_whiskey == 'true'
         run: docker push "$IMAGE_NAME:${{ inputs.image_tag }}"
+      - name: Deploy Whiskey
+        if: inputs.deploy_whiskey == 'true'
+        env:
+          INPUT_WHISKEY_REMOTE_HOST: ${{ inputs.whiskey_remote_host }}
+          INPUT_WHISKEY_REMOTE_USER: ${{ inputs.whiskey_remote_user }}
+          INPUT_WHISKEY_REMOTE_ROOT: ${{ inputs.whiskey_remote_root }}
+          SECRET_WHISKEY_REMOTE_HOST: ${{ secrets.WHISKEY_REMOTE_HOST }}
+          SECRET_WHISKEY_REMOTE_USER: ${{ secrets.WHISKEY_REMOTE_USER }}
+          WHISKEY_SSH_PRIVATE_KEY: ${{ secrets.WHISKEY_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          remote_host="${INPUT_WHISKEY_REMOTE_HOST:-$SECRET_WHISKEY_REMOTE_HOST}"
+          remote_user="${INPUT_WHISKEY_REMOTE_USER:-${SECRET_WHISKEY_REMOTE_USER:-root}}"
+          remote_root="${INPUT_WHISKEY_REMOTE_ROOT:-/opt/mandoforge-adoption}"
+
+          if [[ -z "$remote_host" ]]; then
+            echo "Whiskey deploy requires workflow input whiskey_remote_host or secret WHISKEY_REMOTE_HOST" >&2
+            exit 1
+          fi
+          if [[ -z "${WHISKEY_SSH_PRIVATE_KEY:-}" ]]; then
+            echo "Whiskey deploy requires secret WHISKEY_SSH_PRIVATE_KEY" >&2
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$WHISKEY_SSH_PRIVATE_KEY" > ~/.ssh/whiskey_deploy_key
+          chmod 600 ~/.ssh/whiskey_deploy_key
+          ssh-keyscan -H "$remote_host" >> ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host whiskey-ci
+            HostName $remote_host
+            User $remote_user
+            IdentityFile ~/.ssh/whiskey_deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+
+          WHISKEY_REMOTE_HOST=whiskey-ci \
+            WHISKEY_REMOTE_ROOT="$remote_root" \
+            MANDOFORGE_IMAGE_TAG="${{ inputs.image_tag }}" \
+            scripts/whiskey-adoption-deploy.sh
