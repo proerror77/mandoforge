@@ -268,7 +268,10 @@ if [[ '$PROVIDER_REAL_MODE' == 'deepseek_if_available' ]]; then
     set +a
   fi
   if [[ -n "\${DEEPSEEK_API_KEY:-}" ]]; then
-    ensure_env DEEPSEEK_API_KEY "\$DEEPSEEK_API_KEY"
+    set_env DEEPSEEK_API_KEY "\$DEEPSEEK_API_KEY"
+    set_env MANDOFORGE_PROVIDER_BASE_URL https://api.deepseek.com
+    set_env MANDOFORGE_PROVIDER_API_KEY "\$DEEPSEEK_API_KEY"
+    set_env MANDOFORGE_PROVIDER_MODEL deepseek-v4-flash
   fi
 fi
 ensure_env MANDOFORGE_APPROVAL_WEBHOOK_URL http://host.docker.internal:$APPROVAL_NOTIFICATION_CONTROLLER_PORT/approval/webhook

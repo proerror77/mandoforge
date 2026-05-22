@@ -82,6 +82,7 @@ export function App() {
   const visibleToolCalls = sessionToolCalls.data?.length
     ? sessionToolCalls.data
     : (allToolCalls.data ?? []).filter((call) => call.session_id === sessionId);
+  const runtime = runtimeSummary(events.data ?? [], selectedAgent);
 
   const launch = useMutation({
     mutationFn: async () => {
@@ -191,6 +192,12 @@ export function App() {
             <KeyValue label="Latest job" value={selectedRow?.latestJob?.reason ?? selectedRow?.latestJob?.tool_name ?? "none"} />
             <KeyValue label="Worker" value={selectedRow?.latestJob?.worker_id ?? "waiting"} />
             <KeyValue label="Job status" value={selectedRow?.latestJob?.status ?? selectedRow?.status ?? "idle"} />
+          </Panel>
+
+          <Panel title="Runtime">
+            <KeyValue label="Provider" value={runtime.provider} />
+            <KeyValue label="Provider client" value={runtime.client} />
+            <KeyValue label="Execution" value={runtime.execution} />
           </Panel>
 
           <Panel title="Approvals">
@@ -314,6 +321,26 @@ function KeyValue({ label, value }: { label: string; value: string }) {
 
 function Row({ title, detail }: { title: string; detail: string }) {
   return <div className="obs-row"><strong>{title}</strong><span>{detail}</span></div>;
+}
+
+function runtimeSummary(events: SessionEvent[], agent?: Agent): { provider: string; client: string; execution: string } {
+  const latestModelEvent = [...events]
+    .reverse()
+    .find((event) => event.event_type === "llm.response" || event.event_type === "llm.request");
+  const payload = latestModelEvent?.payload as { provider?: unknown; client?: unknown } | undefined;
+  const provider = typeof payload?.provider === "string" ? payload.provider : agent?.provider ?? "unknown";
+  const client = typeof payload?.client === "string" ? payload.client : "not observed";
+  const hasCodex = events.some((event) => event.event_type.startsWith("codex."));
+  const hasAgentCli = events.some((event) => event.event_type.startsWith("agent_cli."));
+  const hasInternalTools = events.some((event) => event.event_type === "tool.result");
+  const execution = hasCodex
+    ? "Codex runtime"
+    : hasAgentCli
+      ? "Agent CLI runtime"
+      : hasInternalTools
+        ? "Internal tool executors"
+        : "No execution observed";
+  return { provider, client, execution };
 }
 
 function preferredAgent(agents: Agent[]): Agent | undefined {
