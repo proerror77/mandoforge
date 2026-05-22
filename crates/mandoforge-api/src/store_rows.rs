@@ -4,14 +4,14 @@ use sqlx::{Row, postgres::PgRow};
 
 use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
-    AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
+    AgentTeammate, AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
     ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket, CostAlertRoute,
     Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership,
     MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
     ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
-    SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Team, TenantInvitation,
-    ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
-    WorkflowPackInstallation, WorkflowPackProfileAsset,
+    SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Squad, SquadMember, Team,
+    TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment,
+    WorkItemReview, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
@@ -591,6 +591,48 @@ pub(crate) fn team_from_row(row: PgRow) -> Result<Team, AppError> {
         name: row.try_get("name")?,
         slug: row.try_get("slug")?,
         created_at: row.try_get("created_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn agent_teammate_from_row(row: PgRow) -> Result<AgentTeammate, AppError> {
+    Ok(AgentTeammate {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        display_name: row.try_get("display_name")?,
+        handle: row.try_get("handle")?,
+        role: row.try_get("role")?,
+        status: row.try_get("status")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn squad_from_row(row: PgRow) -> Result<Squad, AppError> {
+    Ok(Squad {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        purpose: row.try_get("purpose")?,
+        status: row.try_get("status")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn squad_member_from_row(row: PgRow) -> Result<SquadMember, AppError> {
+    Ok(SquadMember {
+        id: row.try_get("id")?,
+        squad_id: row.try_get("squad_id")?,
+        teammate_id: row.try_get("teammate_id")?,
+        role: row.try_get("role")?,
+        status: row.try_get("status")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
         archived_at: row.try_get("archived_at")?,
     })
 }

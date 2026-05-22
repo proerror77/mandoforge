@@ -6,15 +6,16 @@ use uuid::Uuid;
 
 use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
-    AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup,
+    AgentTeammate, AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup,
     ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun, ContextPacket,
     CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord,
     Membership, MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
     ProviderRecord, RemoteComputer, RemoteComputerAttachment, RemoteComputerJobAssignment,
     RemoteComputerLease, RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord,
     SemanticLink, SemanticObject, SemanticSource, Session, SessionEvent, SessionLoopJob,
-    SessionThread, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry,
-    WorkItemAssignment, WorkItemReview, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    SessionThread, Squad, SquadMember, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem,
+    WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkflowPackInstallation,
+    WorkflowPackProfileAsset,
 };
 
 #[derive(Default)]
@@ -42,6 +43,9 @@ pub(crate) struct MemoryStore {
     pub(crate) organizations: HashMap<Uuid, Organization>,
     pub(crate) teams: HashMap<Uuid, Team>,
     pub(crate) projects: HashMap<Uuid, Project>,
+    pub(crate) agent_teammates: HashMap<Uuid, AgentTeammate>,
+    pub(crate) squads: HashMap<Uuid, Squad>,
+    pub(crate) squad_members: HashMap<Uuid, SquadMember>,
     pub(crate) work_items: HashMap<Uuid, WorkItem>,
     pub(crate) work_item_activity_entries: HashMap<Uuid, WorkItemActivityEntry>,
     pub(crate) work_item_assignments: HashMap<Uuid, WorkItemAssignment>,

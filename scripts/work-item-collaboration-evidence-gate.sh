@@ -77,6 +77,10 @@ assignment_file="$EVIDENCE_DIR/work-item-assignment-created.json"
 review_file="$EVIDENCE_DIR/work-item-review-created.json"
 manager_file="$EVIDENCE_DIR/manager-agent-created.json"
 specialist_file="$EVIDENCE_DIR/specialist-agent-created.json"
+teammate_file="$EVIDENCE_DIR/agent-teammate-created.json"
+squad_file="$EVIDENCE_DIR/squad-created.json"
+squad_member_file="$EVIDENCE_DIR/squad-member-created.json"
+squad_assignment_file="$EVIDENCE_DIR/work-item-squad-assignment-created.json"
 manager_session_file="$EVIDENCE_DIR/manager-session-created.json"
 manager_plan_file="$EVIDENCE_DIR/manager-plan-created.json"
 manager_plan_review_file="$EVIDENCE_DIR/manager-plan-reviewed.json"
@@ -84,6 +88,9 @@ list_file="$EVIDENCE_DIR/work-items.json"
 assignment_list_file="$EVIDENCE_DIR/work-item-assignments.json"
 review_list_file="$EVIDENCE_DIR/work-item-reviews.json"
 activity_file="$EVIDENCE_DIR/work-item-activity.json"
+teammate_list_file="$EVIDENCE_DIR/agent-teammates.json"
+squad_list_file="$EVIDENCE_DIR/squads.json"
+squad_member_list_file="$EVIDENCE_DIR/squad-members.json"
 manager_plan_list_file="$EVIDENCE_DIR/work-item-manager-plans.json"
 handoff_list_file="$EVIDENCE_DIR/manager-session-handoffs.json"
 audit_file="$EVIDENCE_DIR/audit-logs.json"
@@ -213,10 +220,66 @@ api_post "/api/manager-plans/$manager_plan_id/review" "$(
   }'
 )" >"$manager_plan_review_file"
 
+api_post /api/agent-teammates "$(
+  jq -nc --arg agent_id "$specialist_agent_id" --arg run_id "$RUN_ID" '{
+    agent_id: $agent_id,
+    display_name: ("Runtime Teammate " + $run_id),
+    handle: ("runtime-teammate-" + $run_id),
+    role: "specialist",
+    metadata: {
+      gate: "work-item-collaboration-evidence",
+      layer: "collaboration"
+    }
+  }'
+)" >"$teammate_file"
+teammate_id="$(jq -r '.id' "$teammate_file")"
+
+api_post /api/squads "$(
+  jq -nc --arg run_id "$RUN_ID" '{
+    name: ("Runtime Squad " + $run_id),
+    purpose: "Route managed runtime work without becoming a runtime orchestrator.",
+    metadata: {
+      gate: "work-item-collaboration-evidence",
+      layer: "collaboration"
+    }
+  }'
+)" >"$squad_file"
+squad_id="$(jq -r '.id' "$squad_file")"
+
+api_post "/api/squads/$squad_id/members" "$(
+  jq -nc --arg teammate_id "$teammate_id" '{
+    teammate_id: $teammate_id,
+    role: "owner",
+    metadata: {
+      gate: "work-item-collaboration-evidence",
+      routing: "runtime"
+    }
+  }'
+)" >"$squad_member_file"
+squad_member_id="$(jq -r '.id' "$squad_member_file")"
+
+api_post "/api/work-items/$work_item_id/assignments" "$(
+  jq -nc --arg squad_id "$squad_id" --arg run_id "$RUN_ID" '{
+    assignee_kind: "squad",
+    assignee_id: $squad_id,
+    role: "contributor",
+    metadata: {
+      gate: "work-item-collaboration-evidence",
+      layer: "collaboration",
+      routing_reason: ("squad routing evidence " + $run_id),
+      squad_id: $squad_id
+    }
+  }'
+)" >"$squad_assignment_file"
+squad_assignment_id="$(jq -r '.id' "$squad_assignment_file")"
+
 api_get /api/work-items >"$list_file"
 api_get "/api/work-items/$work_item_id/assignments" >"$assignment_list_file"
 api_get "/api/work-items/$work_item_id/reviews" >"$review_list_file"
 api_get "/api/work-items/$work_item_id/activity" >"$activity_file"
+api_get /api/agent-teammates >"$teammate_list_file"
+api_get /api/squads >"$squad_list_file"
+api_get "/api/squads/$squad_id/members" >"$squad_member_list_file"
 api_get "/api/work-items/$work_item_id/manager-plans" >"$manager_plan_list_file"
 api_get "/api/sessions/$manager_session_id/agent-handoffs" >"$handoff_list_file"
 api_get /api/audit-logs >"$audit_file"
@@ -246,6 +309,19 @@ jq -e --arg id "$assignment_id" '
   any(.[]; .id == $id and .metadata.layer == "collaboration")
 ' "$assignment_list_file" >/dev/null
 
+jq -e --arg id "$squad_assignment_id" --arg work_item_id "$work_item_id" --arg squad_id "$squad_id" '
+  .id == $id
+  and .work_item_id == $work_item_id
+  and .assignee_kind == "squad"
+  and .assignee_id == $squad_id
+  and .role == "contributor"
+  and .metadata.squad_id == $squad_id
+' "$squad_assignment_file" >/dev/null
+
+jq -e --arg id "$squad_assignment_id" --arg squad_id "$squad_id" '
+  any(.[]; .id == $id and .assignee_kind == "squad" and .assignee_id == $squad_id)
+' "$assignment_list_file" >/dev/null
+
 jq -e --arg id "$review_id" --arg work_item_id "$work_item_id" '
   .id == $id
   and .work_item_id == $work_item_id
@@ -260,8 +336,43 @@ jq -e --arg id "$review_id" '
   any(.[]; .id == $id and .metadata.layer == "collaboration")
 ' "$review_list_file" >/dev/null
 
-jq -e --arg work_item_id "$work_item_id" --arg assignment_id "$assignment_id" --arg review_id "$review_id" --arg manager_plan_id "$manager_plan_id" --arg subject "$SUBJECT" '
-  length == 5
+jq -e --arg teammate_id "$teammate_id" --arg specialist_agent_id "$specialist_agent_id" '
+  .id == $teammate_id
+  and .agent_id == $specialist_agent_id
+  and .role == "specialist"
+  and .status == "active"
+' "$teammate_file" >/dev/null
+
+jq -e --arg id "$teammate_id" '
+  any(.[]; .id == $id and .metadata.layer == "collaboration")
+' "$teammate_list_file" >/dev/null
+
+jq -e --arg squad_id "$squad_id" '
+  .id == $squad_id
+  and .status == "active"
+  and .metadata.layer == "collaboration"
+' "$squad_file" >/dev/null
+
+jq -e --arg id "$squad_id" '
+  any(.[]; .id == $id and .metadata.layer == "collaboration")
+' "$squad_list_file" >/dev/null
+
+jq -e --arg id "$squad_member_id" --arg squad_id "$squad_id" --arg teammate_id "$teammate_id" '
+  .id == $id
+  and .squad_id == $squad_id
+  and .teammate_id == $teammate_id
+  and .role == "owner"
+  and .status == "active"
+' "$squad_member_file" >/dev/null
+
+jq -e --arg id "$squad_member_id" --arg teammate_id "$teammate_id" '
+  length == 1
+  and .[0].id == $id
+  and .[0].teammate_id == $teammate_id
+' "$squad_member_list_file" >/dev/null
+
+jq -e --arg work_item_id "$work_item_id" --arg assignment_id "$assignment_id" --arg review_id "$review_id" --arg manager_plan_id "$manager_plan_id" --arg squad_assignment_id "$squad_assignment_id" --arg squad_id "$squad_id" --arg subject "$SUBJECT" '
+  length == 6
   and .[0].work_item_id == $work_item_id
   and .[0].event_type == "work_item.created"
   and .[0].actor_subject == $subject
@@ -280,6 +391,11 @@ jq -e --arg work_item_id "$work_item_id" --arg assignment_id "$assignment_id" --
   and .[4].subject_type == "manager_agent_plan"
   and .[4].subject_id == $manager_plan_id
   and .[4].metadata.status == "approved"
+  and .[5].event_type == "work_item.assignment_created"
+  and .[5].subject_type == "work_item_assignment"
+  and .[5].subject_id == $squad_assignment_id
+  and .[5].metadata.assignee_kind == "squad"
+  and .[5].metadata.assignee_id == $squad_id
 ' "$activity_file" >/dev/null
 
 jq -e --arg id "$manager_plan_id" --arg work_item_id "$work_item_id" --arg manager_session_id "$manager_session_id" --arg manager_agent_id "$manager_agent_id" --arg specialist_agent_id "$specialist_agent_id" '
@@ -347,20 +463,49 @@ jq -e --arg id "$manager_plan_id" --arg work_item_id "$work_item_id" '
     and .details.status == "approved")
 ' "$audit_file" >/dev/null
 
+jq -e --arg id "$teammate_id" --arg agent_id "$specialist_agent_id" '
+  any(.[]; .action == "agent_teammate.created"
+    and .resource_type == "agent_teammate"
+    and .resource_id == $id
+    and .details.agent_id == $agent_id)
+' "$audit_file" >/dev/null
+
+jq -e --arg id "$squad_id" '
+  any(.[]; .action == "squad.created"
+    and .resource_type == "squad"
+    and .resource_id == $id)
+' "$audit_file" >/dev/null
+
+jq -e --arg id "$squad_member_id" --arg squad_id "$squad_id" --arg teammate_id "$teammate_id" '
+  any(.[]; .action == "squad.member_added"
+    and .resource_type == "squad_member"
+    and .resource_id == $id
+    and .details.squad_id == $squad_id
+    and .details.teammate_id == $teammate_id)
+' "$audit_file" >/dev/null
+
 {
   echo "work_item_collaboration_status=validated"
   echo "work_item_id=$work_item_id"
   echo "assignment_id=$assignment_id"
+  echo "squad_assignment_id=$squad_assignment_id"
   echo "review_id=$review_id"
   echo "manager_agent_id=$manager_agent_id"
   echo "specialist_agent_id=$specialist_agent_id"
+  echo "teammate_id=$teammate_id"
+  echo "squad_id=$squad_id"
+  echo "squad_member_id=$squad_member_id"
   echo "manager_session_id=$manager_session_id"
   echo "manager_plan_id=$manager_plan_id"
   echo "created_file=$created_file"
   echo "assignment_file=$assignment_file"
+  echo "squad_assignment_file=$squad_assignment_file"
   echo "review_file=$review_file"
   echo "manager_file=$manager_file"
   echo "specialist_file=$specialist_file"
+  echo "teammate_file=$teammate_file"
+  echo "squad_file=$squad_file"
+  echo "squad_member_file=$squad_member_file"
   echo "manager_session_file=$manager_session_file"
   echo "manager_plan_file=$manager_plan_file"
   echo "manager_plan_review_file=$manager_plan_review_file"
@@ -368,6 +513,9 @@ jq -e --arg id "$manager_plan_id" --arg work_item_id "$work_item_id" '
   echo "assignment_list_file=$assignment_list_file"
   echo "review_list_file=$review_list_file"
   echo "activity_file=$activity_file"
+  echo "teammate_list_file=$teammate_list_file"
+  echo "squad_list_file=$squad_list_file"
+  echo "squad_member_list_file=$squad_member_list_file"
   echo "manager_plan_list_file=$manager_plan_list_file"
   echo "handoff_list_file=$handoff_list_file"
   echo "audit_file=$audit_file"

@@ -79,7 +79,7 @@ start_gate_api() {
   env "$@" cargo run -p mandoforge-api >"$log_file" 2>&1 &
   API_PID="$!"
 
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 120); do
     if curl -fsS "$GATE_BASE_URL/healthz" >/dev/null 2>&1; then
       return 0
     fi

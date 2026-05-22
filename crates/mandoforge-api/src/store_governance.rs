@@ -5,17 +5,20 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{
-    mcp_server_from_row, membership_from_row, organization_from_row, project_from_row,
-    provider_access_from_row, provider_record_from_row, team_from_row, tenant_invitation_from_row,
+    agent_teammate_from_row, mcp_server_from_row, membership_from_row, organization_from_row,
+    project_from_row, provider_access_from_row, provider_record_from_row, squad_from_row,
+    squad_member_from_row, team_from_row, tenant_invitation_from_row,
     work_item_activity_entry_from_row, work_item_assignment_from_row, work_item_from_row,
     work_item_review_from_row,
 };
 use crate::{
-    AppError, AppState, CreateMcpServerRecord, CreateMembership, CreateOrganization, CreateProject,
-    CreateProviderAccess, CreateProviderRecord, CreateTeam, CreateTenantInvitation, CreateWorkItem,
-    CreateWorkItemAssignment, CreateWorkItemReview, McpServerRecord, Membership, Organization,
-    Project, ProviderAccess, ProviderRecord, Role, Team, TenantInvitation, UpdateMcpServerRecord,
-    UpdateProviderAccess, WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
+    AgentTeammate, AppError, AppState, CreateAgentTeammate, CreateMcpServerRecord,
+    CreateMembership, CreateOrganization, CreateProject, CreateProviderAccess,
+    CreateProviderRecord, CreateSquad, CreateSquadMember, CreateTeam, CreateTenantInvitation,
+    CreateWorkItem, CreateWorkItemAssignment, CreateWorkItemReview, McpServerRecord, Membership,
+    Organization, Project, ProviderAccess, ProviderRecord, Role, Squad, SquadMember, Team,
+    TenantInvitation, UpdateMcpServerRecord, UpdateProviderAccess, WorkItem, WorkItemActivityEntry,
+    WorkItemAssignment, WorkItemReview,
 };
 
 impl AppState {
@@ -372,6 +375,245 @@ impl AppState {
                 project_from_row(row)
             }
         }
+    }
+
+    pub(crate) async fn list_agent_teammates(&self) -> Result<Vec<AgentTeammate>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut teammates: Vec<_> = inner
+                    .read()
+                    .await
+                    .agent_teammates
+                    .values()
+                    .cloned()
+                    .collect();
+                teammates.sort_by_key(|teammate| teammate.created_at);
+                teammates.reverse();
+                Ok(teammates)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, agent_id, display_name, handle, role, status, metadata, created_at,
+                            updated_at, archived_at
+                     FROM agent_teammates
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.current_tenant_id())
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(agent_teammate_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_agent_teammate(
+        &self,
+        input: CreateAgentTeammate,
+    ) -> Result<AgentTeammate, AppError> {
+        if let Some(agent_id) = input.agent_id {
+            self.get_agent(agent_id).await?;
+        }
+        let display_name = required_text(input.display_name, "agent teammate display_name")?;
+        let role = required_text(input.role, "agent teammate role")?;
+        let status = normalize_collaboration_record_status(&input.status)?;
+        let now = Utc::now();
+        let teammate = AgentTeammate {
+            id: Uuid::new_v4(),
+            agent_id: input.agent_id,
+            display_name,
+            handle: input.handle.and_then(optional_text),
+            role,
+            status,
+            metadata: input.metadata,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .agent_teammates
+                    .insert(teammate.id, teammate.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO agent_teammates
+                         (id, tenant_id, agent_id, display_name, handle, role, status, metadata,
+                          created_at, updated_at, archived_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                )
+                .bind(teammate.id)
+                .bind(self.current_tenant_id())
+                .bind(teammate.agent_id)
+                .bind(&teammate.display_name)
+                .bind(&teammate.handle)
+                .bind(&teammate.role)
+                .bind(&teammate.status)
+                .bind(&teammate.metadata)
+                .bind(teammate.created_at)
+                .bind(teammate.updated_at)
+                .bind(teammate.archived_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(teammate)
+    }
+
+    pub(crate) async fn list_squads(&self) -> Result<Vec<Squad>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut squads: Vec<_> = inner.read().await.squads.values().cloned().collect();
+                squads.sort_by_key(|squad| squad.created_at);
+                squads.reverse();
+                Ok(squads)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, name, purpose, status, metadata, created_at, updated_at,
+                            archived_at
+                     FROM squads
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.current_tenant_id())
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(squad_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_squad(&self, input: CreateSquad) -> Result<Squad, AppError> {
+        let name = required_text(input.name, "squad name")?;
+        let status = normalize_collaboration_record_status(&input.status)?;
+        let now = Utc::now();
+        let squad = Squad {
+            id: Uuid::new_v4(),
+            name,
+            purpose: input.purpose.and_then(optional_text),
+            status,
+            metadata: input.metadata,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner.write().await.squads.insert(squad.id, squad.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO squads
+                         (id, tenant_id, name, purpose, status, metadata, created_at, updated_at,
+                          archived_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                )
+                .bind(squad.id)
+                .bind(self.current_tenant_id())
+                .bind(&squad.name)
+                .bind(&squad.purpose)
+                .bind(&squad.status)
+                .bind(&squad.metadata)
+                .bind(squad.created_at)
+                .bind(squad.updated_at)
+                .bind(squad.archived_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(squad)
+    }
+
+    pub(crate) async fn list_squad_members(
+        &self,
+        squad_id: Uuid,
+    ) -> Result<Vec<SquadMember>, AppError> {
+        self.ensure_squad_exists(squad_id).await?;
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut members: Vec<_> = inner
+                    .read()
+                    .await
+                    .squad_members
+                    .values()
+                    .filter(|member| member.squad_id == squad_id)
+                    .cloned()
+                    .collect();
+                members.sort_by_key(|member| member.created_at);
+                Ok(members)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, squad_id, teammate_id, role, status, metadata, created_at,
+                            updated_at, archived_at
+                     FROM squad_members
+                     WHERE tenant_id = $1 AND squad_id = $2
+                     ORDER BY created_at ASC",
+                )
+                .bind(self.current_tenant_id())
+                .bind(squad_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(squad_member_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn add_squad_member(
+        &self,
+        squad_id: Uuid,
+        input: CreateSquadMember,
+    ) -> Result<SquadMember, AppError> {
+        self.ensure_squad_exists(squad_id).await?;
+        self.ensure_agent_teammate_exists(input.teammate_id).await?;
+        let role = required_text(input.role, "squad member role")?;
+        let status = normalize_collaboration_record_status(&input.status)?;
+        let now = Utc::now();
+        let member = SquadMember {
+            id: Uuid::new_v4(),
+            squad_id,
+            teammate_id: input.teammate_id,
+            role,
+            status,
+            metadata: input.metadata,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .squad_members
+                    .insert(member.id, member.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO squad_members
+                         (id, tenant_id, squad_id, teammate_id, role, status, metadata,
+                          created_at, updated_at, archived_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                )
+                .bind(member.id)
+                .bind(self.current_tenant_id())
+                .bind(member.squad_id)
+                .bind(member.teammate_id)
+                .bind(&member.role)
+                .bind(&member.status)
+                .bind(&member.metadata)
+                .bind(member.created_at)
+                .bind(member.updated_at)
+                .bind(member.archived_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(member)
     }
 
     pub(crate) async fn list_work_items(&self) -> Result<Vec<WorkItem>, AppError> {
@@ -791,6 +1033,74 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    async fn ensure_agent_teammate_exists(&self, teammate_id: Uuid) -> Result<(), AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let active = inner
+                    .read()
+                    .await
+                    .agent_teammates
+                    .get(&teammate_id)
+                    .is_some_and(|teammate| teammate.archived_at.is_none());
+                if active {
+                    Ok(())
+                } else {
+                    Err(AppError::not_found("active agent teammate not found"))
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let exists: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1
+                     FROM agent_teammates
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND archived_at IS NULL",
+                )
+                .bind(self.current_tenant_id())
+                .bind(teammate_id)
+                .fetch_optional(pool)
+                .await?;
+                exists
+                    .map(|_| ())
+                    .ok_or_else(|| AppError::not_found("active agent teammate not found"))
+            }
+        }
+    }
+
+    async fn ensure_squad_exists(&self, squad_id: Uuid) -> Result<(), AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let active = inner
+                    .read()
+                    .await
+                    .squads
+                    .get(&squad_id)
+                    .is_some_and(|squad| squad.archived_at.is_none());
+                if active {
+                    Ok(())
+                } else {
+                    Err(AppError::not_found("active squad not found"))
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let exists: Option<i32> = sqlx::query_scalar(
+                    "SELECT 1
+                     FROM squads
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND archived_at IS NULL",
+                )
+                .bind(self.current_tenant_id())
+                .bind(squad_id)
+                .fetch_optional(pool)
+                .await?;
+                exists
+                    .map(|_| ())
+                    .ok_or_else(|| AppError::not_found("active squad not found"))
+            }
+        }
     }
 
     pub(crate) async fn ensure_work_item_exists(&self, work_item_id: Uuid) -> Result<(), AppError> {
@@ -2743,6 +3053,16 @@ fn normalize_work_item_priority(value: &str) -> Result<String, AppError> {
         "low" | "normal" | "high" | "urgent" => Ok(normalized),
         other => Err(AppError::bad_request(format!(
             "unsupported work item priority value: {other}"
+        ))),
+    }
+}
+
+fn normalize_collaboration_record_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "active" | "inactive" | "archived" => Ok(normalized),
+        other => Err(AppError::bad_request(format!(
+            "unsupported collaboration status value: {other}"
         ))),
     }
 }

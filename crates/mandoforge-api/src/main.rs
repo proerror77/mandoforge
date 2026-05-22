@@ -3612,6 +3612,82 @@ struct CreateTeam {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentTeammate {
+    id: Uuid,
+    agent_id: Option<Uuid>,
+    display_name: String,
+    handle: Option<String>,
+    role: String,
+    status: String,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAgentTeammate {
+    #[serde(default)]
+    agent_id: Option<Uuid>,
+    display_name: String,
+    #[serde(default)]
+    handle: Option<String>,
+    #[serde(default = "default_agent_teammate_role")]
+    role: String,
+    #[serde(default = "default_collaboration_record_status")]
+    status: String,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Squad {
+    id: Uuid,
+    name: String,
+    purpose: Option<String>,
+    status: String,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSquad {
+    name: String,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default = "default_collaboration_record_status")]
+    status: String,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SquadMember {
+    id: Uuid,
+    squad_id: Uuid,
+    teammate_id: Uuid,
+    role: String,
+    status: String,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSquadMember {
+    teammate_id: Uuid,
+    #[serde(default = "default_squad_member_role")]
+    role: String,
+    #[serde(default = "default_collaboration_record_status")]
+    status: String,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Project {
     id: Uuid,
     team_id: Uuid,
@@ -5211,6 +5287,15 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/work-items",
             get(list_work_items).post(create_work_item),
+        )
+        .route(
+            "/api/agent-teammates",
+            get(list_agent_teammates).post(create_agent_teammate),
+        )
+        .route("/api/squads", get(list_squads).post(create_squad))
+        .route(
+            "/api/squads/{id}/members",
+            get(list_squad_members).post(add_squad_member),
         )
         .route(
             "/api/work-items/{id}/assignments",
@@ -16855,6 +16940,147 @@ async fn delete_project(
         ))
         .await?;
     Ok(Json(project))
+}
+
+async fn list_agent_teammates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AgentTeammate>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "agent_teammates",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_agent_teammates().await?))
+}
+
+async fn create_agent_teammate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateAgentTeammate>,
+) -> Result<Json<AgentTeammate>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::SessionsWrite,
+        resource_type: "agent_teammate".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    let teammate = state.create_agent_teammate(input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "agent_teammate.created",
+            "agent_teammate",
+            Some(teammate.id),
+            json!({
+                "subject": principal.subject_id,
+                "agent_id": teammate.agent_id,
+                "display_name": teammate.display_name,
+                "handle": teammate.handle,
+                "role": teammate.role,
+                "status": teammate.status
+            }),
+        ))
+        .await?;
+    Ok(Json(teammate))
+}
+
+async fn list_squads(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Squad>>, AppError> {
+    authorize_request(&state, &headers, Permission::SessionsRead, "squads", None).await?;
+    Ok(Json(state.list_squads().await?))
+}
+
+async fn create_squad(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSquad>,
+) -> Result<Json<Squad>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::SessionsWrite,
+        resource_type: "squad".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    let squad = state.create_squad(input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "squad.created",
+            "squad",
+            Some(squad.id),
+            json!({
+                "subject": principal.subject_id,
+                "name": squad.name,
+                "status": squad.status
+            }),
+        ))
+        .await?;
+    Ok(Json(squad))
+}
+
+async fn list_squad_members(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SquadMember>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "squad",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_squad_members(id).await?))
+}
+
+async fn add_squad_member(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSquadMember>,
+) -> Result<Json<SquadMember>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::SessionsWrite,
+        resource_type: "squad".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    let member = state.add_squad_member(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "squad.member_added",
+            "squad_member",
+            Some(member.id),
+            json!({
+                "subject": principal.subject_id,
+                "squad_id": member.squad_id,
+                "teammate_id": member.teammate_id,
+                "role": member.role,
+                "status": member.status
+            }),
+        ))
+        .await?;
+    Ok(Json(member))
 }
 
 async fn list_work_items(
@@ -39244,6 +39470,18 @@ fn default_work_item_status() -> String {
 
 fn default_work_item_priority() -> String {
     "normal".to_string()
+}
+
+fn default_agent_teammate_role() -> String {
+    "teammate".to_string()
+}
+
+fn default_squad_member_role() -> String {
+    "member".to_string()
+}
+
+fn default_collaboration_record_status() -> String {
+    "active".to_string()
 }
 
 fn default_work_item_assignment_role() -> String {
@@ -64376,6 +64614,151 @@ not json
             json!("runtime-specialist")
         );
         assert_eq!(entries[2]["metadata"]["decision"], json!("approved"));
+    }
+
+    #[tokio::test]
+    async fn agent_teammates_and_squads_route_work_item_assignments() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Runtime Teammate Agent",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["agent_cli.exec"]
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let teammate: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agent-teammates",
+                json!({
+                    "agent_id": agent.id,
+                    "display_name": "Runtime Teammate",
+                    "handle": "runtime-teammate",
+                    "role": "specialist",
+                    "metadata": {"layer": "collaboration"}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(teammate["agent_id"], json!(agent.id));
+        assert_eq!(teammate["status"], json!("active"));
+
+        let squad: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/squads",
+                json!({
+                    "name": "Runtime Squad",
+                    "purpose": "Route managed runtime work",
+                    "metadata": {"layer": "collaboration"}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let squad_id = squad["id"].as_str().expect("squad id");
+
+        let member: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/squads/{squad_id}/members"),
+                json!({
+                    "teammate_id": teammate["id"],
+                    "role": "owner",
+                    "metadata": {"routing": "runtime"}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(member["squad_id"], json!(squad_id));
+        assert_eq!(member["teammate_id"], teammate["id"]);
+
+        let squad_members: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/squads/{squad_id}/members"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(squad_members.as_array().expect("members").len(), 1);
+
+        let work_item: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Route to runtime squad",
+                    "source": "manual",
+                    "metadata": {"layer": "collaboration"}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item_id = work_item["id"].as_str().expect("work item id");
+        let assignment: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/work-items/{work_item_id}/assignments"),
+                json!({
+                    "assignee_kind": "squad",
+                    "assignee_id": squad_id,
+                    "role": "owner",
+                    "metadata": {"squad_id": squad_id}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(assignment["assignee_kind"], json!("squad"));
+        assert_eq!(assignment["assignee_id"], json!(squad_id));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "agent_teammate.created",
+            "squad.created",
+            "squad.member_added",
+            "work_item.assignment_created",
+        ] {
+            assert!(
+                audit_logs.iter().any(|log| log.action == expected),
+                "missing audit action {expected}"
+            );
+        }
     }
 
     #[tokio::test]
