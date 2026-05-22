@@ -1134,7 +1134,7 @@ verify_readiness_inventory_coverage() {
     else
       missing+=("$resolved")
     fi
-  done < <(jq -r --arg include "$INCLUDE_ENTERPRISE_OPTIONAL" '.evidence_requirements[]? | select((.required_for_core // true) != false or $include == "1") | .readiness_endpoints[]?' "$readiness_file" | sort -u)
+  done < <(jq -r --arg include "$INCLUDE_ENTERPRISE_OPTIONAL" '.evidence_requirements[]? | select((.required_for_stage2_production // .required_for_core // true) != false or $include == "1") | .readiness_endpoints[]?' "$readiness_file" | sort -u)
 
   if (( ${#missing[@]} > 0 )); then
     printf 'stage2 evidence gate did not collect declared readiness endpoint: %s\n' "${missing[@]}" >&2
@@ -1198,7 +1198,7 @@ write_endpoint_coverage() {
     else
       echo "$resolved" >>"$missing_file"
     fi
-  done < <(jq -r --arg include "$INCLUDE_ENTERPRISE_OPTIONAL" ".evidence_requirements[]? | select((.required_for_core // true) != false or \$include == \"1\") | .${field}[]?" "$readiness_file" | sort -u)
+  done < <(jq -r --arg include "$INCLUDE_ENTERPRISE_OPTIONAL" ".evidence_requirements[]? | select((.required_for_stage2_production // .required_for_core // true) != false or \$include == \"1\") | .${field}[]?" "$readiness_file" | sort -u)
 
   missing_count="$(grep -c . "$missing_file" || true)"
   stale_count="$(grep -c . "$stale_file" || true)"

@@ -41,3 +41,18 @@ The repo-controlled Agent OS core decision is based on durable runtime evidence.
 If an agent calls a tool, requests approval, writes an artifact, receives a tool
 result, completes a runtime turn, or changes session state, that action must be
 replayable through `session_events`, `tool_calls`, and `audit_logs`.
+
+## Evidence Lane Semantics
+
+Stage 2 readiness metadata separates three scopes:
+
+- `core_runtime`: Agent OS kernel evidence. These lanes are required for Agent
+  OS core completion.
+- `stage2_production`: production-readiness evidence lanes such as provider
+  rollout, MCP rollout, approval notifications, eval/release, observability, and
+  UI polish. These are enforced by the Stage 2 production gate, but they are not
+  Agent OS core gaps.
+- `enterprise_optional`: optional enterprise evidence plugins such as tenant
+  RLS, policy rollout, Vault/KMS, Remote Computer real-cluster proof, and
+  finance/accounting reconciliation. These run only when enterprise optional
+  evidence is explicitly enabled.

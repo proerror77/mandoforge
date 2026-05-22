@@ -2857,6 +2857,8 @@ struct Stage2EvidenceRequirement {
     title: String,
     category: String,
     required_for_core: bool,
+    required_for_stage2_production: bool,
+    enterprise_optional: bool,
     gap: String,
     production_target: String,
     evidence_scripts: Vec<String>,
@@ -6080,7 +6082,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
         id: &'a str,
         title: &'a str,
         category: &'a str,
-        required_for_core: bool,
+        required_for_stage2_production: bool,
         production_target: &'a str,
         evidence_scripts: Vec<&'a str>,
         evidence_job_manifests: Vec<&'a str>,
@@ -6096,7 +6098,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "tenant-routing",
             title: "Cross-tenant runtime isolation",
             category: "enterprise_optional",
-            required_for_core: false,
+            required_for_stage2_production: false,
             production_target: "Real multi-tenant routing target with RLS enabled, forced, and tenant context configured",
             evidence_scripts: vec!["./scripts/tenant-isolation-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6123,7 +6125,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "policy-rollout",
             title: "Policy rollout orchestration",
             category: "enterprise_optional",
-            required_for_core: false,
+            required_for_stage2_production: false,
             production_target: "Real production policy rollout controller target",
             evidence_scripts: vec!["./scripts/policy-rollout-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6151,7 +6153,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "provider-rollout",
             title: "Provider policy gate workflow",
             category: "stage2_production",
-            required_for_core: true,
+            required_for_stage2_production: true,
             production_target: "Real provider deployment, rollout, and rollback target",
             evidence_scripts: vec!["./scripts/provider-governance-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6189,7 +6191,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "vault-kms",
             title: "Secret lifecycle and KMS/HSM recovery",
             category: "enterprise_optional",
-            required_for_core: false,
+            required_for_stage2_production: false,
             production_target: "Real Vault plus external KMS/HSM lifecycle target",
             evidence_scripts: vec!["./scripts/vault-evidence-gate.sh"],
             evidence_job_manifests: vec!["deploy/stage2-evidence/vault-evidence-job.example.yaml"],
@@ -6218,7 +6220,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "worker-remote-computer",
             title: "Worker autoscaling and Remote Computer real-cluster validation",
             category: "enterprise_optional",
-            required_for_core: false,
+            required_for_stage2_production: false,
             production_target: "Durable worker queue, isolated worker pool, and real Remote Computer state filesystem",
             evidence_scripts: vec![
                 "./scripts/worker-evidence-gate.sh",
@@ -6264,7 +6266,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "approval-notifications",
             title: "Approval notification operations",
             category: "stage2_production",
-            required_for_core: true,
+            required_for_stage2_production: true,
             production_target: "Real webhook, Slack, or email notification provider targets",
             evidence_scripts: vec!["./scripts/approval-notification-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6300,7 +6302,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "mcp-rollout",
             title: "MCP connector rollout orchestration",
             category: "stage2_production",
-            required_for_core: true,
+            required_for_stage2_production: true,
             production_target: "Team-scoped MCP deployment, rollout, and rollback target",
             evidence_scripts: vec!["./scripts/mcp-gateway-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6338,7 +6340,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "codex-app-server",
             title: "Codex App Server control-plane operations",
             category: "core_runtime",
-            required_for_core: true,
+            required_for_stage2_production: true,
             production_target: "Real Codex App Server deployment and ops target",
             evidence_scripts: vec!["./scripts/codex-app-server-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6371,7 +6373,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "managed-session-restart-resume",
             title: "Managed-session restart and resume proof",
             category: "core_runtime",
-            required_for_core: true,
+            required_for_stage2_production: true,
             production_target: "Real API and worker restart drill proving session-loop recovery, thread lineage, and lease fencing",
             evidence_scripts: vec!["./scripts/managed-session-runtime-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6399,7 +6401,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "eval-release",
             title: "Eval and release rollout orchestration",
             category: "stage2_production",
-            required_for_core: true,
+            required_for_stage2_production: true,
             production_target: "Real production agent release target",
             evidence_scripts: vec!["./scripts/eval-release-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6438,7 +6440,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "observability-collector",
             title: "Real-cluster collector rollout",
             category: "stage2_production",
-            required_for_core: true,
+            required_for_stage2_production: true,
             production_target: "Real OTLP collector deployment and cluster rollout target",
             evidence_scripts: vec!["./scripts/observability-collector-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6475,7 +6477,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "finance-close",
             title: "Finance close and accounting reconciliation",
             category: "enterprise_optional",
-            required_for_core: false,
+            required_for_stage2_production: false,
             production_target: "Real accounting-system reconciliation target",
             evidence_scripts: vec!["./scripts/finance-evidence-gate.sh"],
             evidence_job_manifests: vec![
@@ -6513,7 +6515,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             id: "ui-production-polish",
             title: "Production UI CRUD and dashboard polish",
             category: "stage2_production",
-            required_for_core: true,
+            required_for_stage2_production: true,
             production_target: "Operator UI flows for production governance tasks",
             evidence_scripts: vec![
                 "./scripts/verify-static-ui-actionbook.sh",
@@ -6547,48 +6549,55 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
     specs
         .iter()
         .enumerate()
-        .map(|(index, spec)| Stage2EvidenceRequirement {
-            id: spec.id.to_string(),
-            title: spec.title.to_string(),
-            category: spec.category.to_string(),
-            required_for_core: spec.required_for_core,
-            gap: open_gaps.get(index).cloned().unwrap_or_default(),
-            production_target: spec.production_target.to_string(),
-            evidence_scripts: spec
-                .evidence_scripts
-                .iter()
-                .map(|script| script.to_string())
-                .collect(),
-            evidence_job_manifests: spec
-                .evidence_job_manifests
-                .iter()
-                .map(|manifest| manifest.to_string())
-                .collect(),
-            readiness_endpoints: spec
-                .readiness_endpoints
-                .iter()
-                .map(|endpoint| endpoint.to_string())
-                .collect(),
-            validation_endpoints: spec
-                .validation_endpoints
-                .iter()
-                .map(|endpoint| endpoint.to_string())
-                .collect(),
-            required_flags: spec
-                .required_flags
-                .iter()
-                .map(|flag| flag.to_string())
-                .collect(),
-            required_artifacts: spec
-                .required_artifacts
-                .iter()
-                .map(|artifact| artifact.to_string())
-                .collect(),
-            required_evidence: spec
-                .required_evidence
-                .iter()
-                .map(|evidence| evidence.to_string())
-                .collect(),
+        .map(|(index, spec)| {
+            let required_for_core = spec.category == "core_runtime";
+            let enterprise_optional = spec.category == "enterprise_optional";
+
+            Stage2EvidenceRequirement {
+                id: spec.id.to_string(),
+                title: spec.title.to_string(),
+                category: spec.category.to_string(),
+                required_for_core,
+                required_for_stage2_production: spec.required_for_stage2_production,
+                enterprise_optional,
+                gap: open_gaps.get(index).cloned().unwrap_or_default(),
+                production_target: spec.production_target.to_string(),
+                evidence_scripts: spec
+                    .evidence_scripts
+                    .iter()
+                    .map(|script| script.to_string())
+                    .collect(),
+                evidence_job_manifests: spec
+                    .evidence_job_manifests
+                    .iter()
+                    .map(|manifest| manifest.to_string())
+                    .collect(),
+                readiness_endpoints: spec
+                    .readiness_endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.to_string())
+                    .collect(),
+                validation_endpoints: spec
+                    .validation_endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.to_string())
+                    .collect(),
+                required_flags: spec
+                    .required_flags
+                    .iter()
+                    .map(|flag| flag.to_string())
+                    .collect(),
+                required_artifacts: spec
+                    .required_artifacts
+                    .iter()
+                    .map(|artifact| artifact.to_string())
+                    .collect(),
+                required_evidence: spec
+                    .required_evidence
+                    .iter()
+                    .map(|evidence| evidence.to_string())
+                    .collect(),
+            }
         })
         .collect()
 }
@@ -40020,6 +40029,14 @@ Stage 2 is not complete.
                 .required_flags
                 .contains(&"RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1".to_string())
         );
+        assert!(
+            eval_release.required_for_stage2_production,
+            "eval/release is a Stage 2 production evidence lane"
+        );
+        assert!(
+            !eval_release.required_for_core,
+            "eval/release must not be reported as an Agent OS core runtime lane"
+        );
 
         let managed_session = readiness
             .evidence_requirements
@@ -40088,6 +40105,45 @@ Stage 2 is not complete.
                 !requirement.required_for_core,
                 "{optional_enterprise_id} must not block Agent OS core completion"
             );
+            assert!(
+                !requirement.required_for_stage2_production,
+                "{optional_enterprise_id} must not block Stage 2 production evidence by default"
+            );
+            assert!(
+                requirement.enterprise_optional,
+                "{optional_enterprise_id} must be reported as optional enterprise evidence"
+            );
+        }
+
+        for stage2_production_id in [
+            "provider-rollout",
+            "approval-notifications",
+            "mcp-rollout",
+            "eval-release",
+            "observability-collector",
+            "ui-production-polish",
+        ] {
+            let requirement = readiness
+                .evidence_requirements
+                .iter()
+                .find(|requirement| requirement.id == stage2_production_id)
+                .unwrap_or_else(|| panic!("missing {stage2_production_id} evidence requirement"));
+            assert_eq!(
+                requirement.category, "stage2_production",
+                "{stage2_production_id} must be a Stage 2 production evidence lane"
+            );
+            assert!(
+                requirement.required_for_stage2_production,
+                "{stage2_production_id} must be enforced by the Stage 2 production evidence gate"
+            );
+            assert!(
+                !requirement.required_for_core,
+                "{stage2_production_id} must not be reported as an Agent OS core runtime lane"
+            );
+            assert!(
+                !requirement.enterprise_optional,
+                "{stage2_production_id} must not be reported as optional enterprise evidence"
+            );
         }
 
         let managed_session = readiness
@@ -40097,6 +40153,8 @@ Stage 2 is not complete.
             .expect("missing managed-session restart/resume evidence requirement");
         assert_eq!(managed_session.category, "core_runtime");
         assert!(managed_session.required_for_core);
+        assert!(managed_session.required_for_stage2_production);
+        assert!(!managed_session.enterprise_optional);
     }
 
     #[test]
@@ -40110,12 +40168,12 @@ Stage 2 is not complete.
             "production evidence gate must keep enterprise plugin evidence opt-in"
         );
         assert!(
-            production_gate.contains("required_for_core"),
-            "production evidence gate must filter declared endpoint coverage to core requirements by default"
+            production_gate.contains("required_for_stage2_production"),
+            "production evidence gate must filter declared endpoint coverage to Stage 2 production requirements by default"
         );
         assert!(
-            completion_audit.contains("required_for_core"),
-            "completion audit gate must classify optional enterprise evidence separately from core requirements"
+            completion_audit.contains("required_for_stage2_production"),
+            "completion audit gate must classify optional enterprise evidence separately from Stage 2 production requirements"
         );
         assert!(
             completion_audit.contains("optional_missing_required_evidence_artifact_count"),

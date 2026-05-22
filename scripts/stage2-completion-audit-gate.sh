@@ -2121,9 +2121,11 @@ while IFS= read -r encoded; do
   req_title="$(jq -r '.title' <<<"$req_json")"
   req_gap="$(jq -r '.gap' <<<"$req_json")"
   req_category="$(jq -r '.category // "stage2_production"' <<<"$req_json")"
-  req_required_for_core="$(jq -r 'if has("required_for_core") then .required_for_core else true end' <<<"$req_json")"
+  req_required_for_core="$(jq -r 'if has("required_for_core") then .required_for_core else ((.category // "") == "core_runtime") end' <<<"$req_json")"
+  req_required_for_stage2_production="$(jq -r 'if has("required_for_stage2_production") then .required_for_stage2_production elif has("required_for_core") then .required_for_core else true end' <<<"$req_json")"
+  req_enterprise_optional="$(jq -r 'if has("enterprise_optional") then .enterprise_optional else ((.category // "") == "enterprise_optional") end' <<<"$req_json")"
   req_enforced="true"
-  if [[ "$req_required_for_core" == "false" && "$INCLUDE_ENTERPRISE_OPTIONAL" != "1" ]]; then
+  if [[ "$req_required_for_stage2_production" == "false" && "$INCLUDE_ENTERPRISE_OPTIONAL" != "1" ]]; then
     req_enforced="false"
   fi
   production_target="$(jq -r '.production_target' <<<"$req_json")"
@@ -2348,6 +2350,8 @@ while IFS= read -r encoded; do
     --arg gap "$req_gap" \
     --arg category "$req_category" \
     --argjson required_for_core "$req_required_for_core" \
+    --argjson required_for_stage2_production "$req_required_for_stage2_production" \
+    --argjson enterprise_optional "$req_enterprise_optional" \
     --argjson enforced "$req_enforced" \
     --arg production_target "$production_target" \
     --arg status "$req_status" \
@@ -2388,6 +2392,8 @@ while IFS= read -r encoded; do
       title: $title,
       category: $category,
       required_for_core: $required_for_core,
+      required_for_stage2_production: $required_for_stage2_production,
+      enterprise_optional: $enterprise_optional,
       enforced: $enforced,
       gap: $gap,
       production_target: $production_target,
@@ -2540,6 +2546,8 @@ checklist_md="$AUDIT_DIR/checklist.md"
       + "- status: " + .status + "\n"
       + "- category: " + .category + "\n"
       + "- required_for_core: " + (.required_for_core | tostring) + "\n"
+      + "- required_for_stage2_production: " + (.required_for_stage2_production | tostring) + "\n"
+      + "- enterprise_optional: " + (.enterprise_optional | tostring) + "\n"
       + "- enforced: " + (.enforced | tostring) + "\n"
       + "- production_target: " + .production_target + "\n"
       + "- missing_readiness_count: " + (.missing_readiness_count | tostring) + "\n"
