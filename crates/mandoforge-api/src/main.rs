@@ -12719,6 +12719,13 @@ async fn build_harness_context(
                     == Some("rejected")
         })
         .count();
+    let manual_tool_result_count = context_events
+        .iter()
+        .filter(|event| {
+            event.event_type == "tool.result"
+                && event.payload.get("origin").and_then(Value::as_str) == Some("manual")
+        })
+        .count();
     let recent_custom_tool_results = context_events
         .iter()
         .filter(|event| event.event_type == "user.custom_tool_result")
@@ -12757,6 +12764,7 @@ async fn build_harness_context(
         latest_goal_event,
         approved_tool_result_count: approved_event_result_count,
         rejected_tool_result_count: rejected_event_result_count,
+        manual_tool_result_count,
         custom_tool_result_count: recent_custom_tool_results.len(),
         recent_custom_tool_results,
         recent_goal_events,
@@ -13206,6 +13214,7 @@ async fn run_session_loop(state: &AppState, job: &SessionLoopJob) -> Result<Sess
                 session_id: id,
                 args: tool_call.args,
             },
+            ToolInvocationOrigin::SessionLoop,
         )
         .await?;
         if result.get("status").and_then(Value::as_str) == Some("approval_required") {
@@ -15279,7 +15288,9 @@ async fn execute_tool(
         Some(input.session_id),
     )
     .await?;
-    Ok(Json(execute_tool_invocation(&state, &name, input).await?))
+    Ok(Json(
+        execute_tool_invocation(&state, &name, input, ToolInvocationOrigin::ManualRoute).await?,
+    ))
 }
 
 async fn authorize_tool_execution(
@@ -15514,10 +15525,17 @@ fn parse_roles_header(value: &str) -> Result<Vec<Role>, AppError> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolInvocationOrigin {
+    ManualRoute,
+    SessionLoop,
+}
+
 async fn execute_tool_invocation(
     state: &AppState,
     name: &str,
     input: ExecuteTool,
+    origin: ToolInvocationOrigin,
 ) -> Result<Value, AppError> {
     let agent_version = state.agent_version_for_session(input.session_id).await?;
     let policy = state.policy_for_session(input.session_id).await;
@@ -15825,7 +15843,11 @@ async fn execute_tool_invocation(
     } else {
         "tool.result"
     };
-    state
+    let result_origin = match origin {
+        ToolInvocationOrigin::ManualRoute => "manual",
+        ToolInvocationOrigin::SessionLoop => "session_loop",
+    };
+    let result_event = state
         .append_event(
             if status == "waiting_approval" {
                 "system"
@@ -15835,9 +15857,18 @@ async fn execute_tool_invocation(
             Some(tool_call.id),
             input.session_id,
             event_type,
-            json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+            json!({"tool_call_id": tool_call.id, "tool": name, "origin": result_origin, "content": result}),
         )
         .await?;
+    if status == "completed" && origin == ToolInvocationOrigin::ManualRoute {
+        enqueue_session_loop(
+            state,
+            input.session_id,
+            Some(result_event.id),
+            "tool.result",
+        )
+        .await?;
+    }
     state
         .append_event(
             "agent",
@@ -62175,6 +62206,88 @@ not json
             call.tool_name == "secret.read"
                 && call.status == "denied"
                 && call.policy_decision["decision"] == "denied"
+        }));
+    }
+
+    #[tokio::test]
+    async fn manual_allowed_tool_result_resumes_session_loop() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "manual allowed tool result"}),
+            ),
+        )
+        .await;
+
+        let read_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.read/execute",
+                json!({"session_id": session.id, "args": {"path": "README.md"}}),
+            ),
+        )
+        .await;
+        assert!(read_result.get("files").is_some());
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let tool_result_event = events
+            .iter()
+            .find(|event| event.event_type == "tool.result")
+            .expect("manual allowed tool should record a durable tool.result event");
+
+        let queued_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
+        assert!(
+            queued_jobs.iter().any(|job| {
+                job.status == SessionLoopJobStatus::Queued
+                    && job.reason == "tool.result"
+                    && job.trigger_event_id == Some(tool_result_event.id)
+            }),
+            "manual tool result should resume through session-loop queue: {queued_jobs:?}"
+        );
+
+        let completed =
+            run_next_session_loop_job(app.clone(), session.id, "manual-tool-result-worker").await;
+        assert_eq!(completed.status, SessionLoopJobStatus::Completed);
+
+        let events_after_resume: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events_after_resume.iter().any(|event| {
+            event.event_type == "llm.request"
+                && event.payload["context"]["manual_tool_result_count"] == json!(1)
+        }));
+        assert!(events_after_resume.iter().any(|event| {
+            event.event_type == "agent.final"
+                && event
+                    .payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("Manual tool result"))
         }));
     }
 

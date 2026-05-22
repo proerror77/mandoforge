@@ -22,6 +22,7 @@ pub(crate) struct HarnessContext {
     pub(crate) latest_goal_event: Option<Value>,
     pub(crate) approved_tool_result_count: usize,
     pub(crate) rejected_tool_result_count: usize,
+    pub(crate) manual_tool_result_count: usize,
     pub(crate) custom_tool_result_count: usize,
     pub(crate) recent_custom_tool_results: Vec<Value>,
     pub(crate) recent_goal_events: Vec<Value>,
@@ -98,6 +99,21 @@ impl ProviderClient for MockProviderClient {
                     prompt_tokens: 96,
                     completion_tokens: 32,
                     total_tokens: 128,
+                }),
+            });
+        }
+        if context.manual_tool_result_count > 0 {
+            return Ok(ProviderResponse {
+                plan: vec!["Review manual tool result and continue the session timeline".to_string()],
+                tool_calls: Vec::new(),
+                final_message: Some(
+                    "Manual tool result processed. The session loop consumed the durable tool result event and recorded a final provider response."
+                        .to_string(),
+                ),
+                usage: Some(ProviderTokenUsage {
+                    prompt_tokens: 88,
+                    completion_tokens: 30,
+                    total_tokens: 118,
                 }),
             });
         }
