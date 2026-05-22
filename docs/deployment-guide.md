@@ -150,6 +150,6 @@ For a self-contained local rehearsal that starts an ephemeral API process first:
 
 The final gate uses the in-memory API store by default, starts a temporary API,
 runs the Agent OS core evidence gate, verifies WorkItem collaboration intake
-assignment routing, and review evidence, and verifies the Codex adapter shim. It
-is the main local completion check for the runtime kernel and first
-Collaboration Layer intake/routing/review slice.
+assignment routing, review, and Activity Feed evidence, and verifies the Codex
+adapter shim. It is the main local completion check for the runtime kernel and
+first Collaboration Layer intake/routing/review/activity slice.

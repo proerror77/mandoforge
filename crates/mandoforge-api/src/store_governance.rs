@@ -7,14 +7,15 @@ use crate::store_backend::StoreBackend;
 use crate::store_rows::{
     mcp_server_from_row, membership_from_row, organization_from_row, project_from_row,
     provider_access_from_row, provider_record_from_row, team_from_row, tenant_invitation_from_row,
-    work_item_assignment_from_row, work_item_from_row, work_item_review_from_row,
+    work_item_activity_entry_from_row, work_item_assignment_from_row, work_item_from_row,
+    work_item_review_from_row,
 };
 use crate::{
     AppError, AppState, CreateMcpServerRecord, CreateMembership, CreateOrganization, CreateProject,
     CreateProviderAccess, CreateProviderRecord, CreateTeam, CreateTenantInvitation, CreateWorkItem,
     CreateWorkItemAssignment, CreateWorkItemReview, McpServerRecord, Membership, Organization,
     Project, ProviderAccess, ProviderRecord, Role, Team, TenantInvitation, UpdateMcpServerRecord,
-    UpdateProviderAccess, WorkItem, WorkItemAssignment, WorkItemReview,
+    UpdateProviderAccess, WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
 };
 
 impl AppState {
@@ -463,6 +464,100 @@ impl AppState {
             }
         }
         Ok(work_item)
+    }
+
+    pub(crate) async fn list_work_item_activity(
+        &self,
+        work_item_id: Uuid,
+    ) -> Result<Vec<WorkItemActivityEntry>, AppError> {
+        self.ensure_work_item_exists(work_item_id).await?;
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut entries: Vec<_> = inner
+                    .read()
+                    .await
+                    .work_item_activity_entries
+                    .values()
+                    .filter(|entry| entry.work_item_id == work_item_id)
+                    .cloned()
+                    .collect();
+                entries.sort_by_key(|entry| entry.created_at);
+                Ok(entries)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, work_item_id, event_type, actor_subject, subject_type, subject_id,
+                            summary, metadata, created_at
+                     FROM work_item_activity_entries
+                     WHERE tenant_id = $1
+                       AND work_item_id = $2
+                     ORDER BY created_at ASC",
+                )
+                .bind(self.current_tenant_id())
+                .bind(work_item_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(work_item_activity_entry_from_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn append_work_item_activity_entry(
+        &self,
+        work_item_id: Uuid,
+        event_type: &str,
+        actor_subject: Option<String>,
+        subject_type: Option<&str>,
+        subject_id: Option<Uuid>,
+        summary: String,
+        metadata: Value,
+    ) -> Result<WorkItemActivityEntry, AppError> {
+        self.ensure_work_item_exists(work_item_id).await?;
+        let event_type = required_text(event_type.to_string(), "activity event_type")?;
+        let summary = required_text(summary, "activity summary")?;
+        let entry = WorkItemActivityEntry {
+            id: Uuid::new_v4(),
+            work_item_id,
+            event_type,
+            actor_subject: actor_subject.and_then(optional_text),
+            subject_type: subject_type.map(str::to_string).and_then(optional_text),
+            subject_id,
+            summary,
+            metadata,
+            created_at: Utc::now(),
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .work_item_activity_entries
+                    .insert(entry.id, entry.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO work_item_activity_entries
+                         (id, tenant_id, work_item_id, event_type, actor_subject, subject_type,
+                          subject_id, summary, metadata, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                )
+                .bind(entry.id)
+                .bind(self.current_tenant_id())
+                .bind(entry.work_item_id)
+                .bind(&entry.event_type)
+                .bind(&entry.actor_subject)
+                .bind(&entry.subject_type)
+                .bind(entry.subject_id)
+                .bind(&entry.summary)
+                .bind(&entry.metadata)
+                .bind(entry.created_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(entry)
     }
 
     pub(crate) async fn list_work_item_assignments(

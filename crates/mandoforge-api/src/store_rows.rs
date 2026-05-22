@@ -10,8 +10,8 @@ use crate::{
     MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
     ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
     SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Team, TenantInvitation,
-    ToolCall, UsageRollup, WorkItem, WorkItemAssignment, WorkItemReview, WorkflowPackInstallation,
-    WorkflowPackProfileAsset,
+    ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
+    WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
@@ -622,6 +622,22 @@ pub(crate) fn work_item_from_row(row: PgRow) -> Result<WorkItem, AppError> {
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn work_item_activity_entry_from_row(
+    row: PgRow,
+) -> Result<WorkItemActivityEntry, AppError> {
+    Ok(WorkItemActivityEntry {
+        id: row.try_get("id")?,
+        work_item_id: row.try_get("work_item_id")?,
+        event_type: row.try_get("event_type")?,
+        actor_subject: row.try_get("actor_subject")?,
+        subject_type: row.try_get("subject_type")?,
+        subject_id: row.try_get("subject_id")?,
+        summary: row.try_get("summary")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 

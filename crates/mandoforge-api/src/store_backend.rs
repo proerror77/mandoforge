@@ -13,8 +13,8 @@ use crate::{
     ProviderRecord, RemoteComputer, RemoteComputerAttachment, RemoteComputerJobAssignment,
     RemoteComputerLease, RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord,
     SemanticLink, SemanticObject, SemanticSource, Session, SessionEvent, SessionLoopJob,
-    SessionThread, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemAssignment,
-    WorkItemReview, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    SessionThread, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry,
+    WorkItemAssignment, WorkItemReview, WorkflowPackInstallation, WorkflowPackProfileAsset,
 };
 
 #[derive(Default)]
@@ -43,6 +43,7 @@ pub(crate) struct MemoryStore {
     pub(crate) teams: HashMap<Uuid, Team>,
     pub(crate) projects: HashMap<Uuid, Project>,
     pub(crate) work_items: HashMap<Uuid, WorkItem>,
+    pub(crate) work_item_activity_entries: HashMap<Uuid, WorkItemActivityEntry>,
     pub(crate) work_item_assignments: HashMap<Uuid, WorkItemAssignment>,
     pub(crate) work_item_reviews: HashMap<Uuid, WorkItemReview>,
     pub(crate) memberships: HashMap<Uuid, Membership>,

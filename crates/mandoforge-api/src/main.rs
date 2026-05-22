@@ -3726,6 +3726,19 @@ struct CreateWorkItemReview {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkItemActivityEntry {
+    id: Uuid,
+    work_item_id: Uuid,
+    event_type: String,
+    actor_subject: Option<String>,
+    subject_type: Option<String>,
+    subject_id: Option<Uuid>,
+    summary: String,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Membership {
     id: Uuid,
     user_id: String,
@@ -5203,6 +5216,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/work-items/{id}/reviews",
             get(list_work_item_reviews).post(create_work_item_review),
+        )
+        .route(
+            "/api/work-items/{id}/activity",
+            get(list_work_item_activity),
         )
         .route(
             "/api/teams/{id}/provider-access",
@@ -16804,6 +16821,22 @@ async fn create_work_item(
     state.authorizer.authorize(&principal, &request).await?;
     let work_item = state.create_work_item(input).await?;
     state
+        .append_work_item_activity_entry(
+            work_item.id,
+            "work_item.created",
+            Some(principal.subject_id.clone()),
+            Some("work_item"),
+            Some(work_item.id),
+            format!("Created WorkItem: {}", work_item.title),
+            json!({
+                "title": work_item.title.clone(),
+                "source": work_item.source.clone(),
+                "status": work_item.status.clone(),
+                "priority": work_item.priority.clone()
+            }),
+        )
+        .await?;
+    state
         .append_audit_log(new_audit_log(
             None,
             "user",
@@ -16860,6 +16893,25 @@ async fn create_work_item_assignment(
         .create_work_item_assignment(id, input, Some(principal.subject_id.clone()))
         .await?;
     state
+        .append_work_item_activity_entry(
+            assignment.work_item_id,
+            "work_item.assignment_created",
+            Some(principal.subject_id.clone()),
+            Some("work_item_assignment"),
+            Some(assignment.id),
+            format!(
+                "Assigned {} {} as {}",
+                assignment.assignee_kind, assignment.assignee_id, assignment.role
+            ),
+            json!({
+                "assignee_kind": assignment.assignee_kind.clone(),
+                "assignee_id": assignment.assignee_id.clone(),
+                "role": assignment.role.clone(),
+                "status": assignment.status.clone()
+            }),
+        )
+        .await?;
+    state
         .append_audit_log(new_audit_log(
             None,
             "user",
@@ -16913,6 +16965,26 @@ async fn create_work_item_review(
     state.authorizer.authorize(&principal, &request).await?;
     let review = state.create_work_item_review(id, input).await?;
     state
+        .append_work_item_activity_entry(
+            review.work_item_id,
+            "work_item.review_created",
+            Some(principal.subject_id.clone()),
+            Some("work_item_review"),
+            Some(review.id),
+            match &review.decision {
+                Some(decision) => format!("Review completed with decision: {decision}"),
+                None => "Review requested".to_string(),
+            },
+            json!({
+                "reviewer_kind": review.reviewer_kind.clone(),
+                "reviewer_id": review.reviewer_id.clone(),
+                "status": review.status.clone(),
+                "decision": review.decision.clone(),
+                "summary": review.summary.clone()
+            }),
+        )
+        .await?;
+    state
         .append_audit_log(new_audit_log(
             None,
             "user",
@@ -16931,6 +17003,22 @@ async fn create_work_item_review(
         ))
         .await?;
     Ok(Json(review))
+}
+
+async fn list_work_item_activity(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkItemActivityEntry>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "work_item",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_work_item_activity(id).await?))
 }
 
 async fn list_memberships(
@@ -63948,6 +64036,100 @@ not json
                 && log.details["reviewer_kind"] == json!("agent")
                 && log.details["decision"] == json!("approved")
         }));
+    }
+
+    #[tokio::test]
+    async fn work_item_activity_feed_records_collaboration_timeline() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+
+        let work_item: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Show collaboration timeline",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {"layer": "collaboration"}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item_id = work_item["id"].as_str().expect("work item id");
+
+        let _assignment: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/work-items/{work_item_id}/assignments"),
+                json!({
+                    "assignee_kind": "agent",
+                    "assignee_id": "runtime-specialist",
+                    "role": "owner"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let _review: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/work-items/{work_item_id}/reviews"),
+                json!({
+                    "reviewer_kind": "agent",
+                    "reviewer_id": "runtime-reviewer",
+                    "status": "completed",
+                    "decision": "approved",
+                    "summary": "Timeline is ready."
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let (status, activity) = request_value(
+            app,
+            Request::builder()
+                .uri(format!("/api/work-items/{work_item_id}/activity"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = activity.as_array().expect("activity entries");
+        let event_types: Vec<_> = entries
+            .iter()
+            .map(|entry| entry["event_type"].as_str().expect("event type"))
+            .collect();
+        assert_eq!(
+            event_types,
+            vec![
+                "work_item.created",
+                "work_item.assignment_created",
+                "work_item.review_created"
+            ]
+        );
+        assert!(entries.iter().all(|entry| {
+            entry["work_item_id"] == json!(work_item_id)
+                && entry["actor_subject"] == json!("admin-1")
+                && entry["summary"]
+                    .as_str()
+                    .is_some_and(|summary| !summary.is_empty())
+        }));
+        assert_eq!(
+            entries[1]["metadata"]["assignee_id"],
+            json!("runtime-specialist")
+        );
+        assert_eq!(entries[2]["metadata"]["decision"], json!("approved"));
     }
 
     #[tokio::test]

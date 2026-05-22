@@ -63,9 +63,12 @@ The first Collaboration Layer slice is now in place:
   or teams.
 - `/api/work-items/:id/reviews` records user, agent, squad, or team review
   decisions.
-- WorkItem intake, routing, and review write `work_item.created`,
-  `work_item.assignment_created`, and `work_item.review_created` audit evidence
-  and are covered by `scripts/work-item-collaboration-evidence-gate.sh`.
+- `/api/work-items/:id/activity` exposes the human-readable Activity Feed for
+  intake, routing, and review.
+- WorkItem intake, routing, review, and activity write `work_item.created`,
+  `work_item.assignment_created`, and `work_item.review_created` audit/activity
+  evidence and are covered by
+  `scripts/work-item-collaboration-evidence-gate.sh`.
 
 ## Near-Term Priority
 

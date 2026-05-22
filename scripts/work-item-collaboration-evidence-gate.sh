@@ -78,6 +78,7 @@ review_file="$EVIDENCE_DIR/work-item-review-created.json"
 list_file="$EVIDENCE_DIR/work-items.json"
 assignment_list_file="$EVIDENCE_DIR/work-item-assignments.json"
 review_list_file="$EVIDENCE_DIR/work-item-reviews.json"
+activity_file="$EVIDENCE_DIR/work-item-activity.json"
 audit_file="$EVIDENCE_DIR/audit-logs.json"
 summary_file="$EVIDENCE_DIR/summary.txt"
 
@@ -132,6 +133,7 @@ review_id="$(jq -r '.id' "$review_file")"
 api_get /api/work-items >"$list_file"
 api_get "/api/work-items/$work_item_id/assignments" >"$assignment_list_file"
 api_get "/api/work-items/$work_item_id/reviews" >"$review_list_file"
+api_get "/api/work-items/$work_item_id/activity" >"$activity_file"
 api_get /api/audit-logs >"$audit_file"
 
 jq -e --arg id "$work_item_id" --arg run_id "$RUN_ID" '
@@ -173,6 +175,21 @@ jq -e --arg id "$review_id" '
   any(.[]; .id == $id and .metadata.layer == "collaboration")
 ' "$review_list_file" >/dev/null
 
+jq -e --arg work_item_id "$work_item_id" --arg assignment_id "$assignment_id" --arg review_id "$review_id" --arg subject "$SUBJECT" '
+  length == 3
+  and .[0].work_item_id == $work_item_id
+  and .[0].event_type == "work_item.created"
+  and .[0].actor_subject == $subject
+  and .[1].event_type == "work_item.assignment_created"
+  and .[1].subject_type == "work_item_assignment"
+  and .[1].subject_id == $assignment_id
+  and .[1].metadata.assignee_id == "runtime-specialist"
+  and .[2].event_type == "work_item.review_created"
+  and .[2].subject_type == "work_item_review"
+  and .[2].subject_id == $review_id
+  and .[2].metadata.decision == "approved"
+' "$activity_file" >/dev/null
+
 jq -e --arg id "$work_item_id" --arg subject "$SUBJECT" '
   any(.[]; .action == "work_item.created"
     and .resource_type == "work_item"
@@ -210,6 +227,7 @@ jq -e --arg id "$review_id" --arg work_item_id "$work_item_id" '
   echo "list_file=$list_file"
   echo "assignment_list_file=$assignment_list_file"
   echo "review_list_file=$review_list_file"
+  echo "activity_file=$activity_file"
   echo "audit_file=$audit_file"
 } | tee "$summary_file"
 
