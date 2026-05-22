@@ -299,12 +299,22 @@ if ! ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_WS_PORT$
   sleep 2
 fi
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_WS_PORT$\" || { cat '$REMOTE_ROOT/codex-app-server-ws.log' >&2; exit 1; }
-if ! ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_CONTROLLER_PORT$\"; then
-  command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey Codex App Server controller' >&2; exit 1; }
-  nohup env CODEX_APP_SERVER_WS_URL=ws://\$docker_gateway_ip:$CODEX_WS_PORT CODEX_CONTROLLER_HOST=\$docker_gateway_ip CODEX_CONTROLLER_PORT=$CODEX_CONTROLLER_PORT CODEX_CONTROLLER_TOKEN='$CODEX_CONTROLLER_TOKEN' node '$REMOTE_CODEX_CONTROLLER' > '$REMOTE_ROOT/codex-app-server-controller.log' 2>&1 &
-  echo \$! > '$REMOTE_ROOT/codex-app-server-controller.pid'
-  sleep 2
+if [[ -f '$REMOTE_ROOT/codex-app-server-controller.pid' ]]; then
+  kill \$(cat '$REMOTE_ROOT/codex-app-server-controller.pid') >/dev/null 2>&1 || true
+  rm -f '$REMOTE_ROOT/codex-app-server-controller.pid'
+  sleep 1
 fi
+if command -v lsof >/dev/null 2>&1; then
+  controller_pid=\$(lsof -tiTCP:$CODEX_CONTROLLER_PORT -sTCP:LISTEN 2>/dev/null || true)
+  if [[ -n \"\$controller_pid\" ]]; then
+    kill \$controller_pid >/dev/null 2>&1 || true
+    sleep 1
+  fi
+fi
+command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey Codex App Server controller' >&2; exit 1; }
+nohup env CODEX_APP_SERVER_WS_URL=ws://\$docker_gateway_ip:$CODEX_WS_PORT CODEX_CONTROLLER_HOST=\$docker_gateway_ip CODEX_CONTROLLER_PORT=$CODEX_CONTROLLER_PORT CODEX_CONTROLLER_TOKEN='$CODEX_CONTROLLER_TOKEN' node '$REMOTE_CODEX_CONTROLLER' > '$REMOTE_ROOT/codex-app-server-controller.log' 2>&1 &
+echo \$! > '$REMOTE_ROOT/codex-app-server-controller.pid'
+sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/codex-app-server-controller.log' >&2; exit 1; }
 if [[ -f '$REMOTE_ROOT/tenant-routing-controller.pid' ]]; then
   kill \$(cat '$REMOTE_ROOT/tenant-routing-controller.pid') >/dev/null 2>&1 || true
