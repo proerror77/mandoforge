@@ -5,6 +5,8 @@ import {
   api,
   createSession,
   decideApproval,
+  getAdminToken,
+  setAdminToken,
   type Agent,
   type Approval,
   type Artifact,
@@ -38,6 +40,7 @@ export function App() {
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState("");
   const [task, setTask] = useState(DEFAULT_TASK);
+  const [adminTokenInput, setAdminTokenInput] = useState(() => consumeTokenFromHash() || getAdminToken());
 
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api<Agent[]>("/api/agents"), refetchInterval: 5000 });
   const environments = useQuery({ queryKey: ["environments"], queryFn: () => api<Environment[]>("/api/environments"), refetchInterval: 5000 });
@@ -109,6 +112,7 @@ export function App() {
 
   const activeCount = rows.filter((row) => row.status === "running" || row.status === "queued").length;
   const blockedCount = rows.filter((row) => row.status === "needs_input").length;
+  const apiError = firstQueryError([agents.error, environments.error, sessions.error, approvals.error, executionJobs.error, sessionLoopJobs.error, allToolCalls.error]);
 
   return (
     <main className="workbench">
@@ -124,6 +128,28 @@ export function App() {
           <Metric label="Sessions" value={String(rows.length)} />
         </div>
       </header>
+
+      <section className={apiError ? "auth-strip auth-error" : "auth-strip"}>
+        <div>
+          <strong>{apiError ? "API access blocked" : "API connected"}</strong>
+          <span>{apiError ?? "Authenticated requests are enabled for live agents, sessions, workers, approvals, and logs."}</span>
+        </div>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            setAdminToken(adminTokenInput);
+            invalidateAll(queryClient);
+          }}
+        >
+          <input
+            value={adminTokenInput}
+            onChange={(event) => setAdminTokenInput(event.target.value)}
+            placeholder="Dev admin token"
+            type="password"
+          />
+          <button type="submit">Connect</button>
+        </form>
+      </section>
 
       <section className="workbench-grid">
         <aside className="agent-lane">
@@ -388,4 +414,21 @@ function eventKind(eventType: string): string {
 
 function invalidateAll(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries();
+}
+
+function firstQueryError(errors: Array<unknown>): string | undefined {
+  const error = errors.find(Boolean);
+  if (!error) return undefined;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function consumeTokenFromHash(): string {
+  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  const params = new URLSearchParams(hash);
+  const token = params.get("admin_token") ?? params.get("token") ?? "";
+  if (!token.trim()) return "";
+  setAdminToken(token);
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  return token;
 }

@@ -82,11 +82,14 @@ export type WorkerJob = {
   completed_at?: string | null;
 };
 
+const ADMIN_TOKEN_KEY = "mandoforge.adminToken";
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: {
       "content-type": "application/json",
+      ...authHeaders(),
       ...(init.headers ?? {}),
     },
   });
@@ -101,7 +104,26 @@ export function approvalHeaders(): HeadersInit {
 }
 
 export function adminHeaders(): HeadersInit {
+  return authHeaders();
+}
+
+export function getAdminToken(): string {
+  return localStorage.getItem(ADMIN_TOKEN_KEY) ?? "";
+}
+
+export function setAdminToken(token: string): void {
+  const normalized = token.trim();
+  if (normalized) {
+    localStorage.setItem(ADMIN_TOKEN_KEY, normalized);
+  } else {
+    localStorage.removeItem(ADMIN_TOKEN_KEY);
+  }
+}
+
+export function authHeaders(): HeadersInit {
+  const token = getAdminToken();
   return {
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
     "x-mandoforge-subject": localStorage.getItem("mandoforge.approverSubject") || "admin-1",
     "x-mandoforge-roles": localStorage.getItem("mandoforge.approverRoles") || "admin",
   };
