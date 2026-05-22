@@ -56073,7 +56073,7 @@ not json
         let shim_path = shim_dir.join("claude");
         fs::write(
             &shim_path,
-            "#!/usr/bin/env bash\nset -euo pipefail\necho '{\"type\":\"system\",\"session_id\":\"claude-session-1\",\"token\":\"secret\"}'\necho '{\"type\":\"assistant\",\"message\":{\"content\":\"done\"}}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":345,\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8},\"result\":\"Claude final\"}'\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"task=$MANDOFORGE_AGENT_TASK\"\necho \"argv=$*\"\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\necho '{\"type\":\"system\",\"session_id\":\"claude-session-1\",\"token\":\"secret\"}'\necho '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"},{\"type\":\"tool_use\",\"id\":\"toolu_claude_1\",\"name\":\"Bash\",\"input\":{\"command\":\"pwd\",\"description\":\"show cwd\"}}]}}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":345,\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8},\"result\":\"Claude final\"}'\necho \"profile=$MANDOFORGE_AGENT_CLI_PROFILE\"\necho \"task=$MANDOFORGE_AGENT_TASK\"\necho \"argv=$*\"\n",
         )
         .expect("write fake claude CLI");
         #[cfg(unix)]
@@ -56199,7 +56199,7 @@ not json
         assert_eq!(result["profile_source"], "managed");
         assert_eq!(result["runtime_type"], "claude_code");
         assert_eq!(result["runtime_adapter_event_count"], 3);
-        assert_eq!(result["runtime_turn_event_count"], 5);
+        assert_eq!(result["runtime_turn_event_count"], 6);
         assert_eq!(result["runtime_final_artifact_count"], 1);
         assert!(
             result["stdout"]
@@ -56239,7 +56239,7 @@ not json
         }));
         assert!(runtime_events.iter().any(|event| {
             event.payload["adapter_event_type"] == "assistant"
-                && event.payload["event"]["message"]["content"] == "done"
+                && event.payload["event"]["message"]["content"][0]["text"] == "done"
         }));
         assert!(events.iter().any(|event| {
             event.event_type == "runtime.turn.started"
@@ -56249,7 +56249,14 @@ not json
         assert!(events.iter().any(|event| {
             event.event_type == "runtime.item"
                 && event.payload["runtime_type"] == "claude_code"
-                && event.payload["item"]["message"]["content"] == "done"
+                && event.payload["item"]["message"]["content"][0]["text"] == "done"
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "runtime.tool_call"
+                && event.payload["runtime_type"] == "claude_code"
+                && event.payload["tool_call"]["call_id"] == "toolu_claude_1"
+                && event.payload["tool_call"]["tool"] == "Bash"
+                && event.payload["tool_call"]["args"]["command"] == "pwd"
         }));
         assert!(events.iter().any(|event| {
             event.event_type == "runtime.usage"
@@ -56285,7 +56292,7 @@ not json
                 && log.details["runtime_type"] == "claude_code"
                 && log.details["runner"] == "agent-cli"
                 && log.details["runtime_adapter_event_count"] == 3
-                && log.details["runtime_turn_event_count"] == 5
+                && log.details["runtime_turn_event_count"] == 6
                 && log.details["runtime_final_artifact_count"] == 1
         }));
     }

@@ -3875,10 +3875,10 @@ fn build_runtime_adapter_turn_metadata(
                 value: runtime_adapter_item_value(&event.event),
             });
         }
-        if is_runtime_tool_call_event(adapter_event_type) {
+        for tool_call in runtime_adapter_tool_call_values(adapter_event_type, &event.event) {
             metadata.tool_calls.push(RuntimeAdapterTurnMetadataValue {
                 event_index: event.index,
-                value: runtime_adapter_tool_call_value(adapter_event_type, &event.event),
+                value: tool_call,
             });
         }
         if let Some(final_message) = runtime_adapter_final_message(adapter_event_type, &event.event)
@@ -4156,6 +4156,51 @@ fn runtime_adapter_tool_call_value(adapter_event_type: &str, event: &Value) -> V
         }
     }
     Value::Object(tool_call)
+}
+
+fn runtime_adapter_tool_call_values(adapter_event_type: &str, event: &Value) -> Vec<Value> {
+    if is_runtime_tool_call_event(adapter_event_type) {
+        return vec![runtime_adapter_tool_call_value(adapter_event_type, event)];
+    }
+    claude_stream_json_tool_use_values(adapter_event_type, event)
+}
+
+fn claude_stream_json_tool_use_values(adapter_event_type: &str, event: &Value) -> Vec<Value> {
+    if !matches!(
+        adapter_event_type,
+        "assistant" | "message" | "assistant.message"
+    ) {
+        return Vec::new();
+    }
+    event
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .or_else(|| event.get("content"))
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .map(|block| {
+                    let mut tool_call = Map::new();
+                    tool_call.insert(
+                        "adapter_event_type".to_string(),
+                        Value::String(adapter_event_type.to_string()),
+                    );
+                    if let Some(id) = block.get("id") {
+                        tool_call.insert("call_id".to_string(), id.clone());
+                    }
+                    if let Some(name) = block.get("name") {
+                        tool_call.insert("tool".to_string(), name.clone());
+                    }
+                    if let Some(input) = block.get("input") {
+                        tool_call.insert("args".to_string(), input.clone());
+                    }
+                    Value::Object(tool_call)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn runtime_adapter_final_message(adapter_event_type: &str, event: &Value) -> Option<String> {
@@ -4482,6 +4527,26 @@ mod tests {
         assert_eq!(events[0].adapter_event_type, "system");
         assert_eq!(events[0].event["credential"], "[REDACTED]");
         assert_eq!(events[1].adapter_event_type, "assistant");
+    }
+
+    #[test]
+    fn runtime_adapter_maps_claude_stream_json_tool_use_to_runtime_tool_call() {
+        let events = parse_runtime_adapter_events(
+            "claude_code",
+            r#"{"type":"system","session_id":"claude-session-1"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01abc","name":"Bash","input":{"command":"pwd","description":"show cwd"}}]}}"#,
+        );
+
+        let metadata = build_runtime_adapter_turn_metadata(&events, &[]);
+
+        assert_eq!(metadata.tool_calls.len(), 1);
+        assert_eq!(metadata.tool_calls[0].event_index, 1);
+        assert_eq!(metadata.tool_calls[0].value["call_id"], "toolu_01abc");
+        assert_eq!(metadata.tool_calls[0].value["tool"], "Bash");
+        assert_eq!(
+            metadata.tool_calls[0].value["args"],
+            json!({"command": "pwd", "description": "show cwd"})
+        );
     }
 
     #[test]
