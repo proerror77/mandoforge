@@ -74,8 +74,10 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 
 created_file="$EVIDENCE_DIR/work-item-created.json"
 assignment_file="$EVIDENCE_DIR/work-item-assignment-created.json"
+review_file="$EVIDENCE_DIR/work-item-review-created.json"
 list_file="$EVIDENCE_DIR/work-items.json"
 assignment_list_file="$EVIDENCE_DIR/work-item-assignments.json"
+review_list_file="$EVIDENCE_DIR/work-item-reviews.json"
 audit_file="$EVIDENCE_DIR/audit-logs.json"
 summary_file="$EVIDENCE_DIR/summary.txt"
 
@@ -110,8 +112,26 @@ api_post "/api/work-items/$work_item_id/assignments" "$(
 )" >"$assignment_file"
 
 assignment_id="$(jq -r '.id' "$assignment_file")"
+api_post "/api/work-items/$work_item_id/reviews" "$(
+  jq -nc --arg run_id "$RUN_ID" '{
+    reviewer_kind: "agent",
+    reviewer_id: "runtime-reviewer",
+    status: "completed",
+    decision: "approved",
+    summary: ("Collaboration routing reviewed for " + $run_id),
+    metadata: {
+      gate: "work-item-collaboration-evidence",
+      layer: "collaboration",
+      review_reason: "runtime evidence checkpoint",
+      runtime_evidence_checked: true
+    }
+  }'
+)" >"$review_file"
+
+review_id="$(jq -r '.id' "$review_file")"
 api_get /api/work-items >"$list_file"
 api_get "/api/work-items/$work_item_id/assignments" >"$assignment_list_file"
+api_get "/api/work-items/$work_item_id/reviews" >"$review_list_file"
 api_get /api/audit-logs >"$audit_file"
 
 jq -e --arg id "$work_item_id" --arg run_id "$RUN_ID" '
@@ -139,6 +159,20 @@ jq -e --arg id "$assignment_id" '
   any(.[]; .id == $id and .metadata.layer == "collaboration")
 ' "$assignment_list_file" >/dev/null
 
+jq -e --arg id "$review_id" --arg work_item_id "$work_item_id" '
+  .id == $id
+  and .work_item_id == $work_item_id
+  and .reviewer_kind == "agent"
+  and .reviewer_id == "runtime-reviewer"
+  and .status == "completed"
+  and .decision == "approved"
+  and .metadata.runtime_evidence_checked == true
+' "$review_file" >/dev/null
+
+jq -e --arg id "$review_id" '
+  any(.[]; .id == $id and .metadata.layer == "collaboration")
+' "$review_list_file" >/dev/null
+
 jq -e --arg id "$work_item_id" --arg subject "$SUBJECT" '
   any(.[]; .action == "work_item.created"
     and .resource_type == "work_item"
@@ -156,14 +190,26 @@ jq -e --arg id "$assignment_id" --arg work_item_id "$work_item_id" '
     and .details.assignee_id == "runtime-specialist")
 ' "$audit_file" >/dev/null
 
+jq -e --arg id "$review_id" --arg work_item_id "$work_item_id" '
+  any(.[]; .action == "work_item.review_created"
+    and .resource_type == "work_item_review"
+    and .resource_id == $id
+    and .details.work_item_id == $work_item_id
+    and .details.reviewer_kind == "agent"
+    and .details.decision == "approved")
+' "$audit_file" >/dev/null
+
 {
   echo "work_item_collaboration_status=validated"
   echo "work_item_id=$work_item_id"
   echo "assignment_id=$assignment_id"
+  echo "review_id=$review_id"
   echo "created_file=$created_file"
   echo "assignment_file=$assignment_file"
+  echo "review_file=$review_file"
   echo "list_file=$list_file"
   echo "assignment_list_file=$assignment_list_file"
+  echo "review_list_file=$review_list_file"
   echo "audit_file=$audit_file"
 } | tee "$summary_file"
 

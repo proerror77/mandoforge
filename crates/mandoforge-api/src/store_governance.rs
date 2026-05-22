@@ -7,14 +7,14 @@ use crate::store_backend::StoreBackend;
 use crate::store_rows::{
     mcp_server_from_row, membership_from_row, organization_from_row, project_from_row,
     provider_access_from_row, provider_record_from_row, team_from_row, tenant_invitation_from_row,
-    work_item_assignment_from_row, work_item_from_row,
+    work_item_assignment_from_row, work_item_from_row, work_item_review_from_row,
 };
 use crate::{
     AppError, AppState, CreateMcpServerRecord, CreateMembership, CreateOrganization, CreateProject,
     CreateProviderAccess, CreateProviderRecord, CreateTeam, CreateTenantInvitation, CreateWorkItem,
-    CreateWorkItemAssignment, McpServerRecord, Membership, Organization, Project, ProviderAccess,
-    ProviderRecord, Role, Team, TenantInvitation, UpdateMcpServerRecord, UpdateProviderAccess,
-    WorkItem, WorkItemAssignment,
+    CreateWorkItemAssignment, CreateWorkItemReview, McpServerRecord, Membership, Organization,
+    Project, ProviderAccess, ProviderRecord, Role, Team, TenantInvitation, UpdateMcpServerRecord,
+    UpdateProviderAccess, WorkItem, WorkItemAssignment, WorkItemReview,
 };
 
 impl AppState {
@@ -564,6 +564,107 @@ impl AppState {
             }
         }
         Ok(assignment)
+    }
+
+    pub(crate) async fn list_work_item_reviews(
+        &self,
+        work_item_id: Uuid,
+    ) -> Result<Vec<WorkItemReview>, AppError> {
+        self.ensure_work_item_exists(work_item_id).await?;
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut reviews: Vec<_> = inner
+                    .read()
+                    .await
+                    .work_item_reviews
+                    .values()
+                    .filter(|review| {
+                        review.work_item_id == work_item_id && review.archived_at.is_none()
+                    })
+                    .cloned()
+                    .collect();
+                reviews.sort_by_key(|review| review.created_at);
+                reviews.reverse();
+                Ok(reviews)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, work_item_id, reviewer_kind, reviewer_id, status, decision,
+                            summary, metadata, created_at, updated_at, archived_at
+                     FROM work_item_reviews
+                     WHERE tenant_id = $1
+                       AND work_item_id = $2
+                       AND archived_at IS NULL
+                     ORDER BY created_at DESC",
+                )
+                .bind(self.current_tenant_id())
+                .bind(work_item_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(work_item_review_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_work_item_review(
+        &self,
+        work_item_id: Uuid,
+        input: CreateWorkItemReview,
+    ) -> Result<WorkItemReview, AppError> {
+        self.ensure_work_item_exists(work_item_id).await?;
+        let reviewer_kind = normalize_work_item_review_reviewer_kind(&input.reviewer_kind)?;
+        let reviewer_id = required_text(input.reviewer_id, "review reviewer_id")?;
+        let status = normalize_work_item_review_status(&input.status)?;
+        let decision = input
+            .decision
+            .map(|value| normalize_work_item_review_decision(&value))
+            .transpose()?;
+        let now = Utc::now();
+        let review = WorkItemReview {
+            id: Uuid::new_v4(),
+            work_item_id,
+            reviewer_kind,
+            reviewer_id,
+            status,
+            decision,
+            summary: input.summary.and_then(optional_text),
+            metadata: input.metadata,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .work_item_reviews
+                    .insert(review.id, review.clone());
+            }
+            StoreBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO work_item_reviews
+                         (id, tenant_id, work_item_id, reviewer_kind, reviewer_id, status,
+                          decision, summary, metadata, created_at, updated_at, archived_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                )
+                .bind(review.id)
+                .bind(self.current_tenant_id())
+                .bind(review.work_item_id)
+                .bind(&review.reviewer_kind)
+                .bind(&review.reviewer_id)
+                .bind(&review.status)
+                .bind(&review.decision)
+                .bind(&review.summary)
+                .bind(&review.metadata)
+                .bind(review.created_at)
+                .bind(review.updated_at)
+                .bind(review.archived_at)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(review)
     }
 
     async fn validate_work_item_scope(&self, input: &CreateWorkItem) -> Result<(), AppError> {
@@ -2577,6 +2678,36 @@ fn normalize_work_item_assignment_status(value: &str) -> Result<String, AppError
         "assigned" | "in_progress" | "blocked" | "review" | "done" | "canceled" => Ok(normalized),
         other => Err(AppError::bad_request(format!(
             "unsupported assignment status value: {other}"
+        ))),
+    }
+}
+
+fn normalize_work_item_review_reviewer_kind(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "user" | "agent" | "squad" | "team" => Ok(normalized),
+        other => Err(AppError::bad_request(format!(
+            "unsupported review reviewer_kind value: {other}"
+        ))),
+    }
+}
+
+fn normalize_work_item_review_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "requested" | "in_review" | "completed" | "canceled" => Ok(normalized),
+        other => Err(AppError::bad_request(format!(
+            "unsupported review status value: {other}"
+        ))),
+    }
+}
+
+fn normalize_work_item_review_decision(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "approved" | "changes_requested" | "rejected" | "needs_info" => Ok(normalized),
+        other => Err(AppError::bad_request(format!(
+            "unsupported review decision value: {other}"
         ))),
     }
 }

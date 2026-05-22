@@ -3697,6 +3697,35 @@ struct CreateWorkItemAssignment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkItemReview {
+    id: Uuid,
+    work_item_id: Uuid,
+    reviewer_kind: String,
+    reviewer_id: String,
+    status: String,
+    decision: Option<String>,
+    summary: Option<String>,
+    metadata: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkItemReview {
+    reviewer_kind: String,
+    reviewer_id: String,
+    #[serde(default = "default_work_item_review_status")]
+    status: String,
+    #[serde(default)]
+    decision: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Membership {
     id: Uuid,
     user_id: String,
@@ -5170,6 +5199,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/work-items/{id}/assignments",
             get(list_work_item_assignments).post(create_work_item_assignment),
+        )
+        .route(
+            "/api/work-items/{id}/reviews",
+            get(list_work_item_reviews).post(create_work_item_review),
         )
         .route(
             "/api/teams/{id}/provider-access",
@@ -16846,6 +16879,58 @@ async fn create_work_item_assignment(
         ))
         .await?;
     Ok(Json(assignment))
+}
+
+async fn list_work_item_reviews(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkItemReview>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "work_item",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_work_item_reviews(id).await?))
+}
+
+async fn create_work_item_review(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateWorkItemReview>,
+) -> Result<Json<WorkItemReview>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::SessionsWrite,
+        resource_type: "work_item".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    let review = state.create_work_item_review(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "work_item.review_created",
+            "work_item_review",
+            Some(review.id),
+            json!({
+                "subject": principal.subject_id,
+                "work_item_id": review.work_item_id,
+                "reviewer_kind": review.reviewer_kind,
+                "reviewer_id": review.reviewer_id,
+                "status": review.status,
+                "decision": review.decision
+            }),
+        ))
+        .await?;
+    Ok(Json(review))
 }
 
 async fn list_memberships(
@@ -39013,6 +39098,10 @@ fn default_work_item_assignment_role() -> String {
 
 fn default_work_item_assignment_status() -> String {
     "assigned".to_string()
+}
+
+fn default_work_item_review_status() -> String {
+    "requested".to_string()
 }
 
 fn default_semantic_source_status() -> String {
@@ -63769,6 +63858,95 @@ not json
                 && log.details["work_item_id"] == json!(work_item_id)
                 && log.details["assignee_kind"] == json!("agent")
                 && log.details["assignee_id"] == json!("runtime-specialist")
+        }));
+    }
+
+    #[tokio::test]
+    async fn work_item_reviews_create_list_and_audit_collaboration_review() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+
+        let work_item: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Review managed runtime metadata work",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {"layer": "collaboration"}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item_id = work_item["id"].as_str().expect("work item id");
+
+        let review_payload = json!({
+            "reviewer_kind": "agent",
+            "reviewer_id": "runtime-reviewer",
+            "status": "completed",
+            "decision": "approved",
+            "summary": "Runtime metadata work is ready to proceed.",
+            "metadata": {
+                "review_reason": "collaboration review checkpoint",
+                "runtime_evidence_checked": true
+            }
+        });
+        let (status, review) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/work-items/{work_item_id}/reviews"),
+                review_payload.clone(),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(review["work_item_id"], json!(work_item_id));
+        assert_eq!(review["reviewer_kind"], json!("agent"));
+        assert_eq!(review["reviewer_id"], json!("runtime-reviewer"));
+        assert_eq!(review["status"], json!("completed"));
+        assert_eq!(review["decision"], json!("approved"));
+        let review_id = review["id"].as_str().expect("review id");
+
+        let reviews: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{work_item_id}/reviews"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(reviews.iter().any(|listed| {
+            listed["id"] == json!(review_id)
+                && listed["metadata"]["runtime_evidence_checked"] == json!(true)
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "work_item.review_created"
+                && log.resource_type == "work_item_review"
+                && log.resource_id == Some(Uuid::parse_str(review_id).expect("uuid"))
+                && log.details["work_item_id"] == json!(work_item_id)
+                && log.details["reviewer_kind"] == json!("agent")
+                && log.details["decision"] == json!("approved")
         }));
     }
 

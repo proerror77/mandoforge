@@ -10,7 +10,7 @@ use crate::{
     MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
     ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
     SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Team, TenantInvitation,
-    ToolCall, UsageRollup, WorkItem, WorkItemAssignment, WorkflowPackInstallation,
+    ToolCall, UsageRollup, WorkItem, WorkItemAssignment, WorkItemReview, WorkflowPackInstallation,
     WorkflowPackProfileAsset,
 };
 
@@ -634,6 +634,22 @@ pub(crate) fn work_item_assignment_from_row(row: PgRow) -> Result<WorkItemAssign
         role: row.try_get("role")?,
         status: row.try_get("status")?,
         assigned_by: row.try_get("assigned_by")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn work_item_review_from_row(row: PgRow) -> Result<WorkItemReview, AppError> {
+    Ok(WorkItemReview {
+        id: row.try_get("id")?,
+        work_item_id: row.try_get("work_item_id")?,
+        reviewer_kind: row.try_get("reviewer_kind")?,
+        reviewer_id: row.try_get("reviewer_id")?,
+        status: row.try_get("status")?,
+        decision: row.try_get("decision")?,
+        summary: row.try_get("summary")?,
         metadata: row.try_get("metadata")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
