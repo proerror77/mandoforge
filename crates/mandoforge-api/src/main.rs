@@ -12707,18 +12707,16 @@ async fn build_harness_context(
                     == Some("approved")
         })
         .count();
-    let approved_tool_call_result_count = state
-        .list_tool_calls(Some(session_id))
-        .await?
-        .into_iter()
-        .filter(|call| {
-            call.status == "completed"
-                && call
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("approval"))
+    let rejected_event_result_count = context_events
+        .iter()
+        .filter(|event| {
+            event.event_type == "tool.result"
+                && event
+                    .payload
+                    .get("content")
+                    .and_then(|content| content.get("approval"))
                     .and_then(Value::as_str)
-                    == Some("approved")
+                    == Some("rejected")
         })
         .count();
     let recent_custom_tool_results = context_events
@@ -12757,7 +12755,8 @@ async fn build_harness_context(
         pending_event_count: pending_events.len(),
         last_user_message,
         latest_goal_event,
-        approved_tool_result_count: approved_event_result_count + approved_tool_call_result_count,
+        approved_tool_result_count: approved_event_result_count,
+        rejected_tool_result_count: rejected_event_result_count,
         custom_tool_result_count: recent_custom_tool_results.len(),
         recent_custom_tool_results,
         recent_goal_events,
@@ -13095,6 +13094,7 @@ async fn continue_session_after_approved_execution(
     reason: &str,
 ) -> Result<(), AppError> {
     let trigger_event_id = if let Some(job) = job {
+        seed_session_loop_window_at_latest_tool_result(state, session_id, job.tool_call_id).await?;
         state
             .append_event(
                 "worker",
@@ -13128,6 +13128,28 @@ async fn continue_session_after_approved_execution(
             .id
     };
     enqueue_session_loop_after_approval_event(state, session_id, trigger_event_id, reason).await?;
+    Ok(())
+}
+
+async fn seed_session_loop_window_at_latest_tool_result(
+    state: &AppState,
+    session_id: Uuid,
+    tool_call_id: Uuid,
+) -> Result<(), AppError> {
+    let events = state.list_events(session_id).await?;
+    if let Some(tool_result_event) = events.iter().rev().find(|event| {
+        event.event_type == "tool.result"
+            && event
+                .payload
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                == Some(tool_call_id)
+    }) {
+        state
+            .enqueue_session_loop_job(session_id, Some(tool_result_event.id), "tool.result")
+            .await?;
+    }
     Ok(())
 }
 
@@ -39338,6 +39360,10 @@ async fn decide_approval(
         return Err(AppError::bad_request("approval expired"));
     }
     let updated = state.decide_approval(approval_id, status).await?;
+    let decision_result = match status {
+        "rejected" => record_rejected_approval_tool_result(&state, &updated).await?,
+        _ => None,
+    };
     let decision_event = state
         .append_event(
             "user",
@@ -39373,6 +39399,14 @@ async fn decide_approval(
                 .await?;
             }
         }
+    } else if status == "rejected" {
+        enqueue_session_loop_after_approval_event(
+            &state,
+            updated.session_id,
+            decision_event.id,
+            "approval rejected",
+        )
+        .await?;
     }
     state
         .append_audit_log(new_audit_log(
@@ -39382,10 +39416,84 @@ async fn decide_approval(
             &format!("approval.{status}"),
             "approval",
             Some(approval_id),
-            json!({"tool_call_id": updated.tool_call_id, "decision": status}),
+            json!({
+                "tool_call_id": updated.tool_call_id,
+                "decision": status,
+                "tool_result_status": decision_result.map(|tool_call| tool_call.status),
+            }),
         ))
         .await?;
     Ok(Json(updated))
+}
+
+async fn record_rejected_approval_tool_result(
+    state: &AppState,
+    approval: &Approval,
+) -> Result<Option<ToolCall>, AppError> {
+    let Some(tool_call_id) = approval.tool_call_id else {
+        return Ok(None);
+    };
+    let tool_call = state.get_tool_call(tool_call_id).await?;
+    let result = json!({
+        "status": "denied",
+        "approval": "rejected",
+        "approval_id": approval.id,
+        "reason": approval.reason,
+    });
+    let tool_result_event = state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.tool_name,
+                "content": result,
+            }),
+        )
+        .await?;
+    state
+        .enqueue_session_loop_job(
+            approval.session_id,
+            Some(tool_result_event.id),
+            "tool.result",
+        )
+        .await?;
+    state
+        .append_event(
+            "agent",
+            Some(tool_call.id),
+            approval.session_id,
+            "agent.tool_result",
+            json!({
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.tool_name,
+                "status": "denied",
+                "content": result,
+            }),
+        )
+        .await?;
+    let updated = state
+        .update_tool_call_status(tool_call.id, "denied", Some(result.clone()), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "tool.denied",
+            "tool_call",
+            Some(tool_call.id),
+            json!({
+                "tool": tool_call.tool_name,
+                "approval_id": approval.id,
+                "decision": "rejected",
+                "status": "denied",
+            }),
+        ))
+        .await?;
+    Ok(Some(updated))
 }
 
 fn approval_is_expired(approval: &Approval) -> bool {
@@ -68675,12 +68783,140 @@ not json
                 .any(|event| event.event_type == "artifact.created")
         );
         assert!(events_after_resume.iter().any(|event| {
+            event.event_type == "llm.request"
+                && event.payload["context"]["approved_tool_result_count"] == json!(1)
+        }));
+        assert!(events_after_resume.iter().any(|event| {
             event.event_type == "session.loop.idle"
                 && event.payload["reason"] == json!("provider tool loop idled")
         }));
         assert!(events_after_resume.iter().any(|event| {
             event.event_type == "execution.completed"
                 && event.payload["reason"] == json!("approved execution completed")
+        }));
+    }
+
+    #[tokio::test]
+    async fn rejecting_approval_records_tool_result_and_resumes_session_loop() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "file write rejection"}),
+            ),
+        )
+        .await;
+
+        let approval_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.write/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "path": "rejected.md",
+                        "content": "should not be written"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let approval_id = approval_result["approval_id"]
+            .as_str()
+            .expect("approval id");
+
+        let rejected: Approval = request_json(
+            app.clone(),
+            approve_request(format!("/api/approvals/{approval_id}/reject")),
+        )
+        .await;
+        assert_eq!(rejected.status, "rejected");
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let approval_rejected_event = events
+            .iter()
+            .find(|event| event.event_type == "approval.rejected")
+            .expect("approval rejection should be a durable event");
+        assert!(events.iter().any(|event| {
+            event.event_type == "tool.result"
+                && event.payload["content"]["approval"] == json!("rejected")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "agent.tool_result"
+                && event.payload["content"]["approval"] == json!("rejected")
+        }));
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/tool-calls", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(tool_calls.iter().any(|call| {
+            call.tool_name == "file.write"
+                && call.status == "denied"
+                && call
+                    .result
+                    .as_ref()
+                    .and_then(|result| result["approval"].as_str())
+                    == Some("rejected")
+        }));
+
+        let queued_resume_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
+        assert!(
+            queued_resume_jobs.iter().any(|job| {
+                job.status == SessionLoopJobStatus::Queued
+                    && job.reason == "approval rejected"
+                    && job.trigger_event_id == Some(approval_rejected_event.id)
+            }),
+            "rejected approval should resume through the session-loop queue: {queued_resume_jobs:?}"
+        );
+
+        let completed_resume =
+            run_next_session_loop_job(app.clone(), session.id, "approval-reject-resume-worker")
+                .await;
+        assert_eq!(completed_resume.status, SessionLoopJobStatus::Completed);
+
+        let events_after_resume: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events_after_resume.iter().any(|event| {
+            event.event_type == "llm.request"
+                && event.payload["context"]["rejected_tool_result_count"] == json!(1)
+        }));
+        assert!(events_after_resume.iter().any(|event| {
+            event.event_type == "agent.final"
+                && event
+                    .payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("Approval rejected"))
         }));
     }
 

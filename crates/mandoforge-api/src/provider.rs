@@ -21,6 +21,7 @@ pub(crate) struct HarnessContext {
     pub(crate) last_user_message: Option<String>,
     pub(crate) latest_goal_event: Option<Value>,
     pub(crate) approved_tool_result_count: usize,
+    pub(crate) rejected_tool_result_count: usize,
     pub(crate) custom_tool_result_count: usize,
     pub(crate) recent_custom_tool_results: Vec<Value>,
     pub(crate) recent_goal_events: Vec<Value>,
@@ -82,6 +83,21 @@ impl ProviderClient for MockProviderClient {
                     prompt_tokens: 120,
                     completion_tokens: 45,
                     total_tokens: 165,
+                }),
+            });
+        }
+        if context.rejected_tool_result_count > 0 {
+            return Ok(ProviderResponse {
+                plan: vec!["Record rejected approval and stop the blocked tool path".to_string()],
+                tool_calls: Vec::new(),
+                final_message: Some(
+                    "Approval rejected. The session timeline records the denied tool result and no blocked tool execution was run."
+                        .to_string(),
+                ),
+                usage: Some(ProviderTokenUsage {
+                    prompt_tokens: 96,
+                    completion_tokens: 32,
+                    total_tokens: 128,
                 }),
             });
         }
