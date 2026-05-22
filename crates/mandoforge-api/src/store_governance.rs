@@ -793,7 +793,7 @@ impl AppState {
         Ok(())
     }
 
-    async fn ensure_work_item_exists(&self, work_item_id: Uuid) -> Result<(), AppError> {
+    pub(crate) async fn ensure_work_item_exists(&self, work_item_id: Uuid) -> Result<(), AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let active = inner

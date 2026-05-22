@@ -414,6 +414,7 @@ pub(crate) fn manager_agent_plan_from_row(row: PgRow) -> Result<ManagerAgentPlan
         id: row.try_get("id")?,
         session_id: row.try_get("session_id")?,
         manager_agent_id: row.try_get("manager_agent_id")?,
+        work_item_id: row.try_get("work_item_id")?,
         specialist_agent_id: row.try_get("specialist_agent_id")?,
         task_intake: row.try_get("task_intake")?,
         decomposition: row.try_get("decomposition")?,

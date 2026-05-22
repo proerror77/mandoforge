@@ -65,9 +65,12 @@ The first Collaboration Layer slice is now in place:
   decisions.
 - `/api/work-items/:id/activity` exposes the human-readable Activity Feed for
   intake, routing, and review.
-- WorkItem intake, routing, review, and activity write `work_item.created`,
-  `work_item.assignment_created`, and `work_item.review_created` audit/activity
-  evidence and are covered by
+- `/api/work-items/:id/manager-plans` exposes Manager Agent planning records
+  bound to the WorkItem without starting specialist runtime execution.
+- WorkItem intake, routing, review, activity, and Manager Plan binding write
+  `work_item.created`, `work_item.assignment_created`,
+  `work_item.review_created`, `manager_plan.created`, and
+  `manager_plan.reviewed` audit/activity evidence and are covered by
   `scripts/work-item-collaboration-evidence-gate.sh`.
 
 ## Near-Term Priority

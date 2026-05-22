@@ -75,10 +75,17 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 created_file="$EVIDENCE_DIR/work-item-created.json"
 assignment_file="$EVIDENCE_DIR/work-item-assignment-created.json"
 review_file="$EVIDENCE_DIR/work-item-review-created.json"
+manager_file="$EVIDENCE_DIR/manager-agent-created.json"
+specialist_file="$EVIDENCE_DIR/specialist-agent-created.json"
+manager_session_file="$EVIDENCE_DIR/manager-session-created.json"
+manager_plan_file="$EVIDENCE_DIR/manager-plan-created.json"
+manager_plan_review_file="$EVIDENCE_DIR/manager-plan-reviewed.json"
 list_file="$EVIDENCE_DIR/work-items.json"
 assignment_list_file="$EVIDENCE_DIR/work-item-assignments.json"
 review_list_file="$EVIDENCE_DIR/work-item-reviews.json"
 activity_file="$EVIDENCE_DIR/work-item-activity.json"
+manager_plan_list_file="$EVIDENCE_DIR/work-item-manager-plans.json"
+handoff_list_file="$EVIDENCE_DIR/manager-session-handoffs.json"
 audit_file="$EVIDENCE_DIR/audit-logs.json"
 summary_file="$EVIDENCE_DIR/summary.txt"
 
@@ -130,10 +137,88 @@ api_post "/api/work-items/$work_item_id/reviews" "$(
 )" >"$review_file"
 
 review_id="$(jq -r '.id' "$review_file")"
+
+api_post /api/agents "$(
+  jq -nc --arg run_id "$RUN_ID" '{
+    name: ("WorkItem Manager " + $run_id),
+    kind: "manager",
+    agent_role: "manager",
+    provider: "openai-compatible",
+    model: "gpt-5.4-mini",
+    tools: ["approval.request"],
+    semantic_scopes: {
+      project_scope: "mandoforge",
+      workflow_scope: "work-item-manager-plan"
+    }
+  }'
+)" >"$manager_file"
+manager_agent_id="$(jq -r '.id' "$manager_file")"
+
+api_post /api/agents "$(
+  jq -nc --arg run_id "$RUN_ID" '{
+    name: ("WorkItem Specialist " + $run_id),
+    kind: "specialist",
+    agent_role: "specialist",
+    provider: "openai-compatible",
+    model: "gpt-5.4-mini",
+    tools: ["agent_cli.exec"],
+    semantic_scopes: {
+      project_scope: "mandoforge",
+      workflow_scope: "work-item-manager-plan"
+    }
+  }'
+)" >"$specialist_file"
+specialist_agent_id="$(jq -r '.id' "$specialist_file")"
+
+api_post /api/sessions "$(
+  jq -nc --arg agent_id "$manager_agent_id" --arg run_id "$RUN_ID" '{
+    agent_id: $agent_id,
+    title: ("WorkItem manager planning " + $run_id),
+    message: "Create a plan record without starting specialist runtime execution."
+  }'
+)" >"$manager_session_file"
+manager_session_id="$(jq -r '.id' "$manager_session_file")"
+
+api_post "/api/sessions/$manager_session_id/manager-plans" "$(
+  jq -nc --arg work_item_id "$work_item_id" --arg specialist_agent_id "$specialist_agent_id" --arg run_id "$RUN_ID" '{
+    work_item_id: $work_item_id,
+    specialist_agent_id: $specialist_agent_id,
+    task_intake: {
+      goal: ("Bind manager plan to WorkItem " + $run_id),
+      source: "work_item"
+    },
+    decomposition: {
+      steps: ["record plan", "review plan", "assign later"]
+    },
+    specialist_selection: {
+      selected_agent_id: $specialist_agent_id,
+      reason: "runtime evidence scope"
+    },
+    risk_classification: "medium",
+    review: {
+      required: true,
+      status: "pending"
+    }
+  }'
+)" >"$manager_plan_file"
+manager_plan_id="$(jq -r '.id' "$manager_plan_file")"
+
+api_post "/api/manager-plans/$manager_plan_id/review" "$(
+  jq -nc --arg run_id "$RUN_ID" '{
+    status: "approved",
+    review: {
+      status: "approved",
+      summary: ("Manager plan reviewed for " + $run_id)
+    }
+  }'
+)" >"$manager_plan_review_file"
+
 api_get /api/work-items >"$list_file"
 api_get "/api/work-items/$work_item_id/assignments" >"$assignment_list_file"
 api_get "/api/work-items/$work_item_id/reviews" >"$review_list_file"
 api_get "/api/work-items/$work_item_id/activity" >"$activity_file"
+api_get "/api/work-items/$work_item_id/manager-plans" >"$manager_plan_list_file"
+api_get "/api/sessions/$manager_session_id/agent-handoffs" >"$handoff_list_file"
 api_get /api/audit-logs >"$audit_file"
 
 jq -e --arg id "$work_item_id" --arg run_id "$RUN_ID" '
@@ -175,8 +260,8 @@ jq -e --arg id "$review_id" '
   any(.[]; .id == $id and .metadata.layer == "collaboration")
 ' "$review_list_file" >/dev/null
 
-jq -e --arg work_item_id "$work_item_id" --arg assignment_id "$assignment_id" --arg review_id "$review_id" --arg subject "$SUBJECT" '
-  length == 3
+jq -e --arg work_item_id "$work_item_id" --arg assignment_id "$assignment_id" --arg review_id "$review_id" --arg manager_plan_id "$manager_plan_id" --arg subject "$SUBJECT" '
+  length == 5
   and .[0].work_item_id == $work_item_id
   and .[0].event_type == "work_item.created"
   and .[0].actor_subject == $subject
@@ -188,7 +273,38 @@ jq -e --arg work_item_id "$work_item_id" --arg assignment_id "$assignment_id" --
   and .[2].subject_type == "work_item_review"
   and .[2].subject_id == $review_id
   and .[2].metadata.decision == "approved"
+  and .[3].event_type == "manager_plan.created"
+  and .[3].subject_type == "manager_agent_plan"
+  and .[3].subject_id == $manager_plan_id
+  and .[4].event_type == "manager_plan.reviewed"
+  and .[4].subject_type == "manager_agent_plan"
+  and .[4].subject_id == $manager_plan_id
+  and .[4].metadata.status == "approved"
 ' "$activity_file" >/dev/null
+
+jq -e --arg id "$manager_plan_id" --arg work_item_id "$work_item_id" --arg manager_session_id "$manager_session_id" --arg manager_agent_id "$manager_agent_id" --arg specialist_agent_id "$specialist_agent_id" '
+  .id == $id
+  and .work_item_id == $work_item_id
+  and .session_id == $manager_session_id
+  and .manager_agent_id == $manager_agent_id
+  and .specialist_agent_id == $specialist_agent_id
+  and .status == "planned"
+  and .risk_classification == "medium"
+' "$manager_plan_file" >/dev/null
+
+jq -e --arg id "$manager_plan_id" --arg work_item_id "$work_item_id" '
+  .id == $id
+  and .work_item_id == $work_item_id
+  and .status == "approved"
+' "$manager_plan_review_file" >/dev/null
+
+jq -e --arg id "$manager_plan_id" --arg work_item_id "$work_item_id" '
+  length == 1
+  and .[0].id == $id
+  and .[0].work_item_id == $work_item_id
+' "$manager_plan_list_file" >/dev/null
+
+jq -e 'length == 0' "$handoff_list_file" >/dev/null
 
 jq -e --arg id "$work_item_id" --arg subject "$SUBJECT" '
   any(.[]; .action == "work_item.created"
@@ -216,18 +332,44 @@ jq -e --arg id "$review_id" --arg work_item_id "$work_item_id" '
     and .details.decision == "approved")
 ' "$audit_file" >/dev/null
 
+jq -e --arg id "$manager_plan_id" --arg work_item_id "$work_item_id" '
+  any(.[]; .action == "manager_plan.created"
+    and .resource_type == "manager_agent_plan"
+    and .resource_id == $id
+    and .details.work_item_id == $work_item_id)
+' "$audit_file" >/dev/null
+
+jq -e --arg id "$manager_plan_id" --arg work_item_id "$work_item_id" '
+  any(.[]; .action == "manager_plan.reviewed"
+    and .resource_type == "manager_agent_plan"
+    and .resource_id == $id
+    and .details.work_item_id == $work_item_id
+    and .details.status == "approved")
+' "$audit_file" >/dev/null
+
 {
   echo "work_item_collaboration_status=validated"
   echo "work_item_id=$work_item_id"
   echo "assignment_id=$assignment_id"
   echo "review_id=$review_id"
+  echo "manager_agent_id=$manager_agent_id"
+  echo "specialist_agent_id=$specialist_agent_id"
+  echo "manager_session_id=$manager_session_id"
+  echo "manager_plan_id=$manager_plan_id"
   echo "created_file=$created_file"
   echo "assignment_file=$assignment_file"
   echo "review_file=$review_file"
+  echo "manager_file=$manager_file"
+  echo "specialist_file=$specialist_file"
+  echo "manager_session_file=$manager_session_file"
+  echo "manager_plan_file=$manager_plan_file"
+  echo "manager_plan_review_file=$manager_plan_review_file"
   echo "list_file=$list_file"
   echo "assignment_list_file=$assignment_list_file"
   echo "review_list_file=$review_list_file"
   echo "activity_file=$activity_file"
+  echo "manager_plan_list_file=$manager_plan_list_file"
+  echo "handoff_list_file=$handoff_list_file"
   echo "audit_file=$audit_file"
 } | tee "$summary_file"
 

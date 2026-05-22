@@ -977,6 +977,7 @@ struct ManagerAgentPlan {
     id: Uuid,
     session_id: Uuid,
     manager_agent_id: Uuid,
+    work_item_id: Option<Uuid>,
     specialist_agent_id: Option<Uuid>,
     task_intake: Value,
     decomposition: Value,
@@ -991,6 +992,8 @@ struct ManagerAgentPlan {
 
 #[derive(Debug, Deserialize)]
 struct CreateManagerAgentPlan {
+    #[serde(default)]
+    work_item_id: Option<Uuid>,
     #[serde(default)]
     specialist_agent_id: Option<Uuid>,
     task_intake: Value,
@@ -5220,6 +5223,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/work-items/{id}/activity",
             get(list_work_item_activity),
+        )
+        .route(
+            "/api/work-items/{id}/manager-plans",
+            get(list_work_item_manager_agent_plans),
         )
         .route(
             "/api/teams/{id}/provider-access",
@@ -10145,6 +10152,22 @@ async fn list_session_manager_agent_plans(
     Ok(Json(state.list_manager_agent_plans(Some(id)).await?))
 }
 
+async fn list_work_item_manager_agent_plans(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "work_item",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_work_item_manager_agent_plans(id).await?))
+}
+
 async fn get_manager_agent_plan(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -10201,12 +10224,16 @@ async fn create_manager_agent_plan(
             ));
         }
     }
+    if let Some(work_item_id) = input.work_item_id {
+        state.ensure_work_item_exists(work_item_id).await?;
+    }
     let now = Utc::now();
     let plan = state
         .create_manager_agent_plan(ManagerAgentPlan {
             id: Uuid::new_v4(),
             session_id,
             manager_agent_id: manager_agent.id,
+            work_item_id: input.work_item_id,
             specialist_agent_id: input.specialist_agent_id,
             task_intake: input.task_intake,
             decomposition: input.decomposition,
@@ -10221,6 +10248,7 @@ async fn create_manager_agent_plan(
         .await?;
     let audit =
         record_manager_agent_plan_audit_and_event(&state, &plan, "manager_plan.created").await?;
+    record_manager_agent_plan_work_item_activity(&state, &plan, "manager_plan.created").await?;
     let plan = state
         .update_manager_agent_plan_review(
             plan.id,
@@ -10262,6 +10290,8 @@ async fn review_manager_agent_plan(
     let audit =
         record_manager_agent_plan_audit_and_event(&state, &reviewed, "manager_plan.reviewed")
             .await?;
+    record_manager_agent_plan_work_item_activity(&state, &reviewed, "manager_plan.reviewed")
+        .await?;
     let reviewed = state
         .update_manager_agent_plan_review(
             reviewed.id,
@@ -10953,6 +10983,7 @@ async fn record_manager_agent_plan_audit_and_event(
         "manager_agent_plan_id": plan.id,
         "session_id": plan.session_id,
         "manager_agent_id": plan.manager_agent_id,
+        "work_item_id": plan.work_item_id,
         "specialist_agent_id": plan.specialist_agent_id,
         "risk_classification": plan.risk_classification,
         "status": plan.status,
@@ -10981,6 +11012,41 @@ async fn record_manager_agent_plan_audit_and_event(
             details,
         ))
         .await
+}
+
+async fn record_manager_agent_plan_work_item_activity(
+    state: &AppState,
+    plan: &ManagerAgentPlan,
+    action: &str,
+) -> Result<(), AppError> {
+    let Some(work_item_id) = plan.work_item_id else {
+        return Ok(());
+    };
+    let summary = match action {
+        "manager_plan.created" => format!("Created manager plan: {}", plan.id),
+        "manager_plan.reviewed" => format!("Reviewed manager plan with status: {}", plan.status),
+        _ => format!("Updated manager plan: {}", plan.id),
+    };
+    state
+        .append_work_item_activity_entry(
+            work_item_id,
+            action,
+            Some(plan.manager_agent_id.to_string()),
+            Some("manager_agent_plan"),
+            Some(plan.id),
+            summary,
+            json!({
+                "manager_agent_plan_id": plan.id,
+                "session_id": plan.session_id,
+                "manager_agent_id": plan.manager_agent_id,
+                "specialist_agent_id": plan.specialist_agent_id,
+                "risk_classification": plan.risk_classification,
+                "status": plan.status,
+                "review": plan.review,
+            }),
+        )
+        .await?;
+    Ok(())
 }
 
 fn normalize_manager_plan_risk(value: &str) -> Result<String, AppError> {
@@ -43433,6 +43499,186 @@ not json
                 && log.resource_type == "manager_agent_plan"
                 && log.resource_id == Some(plan.id)
         }));
+    }
+
+    #[tokio::test]
+    async fn manager_agent_plan_binds_work_item_without_starting_runtime_execution() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let work_item: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Plan managed runtime follow-up",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {"layer": "collaboration"}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item_id = work_item["id"].as_str().expect("work item id");
+
+        let specialist: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Runtime Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["agent_cli.exec"]
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Planning Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["approval.request"]
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let manager_session: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": manager.id,
+                    "title": "manager plan bound to work item",
+                    "message": "Plan without starting runtime execution."
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let plan: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/sessions/{}/manager-plans", manager_session.id),
+                json!({
+                    "work_item_id": work_item_id,
+                    "specialist_agent_id": specialist.id,
+                    "task_intake": {"goal": "Add a WorkItem-bound manager plan"},
+                    "decomposition": {"steps": ["bind plan", "review plan"]},
+                    "specialist_selection": {"selected_agent_id": specialist.id},
+                    "risk_classification": "medium",
+                    "review": {"required": true}
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let plan_id = plan["id"].as_str().expect("manager plan id");
+        assert_eq!(plan["work_item_id"], json!(work_item_id));
+
+        let plans_for_work_item: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{work_item_id}/manager-plans"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let plans = plans_for_work_item.as_array().expect("plans list");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0]["id"], json!(plan_id));
+
+        let reviewed: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/manager-plans/{plan_id}/review"),
+                json!({
+                    "status": "approved",
+                    "review": {
+                        "status": "approved",
+                        "summary": "Plan can be assigned later."
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(reviewed["work_item_id"], json!(work_item_id));
+
+        let activity: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{work_item_id}/activity"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let event_types: Vec<_> = activity
+            .as_array()
+            .expect("activity entries")
+            .iter()
+            .map(|entry| entry["event_type"].as_str().expect("event type"))
+            .collect();
+        assert_eq!(
+            event_types,
+            vec![
+                "work_item.created",
+                "manager_plan.created",
+                "manager_plan.reviewed"
+            ]
+        );
+
+        let handoffs: Vec<AgentHandoffEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/agent-handoffs",
+                    manager_session.id
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(handoffs.is_empty());
+
+        let sessions: Vec<Session> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/sessions")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, manager_session.id);
     }
 
     #[tokio::test]

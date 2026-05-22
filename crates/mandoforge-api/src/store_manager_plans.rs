@@ -28,7 +28,7 @@ impl AppState {
                 let rows = match session_id {
                     Some(session_id) => {
                         sqlx::query(
-                            "SELECT id, session_id, manager_agent_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at
+                            "SELECT id, session_id, manager_agent_id, work_item_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at
                              FROM manager_agent_plans
                              WHERE tenant_id = $1 AND session_id = $2
                              ORDER BY created_at ASC",
@@ -40,7 +40,7 @@ impl AppState {
                     }
                     None => {
                         sqlx::query(
-                            "SELECT id, session_id, manager_agent_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at
+                            "SELECT id, session_id, manager_agent_id, work_item_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at
                              FROM manager_agent_plans
                              WHERE tenant_id = $1
                              ORDER BY created_at ASC",
@@ -50,6 +50,40 @@ impl AppState {
                         .await?
                     }
                 };
+                rows.into_iter().map(manager_agent_plan_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn list_work_item_manager_agent_plans(
+        &self,
+        work_item_id: Uuid,
+    ) -> Result<Vec<ManagerAgentPlan>, AppError> {
+        self.ensure_work_item_exists(work_item_id).await?;
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut plans: Vec<_> = inner
+                    .read()
+                    .await
+                    .manager_agent_plans
+                    .values()
+                    .filter(|plan| plan.work_item_id == Some(work_item_id))
+                    .cloned()
+                    .collect();
+                plans.sort_by_key(|plan| plan.created_at);
+                Ok(plans)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, session_id, manager_agent_id, work_item_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at
+                     FROM manager_agent_plans
+                     WHERE tenant_id = $1 AND work_item_id = $2
+                     ORDER BY created_at ASC",
+                )
+                .bind(self.current_tenant_id())
+                .bind(work_item_id)
+                .fetch_all(pool)
+                .await?;
                 rows.into_iter().map(manager_agent_plan_from_row).collect()
             }
         }
@@ -69,7 +103,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("manager agent plan not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, session_id, manager_agent_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at
+                    "SELECT id, session_id, manager_agent_id, work_item_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at
                      FROM manager_agent_plans
                      WHERE tenant_id = $1 AND id = $2",
                 )
@@ -99,14 +133,15 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "INSERT INTO manager_agent_plans
-                        (id, tenant_id, session_id, manager_agent_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                     RETURNING id, session_id, manager_agent_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at",
+                        (id, tenant_id, session_id, manager_agent_id, work_item_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                     RETURNING id, session_id, manager_agent_id, work_item_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at",
                 )
                 .bind(plan.id)
                 .bind(self.current_tenant_id())
                 .bind(plan.session_id)
                 .bind(plan.manager_agent_id)
+                .bind(plan.work_item_id)
                 .bind(plan.specialist_agent_id)
                 .bind(&plan.task_intake)
                 .bind(&plan.decomposition)
@@ -153,7 +188,7 @@ impl AppState {
                          audit_trace_id = $5,
                          updated_at = $6
                      WHERE tenant_id = $1 AND id = $2
-                     RETURNING id, session_id, manager_agent_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at",
+                     RETURNING id, session_id, manager_agent_id, work_item_id, specialist_agent_id, task_intake, decomposition, specialist_selection, risk_classification, review, status, audit_trace_id, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(id)
