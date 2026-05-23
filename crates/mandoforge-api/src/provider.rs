@@ -24,7 +24,9 @@ pub(crate) struct HarnessContext {
     pub(crate) rejected_tool_result_count: usize,
     pub(crate) manual_tool_result_count: usize,
     pub(crate) custom_tool_result_count: usize,
+    pub(crate) execution_completed_count: usize,
     pub(crate) recent_custom_tool_results: Vec<Value>,
+    pub(crate) recent_execution_completed: Vec<Value>,
     pub(crate) recent_goal_events: Vec<Value>,
 }
 
@@ -117,6 +119,53 @@ impl ProviderClient for MockProviderClient {
                 }),
             });
         }
+        if context.execution_completed_count > 0 {
+            return Ok(ProviderResponse {
+                plan: vec!["Review completed worker execution and stop dispatching new runtime work".to_string()],
+                tool_calls: Vec::new(),
+                final_message: Some(
+                    "Worker execution completed. The session timeline now contains the Codex App Server run, runtime events, and final tool result."
+                        .to_string(),
+                ),
+                usage: Some(ProviderTokenUsage {
+                    prompt_tokens: 104,
+                    completion_tokens: 38,
+                    total_tokens: 142,
+                }),
+            });
+        }
+        if context
+            .last_user_message
+            .as_deref()
+            .is_some_and(looks_like_codex_app_server_delegation_request)
+        {
+            let task = context
+                .last_user_message
+                .clone()
+                .unwrap_or_else(|| "Open the requested webpage and extract useful facts.".to_string());
+            return Ok(ProviderResponse {
+                plan: vec![
+                    "Delegate the user request to Codex App Server through codex.exec".to_string(),
+                    "Wait for the approved worker execution result before finalizing".to_string(),
+                ],
+                tool_calls: vec![ProviderToolCall {
+                    tool_name: "codex.exec".to_string(),
+                    args: json!({
+                        "task": task,
+                        "sandbox_mode": "workspace-write",
+                        "execution_strategy": "app-server",
+                        "poll_attempts": 6,
+                        "poll_interval_ms": 500
+                    }),
+                }],
+                final_message: None,
+                usage: Some(ProviderTokenUsage {
+                    prompt_tokens: 160,
+                    completion_tokens: 42,
+                    total_tokens: 202,
+                }),
+            });
+        }
         Ok(ProviderResponse {
             plan: vec![
                 "Read README and Stage 1 policy/config from the workspace".to_string(),
@@ -150,6 +199,18 @@ impl ProviderClient for MockProviderClient {
             }),
         })
     }
+}
+
+fn looks_like_codex_app_server_delegation_request(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("codex")
+        || normalized.contains("cdp")
+        || normalized.contains("browser")
+        || normalized.contains("webpage")
+        || normalized.contains("open a page")
+        || normalized.contains("open the page")
+        || message.contains("网页")
+        || message.contains("打开")
 }
 
 impl OpenAiCompatibleProviderClient {
@@ -360,6 +421,24 @@ fn provider_tool_schemas() -> Value {
                     "type": "object",
                     "properties": {"command": {"type": "string"}},
                     "required": ["command"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "codex.exec",
+                "description": "Delegate a task to the Codex App Server worker after policy approval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": {"type": "string"},
+                        "sandbox_mode": {"type": "string"},
+                        "execution_strategy": {"type": "string"},
+                        "poll_attempts": {"type": "integer"},
+                        "poll_interval_ms": {"type": "integer"}
+                    },
+                    "required": ["task"]
                 }
             }
         }

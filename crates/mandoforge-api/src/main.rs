@@ -12763,6 +12763,19 @@ async fn build_harness_context(
                 && event.payload.get("origin").and_then(Value::as_str) == Some("manual")
         })
         .count();
+    let execution_completed_events = context_events
+        .iter()
+        .filter(|event| event.event_type == "execution.completed")
+        .rev()
+        .take(10)
+        .map(|event| {
+            json!({
+                "event_id": event.id,
+                "created_at": event.created_at,
+                "payload": event.payload,
+            })
+        })
+        .collect::<Vec<_>>();
     let recent_custom_tool_results = context_events
         .iter()
         .filter(|event| event.event_type == "user.custom_tool_result")
@@ -12802,8 +12815,10 @@ async fn build_harness_context(
         approved_tool_result_count: approved_event_result_count,
         rejected_tool_result_count: rejected_event_result_count,
         manual_tool_result_count,
+        execution_completed_count: execution_completed_events.len(),
         custom_tool_result_count: recent_custom_tool_results.len(),
         recent_custom_tool_results,
+        recent_execution_completed: execution_completed_events,
         recent_goal_events,
     })
 }
