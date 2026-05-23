@@ -1116,6 +1116,22 @@ struct WorkflowPackBinding {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackRuntimeObject {
+    id: Uuid,
+    installation_id: Uuid,
+    binding_id: Uuid,
+    pack_id: String,
+    pack_version: String,
+    object_type: String,
+    object_key: String,
+    runtime_kind: String,
+    status: String,
+    spec: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowDefinition {
     id: Uuid,
     pack_installation_id: Option<Uuid>,
@@ -1223,6 +1239,7 @@ struct WorkflowStepRun {
     tool_call_ids: Vec<Uuid>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
+    scheduled_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -1286,6 +1303,21 @@ struct UpdateWorkflowStepRun {
     approval_ids: Option<Vec<Uuid>>,
     #[serde(default)]
     tool_call_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunDueWorkflowSteps {
+    #[serde(default)]
+    now: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkflowScheduledStepActivationRun {
+    workflow_run_id: Uuid,
+    checked_at: DateTime<Utc>,
+    activated_count: usize,
+    activated_step_ids: Vec<Uuid>,
+    remaining_scheduled_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1665,6 +1697,50 @@ struct MemoryWritebackCandidate {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryGovernanceSummary {
+    status: String,
+    generated_at: DateTime<Utc>,
+    isolation_policy: String,
+    semantic_object_count: usize,
+    memory_object_count: usize,
+    partition_count: usize,
+    partitions: Vec<MemoryGovernancePartition>,
+    trust_counts: BTreeMap<String, usize>,
+    freshness_counts: BTreeMap<String, usize>,
+    writeback: MemoryGovernanceWritebackSummary,
+    attention_items: Vec<MemoryGovernanceAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryGovernancePartition {
+    partition_key: String,
+    domain_scope: String,
+    workflow_scope: String,
+    memory_scope: String,
+    object_count: usize,
+    memory_object_count: usize,
+    human_verified_count: usize,
+    unverified_count: usize,
+    stale_count: usize,
+    shared: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryGovernanceWritebackSummary {
+    pending_count: usize,
+    approved_count: usize,
+    rejected_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryGovernanceAttentionItem {
+    severity: String,
+    kind: String,
+    message: String,
+    partition_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5423,6 +5499,10 @@ fn build_router(state: AppState) -> Router {
                 .patch(update_semantic_link)
                 .delete(archive_semantic_link),
         )
+        .route(
+            "/api/memory-governance/summary",
+            get(get_memory_governance_summary),
+        )
         .route("/api/agents/{id}/versions", get(list_agent_versions))
         .route(
             "/api/agents/releases/summary",
@@ -5549,6 +5629,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-runs/{id}/transitions",
             get(list_workflow_transitions_route),
+        )
+        .route(
+            "/api/workflow-runs/{id}/scheduled-steps/run-due",
+            post(run_due_workflow_steps_route),
         )
         .route(
             "/api/workflow-runs/{id}/steps",
@@ -5874,6 +5958,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-packs/installations/{id}/bindings",
             get(list_workflow_pack_bindings_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/runtime-objects",
+            get(list_workflow_pack_runtime_objects_route),
         )
         .route(
             "/api/workflow-packs/installations/{id}/stage",
@@ -7842,6 +7930,182 @@ async fn list_semantic_objects(
     )
     .await?;
     Ok(Json(state.list_semantic_objects().await?))
+}
+
+async fn get_memory_governance_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<MemoryGovernanceSummary>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "memory_governance",
+        None,
+    )
+    .await?;
+    let objects = state.list_semantic_objects().await?;
+    let candidates = state.list_memory_writeback_candidates(None).await?;
+    Ok(Json(build_memory_governance_summary(
+        &objects,
+        &candidates,
+        Utc::now(),
+    )))
+}
+
+fn build_memory_governance_summary(
+    objects: &[SemanticObject],
+    candidates: &[MemoryWritebackCandidate],
+    generated_at: DateTime<Utc>,
+) -> MemoryGovernanceSummary {
+    let mut trust_counts = BTreeMap::new();
+    let mut freshness_counts = BTreeMap::new();
+    let mut partition_accumulators: BTreeMap<String, MemoryGovernancePartition> = BTreeMap::new();
+    let mut attention_items = Vec::new();
+
+    for object in objects {
+        *trust_counts.entry(object.trust_level.clone()).or_insert(0) += 1;
+        *freshness_counts
+            .entry(object.freshness.clone())
+            .or_insert(0) += 1;
+        if object.object_type != "memory" {
+            continue;
+        }
+        let domain_scope = memory_governance_scope_value(&object.semantic_scopes, "domain_scope");
+        let workflow_scope =
+            memory_governance_scope_value(&object.semantic_scopes, "workflow_scope");
+        let memory_scope = memory_governance_scope_value(&object.semantic_scopes, "memory_scope");
+        let partition_key =
+            memory_governance_partition_key(&domain_scope, &workflow_scope, &memory_scope);
+        let shared = object
+            .semantic_scopes
+            .get("share_policy")
+            .or_else(|| object.semantic_scopes.get("visibility"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| matches!(value, "shared" | "tenant_shared" | "org_shared"));
+        let partition = partition_accumulators
+            .entry(partition_key.clone())
+            .or_insert(MemoryGovernancePartition {
+                partition_key: partition_key.clone(),
+                domain_scope,
+                workflow_scope,
+                memory_scope,
+                object_count: 0,
+                memory_object_count: 0,
+                human_verified_count: 0,
+                unverified_count: 0,
+                stale_count: 0,
+                shared,
+            });
+        partition.object_count += 1;
+        partition.memory_object_count += 1;
+        partition.shared |= shared;
+        if object.trust_level == "human_verified" {
+            partition.human_verified_count += 1;
+        }
+        if object.trust_level == "unverified" {
+            partition.unverified_count += 1;
+        }
+        if object.freshness != "current" {
+            partition.stale_count += 1;
+        }
+    }
+
+    for partition in partition_accumulators.values() {
+        if partition.stale_count > 0 {
+            attention_items.push(MemoryGovernanceAttentionItem {
+                severity: "medium".to_string(),
+                kind: "stale_memory_objects".to_string(),
+                message: format!(
+                    "{} stale memory object(s) require refresh or retirement",
+                    partition.stale_count
+                ),
+                partition_key: Some(partition.partition_key.clone()),
+            });
+        }
+        if partition.unverified_count > 0 {
+            attention_items.push(MemoryGovernanceAttentionItem {
+                severity: "high".to_string(),
+                kind: "unverified_memory_objects".to_string(),
+                message: format!(
+                    "{} unverified memory object(s) must not feed high-risk execution",
+                    partition.unverified_count
+                ),
+                partition_key: Some(partition.partition_key.clone()),
+            });
+        }
+    }
+
+    let writeback = MemoryGovernanceWritebackSummary {
+        pending_count: candidates
+            .iter()
+            .filter(|candidate| candidate.status == "pending")
+            .count(),
+        approved_count: candidates
+            .iter()
+            .filter(|candidate| candidate.status == "approved")
+            .count(),
+        rejected_count: candidates
+            .iter()
+            .filter(|candidate| candidate.status == "rejected")
+            .count(),
+    };
+    if writeback.pending_count > 0 {
+        attention_items.push(MemoryGovernanceAttentionItem {
+            severity: "medium".to_string(),
+            kind: "pending_memory_writeback_review".to_string(),
+            message: format!(
+                "{} memory writeback candidate(s) need review before becoming reusable memory",
+                writeback.pending_count
+            ),
+            partition_key: None,
+        });
+    }
+
+    let partitions = partition_accumulators.into_values().collect::<Vec<_>>();
+    let status = if attention_items.iter().any(|item| item.severity == "high") {
+        "attention_required"
+    } else if attention_items.is_empty() {
+        "ready"
+    } else {
+        "review_needed"
+    }
+    .to_string();
+
+    MemoryGovernanceSummary {
+        status,
+        generated_at,
+        isolation_policy: "domain_scope + workflow_scope + memory_scope".to_string(),
+        semantic_object_count: objects.len(),
+        memory_object_count: objects
+            .iter()
+            .filter(|object| object.object_type == "memory")
+            .count(),
+        partition_count: partitions.len(),
+        partitions,
+        trust_counts,
+        freshness_counts,
+        writeback,
+        attention_items,
+    }
+}
+
+fn memory_governance_scope_value(scopes: &Value, key: &str) -> String {
+    scopes
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unspecified")
+        .to_string()
+}
+
+fn memory_governance_partition_key(
+    domain_scope: &str,
+    workflow_scope: &str,
+    memory_scope: &str,
+) -> String {
+    format!("domain={domain_scope}|workflow={workflow_scope}|memory={memory_scope}")
 }
 
 async fn create_semantic_object(
@@ -11203,6 +11467,7 @@ async fn materialize_workflow_handoff_assignment(
             tool_call_ids: Vec::new(),
             started_at: None,
             completed_at: None,
+            scheduled_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -11723,10 +11988,10 @@ fn normalize_workflow_release_state(value: &str) -> Result<String, AppError> {
 fn normalize_workflow_run_status(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "queued" | "running" | "requires_action" | "completed" | "failed" | "canceled"
-        | "skipped" => Ok(normalized),
+        "queued" | "scheduled" | "running" | "requires_action" | "completed" | "failed"
+        | "canceled" | "skipped" => Ok(normalized),
         _ => Err(AppError::bad_request(
-            "workflow status must be queued, running, requires_action, completed, failed, canceled, or skipped",
+            "workflow status must be queued, scheduled, running, requires_action, completed, failed, canceled, or skipped",
         )),
     }
 }
@@ -12426,6 +12691,7 @@ async fn materialize_workflow_graph_step(
         root_grant,
         graph_step,
         "queued",
+        None,
         empty_json_object(),
         empty_json_object(),
     )
@@ -12440,6 +12706,7 @@ async fn materialize_workflow_graph_step_with_policy_context(
     root_grant: &TaskGrant,
     graph_step: &Value,
     status: &str,
+    scheduled_at: Option<DateTime<Utc>>,
     input_context: Value,
     output_payload: Value,
 ) -> Result<WorkflowStepRun, AppError> {
@@ -12483,6 +12750,7 @@ async fn materialize_workflow_graph_step_with_policy_context(
             tool_call_ids: Vec::new(),
             started_at: terminal.then_some(now),
             completed_at: terminal.then_some(now),
+            scheduled_at,
             created_at: now,
             updated_at: now,
         })
@@ -12602,9 +12870,18 @@ fn workflow_graph_string_or_string_array(
     }
 }
 
-fn workflow_graph_step_retry_max_attempts(step: &Value) -> Result<usize, AppError> {
+#[derive(Debug, Clone, Copy)]
+struct WorkflowGraphRetryPolicy {
+    max_attempts: usize,
+    delay_seconds: i64,
+}
+
+fn workflow_graph_step_retry_policy(step: &Value) -> Result<WorkflowGraphRetryPolicy, AppError> {
     let Some(policy) = step.get("retry").or_else(|| step.get("retry_policy")) else {
-        return Ok(1);
+        return Ok(WorkflowGraphRetryPolicy {
+            max_attempts: 1,
+            delay_seconds: 0,
+        });
     };
     let Some(max_attempts) = policy.get("max_attempts").and_then(Value::as_u64) else {
         return Err(AppError::bad_request(
@@ -12616,8 +12893,37 @@ fn workflow_graph_step_retry_max_attempts(step: &Value) -> Result<usize, AppErro
             "workflow graph step retry.max_attempts must be at least 1",
         ));
     }
-    usize::try_from(max_attempts)
-        .map_err(|_| AppError::bad_request("workflow graph step retry.max_attempts is too large"))
+    let max_attempts = usize::try_from(max_attempts).map_err(|_| {
+        AppError::bad_request("workflow graph step retry.max_attempts is too large")
+    })?;
+    let delay_seconds = workflow_graph_retry_delay_seconds(policy)?;
+    Ok(WorkflowGraphRetryPolicy {
+        max_attempts,
+        delay_seconds,
+    })
+}
+
+fn workflow_graph_retry_delay_seconds(policy: &Value) -> Result<i64, AppError> {
+    let direct_delay = policy
+        .get("delay_seconds")
+        .or_else(|| policy.get("backoff_seconds"))
+        .and_then(Value::as_i64);
+    let nested_delay = policy
+        .get("backoff")
+        .and_then(|backoff| {
+            backoff
+                .get("initial_seconds")
+                .or_else(|| backoff.get("delay_seconds"))
+                .or_else(|| backoff.get("backoff_seconds"))
+        })
+        .and_then(Value::as_i64);
+    let delay_seconds = direct_delay.or(nested_delay).unwrap_or(0);
+    if !(0..=86_400).contains(&delay_seconds) {
+        return Err(AppError::bad_request(
+            "workflow graph step retry delay_seconds must be between 0 and 86400",
+        ));
+    }
+    Ok(delay_seconds)
 }
 
 #[derive(Debug, Clone)]
@@ -12825,10 +13131,26 @@ fn workflow_graph_step_keys(step_graph: &Value) -> Result<BTreeSet<String>, AppE
     Ok(keys)
 }
 
+#[derive(Debug, Clone)]
+struct WorkflowGraphReadyStep<'a> {
+    graph_step: &'a Value,
+    fan_in: WorkflowGraphFanInReadiness,
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowGraphFanInReadiness {
+    mode: String,
+    min_success: usize,
+    dependencies: Vec<String>,
+    successful_dependencies: Vec<String>,
+    failed_dependencies: Vec<String>,
+    pending_dependencies: Vec<String>,
+}
+
 fn workflow_graph_ready_steps<'a>(
     step_graph: &'a Value,
     existing_steps: &[WorkflowStepRun],
-) -> Result<Vec<&'a Value>, AppError> {
+) -> Result<Vec<WorkflowGraphReadyStep<'a>>, AppError> {
     let Some(steps) = step_graph.get("steps").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
@@ -12846,15 +13168,165 @@ fn workflow_graph_ready_steps<'a>(
         if dependencies.is_empty() {
             continue;
         }
-        if dependencies.iter().all(|dependency| {
-            existing_by_key
-                .get(dependency.as_str())
-                .is_some_and(|status| workflow_step_status_successful(status))
-        }) {
-            ready.push(graph_step);
+        let fan_in = workflow_graph_fan_in_readiness(graph_step, &dependencies, &existing_by_key)?;
+        if workflow_graph_fan_in_ready(&fan_in) {
+            ready.push(WorkflowGraphReadyStep { graph_step, fan_in });
         }
     }
     Ok(ready)
+}
+
+fn workflow_graph_fan_in_readiness(
+    graph_step: &Value,
+    dependencies: &[String],
+    existing_by_key: &HashMap<&str, &str>,
+) -> Result<WorkflowGraphFanInReadiness, AppError> {
+    let mode = workflow_graph_fan_in_mode(graph_step)?;
+    let min_success = workflow_graph_fan_in_min_success(graph_step, &mode, dependencies.len())?;
+    let mut successful_dependencies = Vec::new();
+    let mut failed_dependencies = Vec::new();
+    let mut pending_dependencies = Vec::new();
+    for dependency in dependencies {
+        match existing_by_key.get(dependency.as_str()).copied() {
+            Some(status) if workflow_step_status_successful(status) => {
+                successful_dependencies.push(dependency.clone());
+            }
+            Some("failed" | "canceled") => failed_dependencies.push(dependency.clone()),
+            Some(_) | None => pending_dependencies.push(dependency.clone()),
+        }
+    }
+    Ok(WorkflowGraphFanInReadiness {
+        mode,
+        min_success,
+        dependencies: dependencies.to_vec(),
+        successful_dependencies,
+        failed_dependencies,
+        pending_dependencies,
+    })
+}
+
+fn workflow_graph_fan_in_mode(graph_step: &Value) -> Result<String, AppError> {
+    let Some(policy) = graph_step.get("fan_in").or_else(|| graph_step.get("join")) else {
+        return Ok("all".to_string());
+    };
+    let mode = match policy {
+        Value::String(mode) => mode.as_str(),
+        Value::Object(object) => object
+            .get("mode")
+            .or_else(|| object.get("strategy"))
+            .and_then(Value::as_str)
+            .unwrap_or("all"),
+        _ => {
+            return Err(AppError::bad_request(
+                "workflow graph step fan_in must be a string or object",
+            ));
+        }
+    }
+    .trim()
+    .to_ascii_lowercase();
+    match mode.as_str() {
+        "all" | "any" | "quorum" => Ok(mode),
+        _ => Err(AppError::bad_request(
+            "workflow graph step fan_in mode must be all, any, or quorum",
+        )),
+    }
+}
+
+fn workflow_graph_fan_in_min_success(
+    graph_step: &Value,
+    mode: &str,
+    dependency_count: usize,
+) -> Result<usize, AppError> {
+    if mode == "all" {
+        return Ok(dependency_count);
+    }
+    if mode == "any" {
+        return Ok(1);
+    }
+    let min_success = graph_step
+        .get("fan_in")
+        .and_then(|policy| policy.get("min_success").or_else(|| policy.get("quorum")))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            AppError::bad_request("workflow graph step fan_in quorum requires min_success")
+        })?;
+    let min_success = usize::try_from(min_success).map_err(|_| {
+        AppError::bad_request("workflow graph step fan_in min_success is too large")
+    })?;
+    if min_success == 0 || min_success > dependency_count {
+        return Err(AppError::bad_request(
+            "workflow graph step fan_in min_success must be between 1 and dependency count",
+        ));
+    }
+    Ok(min_success)
+}
+
+fn workflow_graph_fan_in_ready(fan_in: &WorkflowGraphFanInReadiness) -> bool {
+    fan_in.successful_dependencies.len() >= fan_in.min_success
+}
+
+fn workflow_graph_fan_in_payload(fan_in: &WorkflowGraphFanInReadiness) -> Value {
+    json!({
+        "mode": fan_in.mode,
+        "min_success": fan_in.min_success,
+        "dependencies": fan_in.dependencies,
+        "successful_dependencies": fan_in.successful_dependencies,
+        "failed_dependencies": fan_in.failed_dependencies,
+        "pending_dependencies": fan_in.pending_dependencies
+    })
+}
+
+fn workflow_graph_fan_out_max_parallel(step_graph: &Value) -> Result<Option<usize>, AppError> {
+    let Some(policy) = step_graph
+        .get("fan_out")
+        .or_else(|| step_graph.get("fanout"))
+    else {
+        return Ok(None);
+    };
+    let max_parallel = match policy {
+        Value::Object(object) => object
+            .get("max_parallel")
+            .or_else(|| object.get("parallelism"))
+            .and_then(Value::as_u64),
+        Value::Number(number) => number.as_u64(),
+        _ => {
+            return Err(AppError::bad_request(
+                "workflow graph fan_out must be an object or positive integer",
+            ));
+        }
+    }
+    .ok_or_else(|| AppError::bad_request("workflow graph fan_out.max_parallel is required"))?;
+    if max_parallel == 0 {
+        return Err(AppError::bad_request(
+            "workflow graph fan_out.max_parallel must be at least 1",
+        ));
+    }
+    usize::try_from(max_parallel)
+        .map(Some)
+        .map_err(|_| AppError::bad_request("workflow graph fan_out.max_parallel is too large"))
+}
+
+fn workflow_graph_active_parallel_count(existing_steps: &[WorkflowStepRun]) -> usize {
+    existing_steps
+        .iter()
+        .filter(|step| {
+            !workflow_step_status_terminal(&step.status)
+                && matches!(
+                    step.status.as_str(),
+                    "queued" | "scheduled" | "running" | "requires_action"
+                )
+        })
+        .count()
+}
+
+fn workflow_graph_fan_out_payload(
+    max_parallel: Option<usize>,
+    active_parallel_count: usize,
+) -> Value {
+    json!({
+        "max_parallel": max_parallel,
+        "active_parallel_count": active_parallel_count
+    })
 }
 
 fn workflow_graph_step_by_key<'a>(
@@ -13015,6 +13487,7 @@ async fn record_workflow_step_run_created(
                 "step_key": step.step_key,
                 "step_type": step.step_type,
                 "status": step.status,
+                "scheduled_at": step.scheduled_at,
                 "agent_id": step.agent_id,
                 "session_id": step.session_id,
                 "handoff_id": step.handoff_id,
@@ -13035,6 +13508,7 @@ async fn record_workflow_step_run_created(
                 "step_key": step.step_key,
                 "step_type": step.step_type,
                 "status": step.status,
+                "scheduled_at": step.scheduled_at,
                 "handoff_id": step.handoff_id,
                 "task_grant_id": step.task_grant_id
             }),
@@ -13681,6 +14155,7 @@ async fn create_workflow_step_run_route(
             tool_call_ids: input.tool_call_ids,
             started_at: None,
             completed_at: None,
+            scheduled_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -13766,6 +14241,81 @@ fn workflow_step_status_successful(status: &str) -> bool {
     matches!(status, "completed" | "skipped")
 }
 
+async fn run_due_workflow_steps_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RunDueWorkflowSteps>,
+) -> Result<Json<WorkflowScheduledStepActivationRun>, AppError> {
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    let checked_at = input.now.unwrap_or_else(Utc::now);
+    let mut scheduled_steps = state
+        .list_workflow_step_runs(id)
+        .await?
+        .into_iter()
+        .filter(|step| step.status == "scheduled")
+        .collect::<Vec<_>>();
+    scheduled_steps.sort_by_key(|step| step.scheduled_at);
+
+    let mut activated_step_ids = Vec::new();
+    for mut step in scheduled_steps {
+        let Some(scheduled_at) = step.scheduled_at else {
+            continue;
+        };
+        if scheduled_at > checked_at {
+            continue;
+        }
+        let previous_status = step.status.clone();
+        step.status = "queued".to_string();
+        step.updated_at = checked_at;
+        let updated = state.update_workflow_step_run(step).await?;
+        record_workflow_step_run_updated(&state, &run, &updated, &previous_status).await?;
+        record_workflow_transition(
+            &state,
+            &run,
+            Some(&updated),
+            Some(&updated),
+            "schedule",
+            "queued",
+            json!({
+                "source": "scheduled_step_due",
+                "scheduled_at": scheduled_at,
+                "checked_at": checked_at
+            }),
+            json!({
+                "workflow_step_run_id": updated.id,
+                "workflow_status": "running"
+            }),
+        )
+        .await?;
+        activated_step_ids.push(updated.id);
+    }
+    if !activated_step_ids.is_empty() {
+        update_workflow_run_status_and_record(&state, &run, "running").await?;
+    }
+    let remaining_scheduled_count = state
+        .list_workflow_step_runs(id)
+        .await?
+        .into_iter()
+        .filter(|step| step.status == "scheduled")
+        .count();
+    Ok(Json(WorkflowScheduledStepActivationRun {
+        workflow_run_id: id,
+        checked_at,
+        activated_count: activated_step_ids.len(),
+        activated_step_ids,
+        remaining_scheduled_count,
+    }))
+}
+
 async fn record_workflow_step_run_updated(
     state: &AppState,
     run: &WorkflowRun,
@@ -13790,6 +14340,7 @@ async fn record_workflow_step_run_updated(
                 "step_key": step.step_key,
                 "previous_status": previous_status,
                 "status": step.status,
+                "scheduled_at": step.scheduled_at,
                 "output_payload": step.output_payload,
                 "artifact_ids": step.artifact_ids,
                 "approval_ids": step.approval_ids,
@@ -13811,7 +14362,8 @@ async fn record_workflow_step_run_updated(
                 "workflow_run_id": run.id,
                 "step_key": step.step_key,
                 "previous_status": previous_status,
-                "status": step.status
+                "status": step.status,
+                "scheduled_at": step.scheduled_at
             }),
         ))
         .await?;
@@ -13848,7 +14400,39 @@ async fn advance_workflow_graph_after_step_update(
         if ready_steps.is_empty() {
             break;
         }
-        for graph_step in ready_steps {
+        let fan_out_max_parallel = workflow_graph_fan_out_max_parallel(&definition.step_graph)?;
+        let mut active_parallel_count = workflow_graph_active_parallel_count(&existing_steps);
+        let mut materialized_any = false;
+        for ready_step in ready_steps {
+            let graph_step = ready_step.graph_step;
+            let fan_in_payload = workflow_graph_fan_in_payload(&ready_step.fan_in);
+            let fan_out_payload =
+                workflow_graph_fan_out_payload(fan_out_max_parallel, active_parallel_count);
+            if let Some(max_parallel) = fan_out_max_parallel {
+                if active_parallel_count >= max_parallel {
+                    record_workflow_transition(
+                        state,
+                        run,
+                        Some(step),
+                        None,
+                        "fan_out",
+                        "deferred",
+                        json!({
+                            "source": "step_graph_fan_out",
+                            "max_parallel": max_parallel,
+                            "active_parallel_count": active_parallel_count,
+                            "dependencies": ready_step.fan_in.dependencies,
+                            "graph_step": graph_step
+                        }),
+                        json!({
+                            "deferred_step_key": workflow_graph_step_key(graph_step)?,
+                            "reason": "fan_out_max_parallel_reached"
+                        }),
+                    )
+                    .await?;
+                    continue;
+                }
+            }
             if let Some(evaluation) =
                 workflow_graph_step_condition_evaluation(graph_step, &existing_steps)?
             {
@@ -13865,7 +14449,10 @@ async fn advance_workflow_graph_after_step_update(
                         &root_grant,
                         graph_step,
                         "skipped",
+                        None,
                         json!({
+                            "fan_in": fan_in_payload.clone(),
+                            "fan_out": fan_out_payload.clone(),
                             "branch": {
                                 "condition": condition.clone(),
                                 "path": path.clone(),
@@ -13882,6 +14469,7 @@ async fn advance_workflow_graph_after_step_update(
                         }),
                     )
                     .await?;
+                    materialized_any = true;
                     record_workflow_transition(
                         state,
                         run,
@@ -13905,30 +14493,59 @@ async fn advance_workflow_graph_after_step_update(
                     continue;
                 }
             }
-            let materialized = materialize_workflow_graph_step(
+            let materialized = materialize_workflow_graph_step_with_policy_context(
                 state,
                 &definition,
                 run,
                 &session,
                 &root_grant,
                 graph_step,
+                "queued",
+                None,
+                json!({
+                    "fan_in": fan_in_payload,
+                    "fan_out": fan_out_payload
+                }),
+                empty_json_object(),
             )
             .await?;
+            active_parallel_count += 1;
+            materialized_any = true;
+            let transition_type = if ready_step.fan_in.mode == "all" {
+                if fan_out_max_parallel.is_some() {
+                    "fan_out"
+                } else {
+                    "dependency"
+                }
+            } else {
+                "fan_in"
+            };
             record_workflow_transition(
                 state,
                 run,
                 Some(step),
                 Some(&materialized),
-                "dependency",
+                transition_type,
                 "materialized",
                 json!({
-                    "source": "step_graph_dependency",
+                    "source": if ready_step.fan_in.mode == "all" {
+                        if fan_out_max_parallel.is_some() { "step_graph_fan_out" } else { "step_graph_dependency" }
+                    } else { "step_graph_fan_in" },
                     "dependencies": workflow_graph_step_dependencies(graph_step)?,
+                    "fan_out": workflow_graph_fan_out_payload(fan_out_max_parallel, active_parallel_count - 1),
+                    "mode": ready_step.fan_in.mode,
+                    "min_success": ready_step.fan_in.min_success,
+                    "successful_dependencies": ready_step.fan_in.successful_dependencies,
+                    "failed_dependencies": ready_step.fan_in.failed_dependencies,
+                    "pending_dependencies": ready_step.fan_in.pending_dependencies,
                     "graph_step": graph_step
                 }),
                 empty_json_object(),
             )
             .await?;
+        }
+        if !materialized_any {
+            break;
         }
     }
 
@@ -13958,9 +14575,16 @@ async fn advance_workflow_graph_after_step_failure(
 
     if step.status == "failed" {
         let attempts = workflow_graph_step_attempt_count(&existing_steps, &step.step_key);
-        let max_attempts = workflow_graph_step_retry_max_attempts(graph_step)?;
-        if attempts < max_attempts {
+        let retry_policy = workflow_graph_step_retry_policy(graph_step)?;
+        if attempts < retry_policy.max_attempts {
             let next_attempt = attempts + 1;
+            let scheduled_at = (retry_policy.delay_seconds > 0)
+                .then(|| Utc::now() + chrono::Duration::seconds(retry_policy.delay_seconds));
+            let retry_status = if scheduled_at.is_some() {
+                "scheduled"
+            } else {
+                "queued"
+            };
             let retry_step = materialize_workflow_graph_step_with_policy_context(
                 state,
                 &definition,
@@ -13968,11 +14592,14 @@ async fn advance_workflow_graph_after_step_failure(
                 &session,
                 &root_grant,
                 graph_step,
-                "queued",
+                retry_status,
+                scheduled_at,
                 json!({
                     "retry": {
                         "attempt": next_attempt,
-                        "max_attempts": max_attempts,
+                        "max_attempts": retry_policy.max_attempts,
+                        "delay_seconds": retry_policy.delay_seconds,
+                        "scheduled_at": scheduled_at,
                         "previous_step_run_id": step.id,
                         "previous_status": step.status,
                         "previous_output": step.output_payload
@@ -13987,16 +14614,19 @@ async fn advance_workflow_graph_after_step_failure(
                 Some(step),
                 Some(&retry_step),
                 "retry",
-                "queued",
+                retry_status,
                 json!({
                     "source": "step_graph_retry",
                     "attempt": next_attempt,
-                    "max_attempts": max_attempts,
+                    "max_attempts": retry_policy.max_attempts,
+                    "delay_seconds": retry_policy.delay_seconds,
+                    "scheduled_at": scheduled_at,
                     "graph_step": graph_step
                 }),
                 json!({
                     "workflow_status": "running",
-                    "retry_step_run_id": retry_step.id
+                    "retry_step_run_id": retry_step.id,
+                    "retry_status": retry_status
                 }),
             )
             .await?;
@@ -14112,6 +14742,7 @@ async fn materialize_workflow_graph_failure_policy_steps(
                     root_grant,
                     graph_step,
                     "queued",
+                    None,
                     json!({
                         "failure_trigger": {
                             "failed_step_run_id": failed_step.id,
@@ -14162,6 +14793,7 @@ async fn materialize_workflow_graph_failure_policy_steps(
                 root_grant,
                 graph_step,
                 "skipped",
+                None,
                 json!({
                     "skip": {
                         "reason": "dependency_failed",
@@ -14551,6 +15183,23 @@ async fn list_workflow_pack_bindings_route(
     Ok(Json(state.list_workflow_pack_bindings(id).await?))
 }
 
+async fn list_workflow_pack_runtime_objects_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkflowPackRuntimeObject>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    state.get_workflow_pack_installation(id).await?;
+    Ok(Json(state.list_workflow_pack_runtime_objects(id).await?))
+}
+
 async fn install_workflow_pack_route(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -14635,6 +15284,11 @@ async fn stage_workflow_pack_installation_route(
         )
         .await?;
     let bindings = state.create_workflow_pack_bindings(bindings).await?;
+    let runtime_objects =
+        workflow_pack_runtime_objects_from_bindings(&installation, &bindings, "staged")?;
+    let runtime_objects = state
+        .create_workflow_pack_runtime_objects(runtime_objects)
+        .await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -14651,6 +15305,11 @@ async fn stage_workflow_pack_installation_route(
             "binding_types": bindings
                 .iter()
                 .map(|binding| binding.binding_type.clone())
+                .collect::<BTreeSet<_>>(),
+            "runtime_object_count": runtime_objects.len(),
+            "runtime_object_types": runtime_objects
+                .iter()
+                .map(|object| object.object_type.clone())
                 .collect::<BTreeSet<_>>(),
         }),
     )
@@ -14950,6 +15609,9 @@ async fn release_workflow_pack_installation_route(
     let released_bindings = state
         .update_workflow_pack_binding_statuses(id, "released")
         .await?;
+    let released_runtime_objects = state
+        .update_workflow_pack_runtime_object_statuses(id, "released")
+        .await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -14959,6 +15621,7 @@ async fn release_workflow_pack_installation_route(
             "release_gate_status": installation.release_gate_status,
             "gate_evidence": installation.gate_evidence,
             "binding_count": released_bindings.len(),
+            "runtime_object_count": released_runtime_objects.len(),
         }),
     )
     .await?;
@@ -15014,6 +15677,9 @@ async fn rollback_workflow_pack_installation_route(
     state
         .update_workflow_pack_binding_statuses(id, "rolled_back")
         .await?;
+    state
+        .update_workflow_pack_runtime_object_statuses(id, "rolled_back")
+        .await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -15054,6 +15720,9 @@ async fn archive_workflow_pack_installation_route(
     let installation = state.archive_workflow_pack_installation(id).await?;
     state
         .update_workflow_pack_binding_statuses(id, "archived")
+        .await?;
+    state
+        .update_workflow_pack_runtime_object_statuses(id, "archived")
         .await?;
     record_workflow_pack_installation_audit(
         &state,
@@ -15556,6 +16225,115 @@ fn workflow_pack_materialized_bindings(
             .then(left.binding_key.cmp(&right.binding_key))
     });
     Ok(bindings)
+}
+
+fn workflow_pack_runtime_objects_from_bindings(
+    installation: &WorkflowPackInstallation,
+    bindings: &[WorkflowPackBinding],
+    status: &str,
+) -> Result<Vec<WorkflowPackRuntimeObject>, AppError> {
+    let now = Utc::now();
+    let mut objects = Vec::new();
+    for binding in bindings {
+        match binding.binding_type.as_str() {
+            "workflow" => objects.push(new_workflow_pack_runtime_object(
+                installation,
+                binding,
+                "schedule",
+                &format!("workflow:{}:schedule", binding.binding_key),
+                "workflow_schedule",
+                status,
+                json!({
+                    "binding_id": binding.id,
+                    "workflow_id": binding.binding_key.clone(),
+                    "entry_agent": binding.materialized_payload.get("entry_agent").cloned(),
+                    "source_path": binding.source_path.clone(),
+                    "source_digest": binding.materialized_payload.get("source_digest").cloned(),
+                    "schedule_policy": {
+                        "mode": "manual_or_scheduler",
+                        "source": "workflow_pack_binding"
+                    },
+                    "provider_specific_validation": "not_required"
+                }),
+                now,
+            )),
+            "connector" => objects.push(new_workflow_pack_runtime_object(
+                installation,
+                binding,
+                "connector_account",
+                &format!("connector:{}:account", binding.binding_key),
+                "generic_connector_account",
+                status,
+                json!({
+                    "binding_id": binding.id,
+                    "connector_id": binding.binding_key.clone(),
+                    "connector_kind": binding.materialized_payload.get("kind").cloned(),
+                    "required_permissions": binding.materialized_payload.get("required_permissions").cloned(),
+                    "writes_enabled": binding.materialized_payload.get("writes_enabled").cloned(),
+                    "write_approval_required": binding.materialized_payload.get("write_approval_required").cloned(),
+                    "tenant_scope": binding.materialized_payload.get("tenant_scope").cloned(),
+                    "prompt_injection_boundary": binding.materialized_payload.get("prompt_injection_boundary").cloned(),
+                    "data_quality": binding.materialized_payload.get("data_quality").cloned(),
+                    "source_path": binding.source_path.clone(),
+                    "source_digest": binding.materialized_payload.get("source_digest").cloned(),
+                    "provider_specific_validation": "deferred_to_connector_adapter"
+                }),
+                now,
+            )),
+            "agent" => objects.push(new_workflow_pack_runtime_object(
+                installation,
+                binding,
+                "provider_deployment_handle",
+                &format!("agent:{}:provider-deployment", binding.binding_key),
+                "generic_provider_deployment",
+                status,
+                json!({
+                    "binding_id": binding.id,
+                    "agent_id": binding.binding_key.clone(),
+                    "role": binding.materialized_payload.get("role").cloned(),
+                    "tool_scope": binding.materialized_payload.get("tool_scope").cloned(),
+                    "handoffs": binding.materialized_payload.get("handoffs").cloned(),
+                    "source_path": binding.source_path.clone(),
+                    "source_digest": binding.materialized_payload.get("source_digest").cloned(),
+                    "provider_specific_validation": "deferred_to_provider_adapter"
+                }),
+                now,
+            )),
+            _ => {}
+        }
+    }
+    objects.sort_by(|left, right| {
+        left.object_type
+            .cmp(&right.object_type)
+            .then(left.object_key.cmp(&right.object_key))
+    });
+    Ok(objects)
+}
+
+fn new_workflow_pack_runtime_object(
+    installation: &WorkflowPackInstallation,
+    binding: &WorkflowPackBinding,
+    object_type: &str,
+    object_key: &str,
+    runtime_kind: &str,
+    status: &str,
+    spec: Value,
+    now: DateTime<Utc>,
+) -> WorkflowPackRuntimeObject {
+    WorkflowPackRuntimeObject {
+        id: Uuid::new_v4(),
+        installation_id: installation.id,
+        binding_id: binding.id,
+        pack_id: installation.pack_id.clone(),
+        pack_version: installation.version.clone(),
+        object_type: object_type.to_string(),
+        object_key: object_key.to_string(),
+        runtime_kind: runtime_kind.to_string(),
+        status: status.to_string(),
+        spec,
+        created_at: now,
+        updated_at: now,
+    }
 }
 
 fn new_workflow_pack_binding(
@@ -20167,6 +20945,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "workflow_pack_installations",
         "workflow_pack_profile_assets",
         "workflow_pack_bindings",
+        "workflow_pack_runtime_objects",
         "workflow_definitions",
         "workflow_runs",
         "workflow_step_runs",
@@ -49516,6 +50295,111 @@ not json
     }
 
     #[tokio::test]
+    async fn memory_governance_summary_partitions_memory_by_scope_and_flags_risks() {
+        let app = test_app().await;
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "memory",
+                    "source_uri": "memory://governance-test",
+                    "display_name": "Memory governance test",
+                    "metadata": {"purpose": "partition summary"}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        for (object_key, domain_scope, workflow_scope, memory_scope, trust_level, freshness) in [
+            (
+                "memory:social:brand:voice",
+                "social-media",
+                "content",
+                "brand-voice",
+                "human_verified",
+                "current",
+            ),
+            (
+                "memory:social:brand:old",
+                "social-media",
+                "content",
+                "brand-voice",
+                "human_verified",
+                "stale",
+            ),
+            (
+                "memory:ecommerce:ads:unverified",
+                "ecommerce",
+                "ads",
+                "ad-ops",
+                "unverified",
+                "current",
+            ),
+        ] {
+            let _: SemanticObject = request_json(
+                app.clone(),
+                json_request_with_headers(
+                    "POST",
+                    "/api/semantic-objects",
+                    json!({
+                        "source_id": source.id,
+                        "object_type": "memory",
+                        "object_key": object_key,
+                        "title": object_key,
+                        "summary": "governance summary fixture",
+                        "content": {"note": object_key},
+                        "semantic_scopes": {
+                            "domain_scope": domain_scope,
+                            "workflow_scope": workflow_scope,
+                            "memory_scope": memory_scope,
+                            "share_policy": "isolated"
+                        },
+                        "trust_level": trust_level,
+                        "freshness": freshness
+                    }),
+                    &[("x-mandoforge-roles", "admin")],
+                ),
+            )
+            .await;
+        }
+
+        let summary: Value = request_json(
+            app,
+            Request::builder()
+                .uri("/api/memory-governance/summary")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            summary["isolation_policy"],
+            json!("domain_scope + workflow_scope + memory_scope")
+        );
+        assert_eq!(summary["memory_object_count"], json!(3));
+        assert!(summary["partitions"].as_array().is_some_and(|partitions| {
+            partitions.iter().any(|partition| {
+                partition["partition_key"]
+                    == json!("domain=social-media|workflow=content|memory=brand-voice")
+                    && partition["object_count"] == json!(2)
+                    && partition["stale_count"] == json!(1)
+                    && partition["shared"] == json!(false)
+            })
+        }));
+        assert!(summary["attention_items"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["kind"] == json!("stale_memory_objects"))
+                && items
+                    .iter()
+                    .any(|item| item["kind"] == json!("unverified_memory_objects"))
+        }));
+    }
+
+    #[tokio::test]
     async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
         let app = test_app().await;
         let manifest_path = ai_governance_manifest_path_string();
@@ -49643,6 +50527,44 @@ not json
                 && binding["target_kind"] == json!("workflow_pack_profile_asset")
                 && binding["materialized_payload"]["onboarding_required"] == json!(true)
         }));
+        let staged_runtime_objects: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}/runtime-objects",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(staged_runtime_objects.iter().any(|object| {
+            object["object_type"] == json!("schedule")
+                && object["runtime_kind"] == json!("workflow_schedule")
+                && object["object_key"] == json!("workflow:profile-onboarding:schedule")
+                && object["status"] == json!("staged")
+                && object["spec"]["workflow_id"] == json!("profile-onboarding")
+                && object["spec"]["provider_specific_validation"] == json!("not_required")
+        }));
+        assert!(staged_runtime_objects.iter().any(|object| {
+            object["object_type"] == json!("connector_account")
+                && object["runtime_kind"] == json!("generic_connector_account")
+                && object["object_key"] == json!("connector:knowledge-base:account")
+                && object["status"] == json!("staged")
+                && object["spec"]["connector_id"] == json!("knowledge-base")
+                && object["spec"]["provider_specific_validation"]
+                    == json!("deferred_to_connector_adapter")
+        }));
+        assert!(staged_runtime_objects.iter().any(|object| {
+            object["object_type"] == json!("provider_deployment_handle")
+                && object["runtime_kind"] == json!("generic_provider_deployment")
+                && object["object_key"] == json!("agent:reader:provider-deployment")
+                && object["status"] == json!("staged")
+                && object["spec"]["agent_id"] == json!("reader")
+                && object["spec"]["provider_specific_validation"]
+                    == json!("deferred_to_provider_adapter")
+        }));
 
         let (status, error) = request_value(
             app.clone(),
@@ -49703,6 +50625,24 @@ not json
             released_bindings
                 .iter()
                 .all(|binding| binding["status"] == json!("released"))
+        );
+        let released_runtime_objects: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}/runtime-objects",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(!released_runtime_objects.is_empty());
+        assert!(
+            released_runtime_objects
+                .iter()
+                .all(|object| object["status"] == json!("released"))
         );
         assert_eq!(
             released.gate_evidence["evidence"]["eval_run_id"],
@@ -50596,6 +51536,205 @@ not json
         }));
     }
 
+    #[tokio::test]
+    async fn workflow_retry_delay_schedules_attempt_until_due() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Scheduled retry workflow",
+                    "entrypoint": "scheduled-retry-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true},
+                            {
+                                "key": "enrich",
+                                "type": "agent",
+                                "depends_on": ["intake"],
+                                "retry": {"max_attempts": 2, "delay_seconds": 60}
+                            }
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "scheduled retry"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let intake_step_id = steps[0]["id"].as_str().expect("intake step id").to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{intake_step_id}"),
+                json!({"status": "completed"}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let enrich_step_id = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("enrich"))
+            .and_then(|step| step["id"].as_str())
+            .expect("enrich step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{enrich_step_id}"),
+                json!({
+                    "status": "failed",
+                    "output_payload": {"error": "transient upstream failure"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps_after_retry: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let retry_step = steps_after_retry
+            .iter()
+            .find(|step| {
+                step["step_key"] == json!("enrich") && step["status"] == json!("scheduled")
+            })
+            .expect("retry attempt should be scheduled");
+        let retry_step_id = retry_step["id"]
+            .as_str()
+            .expect("retry step id")
+            .to_string();
+        let scheduled_at = retry_step["scheduled_at"]
+            .as_str()
+            .expect("scheduled_at timestamp");
+        assert_eq!(retry_step["input_payload"]["retry"]["attempt"], json!(2));
+        assert_eq!(
+            retry_step["input_payload"]["retry"]["delay_seconds"],
+            json!(60)
+        );
+        assert_eq!(
+            retry_step["input_payload"]["retry"]["scheduled_at"],
+            json!(scheduled_at)
+        );
+
+        let transitions_after_retry: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(transitions_after_retry.iter().any(|transition| {
+            transition["transition_type"] == json!("retry")
+                && transition["from_step_run_id"] == json!(enrich_step_id)
+                && transition["to_step_run_id"] == json!(retry_step_id)
+                && transition["status"] == json!("scheduled")
+                && transition["condition_payload"]["delay_seconds"] == json!(60)
+        }));
+
+        let before_due: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-runs/{run_id}/scheduled-steps/run-due"),
+                json!({"now": "2000-01-01T00:00:00Z"}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(before_due["activated_count"], json!(0));
+
+        let due_at = DateTime::parse_from_rfc3339(scheduled_at)
+            .expect("valid scheduled timestamp")
+            .with_timezone(&Utc)
+            + chrono::Duration::seconds(1);
+        let after_due: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-runs/{run_id}/scheduled-steps/run-due"),
+                json!({"now": due_at}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(after_due["activated_count"], json!(1));
+        assert_eq!(after_due["activated_step_ids"], json!([retry_step_id]));
+
+        let steps_after_due: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let activated = steps_after_due
+            .iter()
+            .find(|step| step["id"] == json!(retry_step_id))
+            .expect("activated retry step");
+        assert_eq!(activated["status"], json!("queued"));
+    }
+
     #[test]
     fn workflow_blocking_failure_keys_use_latest_step_attempt_status() {
         let run_id = Uuid::new_v4();
@@ -50654,6 +51793,7 @@ not json
             tool_call_ids: Vec::new(),
             started_at: None,
             completed_at: workflow_step_status_terminal(status).then_some(created_at),
+            scheduled_at: None,
             created_at,
             updated_at: created_at,
         }
@@ -50945,6 +52085,278 @@ not json
                 && transition["status"] == json!("skipped")
                 && transition["condition_payload"]["actual"]["all"][1]["matched"] == json!(false)
         }));
+    }
+
+    #[tokio::test]
+    async fn workflow_fan_in_any_materializes_after_first_successful_dependency() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Fan in any workflow",
+                    "entrypoint": "fan-in-any-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "source_a", "type": "agent", "start": true},
+                            {"key": "source_b", "type": "agent", "start": true},
+                            {
+                                "key": "join",
+                                "type": "agent",
+                                "depends_on": ["source_a", "source_b"],
+                                "fan_in": {"mode": "any"}
+                            }
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "fan in any"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(steps.len(), 2);
+        let source_a_id = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("source_a"))
+            .and_then(|step| step["id"].as_str())
+            .expect("source_a step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{source_a_id}"),
+                json!({"status": "completed", "output_payload": {"ok": true}}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps_after_join: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let join = steps_after_join
+            .iter()
+            .find(|step| step["step_key"] == json!("join"))
+            .expect("join should materialize after source_a completes");
+        assert_eq!(join["status"], json!("queued"));
+        assert_eq!(join["input_payload"]["fan_in"]["mode"], json!("any"));
+
+        let transitions: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("fan_in")
+                && transition["to_step_key"] == json!("join")
+                && transition["status"] == json!("materialized")
+                && transition["condition_payload"]["mode"] == json!("any")
+                && transition["condition_payload"]["successful_dependencies"] == json!(["source_a"])
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_fan_out_max_parallel_defers_extra_ready_steps() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Fan out capped workflow",
+                    "entrypoint": "fan-out-capped-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "fan_out": {"max_parallel": 1},
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true},
+                            {"key": "worker_a", "type": "agent", "depends_on": ["intake"]},
+                            {"key": "worker_b", "type": "agent", "depends_on": ["intake"]},
+                            {"key": "worker_c", "type": "agent", "depends_on": ["intake"]}
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "fan out cap"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let intake_step_id = steps[0]["id"].as_str().expect("intake step id").to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{intake_step_id}"),
+                json!({"status": "completed"}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps_after_fan_out: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let materialized_workers = steps_after_fan_out
+            .iter()
+            .filter(|step| {
+                matches!(
+                    step["step_key"].as_str(),
+                    Some("worker_a" | "worker_b" | "worker_c")
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(materialized_workers.len(), 1);
+        assert_eq!(materialized_workers[0]["step_key"], json!("worker_a"));
+        assert_eq!(
+            materialized_workers[0]["input_payload"]["fan_out"]["max_parallel"],
+            json!(1)
+        );
+        let worker_a_id = materialized_workers[0]["id"]
+            .as_str()
+            .expect("worker_a step id")
+            .to_string();
+
+        let transitions: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("fan_out")
+                && transition["status"] == json!("deferred")
+                && transition["result_payload"]["deferred_step_key"] == json!("worker_b")
+        }));
+        assert!(transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("fan_out")
+                && transition["status"] == json!("deferred")
+                && transition["result_payload"]["deferred_step_key"] == json!("worker_c")
+        }));
+
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{worker_a_id}"),
+                json!({"status": "completed"}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let steps_after_worker_a: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            steps_after_worker_a
+                .iter()
+                .any(|step| step["step_key"] == json!("worker_b")
+                    && step["status"] == json!("queued"))
+        );
+        assert!(
+            !steps_after_worker_a
+                .iter()
+                .any(|step| step["step_key"] == json!("worker_c"))
+        );
     }
 
     #[tokio::test]
@@ -52625,6 +54037,8 @@ not json
         assert!(names.contains(&"0052_approval_commit_tokens.sql"));
         assert!(names.contains(&"0053_workflow_transitions.sql"));
         assert!(names.contains(&"0054_workflow_pack_bindings.sql"));
+        assert!(names.contains(&"0055_workflow_step_run_schedule.sql"));
+        assert!(names.contains(&"0056_workflow_pack_runtime_objects.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -52675,6 +54089,7 @@ not json
             include_str!("../../../db/migrations/0052_approval_commit_tokens.sql"),
             include_str!("../../../db/migrations/0053_workflow_transitions.sql"),
             include_str!("../../../db/migrations/0054_workflow_pack_bindings.sql"),
+            include_str!("../../../db/migrations/0056_workflow_pack_runtime_objects.sql"),
         ]
         .join("\n");
         assert!(migration.contains("mandoforge_current_tenant_id"));

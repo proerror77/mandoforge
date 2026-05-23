@@ -107,6 +107,7 @@ export type WorkflowStepRun = {
   status: string;
   started_at?: string | null;
   completed_at?: string | null;
+  scheduled_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -140,6 +141,60 @@ export type TaskGrant = {
   external_effects: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+};
+
+export type WorkflowPackBinding = {
+  id: string;
+  installation_id: string;
+  pack_id: string;
+  pack_version: string;
+  binding_type: string;
+  binding_key: string;
+  source_path?: string | null;
+  target_kind: string;
+  target_id?: string | null;
+  status: string;
+  materialized_payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkflowPackRuntimeObject = {
+  id: string;
+  installation_id: string;
+  binding_id: string;
+  pack_id: string;
+  pack_version: string;
+  object_type: string;
+  object_key: string;
+  runtime_kind: string;
+  status: string;
+  spec: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MemoryGovernanceSummary = {
+  status: string;
+  isolation_policy: string;
+  semantic_object_count: number;
+  memory_object_count: number;
+  partition_count: number;
+  partitions: Array<{
+    partition_key: string;
+    object_count: number;
+    memory_object_count: number;
+    human_verified_count: number;
+    unverified_count: number;
+    stale_count: number;
+    shared: boolean;
+  }>;
+  attention_items: Array<{
+    severity: string;
+    kind: string;
+    message: string;
+    partition_key?: string | null;
+  }>;
 };
 
 const ADMIN_TOKEN_KEY = "mandoforge.adminToken";

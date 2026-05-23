@@ -83,8 +83,11 @@ The repository already has the managed runtime kernel:
   `depends_on` / `after` / `needs` dependencies are satisfied, condition-false
   branches become skipped step runs, branch conditions support recursive
   `all` / `any` / `not` predicates with `equals` / `not_equals` / `in` /
-  `not_in` / `exists` leaf checks, failed steps respect `retry.max_attempts`,
-  exhausted failures skip blocked downstream steps and materialize
+  `not_in` / `exists` leaf checks, failed steps respect `retry.max_attempts`
+  plus delayed `retry.delay_seconds` / `retry.backoff_seconds` scheduling,
+  due scheduled retries activate through a run-scoped scheduler API, fan-in
+  supports `all` / `any` / `quorum`, fan-out can cap ready-step materialization
+  with `fan_out.max_parallel`, exhausted failures skip blocked downstream steps and materialize
   `on_failure_of` / `compensates` compensation steps, and the WorkflowRun reaches
   `completed` or `failed` only after terminal graph state is recorded.
 - TaskGrant persistence and APIs, root grant issuance on workflow start, child
@@ -110,11 +113,17 @@ The repository already has the managed runtime kernel:
   manifest objects such as workflows, agents, connectors, policies, evals,
   schemas, skills, profiles, onboarding schemas, and release gates; release,
   rollback, and archive update their binding status.
+- Workflow Pack stage also materializes generic production runtime objects:
+  workflow schedules, connector account handles, and provider deployment
+  handles. These are durable, inspectable runtime objects, while
+  provider-specific validation and transport remain adapter-owned.
 - Native connector commit writes now enforce connector id, operation,
   side-effect class, external effect flag, and exact approval digest binding
   before the approved execution path can mark the call complete.
 - The web console now observes workflow runs, steps, transitions, task grants,
-  workers, approvals, tool calls, artifacts, and session events from live APIs.
+  workers, approvals, tool calls, artifacts, session events, graph nodes,
+  transition filters, pack bindings, pack runtime objects, and memory governance
+  summary data from live APIs.
 
 The main gap is not "can it run a tool". The main gap is "can an installed
 Workflow Pack become an executable, governed, observable workflow graph".
@@ -122,19 +131,21 @@ Workflow Pack become an executable, governed, observable workflow graph".
 Remaining first-class execution gaps:
 
 - Workflow graph scheduling now has the first branch/skip/fail/retry/
-  compensation policy slice plus a recursive branch-expression evaluator. It
-  still needs numeric/time comparisons, delayed retry/backoff scheduling,
-  fan-out/fan-in policy controls, and production rollback/compensation adapters.
-- Pack bindings are materialized as generic durable binding records. Native
-  runtime objects for schedules, connector accounts, and provider-specific
-  deployment handles still need dedicated adapters.
+  compensation policy slice, recursive branch-expression evaluator, delayed
+  retry/backoff scheduling, due activation, fan-in policy, and fan-out
+  max-parallel controls. It still needs numeric/time comparisons and production
+  rollback/compensation adapters.
+- Pack bindings are materialized as generic durable binding records and generic
+  runtime objects for schedules, connector accounts, and provider deployment
+  handles. Provider-specific deployment adapters remain extension points.
 - Native connector enforcement is implemented at the generic
   `native.connector.call` boundary. Production connector adapters still need
   service-specific target validation, rate limits, reconciliation, and rollback
   semantics.
-- Workflow observability is now present in the web console, but richer graph
-  visualization, transition filtering, and pack-binding inspection remain UI
-  follow-ups.
+- Workflow observability is now present in the web console with graph
+  visualization, transition filtering, pack-binding inspection, runtime-object
+  inspection, and memory-governance summary. Deeper graph editing remains a
+  follow-up.
 
 Current boundary status:
 
@@ -144,15 +155,16 @@ Current boundary status:
   filtering, MemoryScope writeback/trust gates, handoff-to-step/grant
   materialization, `step_graph` start-step materialization plus dependency
   advancement, recursive branch condition evaluation, condition-false branch
-  skipping, retry attempt materialization, failure-driven downstream skip,
+  skipping, scheduled retry/backoff and due activation, fan-in/fan-out policy
+  controls, retry attempt materialization, failure-driven downstream skip,
   compensation step materialization, durable transition recording, pack binding
-  materialization, and `ApprovalCommitToken` exact binding for MCP and native
+  materialization, generic pack runtime-object materialization, memory
+  governance summary, and `ApprovalCommitToken` exact binding for MCP and native
   connector commit writes.
 - Clear but only partially enforced now: worker/agent class authority,
-  numeric/time branch expression policy, delayed retry/backoff scheduling,
-  production native connector transport semantics, provider-specific pack binding
-  deployment, production compensation adapters, and advanced workflow
-  observability UI.
+  numeric/time branch expression policy, production native connector transport
+  semantics, provider-specific pack binding deployment, production compensation
+  adapters, and graph authoring/editing UI.
 
 ## Product Object Model
 
@@ -650,9 +662,9 @@ Hourly metrics trigger
 
 The runtime can support these. The first governed slice now exists: workflow
 run objects, task-level grants, connector scopes, approval token binding, and
-workflow UI are in the runtime path. The remaining work is deeper transition
+workflow UI are in the runtime path. The remaining work is numeric/time branch
 policy, production connector adapters, provider-specific pack deployment, and
-rich graph observability.
+production-grade compensation/rollback adapters.
 
 ## Implementation Plan
 
@@ -674,11 +686,13 @@ Acceptance:
 - Status: implemented for definition/run/step persistence, APIs, root grant
   issuance, start-step materialization from `step_graph`, step update API,
   dependency-based graph advancement on step completion, condition-false branch
-  skip records, retry attempt materialization, failure-driven downstream skip,
-  compensation step materialization, recursive branch expressions, and durable
-  `WorkflowTransition` records for start, dependency, branch, retry, skip,
-  compensation, completion, and terminal failure events. Numeric/time expression
-  policy, delayed backoff, and production compensation adapters remain pending.
+  skip records, scheduled retry/backoff materialization and due activation,
+  fan-in `all` / `any` / `quorum`, fan-out `max_parallel`, failure-driven
+  downstream skip, compensation step materialization, recursive branch
+  expressions, and durable `WorkflowTransition` records for start, dependency,
+  fan-in, fan-out, branch, retry, schedule activation, skip, compensation,
+  completion, and terminal failure events. Numeric/time expression policy and
+  production compensation adapters remain pending.
 - Add migrations and store modules for `workflow_definitions`,
   `workflow_runs`, `workflow_step_runs`, and `workflow_transitions`.
 - Add read APIs for workflow run console.
@@ -693,8 +707,10 @@ Acceptance:
 
 - Status: implemented as durable generic `workflow_pack_bindings` for manifest
   objects including workflows, agents, connectors, policies, evals, schemas,
-  skills, profiles, onboarding schemas, and release gates. Dedicated provider
-  deployment handles and schedule adapters remain pending.
+  skills, profiles, onboarding schemas, and release gates. Stage now also
+  creates durable `workflow_pack_runtime_objects` for workflow schedules,
+  connector account handles, and provider deployment handles. Provider-specific
+  adapters remain pending by design.
 - Stage pack into draft AgentVersion, WorkflowDefinition, ConnectorBinding,
   PolicyRevision, EvalSuite, and ScheduleBinding objects.
 - Release activates those bindings.

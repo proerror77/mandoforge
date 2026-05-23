@@ -552,6 +552,103 @@ h1 {
   align-items: center;
 }
 
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.filter-chip {
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: white;
+  color: var(--muted);
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.filter-chip.selected {
+  border-color: var(--black);
+  background: var(--black);
+  color: white;
+}
+
+.graph-console {
+  display: grid;
+  gap: 10px;
+}
+
+.graph-nodes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  gap: 8px;
+}
+
+.graph-node {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 56px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 8px;
+}
+
+.graph-node strong,
+.graph-node span,
+.graph-edges span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-node strong {
+  font-size: 12px;
+}
+
+.graph-node span,
+.graph-edges {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.node-running {
+  border-color: #b8d1ef;
+  background: var(--blue-soft);
+}
+
+.node-queued {
+  border-color: #ecc073;
+  background: var(--amber-soft);
+}
+
+.node-completed {
+  border-color: #9ccfc1;
+  background: var(--green-soft);
+}
+
+.node-failed {
+  border-color: #eba0a7;
+  background: var(--red-soft);
+}
+
+.graph-edges {
+  display: grid;
+  gap: 5px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.runtime-row strong,
+.binding-row strong {
+  font-size: 12px;
+}
+
 .approval-card {
   border: 1px solid #ecc073;
   border-radius: 8px;

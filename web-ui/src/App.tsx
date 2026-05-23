@@ -11,11 +11,14 @@ import {
   type Approval,
   type Artifact,
   type Environment,
+  type MemoryGovernanceSummary,
   type Session,
   type SessionEvent,
   type TaskGrant,
   type ToolCall,
   type WorkerJob,
+  type WorkflowPackBinding,
+  type WorkflowPackRuntimeObject,
   type WorkflowRun,
   type WorkflowStepRun,
   type WorkflowTransition,
@@ -46,6 +49,7 @@ export function App() {
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState("");
   const [task, setTask] = useState(DEFAULT_TASK);
   const [adminTokenInput, setAdminTokenInput] = useState(() => consumeTokenFromHash() || getAdminToken());
+  const [transitionFilter, setTransitionFilter] = useState("all");
 
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api<Agent[]>("/api/agents"), refetchInterval: 5000 });
   const environments = useQuery({ queryKey: ["environments"], queryFn: () => api<Environment[]>("/api/environments"), refetchInterval: 5000 });
@@ -70,6 +74,7 @@ export function App() {
   const selectedRow = rows.find((row) => row.session.id === sessionId);
   const selectedWorkflowRun = selectedRow?.workflowRun;
   const workflowRunId = selectedWorkflowRun?.id ?? "";
+  const packInstallationId = selectedWorkflowRun?.pack_installation_id ?? "";
   const selectedAgent = agents.data?.find((agent) => agent.id === selectedSession?.agent_id) ?? preferredAgent(agents.data ?? []);
   const selectedEnvironment = environments.data?.find((environment) => environment.id === selectedSession?.environment_id) ?? environments.data?.[0];
 
@@ -109,10 +114,31 @@ export function App() {
     enabled: Boolean(workflowRunId),
     refetchInterval: 1500,
   });
+  const workflowPackBindings = useQuery({
+    queryKey: ["workflow-pack-bindings", packInstallationId],
+    queryFn: () => api<WorkflowPackBinding[]>(`/api/workflow-packs/installations/${packInstallationId}/bindings`),
+    enabled: Boolean(packInstallationId),
+    refetchInterval: 3000,
+  });
+  const workflowPackRuntimeObjects = useQuery({
+    queryKey: ["workflow-pack-runtime-objects", packInstallationId],
+    queryFn: () => api<WorkflowPackRuntimeObject[]>(`/api/workflow-packs/installations/${packInstallationId}/runtime-objects`),
+    enabled: Boolean(packInstallationId),
+    refetchInterval: 3000,
+  });
+  const memoryGovernance = useQuery({
+    queryKey: ["memory-governance-summary"],
+    queryFn: () => api<MemoryGovernanceSummary>("/api/memory-governance/summary"),
+    refetchInterval: 5000,
+  });
   const visibleToolCalls = sessionToolCalls.data?.length
     ? sessionToolCalls.data
     : (allToolCalls.data ?? []).filter((call) => call.session_id === sessionId);
   const runtime = runtimeSummary(events.data ?? [], selectedAgent);
+  const transitionTypes = uniqueTransitionTypes(workflowTransitions.data ?? []);
+  const filteredTransitions = transitionFilter === "all"
+    ? (workflowTransitions.data ?? [])
+    : (workflowTransitions.data ?? []).filter((transition) => transition.transition_type === transitionFilter);
 
   const launch = useMutation({
     mutationFn: async () => {
@@ -248,9 +274,16 @@ export function App() {
                 <KeyValue label="Run status" value={selectedWorkflowRun.status} />
                 <KeyValue label="Run ID" value={shortId(selectedWorkflowRun.id)} />
                 <KeyValue label="Definition" value={shortId(selectedWorkflowRun.workflow_definition_id)} />
+                <KeyValue label="Pack" value={shortId(selectedWorkflowRun.pack_installation_id ?? "none")} />
                 <KeyValue label="Root grant" value={shortId(selectedWorkflowRun.root_task_grant_id ?? "none")} />
               </>
             ) : <p className="muted">No workflow run is linked to this session.</p>}
+          </Panel>
+
+          <Panel title="Graph console">
+            {(workflowSteps.data ?? []).length ? (
+              <WorkflowGraph steps={workflowSteps.data ?? []} transitions={workflowTransitions.data ?? []} />
+            ) : <p className="muted">No graph nodes observed.</p>}
           </Panel>
 
           <Panel title="Steps">
@@ -260,9 +293,49 @@ export function App() {
           </Panel>
 
           <Panel title="Transitions">
-            {(workflowTransitions.data ?? []).length ? (workflowTransitions.data ?? []).slice(-8).reverse().map((transition) => (
+            {(workflowTransitions.data ?? []).length ? (
+              <div className="filter-row">
+                {["all", ...transitionTypes].map((type) => (
+                  <button
+                    key={type}
+                    className={transitionFilter === type ? "filter-chip selected" : "filter-chip"}
+                    onClick={() => setTransitionFilter(type)}
+                  >
+                    {type}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {filteredTransitions.length ? filteredTransitions.slice(-10).reverse().map((transition) => (
               <TransitionRow key={transition.id} transition={transition} />
             )) : <p className="muted">No durable transition records yet.</p>}
+          </Panel>
+
+          <Panel title="Pack runtime">
+            {packInstallationId ? (
+              <>
+                {(workflowPackRuntimeObjects.data ?? []).length ? (workflowPackRuntimeObjects.data ?? []).map((object) => (
+                  <RuntimeObjectRow key={object.id} object={object} />
+                )) : <p className="muted">No runtime objects materialized.</p>}
+                {(workflowPackBindings.data ?? []).slice(0, 5).map((binding) => (
+                  <BindingRow key={binding.id} binding={binding} />
+                ))}
+              </>
+            ) : <p className="muted">This workflow is not bound to a pack installation.</p>}
+          </Panel>
+
+          <Panel title="Memory governance">
+            {memoryGovernance.data ? (
+              <>
+                <KeyValue label="Status" value={memoryGovernance.data.status} />
+                <KeyValue label="Isolation" value={memoryGovernance.data.isolation_policy} />
+                <KeyValue label="Memory objects" value={String(memoryGovernance.data.memory_object_count)} />
+                <KeyValue label="Partitions" value={String(memoryGovernance.data.partition_count)} />
+                {memoryGovernance.data.attention_items.slice(0, 3).map((item) => (
+                  <Row key={`${item.kind}-${item.partition_key ?? "global"}`} title={item.kind} detail={`${item.severity} · ${item.message}`} />
+                ))}
+              </>
+            ) : <p className="muted">Memory governance summary is not loaded.</p>}
           </Panel>
 
           <Panel title="Worker">
@@ -416,7 +489,39 @@ function StepRow({ step }: { step: WorkflowStepRun }) {
       <StatusLogo status={statusFromText(step.status)} />
       <div>
         <strong>{step.step_key}</strong>
-        <span>{step.step_type} · {step.status}</span>
+        <span>{step.step_type} · {step.status}{step.scheduled_at ? ` · due ${relativeAge(step.scheduled_at)}` : ""}</span>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowGraph({ steps, transitions }: { steps: WorkflowStepRun[]; transitions: WorkflowTransition[] }) {
+  const transitionByTarget = new Map<string, WorkflowTransition>();
+  for (const transition of transitions) {
+    if (transition.to_step_key) transitionByTarget.set(transition.to_step_key, transition);
+  }
+  return (
+    <div className="graph-console">
+      <div className="graph-nodes">
+        {steps.map((step) => {
+          const inbound = transitionByTarget.get(step.step_key);
+          return (
+            <div key={step.id} className={`graph-node node-${statusFromText(step.status)}`}>
+              <StatusLogo status={statusFromText(step.status)} />
+              <div>
+                <strong>{step.step_key}</strong>
+                <span>{inbound?.transition_type ?? "start"} · {step.status}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="graph-edges">
+        {transitions.slice(-6).map((transition) => (
+          <span key={transition.id}>
+            {(transition.from_step_key ?? "start")} {"->"} {(transition.to_step_key ?? "run")} · {transition.transition_type}/{transition.status}
+          </span>
+        ))}
       </div>
     </div>
   );
@@ -429,6 +534,25 @@ function TransitionRow({ transition }: { transition: WorkflowTransition }) {
     <div className="obs-row transition-row">
       <strong>{transition.transition_type}</strong>
       <span>{from} {"->"} {to} · {transition.status}</span>
+    </div>
+  );
+}
+
+function RuntimeObjectRow({ object }: { object: WorkflowPackRuntimeObject }) {
+  const providerValidation = object.spec?.provider_specific_validation;
+  return (
+    <div className="obs-row runtime-row">
+      <strong>{object.object_type} · {object.status}</strong>
+      <span>{object.object_key} · {typeof providerValidation === "string" ? providerValidation : object.runtime_kind}</span>
+    </div>
+  );
+}
+
+function BindingRow({ binding }: { binding: WorkflowPackBinding }) {
+  return (
+    <div className="obs-row binding-row">
+      <strong>{binding.binding_type} · {binding.binding_key}</strong>
+      <span>{binding.target_kind} · {binding.status}</span>
     </div>
   );
 }
@@ -505,9 +629,13 @@ function hasEvent(events: SessionEvent[], phase: string): boolean {
 function statusFromText(status: string): RowStatus {
   if (status === "completed" || status === "skipped" || status === "consumed") return "completed";
   if (status === "running" || status === "active") return "running";
-  if (status === "queued" || status === "issued" || status === "materialized") return "queued";
+  if (status === "queued" || status === "scheduled" || status === "issued" || status === "materialized" || status === "deferred") return "queued";
   if (status === "failed" || status === "canceled" || status === "denied") return "failed";
   return "idle";
+}
+
+function uniqueTransitionTypes(transitions: WorkflowTransition[]): string[] {
+  return [...new Set(transitions.map((transition) => transition.transition_type))].sort();
 }
 
 function shortId(value: string): string {

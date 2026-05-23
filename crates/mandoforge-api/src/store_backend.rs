@@ -16,7 +16,8 @@ use crate::{
     SessionEvent, SessionLoopJob, SessionThread, Squad, SquadMember, TaskGrant, Team,
     TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment,
     WorkItemReview, WorkflowDefinition, WorkflowPackBinding, WorkflowPackInstallation,
-    WorkflowPackProfileAsset, WorkflowRun, WorkflowStepRun, WorkflowTransition,
+    WorkflowPackProfileAsset, WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun,
+    WorkflowTransition,
 };
 
 #[derive(Default)]
@@ -74,6 +75,7 @@ pub(crate) struct MemoryStore {
     pub(crate) workflow_pack_installations: HashMap<Uuid, WorkflowPackInstallation>,
     pub(crate) workflow_pack_profile_assets: HashMap<Uuid, WorkflowPackProfileAsset>,
     pub(crate) workflow_pack_bindings: HashMap<Uuid, WorkflowPackBinding>,
+    pub(crate) workflow_pack_runtime_objects: HashMap<Uuid, WorkflowPackRuntimeObject>,
     pub(crate) workflow_definitions: HashMap<Uuid, WorkflowDefinition>,
     pub(crate) workflow_runs: HashMap<Uuid, WorkflowRun>,
     pub(crate) workflow_step_runs: HashMap<Uuid, WorkflowStepRun>,

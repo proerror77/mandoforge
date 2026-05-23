@@ -12,8 +12,8 @@ use crate::{
     SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Squad, SquadMember,
     TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry,
     WorkItemAssignment, WorkItemReview, WorkflowDefinition, WorkflowPackBinding,
-    WorkflowPackInstallation, WorkflowPackProfileAsset, WorkflowRun, WorkflowStepRun,
-    WorkflowTransition,
+    WorkflowPackInstallation, WorkflowPackProfileAsset, WorkflowPackRuntimeObject, WorkflowRun,
+    WorkflowStepRun, WorkflowTransition,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
@@ -486,6 +486,25 @@ pub(crate) fn workflow_pack_binding_from_row(row: PgRow) -> Result<WorkflowPackB
     })
 }
 
+pub(crate) fn workflow_pack_runtime_object_from_row(
+    row: PgRow,
+) -> Result<WorkflowPackRuntimeObject, AppError> {
+    Ok(WorkflowPackRuntimeObject {
+        id: row.try_get("id")?,
+        installation_id: row.try_get("installation_id")?,
+        binding_id: row.try_get("binding_id")?,
+        pack_id: row.try_get("pack_id")?,
+        pack_version: row.try_get("pack_version")?,
+        object_type: row.try_get("object_type")?,
+        object_key: row.try_get("object_key")?,
+        runtime_kind: row.try_get("runtime_kind")?,
+        status: row.try_get("status")?,
+        spec: row.try_get("spec")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 pub(crate) fn workflow_definition_from_row(row: PgRow) -> Result<WorkflowDefinition, AppError> {
     let eval_gate_refs: Value = row.try_get("eval_gate_refs")?;
     Ok(WorkflowDefinition {
@@ -556,6 +575,7 @@ pub(crate) fn workflow_step_run_from_row(row: PgRow) -> Result<WorkflowStepRun, 
         tool_call_ids: json_array_from_row(tool_call_ids, "workflow_step_runs.tool_call_ids")?,
         started_at: row.try_get("started_at")?,
         completed_at: row.try_get("completed_at")?,
+        scheduled_at: row.try_get("scheduled_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

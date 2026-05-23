@@ -6,10 +6,11 @@ use uuid::Uuid;
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{
     workflow_pack_binding_from_row, workflow_pack_installation_from_row,
-    workflow_pack_profile_asset_from_row,
+    workflow_pack_profile_asset_from_row, workflow_pack_runtime_object_from_row,
 };
 use crate::{
     AppError, AppState, WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    WorkflowPackRuntimeObject,
 };
 
 impl AppState {
@@ -523,6 +524,157 @@ impl AppState {
                 .await?;
                 rows.into_iter()
                     .map(workflow_pack_binding_from_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_workflow_pack_runtime_objects(
+        &self,
+        objects: Vec<WorkflowPackRuntimeObject>,
+    ) -> Result<Vec<WorkflowPackRuntimeObject>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                for object in store.workflow_pack_runtime_objects.values_mut() {
+                    if objects.first().is_some_and(|new_object| {
+                        object.installation_id == new_object.installation_id
+                    }) {
+                        object.status = "superseded".to_string();
+                        object.updated_at = Utc::now();
+                    }
+                }
+                for object in &objects {
+                    store
+                        .workflow_pack_runtime_objects
+                        .insert(object.id, object.clone());
+                }
+                Ok(objects)
+            }
+            StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                if let Some(first) = objects.first() {
+                    sqlx::query(
+                        "UPDATE workflow_pack_runtime_objects
+                         SET status = 'superseded', updated_at = now()
+                         WHERE tenant_id = $1 AND installation_id = $2",
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(first.installation_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                let mut created = Vec::with_capacity(objects.len());
+                for object in objects {
+                    let row = sqlx::query(
+                        "INSERT INTO workflow_pack_runtime_objects
+                            (id, tenant_id, installation_id, binding_id, pack_id, pack_version, object_type, object_key, runtime_kind, status, spec, created_at, updated_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                         RETURNING id, installation_id, binding_id, pack_id, pack_version, object_type, object_key, runtime_kind, status, spec, created_at, updated_at",
+                    )
+                    .bind(object.id)
+                    .bind(self.current_tenant_id())
+                    .bind(object.installation_id)
+                    .bind(object.binding_id)
+                    .bind(&object.pack_id)
+                    .bind(&object.pack_version)
+                    .bind(&object.object_type)
+                    .bind(&object.object_key)
+                    .bind(&object.runtime_kind)
+                    .bind(&object.status)
+                    .bind(&object.spec)
+                    .bind(object.created_at)
+                    .bind(object.updated_at)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    created.push(workflow_pack_runtime_object_from_row(row)?);
+                }
+                tx.commit().await?;
+                Ok(created)
+            }
+        }
+    }
+
+    pub(crate) async fn list_workflow_pack_runtime_objects(
+        &self,
+        installation_id: Uuid,
+    ) -> Result<Vec<WorkflowPackRuntimeObject>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut objects: Vec<_> = inner
+                    .read()
+                    .await
+                    .workflow_pack_runtime_objects
+                    .values()
+                    .filter(|object| {
+                        object.installation_id == installation_id && object.status != "superseded"
+                    })
+                    .cloned()
+                    .collect();
+                objects.sort_by(|left, right| {
+                    left.object_type
+                        .cmp(&right.object_type)
+                        .then(left.object_key.cmp(&right.object_key))
+                });
+                Ok(objects)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, installation_id, binding_id, pack_id, pack_version, object_type, object_key, runtime_kind, status, spec, created_at, updated_at
+                     FROM workflow_pack_runtime_objects
+                     WHERE tenant_id = $1 AND installation_id = $2 AND status <> 'superseded'
+                     ORDER BY object_type ASC, object_key ASC",
+                )
+                .bind(self.current_tenant_id())
+                .bind(installation_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(workflow_pack_runtime_object_from_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn update_workflow_pack_runtime_object_statuses(
+        &self,
+        installation_id: Uuid,
+        status: &str,
+    ) -> Result<Vec<WorkflowPackRuntimeObject>, AppError> {
+        let updated_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let mut objects = Vec::new();
+                for object in store.workflow_pack_runtime_objects.values_mut() {
+                    if object.installation_id == installation_id && object.status != "superseded" {
+                        object.status = status.to_string();
+                        object.updated_at = updated_at;
+                        objects.push(object.clone());
+                    }
+                }
+                objects.sort_by(|left, right| {
+                    left.object_type
+                        .cmp(&right.object_type)
+                        .then(left.object_key.cmp(&right.object_key))
+                });
+                Ok(objects)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "UPDATE workflow_pack_runtime_objects
+                     SET status = $3, updated_at = $4
+                     WHERE tenant_id = $1 AND installation_id = $2 AND status <> 'superseded'
+                     RETURNING id, installation_id, binding_id, pack_id, pack_version, object_type, object_key, runtime_kind, status, spec, created_at, updated_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(installation_id)
+                .bind(status)
+                .bind(updated_at)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(workflow_pack_runtime_object_from_row)
                     .collect()
             }
         }
