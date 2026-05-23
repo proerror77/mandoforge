@@ -154,8 +154,8 @@ impl ProviderClient for MockProviderClient {
                         "task": task,
                         "sandbox_mode": "workspace-write",
                         "execution_strategy": "app-server",
-                        "poll_attempts": 6,
-                        "poll_interval_ms": 500
+                        "poll_attempts": 120,
+                        "poll_interval_ms": 1000
                     }),
                 }],
                 final_message: None,

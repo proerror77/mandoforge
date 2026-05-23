@@ -2373,7 +2373,7 @@ struct CodexTraceArtifactLineage {
 }
 
 fn default_codex_poll_attempts() -> u32 {
-    3
+    120
 }
 
 fn default_codex_stale_after_seconds() -> u64 {
