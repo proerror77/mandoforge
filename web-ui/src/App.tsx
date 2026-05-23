@@ -13,8 +13,12 @@ import {
   type Environment,
   type Session,
   type SessionEvent,
+  type TaskGrant,
   type ToolCall,
   type WorkerJob,
+  type WorkflowRun,
+  type WorkflowStepRun,
+  type WorkflowTransition,
 } from "./api";
 
 const DEFAULT_TASK =
@@ -25,6 +29,7 @@ type RowStatus = "needs_input" | "running" | "queued" | "completed" | "failed" |
 type SessionRow = {
   session: Session;
   agent?: Agent;
+  workflowRun?: WorkflowRun;
   status: RowStatus;
   label: string;
   detail: string;
@@ -49,6 +54,7 @@ export function App() {
   const executionJobs = useQuery({ queryKey: ["execution-jobs"], queryFn: () => api<WorkerJob[]>("/api/execution-jobs"), refetchInterval: 1500 });
   const sessionLoopJobs = useQuery({ queryKey: ["session-loop-jobs"], queryFn: () => api<WorkerJob[]>("/api/session-loop-jobs"), refetchInterval: 1500 });
   const allToolCalls = useQuery({ queryKey: ["tool-calls"], queryFn: () => api<ToolCall[]>("/api/tool-calls"), refetchInterval: 1800 });
+  const workflowRuns = useQuery({ queryKey: ["workflow-runs"], queryFn: () => api<WorkflowRun[]>("/api/workflow-runs"), refetchInterval: 1600 });
 
   const rows = useMemo(() => buildRows({
     sessions: sessions.data ?? [],
@@ -56,11 +62,14 @@ export function App() {
     approvals: approvals.data ?? [],
     jobs: [...(sessionLoopJobs.data ?? []), ...(executionJobs.data ?? [])],
     toolCalls: allToolCalls.data ?? [],
-  }), [agents.data, allToolCalls.data, approvals.data, executionJobs.data, sessionLoopJobs.data, sessions.data]);
+    workflowRuns: workflowRuns.data ?? [],
+  }), [agents.data, allToolCalls.data, approvals.data, executionJobs.data, sessionLoopJobs.data, sessions.data, workflowRuns.data]);
 
   const selectedSession = rows.find((row) => row.session.id === selectedSessionId)?.session ?? rows[0]?.session;
   const sessionId = selectedSession?.id ?? "";
   const selectedRow = rows.find((row) => row.session.id === sessionId);
+  const selectedWorkflowRun = selectedRow?.workflowRun;
+  const workflowRunId = selectedWorkflowRun?.id ?? "";
   const selectedAgent = agents.data?.find((agent) => agent.id === selectedSession?.agent_id) ?? preferredAgent(agents.data ?? []);
   const selectedEnvironment = environments.data?.find((environment) => environment.id === selectedSession?.environment_id) ?? environments.data?.[0];
 
@@ -81,6 +90,24 @@ export function App() {
     queryFn: () => api<Artifact[]>(`/api/sessions/${sessionId}/artifacts`),
     enabled: Boolean(sessionId),
     refetchInterval: 1200,
+  });
+  const workflowSteps = useQuery({
+    queryKey: ["workflow-steps", workflowRunId],
+    queryFn: () => api<WorkflowStepRun[]>(`/api/workflow-runs/${workflowRunId}/steps`),
+    enabled: Boolean(workflowRunId),
+    refetchInterval: 1200,
+  });
+  const workflowTransitions = useQuery({
+    queryKey: ["workflow-transitions", workflowRunId],
+    queryFn: () => api<WorkflowTransition[]>(`/api/workflow-runs/${workflowRunId}/transitions`),
+    enabled: Boolean(workflowRunId),
+    refetchInterval: 1200,
+  });
+  const workflowTaskGrants = useQuery({
+    queryKey: ["workflow-task-grants", workflowRunId],
+    queryFn: () => api<TaskGrant[]>(`/api/workflow-runs/${workflowRunId}/task-grants`),
+    enabled: Boolean(workflowRunId),
+    refetchInterval: 1500,
   });
   const visibleToolCalls = sessionToolCalls.data?.length
     ? sessionToolCalls.data
@@ -126,6 +153,7 @@ export function App() {
           <Metric label="Running" value={String(activeCount)} tone={activeCount ? "live" : undefined} />
           <Metric label="Needs input" value={String(blockedCount)} tone={blockedCount ? "warn" : undefined} />
           <Metric label="Sessions" value={String(rows.length)} />
+          <Metric label="Workflows" value={String(workflowRuns.data?.length ?? 0)} />
         </div>
       </header>
 
@@ -192,8 +220,8 @@ export function App() {
           </div>
 
           <div className="phase-strip">
-            {["session", "llm", "policy", "tool", "artifact"].map((phase) => (
-              <span key={phase} className={hasEvent(events.data ?? [], phase) ? "phase-on" : ""}>{phase}</span>
+            {["workflow", "session", "llm", "policy", "tool", "artifact"].map((phase) => (
+              <span key={phase} className={hasPhase(events.data ?? [], workflowTransitions.data ?? [], phase) ? "phase-on" : ""}>{phase}</span>
             ))}
           </div>
 
@@ -214,6 +242,29 @@ export function App() {
         </section>
 
         <aside className="observer-panel">
+          <Panel title="Workflow">
+            {selectedWorkflowRun ? (
+              <>
+                <KeyValue label="Run status" value={selectedWorkflowRun.status} />
+                <KeyValue label="Run ID" value={shortId(selectedWorkflowRun.id)} />
+                <KeyValue label="Definition" value={shortId(selectedWorkflowRun.workflow_definition_id)} />
+                <KeyValue label="Root grant" value={shortId(selectedWorkflowRun.root_task_grant_id ?? "none")} />
+              </>
+            ) : <p className="muted">No workflow run is linked to this session.</p>}
+          </Panel>
+
+          <Panel title="Steps">
+            {(workflowSteps.data ?? []).length ? (workflowSteps.data ?? []).map((step) => (
+              <StepRow key={step.id} step={step} />
+            )) : <p className="muted">No workflow steps observed.</p>}
+          </Panel>
+
+          <Panel title="Transitions">
+            {(workflowTransitions.data ?? []).length ? (workflowTransitions.data ?? []).slice(-8).reverse().map((transition) => (
+              <TransitionRow key={transition.id} transition={transition} />
+            )) : <p className="muted">No durable transition records yet.</p>}
+          </Panel>
+
           <Panel title="Worker">
             <KeyValue label="Latest job" value={selectedRow?.latestJob?.reason ?? selectedRow?.latestJob?.tool_name ?? "none"} />
             <KeyValue label="Worker" value={selectedRow?.latestJob?.worker_id ?? "waiting"} />
@@ -239,6 +290,12 @@ export function App() {
                 </article>
               ))
             ) : <p className="muted">No pending approval.</p>}
+          </Panel>
+
+          <Panel title="Grants">
+            {(workflowTaskGrants.data ?? []).length ? (workflowTaskGrants.data ?? []).map((grant) => (
+              <GrantRow key={grant.id} grant={grant} />
+            )) : <p className="muted">No task grant for this session.</p>}
           </Panel>
 
           <Panel title="Tool calls">
@@ -275,10 +332,12 @@ function buildRows(input: {
   approvals: Approval[];
   jobs: WorkerJob[];
   toolCalls: ToolCall[];
+  workflowRuns: WorkflowRun[];
 }): SessionRow[] {
   return [...input.sessions]
     .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
     .map((session) => {
+      const workflowRun = input.workflowRuns.find((run) => run.primary_session_id === session.id);
       const sessionApprovals = input.approvals.filter((approval) => approval.session_id === session.id && approval.status === "pending");
       const jobs = input.jobs
         .filter((job) => job.session_id === session.id)
@@ -289,9 +348,10 @@ function buildRows(input: {
       return {
         session,
         agent: input.agents.find((agent) => agent.id === session.agent_id),
+        workflowRun,
         status,
         label: labelForStatus(status),
-        detail: detailForStatus(status, latestJob, toolCount),
+        detail: detailForStatus(status, latestJob, toolCount, workflowRun),
         latestJob,
         toolCount,
         approvalCount: sessionApprovals.length,
@@ -309,10 +369,11 @@ function deriveRowStatus(session: Session, approvals: Approval[], latestJob: Wor
   return "idle";
 }
 
-function detailForStatus(status: RowStatus, job: WorkerJob | undefined, toolCount: number): string {
+function detailForStatus(status: RowStatus, job: WorkerJob | undefined, toolCount: number, workflowRun?: WorkflowRun): string {
   if (status === "running") return `${job?.worker_id ?? "worker"} processing`;
   if (status === "queued") return "waiting for worker";
   if (status === "needs_input") return "waiting for approval";
+  if (workflowRun) return `workflow ${workflowRun.status}`;
   if (status === "completed") return `${toolCount} tool calls completed`;
   if (status === "failed") return job?.last_error ?? "failed";
   return "ready";
@@ -347,6 +408,39 @@ function KeyValue({ label, value }: { label: string; value: string }) {
 
 function Row({ title, detail }: { title: string; detail: string }) {
   return <div className="obs-row"><strong>{title}</strong><span>{detail}</span></div>;
+}
+
+function StepRow({ step }: { step: WorkflowStepRun }) {
+  return (
+    <div className="obs-row step-row">
+      <StatusLogo status={statusFromText(step.status)} />
+      <div>
+        <strong>{step.step_key}</strong>
+        <span>{step.step_type} · {step.status}</span>
+      </div>
+    </div>
+  );
+}
+
+function TransitionRow({ transition }: { transition: WorkflowTransition }) {
+  const from = transition.from_step_key ?? "start";
+  const to = transition.to_step_key ?? "run";
+  return (
+    <div className="obs-row transition-row">
+      <strong>{transition.transition_type}</strong>
+      <span>{from} {"->"} {to} · {transition.status}</span>
+    </div>
+  );
+}
+
+function GrantRow({ grant }: { grant: TaskGrant }) {
+  const scope = grant.connector_scope?.mode;
+  return (
+    <div className="obs-row">
+      <strong>{grant.agent_class ?? "grant"} · {grant.status}</strong>
+      <span>{grant.risk_level} · {typeof scope === "string" ? scope : "tool scoped"} · {shortId(grant.id)}</span>
+    </div>
+  );
 }
 
 function runtimeSummary(events: SessionEvent[], agent?: Agent): { provider: string; client: string; execution: string } {
@@ -399,8 +493,26 @@ function relativeAge(value: string): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
+function hasPhase(events: SessionEvent[], transitions: WorkflowTransition[], phase: string): boolean {
+  if (phase === "workflow") return transitions.length > 0 || hasEvent(events, "workflow");
+  return hasEvent(events, phase);
+}
+
 function hasEvent(events: SessionEvent[], phase: string): boolean {
   return events.some((event) => event.event_type.startsWith(phase) || event.event_type.includes(phase));
+}
+
+function statusFromText(status: string): RowStatus {
+  if (status === "completed" || status === "skipped" || status === "consumed") return "completed";
+  if (status === "running" || status === "active") return "running";
+  if (status === "queued" || status === "issued" || status === "materialized") return "queued";
+  if (status === "failed" || status === "canceled" || status === "denied") return "failed";
+  return "idle";
+}
+
+function shortId(value: string): string {
+  if (!value || value === "none") return value;
+  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
 }
 
 function eventKind(eventType: string): string {

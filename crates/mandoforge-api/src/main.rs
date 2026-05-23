@@ -1099,6 +1099,23 @@ struct WorkflowPackProfileAsset {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackBinding {
+    id: Uuid,
+    installation_id: Uuid,
+    pack_id: String,
+    pack_version: String,
+    binding_type: String,
+    binding_key: String,
+    source_path: Option<String>,
+    target_kind: String,
+    target_id: Option<Uuid>,
+    status: String,
+    materialized_payload: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowDefinition {
     id: Uuid,
     pack_installation_id: Option<Uuid>,
@@ -1208,6 +1225,21 @@ struct WorkflowStepRun {
     completed_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowTransition {
+    id: Uuid,
+    workflow_run_id: Uuid,
+    from_step_run_id: Option<Uuid>,
+    from_step_key: Option<String>,
+    to_step_run_id: Option<Uuid>,
+    to_step_key: Option<String>,
+    transition_type: String,
+    status: String,
+    condition_payload: Value,
+    result_payload: Value,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5515,6 +5547,10 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/workflow-runs/{id}", get(get_workflow_run_route))
         .route(
+            "/api/workflow-runs/{id}/transitions",
+            get(list_workflow_transitions_route),
+        )
+        .route(
             "/api/workflow-runs/{id}/steps",
             get(list_workflow_step_runs_route).post(create_workflow_step_run_route),
         )
@@ -5834,6 +5870,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-packs/installations/{id}",
             get(get_workflow_pack_installation_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/bindings",
+            get(list_workflow_pack_bindings_route),
         )
         .route(
             "/api/workflow-packs/installations/{id}/stage",
@@ -12351,6 +12391,20 @@ async fn materialize_workflow_graph_start_steps(
             state, definition, run, session, root_grant, graph_step,
         )
         .await?;
+        record_workflow_transition(
+            state,
+            run,
+            None,
+            Some(&step),
+            "start",
+            "materialized",
+            json!({
+                "source": "step_graph_start",
+                "graph_step": graph_step
+            }),
+            empty_json_object(),
+        )
+        .await?;
         materialized.push(step);
     }
     Ok(materialized)
@@ -12690,6 +12744,77 @@ async fn record_workflow_step_run_created(
     Ok(())
 }
 
+async fn record_workflow_transition(
+    state: &AppState,
+    run: &WorkflowRun,
+    from_step: Option<&WorkflowStepRun>,
+    to_step: Option<&WorkflowStepRun>,
+    transition_type: &str,
+    status: &str,
+    condition_payload: Value,
+    result_payload: Value,
+) -> Result<WorkflowTransition, AppError> {
+    let transition_type =
+        require_non_empty(transition_type.to_string(), "workflow transition type")?;
+    let status = require_non_empty(status.to_string(), "workflow transition status")?;
+    let now = Utc::now();
+    let transition = state
+        .create_workflow_transition(WorkflowTransition {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            from_step_run_id: from_step.map(|step| step.id),
+            from_step_key: from_step.map(|step| step.step_key.clone()),
+            to_step_run_id: to_step.map(|step| step.id),
+            to_step_key: to_step.map(|step| step.step_key.clone()),
+            transition_type,
+            status,
+            condition_payload,
+            result_payload,
+            created_at: now,
+        })
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(transition.id),
+            run.primary_session_id,
+            "workflow.transition.created",
+            json!({
+                "workflow_transition_id": transition.id,
+                "workflow_run_id": transition.workflow_run_id,
+                "from_step_run_id": transition.from_step_run_id,
+                "from_step_key": transition.from_step_key,
+                "to_step_run_id": transition.to_step_run_id,
+                "to_step_key": transition.to_step_key,
+                "transition_type": transition.transition_type,
+                "status": transition.status,
+                "condition_payload": transition.condition_payload,
+                "result_payload": transition.result_payload
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(run.primary_session_id),
+            "system",
+            Some(transition.id),
+            "workflow_transition.created",
+            "workflow_transition",
+            Some(transition.id),
+            json!({
+                "workflow_run_id": transition.workflow_run_id,
+                "from_step_run_id": transition.from_step_run_id,
+                "from_step_key": transition.from_step_key,
+                "to_step_run_id": transition.to_step_run_id,
+                "to_step_key": transition.to_step_key,
+                "transition_type": transition.transition_type,
+                "status": transition.status
+            }),
+        ))
+        .await?;
+    Ok(transition)
+}
+
 async fn record_task_grant_checked(
     state: &AppState,
     grant: &TaskGrant,
@@ -12888,15 +13013,14 @@ async fn enforce_task_grant_for_tool_invocation(
         .await?;
         return Err(AppError::forbidden(reason));
     }
-    if tool_name == "mcp.call" && !task_grant_allows_mcp_call(&grant, &input.args) {
-        let reason = "task grant connector scope does not allow MCP call";
+    if let Some(reason) = task_grant_connector_invocation_denial(&grant, tool_name, &input.args)? {
         record_task_grant_denied(
             state,
             input.session_id,
             Some(&grant),
             Some(run.id),
             tool_name,
-            reason,
+            &reason,
         )
         .await?;
         return Err(AppError::forbidden(reason));
@@ -12986,28 +13110,157 @@ fn task_grant_allows_tool(grant: &TaskGrant, tool_name: &str) -> bool {
         .any(|key| json_string_array_contains(grant.tool_scope.get(*key), tool_name))
 }
 
-fn task_grant_allows_mcp_call(grant: &TaskGrant, args: &Value) -> bool {
-    let server = args
-        .get("server")
+fn task_grant_connector_invocation_denial(
+    grant: &TaskGrant,
+    tool_name: &str,
+    args: &Value,
+) -> Result<Option<String>, AppError> {
+    if tool_name == "mcp.call" {
+        return task_grant_mcp_call_denial(grant, args);
+    }
+    if !native_connector_invocation_requested(tool_name, args) {
+        return Ok(None);
+    }
+    let target = native_connector_call_target(args)?;
+    let mode = grant
+        .connector_scope
+        .get("mode")
         .and_then(Value::as_str)
-        .map(str::trim)
         .unwrap_or_default();
-    let tool = args
-        .get("tool")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
+    if mode != "commit_write" {
+        return Ok(Some(
+            "native connector side effects require commit_write connector scope".to_string(),
+        ));
+    }
+    if !json_string_array_contains(
+        grant.connector_scope.get("allowed_connector_ids"),
+        &target.connector_id,
+    ) {
+        return Ok(Some(
+            "task grant connector scope does not allow native connector id".to_string(),
+        ));
+    }
+    if !json_string_array_contains(
+        grant.connector_scope.get("allowed_tool_names"),
+        &target.operation,
+    ) && !json_string_array_contains(grant.connector_scope.get("allowed_tool_names"), tool_name)
+    {
+        return Ok(Some(
+            "task grant connector scope does not allow native connector operation".to_string(),
+        ));
+    }
+    if !task_grant_allows_side_effect_class(grant, &target.side_effect_class) {
+        return Ok(Some(format!(
+            "task grant side effect class {} is not allowed",
+            target.side_effect_class
+        )));
+    }
+    Ok(None)
+}
+
+fn task_grant_mcp_call_denial(grant: &TaskGrant, args: &Value) -> Result<Option<String>, AppError> {
+    let request: McpCallRequest = serde_json::from_value(args.clone())?;
+    let server = request.server.trim();
+    let tool = request.tool.trim();
     if server.is_empty() || tool.is_empty() {
-        return false;
+        return Ok(Some(
+            "task grant connector scope requires MCP server and tool".to_string(),
+        ));
     }
     let mode = grant
         .connector_scope
         .get("mode")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    matches!(mode, "read_only" | "draft_write" | "commit_write")
-        && json_string_array_contains(grant.connector_scope.get("allowed_connector_ids"), server)
-        && json_string_array_contains(grant.connector_scope.get("allowed_tool_names"), tool)
+    if !matches!(mode, "read_only" | "draft_write" | "commit_write") {
+        return Ok(Some(
+            "task grant connector scope does not allow MCP call mode".to_string(),
+        ));
+    }
+    if !json_string_array_contains(grant.connector_scope.get("allowed_connector_ids"), server) {
+        return Ok(Some(
+            "task grant connector scope does not allow MCP server".to_string(),
+        ));
+    }
+    if !json_string_array_contains(grant.connector_scope.get("allowed_tool_names"), tool) {
+        return Ok(Some(
+            "task grant connector scope does not allow MCP tool".to_string(),
+        ));
+    }
+    if let Some(side_effect_class) = request
+        .args
+        .get("side_effect_class")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !task_grant_allows_side_effect_class(grant, side_effect_class) {
+            return Ok(Some(format!(
+                "task grant side effect class {} is not allowed",
+                side_effect_class
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn task_grant_allows_side_effect_class(grant: &TaskGrant, side_effect_class: &str) -> bool {
+    json_string_array_contains(
+        grant.connector_scope.get("side_effect_classes"),
+        side_effect_class,
+    ) && grant
+        .external_effects
+        .get(side_effect_class)
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+fn native_connector_invocation_requested(tool_name: &str, args: &Value) -> bool {
+    tool_name == "native.connector.call"
+        || args.get("connector_id").is_some()
+        || args.get("connector").is_some()
+}
+
+#[derive(Debug, Clone)]
+struct NativeConnectorCallTarget {
+    connector_id: String,
+    operation: String,
+    side_effect_class: String,
+}
+
+fn native_connector_call_target(args: &Value) -> Result<NativeConnectorCallTarget, AppError> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| AppError::bad_request("native connector args must be a JSON object"))?;
+    let connector_id = object
+        .get("connector_id")
+        .or_else(|| object.get("connector"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("native connector call requires connector_id"))?
+        .to_string();
+    let operation = object
+        .get("operation")
+        .or_else(|| object.get("tool"))
+        .or_else(|| object.get("action"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("native connector call requires operation"))?
+        .to_string();
+    let side_effect_class = object
+        .get("side_effect_class")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("native connector call requires side_effect_class"))?
+        .to_string();
+    Ok(NativeConnectorCallTarget {
+        connector_id,
+        operation,
+        side_effect_class,
+    })
 }
 
 async fn list_workflow_step_runs_route(
@@ -13025,6 +13278,23 @@ async fn list_workflow_step_runs_route(
     )
     .await?;
     Ok(Json(state.list_workflow_step_runs(id).await?))
+}
+
+async fn list_workflow_transitions_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkflowTransition>>, AppError> {
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(state.list_workflow_transitions(id).await?))
 }
 
 async fn create_workflow_step_run_route(
@@ -13276,13 +13546,55 @@ async fn advance_workflow_graph_after_step_update(
     let existing_steps = state.list_workflow_step_runs(run.id).await?;
     let ready_steps = workflow_graph_ready_steps(&definition.step_graph, &existing_steps)?;
     for graph_step in ready_steps {
-        materialize_workflow_graph_step(state, &definition, run, &session, &root_grant, graph_step)
-            .await?;
+        let materialized = materialize_workflow_graph_step(
+            state,
+            &definition,
+            run,
+            &session,
+            &root_grant,
+            graph_step,
+        )
+        .await?;
+        record_workflow_transition(
+            state,
+            run,
+            Some(step),
+            Some(&materialized),
+            "dependency",
+            "materialized",
+            json!({
+                "source": "step_graph_dependency",
+                "dependencies": workflow_graph_step_dependencies(graph_step)?,
+                "graph_step": graph_step
+            }),
+            empty_json_object(),
+        )
+        .await?;
     }
 
     let current_run = state.get_workflow_run(run.id).await?;
     if workflow_graph_run_completed(state, &definition, &current_run).await? {
-        update_workflow_run_status_and_record(state, &current_run, "completed").await?;
+        let updated =
+            update_workflow_run_status_and_record(state, &current_run, "completed").await?;
+        record_workflow_transition(
+            state,
+            &updated,
+            Some(step),
+            None,
+            "complete",
+            "completed",
+            json!({
+                "source": "step_graph_complete",
+                "graph_keys": workflow_graph_step_keys(&definition.step_graph)?
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            }),
+            json!({
+                "workflow_status": updated.status,
+                "completed_at": updated.completed_at
+            }),
+        )
+        .await?;
     } else {
         update_workflow_run_status_and_record(state, &current_run, "running").await?;
     }
@@ -13545,6 +13857,23 @@ async fn get_workflow_pack_installation_route(
     Ok(Json(state.get_workflow_pack_installation(id).await?))
 }
 
+async fn list_workflow_pack_bindings_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkflowPackBinding>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    state.get_workflow_pack_installation(id).await?;
+    Ok(Json(state.list_workflow_pack_bindings(id).await?))
+}
+
 async fn install_workflow_pack_route(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -13614,6 +13943,8 @@ async fn stage_workflow_pack_installation_route(
             "only installed workflow packs can be staged",
         ));
     }
+    let profile_assets = state.list_workflow_pack_profile_assets(id).await?;
+    let bindings = workflow_pack_materialized_bindings(&current, &profile_assets, "staged")?;
     let staged_at = Utc::now();
     let installation = state
         .update_workflow_pack_installation_state(
@@ -13626,11 +13957,25 @@ async fn stage_workflow_pack_installation_route(
             current.released_at,
         )
         .await?;
+    let bindings = state.create_workflow_pack_bindings(bindings).await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
         "workflow_pack.staged",
         json!({"reason": input.reason}),
+    )
+    .await?;
+    record_workflow_pack_installation_audit(
+        &state,
+        &installation,
+        "workflow_pack.bindings_materialized",
+        json!({
+            "binding_count": bindings.len(),
+            "binding_types": bindings
+                .iter()
+                .map(|binding| binding.binding_type.clone())
+                .collect::<BTreeSet<_>>(),
+        }),
     )
     .await?;
     Ok(Json(installation))
@@ -13925,6 +14270,9 @@ async fn release_workflow_pack_installation_route(
             Some(released_at),
         )
         .await?;
+    let released_bindings = state
+        .update_workflow_pack_binding_statuses(id, "released")
+        .await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -13933,6 +14281,7 @@ async fn release_workflow_pack_installation_route(
             "eval_gate_status": installation.eval_gate_status,
             "release_gate_status": installation.release_gate_status,
             "gate_evidence": installation.gate_evidence,
+            "binding_count": released_bindings.len(),
         }),
     )
     .await?;
@@ -13985,6 +14334,9 @@ async fn rollback_workflow_pack_installation_route(
             current.released_at,
         )
         .await?;
+    state
+        .update_workflow_pack_binding_statuses(id, "rolled_back")
+        .await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -14023,6 +14375,9 @@ async fn archive_workflow_pack_installation_route(
         ));
     }
     let installation = state.archive_workflow_pack_installation(id).await?;
+    state
+        .update_workflow_pack_binding_statuses(id, "archived")
+        .await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -14310,6 +14665,256 @@ fn workflow_pack_default_profile_assets(
             Ok((profile_id.clone(), content))
         })
         .collect()
+}
+
+fn workflow_pack_materialized_bindings(
+    installation: &WorkflowPackInstallation,
+    profile_assets: &[WorkflowPackProfileAsset],
+    status: &str,
+) -> Result<Vec<WorkflowPackBinding>, AppError> {
+    let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
+    let now = Utc::now();
+    let mut bindings = Vec::new();
+
+    for workflow in &manifest.workflows {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "workflow",
+            &workflow.id,
+            Some(&workflow.path),
+            "workflow_definition",
+            status,
+            json!({
+                "entry_agent": workflow.entry_agent,
+                "source_digest": workflow_pack_source_digest(&package_dir, &workflow.path)?,
+            }),
+            now,
+        ));
+    }
+    for agent in &manifest.agents {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "agent",
+            &agent.id,
+            Some(&agent.path),
+            "agent_version",
+            status,
+            json!({
+                "role": &agent.role,
+                "tool_scope": &agent.tool_scope,
+                "handoffs": &agent.handoffs,
+                "source_digest": workflow_pack_source_digest(&package_dir, &agent.path)?,
+            }),
+            now,
+        ));
+    }
+    for connector in &manifest.connectors {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "connector",
+            &connector.id,
+            Some(&connector.path),
+            "connector_definition",
+            status,
+            json!({
+                "kind": &connector.kind,
+                "required_permissions": &connector.required_permissions,
+                "writes_enabled": connector.writes.enabled,
+                "write_approval_required": connector.writes.approval_required,
+                "provenance_required": connector.provenance.required,
+                "tenant_scope": &connector.tenant_scope,
+                "prompt_injection_boundary": &connector.prompt_injection_boundary,
+                "data_quality": &connector.data_quality,
+                "source_digest": workflow_pack_source_digest(&package_dir, &connector.path)?,
+            }),
+            now,
+        ));
+    }
+    for policy in &manifest.policies {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "policy",
+            &policy.id,
+            Some(&policy.path),
+            "policy_revision",
+            status,
+            json!({
+                "required": policy.required,
+                "source_digest": workflow_pack_source_digest(&package_dir, &policy.path)?,
+            }),
+            now,
+        ));
+    }
+    for eval in &manifest.evals {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "eval",
+            &eval.id,
+            Some(&eval.path),
+            "eval_suite",
+            status,
+            json!({
+                "gate": &eval.gate,
+                "source_digest": workflow_pack_source_digest(&package_dir, &eval.path)?,
+            }),
+            now,
+        ));
+    }
+    for schema in &manifest.schemas {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "schema",
+            &schema.id,
+            Some(&schema.path),
+            "schema_contract",
+            status,
+            json!({
+                "required": schema.required,
+                "source_digest": workflow_pack_source_digest(&package_dir, &schema.path)?,
+            }),
+            now,
+        ));
+    }
+    for skill in &manifest.skills {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "skill",
+            &skill.id,
+            Some(&skill.path),
+            "skill_package",
+            status,
+            json!({
+                "required": skill.required,
+                "source_digest": workflow_pack_source_digest(&package_dir, &skill.path)?,
+            }),
+            now,
+        ));
+    }
+    for profile in &manifest.profiles {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "profile",
+            &profile.id,
+            Some(&profile.path),
+            "profile_template",
+            status,
+            json!({
+                "required": profile.required,
+                "source_digest": workflow_pack_source_digest(&package_dir, &profile.path)?,
+            }),
+            now,
+        ));
+    }
+    if let Some(onboarding) = &manifest.onboarding {
+        let profiles_by_id = manifest
+            .profiles
+            .iter()
+            .map(|profile| (profile.id.as_str(), profile))
+            .collect::<HashMap<_, _>>();
+        let assets_by_id = profile_assets
+            .iter()
+            .map(|asset| (asset.profile_id.as_str(), asset))
+            .collect::<HashMap<_, _>>();
+        for profile_id in &onboarding.required_profiles {
+            let profile_ref = profiles_by_id.get(profile_id.as_str());
+            let asset = assets_by_id.get(profile_id.as_str());
+            let source_path = profile_ref.map(|profile| profile.path.as_str());
+            let source_digest = source_path
+                .map(|path| workflow_pack_source_digest(&package_dir, path))
+                .transpose()?;
+            bindings.push(new_workflow_pack_binding(
+                installation,
+                "profile_requirement",
+                profile_id,
+                source_path,
+                "workflow_pack_profile_asset",
+                status,
+                json!({
+                    "onboarding_required": true,
+                    "workflow": onboarding.workflow,
+                    "eval": onboarding.eval,
+                    "profile_asset_id": asset.map(|asset| asset.id),
+                    "profile_asset_version": asset.map(|asset| asset.version),
+                    "source_digest": source_digest,
+                }),
+                now,
+            ));
+        }
+        for schema in &onboarding.profile_schemas {
+            bindings.push(new_workflow_pack_binding(
+                installation,
+                "onboarding_schema",
+                &schema.id,
+                Some(&schema.path),
+                "schema_contract",
+                status,
+                json!({
+                    "required": schema.required,
+                    "workflow": onboarding.workflow,
+                    "source_digest": workflow_pack_source_digest(&package_dir, &schema.path)?,
+                }),
+                now,
+            ));
+        }
+    }
+    for gate in &manifest.release_gates {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "release_gate",
+            &gate.id,
+            None,
+            "release_gate",
+            status,
+            json!({
+                "gate_type": gate.gate_type,
+                "required": gate.required,
+            }),
+            now,
+        ));
+    }
+
+    bindings.sort_by(|left, right| {
+        left.binding_type
+            .cmp(&right.binding_type)
+            .then(left.binding_key.cmp(&right.binding_key))
+    });
+    Ok(bindings)
+}
+
+fn new_workflow_pack_binding(
+    installation: &WorkflowPackInstallation,
+    binding_type: &str,
+    binding_key: &str,
+    source_path: Option<&str>,
+    target_kind: &str,
+    status: &str,
+    materialized_payload: Value,
+    now: DateTime<Utc>,
+) -> WorkflowPackBinding {
+    WorkflowPackBinding {
+        id: Uuid::new_v4(),
+        installation_id: installation.id,
+        pack_id: installation.pack_id.clone(),
+        pack_version: installation.version.clone(),
+        binding_type: binding_type.to_string(),
+        binding_key: binding_key.to_string(),
+        source_path: source_path.map(ToString::to_string),
+        target_kind: target_kind.to_string(),
+        target_id: None,
+        status: status.to_string(),
+        materialized_payload,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn workflow_pack_source_digest(
+    package_dir: &FsPath,
+    source_path: &str,
+) -> Result<String, AppError> {
+    let content = std::fs::read_to_string(package_dir.join(source_path))
+        .with_context(|| format!("read workflow pack source {}", source_path))?;
+    Ok(normalized_json_sha256(&json!(content)))
 }
 
 fn validate_workflow_pack_profile_assets_input(
@@ -17501,6 +18106,11 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
             risk: "high",
             description: "Run an allowlisted coding-agent CLI profile in a session workspace",
         },
+        ToolDescriptor {
+            name: "native.connector.call",
+            risk: "high",
+            description: "Commit a native connector side effect through scoped approval-token binding",
+        },
     ]);
     descriptors.sort_by_key(|descriptor| descriptor.name);
     descriptors
@@ -17782,8 +18392,10 @@ pub(crate) fn task_grant_requires_approval_commit_token(
     grant: &TaskGrant,
     tool_name: &str,
 ) -> bool {
-    tool_name == "mcp.call"
-        && grant.connector_scope.get("mode").and_then(Value::as_str) == Some("commit_write")
+    grant.connector_scope.get("mode").and_then(Value::as_str) == Some("commit_write")
+        && (tool_name == "mcp.call"
+            || native_connector_tool_name(tool_name)
+            || json_string_array_contains(grant.tool_scope.get("external_write"), tool_name))
 }
 
 fn approval_commit_binding_for_invocation(
@@ -17797,15 +18409,16 @@ fn approval_commit_binding_for_invocation(
     if !task_grant_requires_approval_commit_token(grant, tool_name) {
         return Ok(None);
     }
-    approval_commit_binding_for_mcp_args(args).map(Some)
+    Ok(Some(approval_commit_binding_for_args(tool_name, args)?))
 }
 
-pub(crate) fn approval_commit_binding_for_mcp_args(
+fn approval_commit_binding_for_args(
+    tool_name: &str,
     args: &Value,
 ) -> Result<ApprovalCommitBinding, AppError> {
     Ok(ApprovalCommitBinding {
         normalized_args_hash: normalized_json_sha256(args),
-        target_binding: mcp_call_target_binding(args)?,
+        target_binding: connector_target_binding(tool_name, args)?,
     })
 }
 
@@ -17867,6 +18480,68 @@ fn mcp_call_target_binding(args: &Value) -> Result<Value, AppError> {
     Ok(Value::Object(binding))
 }
 
+fn connector_target_binding(tool_name: &str, args: &Value) -> Result<Value, AppError> {
+    if tool_name == "mcp.call" {
+        return mcp_call_target_binding(args);
+    }
+    native_connector_target_binding(tool_name, args)
+}
+
+fn native_connector_tool_name(tool_name: &str) -> bool {
+    tool_name == "native.connector.call" || tool_name.starts_with("native.")
+}
+
+fn native_connector_target_binding(tool_name: &str, args: &Value) -> Result<Value, AppError> {
+    let target = native_connector_call_target(args)?;
+    let object = args
+        .as_object()
+        .ok_or_else(|| AppError::bad_request("native connector args must be a JSON object"))?;
+    let payload = object.get("payload").unwrap_or(args);
+    let mut binding = serde_json::Map::new();
+    binding.insert("tool".to_string(), json!(tool_name));
+    binding.insert("connector_id".to_string(), json!(target.connector_id));
+    binding.insert("operation".to_string(), json!(target.operation));
+    binding.insert(
+        "side_effect_class".to_string(),
+        json!(target.side_effect_class),
+    );
+    binding.insert(
+        "payload_digest".to_string(),
+        json!(normalized_json_sha256(payload)),
+    );
+    for key in [
+        "account",
+        "resource_id",
+        "campaign_id",
+        "ad_account_id",
+        "amount",
+        "amount_usd",
+        "currency",
+        "spend_limit",
+        "spend_limit_usd",
+        "context_packet_id",
+    ] {
+        if let Some(value) = object.get(key) {
+            binding.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(content_digest) = object.get("content_digest") {
+        binding.insert("content_digest".to_string(), content_digest.clone());
+    } else if let Some(content) = payload.as_object().and_then(|payload| {
+        [
+            "content", "body", "text", "message", "post", "creative", "caption",
+        ]
+        .iter()
+        .find_map(|key| payload.get(*key))
+    }) {
+        binding.insert(
+            "content_digest".to_string(),
+            json!(normalized_json_sha256(content)),
+        );
+    }
+    Ok(Value::Object(binding))
+}
+
 async fn refresh_tool_call_commit_binding_if_required(
     state: &AppState,
     tool_call: ToolCall,
@@ -17878,7 +18553,7 @@ async fn refresh_tool_call_commit_binding_if_required(
     if !task_grant_requires_approval_commit_token(&grant, &tool_call.tool_name) {
         return Ok(tool_call);
     }
-    let binding = approval_commit_binding_for_mcp_args(&tool_call.args)?;
+    let binding = approval_commit_binding_for_args(&tool_call.tool_name, &tool_call.args)?;
     state
         .update_tool_call_commit_binding(
             tool_call.id,
@@ -17905,7 +18580,8 @@ async fn execute_tool_invocation(
         policy_decision.decision = "requires_approval";
         policy_decision.risk_level = "critical".to_string();
         policy_decision.reason =
-            "mcp.call commit_write requires ApprovalCommitToken exact digest binding".to_string();
+            "commit_write connector calls require ApprovalCommitToken exact digest binding"
+                .to_string();
     }
     let session = state.get_session(input.session_id).await?;
     let agent = state.get_agent(session.agent_id).await?;
@@ -18813,10 +19489,13 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "manager_agent_plans",
         "workflow_pack_installations",
         "workflow_pack_profile_assets",
+        "workflow_pack_bindings",
         "workflow_definitions",
         "workflow_runs",
         "workflow_step_runs",
+        "workflow_transitions",
         "task_grants",
+        "approval_commit_tokens",
         "agent_runtime_profiles",
         "environments",
         "mcp_servers",
@@ -41843,7 +42522,7 @@ async fn maybe_issue_approval_commit_token(
     {
         return Ok(None);
     }
-    let binding = approval_commit_binding_for_mcp_args(&tool_call.args)?;
+    let binding = approval_commit_binding_for_args(&tool_call.tool_name, &tool_call.args)?;
     if tool_call.normalized_args_hash.as_deref() != Some(binding.normalized_args_hash.as_str())
         || tool_call.target_binding != binding.target_binding
     {
@@ -41958,12 +42637,12 @@ pub(crate) async fn consume_valid_approval_commit_token_for_tool_call(
             "approval commit token is only valid for commit_write effects",
         ));
     }
-    if tool_call.tool_name == "mcp.call" && !task_grant_allows_mcp_call(&grant, &tool_call.args) {
-        return Err(AppError::forbidden(
-            "task grant connector scope does not allow MCP call",
-        ));
+    if let Some(reason) =
+        task_grant_connector_invocation_denial(&grant, &tool_call.tool_name, &tool_call.args)?
+    {
+        return Err(AppError::forbidden(reason));
     }
-    let binding = approval_commit_binding_for_mcp_args(&tool_call.args)?;
+    let binding = approval_commit_binding_for_args(&tool_call.tool_name, &tool_call.args)?;
     if token.normalized_args_hash != binding.normalized_args_hash
         || token.target_binding != binding.target_binding
     {
@@ -48244,6 +48923,49 @@ not json
         .await;
         assert_eq!(staged.status, "staged");
         assert!(staged.staged_at.is_some());
+        let staged_bindings: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}/bindings",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(staged_bindings.iter().any(|binding| {
+            binding["binding_type"] == json!("workflow")
+                && binding["binding_key"] == json!("profile-onboarding")
+                && binding["target_kind"] == json!("workflow_definition")
+                && binding["status"] == json!("staged")
+                && binding["source_path"] == json!("workflows/profile-onboarding.workflow.yaml")
+                && binding["materialized_payload"]["entry_agent"] == json!("reader")
+                && binding["materialized_payload"]["source_digest"]
+                    .as_str()
+                    .is_some_and(|digest| digest.starts_with("sha256:"))
+        }));
+        assert!(staged_bindings.iter().any(|binding| {
+            binding["binding_type"] == json!("agent")
+                && binding["binding_key"] == json!("reader")
+                && binding["target_kind"] == json!("agent_version")
+                && binding["status"] == json!("staged")
+                && binding["materialized_payload"]["role"] == json!("reader")
+        }));
+        assert!(staged_bindings.iter().any(|binding| {
+            binding["binding_type"] == json!("connector")
+                && binding["binding_key"] == json!("knowledge-base")
+                && binding["target_kind"] == json!("connector_definition")
+                && binding["materialized_payload"]["kind"] == json!("mcp")
+                && binding["materialized_payload"]["writes_enabled"] == json!(false)
+        }));
+        assert!(staged_bindings.iter().any(|binding| {
+            binding["binding_type"] == json!("profile_requirement")
+                && binding["binding_key"] == json!("company")
+                && binding["target_kind"] == json!("workflow_pack_profile_asset")
+                && binding["materialized_payload"]["onboarding_required"] == json!(true)
+        }));
 
         let (status, error) = request_value(
             app.clone(),
@@ -48287,6 +49009,24 @@ not json
         assert_eq!(released.eval_gate_status, "passed");
         assert_eq!(released.release_gate_status, "passed");
         assert!(released.released_at.is_some());
+        let released_bindings: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}/bindings",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(!released_bindings.is_empty());
+        assert!(
+            released_bindings
+                .iter()
+                .all(|binding| binding["status"] == json!("released"))
+        );
         assert_eq!(
             released.gate_evidence["evidence"]["eval_run_id"],
             json!("eval-ai-governance-1")
@@ -48456,6 +49196,7 @@ not json
             "workflow_pack.released",
             "workflow_pack.rolled_back",
             "workflow_pack.archived",
+            "workflow_pack.bindings_materialized",
         ] {
             assert!(
                 audit_logs
@@ -48715,6 +49456,23 @@ not json
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0]["step_key"], json!("intake"));
         let intake_step_id = steps[0]["id"].as_str().expect("intake step id").to_string();
+        let start_transitions: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(start_transitions.len(), 1);
+        assert_eq!(start_transitions[0]["transition_type"], json!("start"));
+        assert_eq!(start_transitions[0]["status"], json!("materialized"));
+        assert_eq!(start_transitions[0]["to_step_key"], json!("intake"));
+        assert_eq!(
+            start_transitions[0]["to_step_run_id"],
+            json!(intake_step_id)
+        );
 
         let completed_intake: Value = request_json(
             app.clone(),
@@ -48758,6 +49516,23 @@ not json
             .and_then(Value::as_str)
             .expect("research step id")
             .to_string();
+        let dependency_transitions: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(dependency_transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("dependency")
+                && transition["from_step_run_id"] == json!(intake_step_id)
+                && transition["from_step_key"] == json!("intake")
+                && transition["to_step_run_id"] == json!(research_step_id)
+                && transition["to_step_key"] == json!("research")
+                && transition["condition_payload"]["dependencies"] == json!(["intake"])
+        }));
         let _: Value = request_json(
             app.clone(),
             json_request_with_headers(
@@ -48818,7 +49593,7 @@ not json
         assert!(completed_run["completed_at"].as_str().is_some());
 
         let events: Vec<SessionEvent> = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri(format!(
                     "/api/sessions/{}/events",
@@ -48835,6 +49610,21 @@ not json
         assert!(events.iter().any(|event| {
             event.event_type == "workflow.run.completed"
                 && event.payload["workflow_run_id"] == completed_run["id"]
+        }));
+        let final_transitions: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(final_transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("complete")
+                && transition["from_step_run_id"] == json!(draft_step_id)
+                && transition["from_step_key"] == json!("draft")
+                && transition["status"] == json!("completed")
         }));
     }
 
@@ -50513,6 +51303,9 @@ not json
         assert!(names.contains(&"0042_session_managed_statuses.sql"));
         assert!(names.contains(&"0050_managed_workflows.sql"));
         assert!(names.contains(&"0051_task_grants.sql"));
+        assert!(names.contains(&"0052_approval_commit_tokens.sql"));
+        assert!(names.contains(&"0053_workflow_transitions.sql"));
+        assert!(names.contains(&"0054_workflow_pack_bindings.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -50542,8 +51335,7 @@ not json
 
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
-        let migration = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        let migration = [
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
@@ -50560,8 +51352,12 @@ not json
             include_str!("../../../db/migrations/0039_session_loop_jobs.sql"),
             include_str!("../../../db/migrations/0040_session_threads.sql"),
             include_str!("../../../db/migrations/0050_managed_workflows.sql"),
-            include_str!("../../../db/migrations/0051_task_grants.sql")
-        );
+            include_str!("../../../db/migrations/0051_task_grants.sql"),
+            include_str!("../../../db/migrations/0052_approval_commit_tokens.sql"),
+            include_str!("../../../db/migrations/0053_workflow_transitions.sql"),
+            include_str!("../../../db/migrations/0054_workflow_pack_bindings.sql"),
+        ]
+        .join("\n");
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
         for table in tenant_isolation_tracked_tables() {
@@ -64847,6 +65643,333 @@ not json
             mcp_client.requests.lock().await.len(),
             1,
             "gateway should not be called after connector scope is revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_binding() {
+        let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+        let organization = state
+            .create_organization(
+                CreateOrganization {
+                    name: "Native Connector Org".to_string(),
+                    slug: "native-connector-org".to_string(),
+                },
+                Some("admin-1".to_string()),
+            )
+            .await
+            .expect("create org");
+        let team = state
+            .create_team(
+                organization.id,
+                CreateTeam {
+                    name: "Native Connector Team".to_string(),
+                    slug: "native-connector-team".to_string(),
+                },
+            )
+            .await
+            .expect("create team");
+        state
+            .create_provider_access(
+                team.id,
+                CreateProviderAccess {
+                    provider_name: "openai-compatible".to_string(),
+                    model_allowlist: vec!["gpt-5.4-mini".to_string()],
+                },
+            )
+            .await
+            .expect("create provider access");
+        let agent = state
+            .create_agent(CreateAgent {
+                name: "Native Connector Agent".to_string(),
+                kind: "orchestrator".to_string(),
+                provider: "openai-compatible".to_string(),
+                model: "gpt-5.4-mini".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                runtime_profile_id: None,
+                agent_role: "manager".to_string(),
+                system_prompt: "Use native connectors only through commit tokens.".to_string(),
+                runtime_config: json!({}),
+                tools: vec!["native.connector.call".to_string()],
+                tool_policy: json!({
+                    "approval_required": [
+                        {"tool": "native.connector.call", "risk": "critical"}
+                    ]
+                }),
+                mcp_server_ids: vec![],
+                skill_ids: vec![],
+                workflow_pack_ids: vec![],
+                remote_computer_profile: json!({}),
+                semantic_scopes: json!({}),
+                release_state: "draft".to_string(),
+            })
+            .await
+            .expect("create agent");
+        let definition = state
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                pack_installation_id: None,
+                pack_id: None,
+                pack_version: None,
+                name: "Native ad spend workflow".to_string(),
+                entrypoint: "native-ad-spend".to_string(),
+                trigger_type: "manual".to_string(),
+                default_agent_id: agent.id,
+                default_environment_id: None,
+                input_schema_ref: None,
+                output_schema_ref: None,
+                step_graph: empty_json_object(),
+                handoff_rules: json!({
+                    "root_task_grant": {
+                        "tool_scope": {
+                            "read": [],
+                            "write": [],
+                            "external_write": ["native.connector.call"]
+                        },
+                        "connector_scope": {
+                            "mode": "commit_write",
+                            "allowed_connector_ids": ["ad-platform"],
+                            "allowed_tool_names": ["launch_campaign"],
+                            "tenant_scope": {"workspace_id": "growth-prod"},
+                            "side_effect_classes": ["ad_spend_mutation"]
+                        },
+                        "external_effects": {
+                            "publish": false,
+                            "payment": false,
+                            "external_message": false,
+                            "account_mutation": false,
+                            "ad_spend_mutation": true
+                        }
+                    }
+                }),
+                approval_policy_ref: None,
+                eval_gate_refs: Vec::new(),
+                release_state: "released".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                archived_at: None,
+            })
+            .await
+            .expect("workflow definition");
+        let app = build_router(state.clone());
+        let run: WorkflowRun = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({"workflow_definition_id": definition.id}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let root_task_grant_id = run.root_task_grant_id.expect("root grant");
+
+        let (status, denied) = request_value(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/native.connector.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": run.primary_session_id,
+                        "task_grant_id": root_task_grant_id,
+                        "args": {
+                            "connector_id": "ad-platform",
+                            "operation": "launch_campaign",
+                            "side_effect_class": "publish",
+                            "payload": {"campaign_id": "cmp-1", "daily_budget_usd": 100}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            denied["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("side effect class")
+        );
+
+        let approval_required: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/native.connector.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": run.primary_session_id,
+                        "task_grant_id": root_task_grant_id,
+                        "args": {
+                            "connector_id": "ad-platform",
+                            "operation": "launch_campaign",
+                            "side_effect_class": "ad_spend_mutation",
+                            "amount": 100,
+                            "currency": "USD",
+                            "payload": {"campaign_id": "cmp-1", "daily_budget_usd": 100}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approval_required["status"], json!("approval_required"));
+        let approval_id = Uuid::parse_str(
+            approval_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval id");
+        let waiting_call = state
+            .list_tool_calls(Some(run.primary_session_id))
+            .await
+            .expect("tool calls")
+            .into_iter()
+            .find(|call| {
+                call.tool_name == "native.connector.call" && call.status == "waiting_approval"
+            })
+            .expect("native tool call");
+        assert_eq!(
+            waiting_call.target_binding["connector_id"],
+            json!("ad-platform")
+        );
+        assert_eq!(
+            waiting_call.target_binding["operation"],
+            json!("launch_campaign")
+        );
+        assert_eq!(
+            waiting_call.target_binding["side_effect_class"],
+            json!("ad_spend_mutation")
+        );
+        assert!(
+            waiting_call.target_binding["payload_digest"]
+                .as_str()
+                .is_some_and(|digest| digest.starts_with("sha256:"))
+        );
+
+        let _: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let issued_token = state
+            .approval_commit_token_for_approval(approval_id)
+            .await
+            .expect("commit token")
+            .expect("native approval should issue commit token");
+        assert_eq!(issued_token.status, "issued");
+        assert_eq!(issued_token.target_binding, waiting_call.target_binding);
+
+        let job = state
+            .execution_queue
+            .list()
+            .await
+            .expect("execution jobs")
+            .into_iter()
+            .find(|job| job.approval_id == approval_id)
+            .expect("queued native connector commit");
+        let completed = run_execution_job(&state, job.id, "native-connector-worker")
+            .await
+            .expect("native connector commit executes");
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        let consumed_token = state
+            .approval_commit_token_for_approval(approval_id)
+            .await
+            .expect("commit token")
+            .expect("native approval should keep token record");
+        assert_eq!(consumed_token.status, "consumed");
+
+        let tamper_required: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/native.connector.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": run.primary_session_id,
+                        "task_grant_id": root_task_grant_id,
+                        "args": {
+                            "connector_id": "ad-platform",
+                            "operation": "launch_campaign",
+                            "side_effect_class": "ad_spend_mutation",
+                            "amount": 100,
+                            "currency": "USD",
+                            "payload": {"campaign_id": "cmp-2", "daily_budget_usd": 100}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let tamper_approval_id = Uuid::parse_str(
+            tamper_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval id");
+        let tamper_approved: Approval = request_json(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{tamper_approval_id}/approve"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        state
+            .update_tool_call_args(
+                tamper_approved.tool_call_id.expect("tool call id"),
+                json!({
+                    "connector_id": "ad-platform",
+                    "operation": "launch_campaign",
+                    "side_effect_class": "ad_spend_mutation",
+                    "amount": 250,
+                    "currency": "USD",
+                    "payload": {"campaign_id": "cmp-2", "daily_budget_usd": 250}
+                }),
+            )
+            .await
+            .expect("tamper native connector args");
+        let tamper_job = state
+            .execution_queue
+            .list()
+            .await
+            .expect("execution jobs")
+            .into_iter()
+            .find(|job| job.approval_id == tamper_approval_id)
+            .expect("queued tampered native commit");
+        let tamper_retry = run_execution_job(&state, tamper_job.id, "native-connector-worker")
+            .await
+            .expect("tampered native connector should retry without commit");
+        assert_eq!(tamper_retry.status, ExecutionJobStatus::Queued);
+        assert!(
+            tamper_retry
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("approval commit token digest does not match")
         );
     }
 

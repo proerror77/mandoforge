@@ -82,6 +82,66 @@ export type WorkerJob = {
   completed_at?: string | null;
 };
 
+export type WorkflowRun = {
+  id: string;
+  workflow_definition_id: string;
+  pack_installation_id?: string | null;
+  status: string;
+  primary_session_id: string;
+  root_task_grant_id?: string | null;
+  input_digest: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkflowStepRun = {
+  id: string;
+  workflow_run_id: string;
+  step_key: string;
+  step_type: string;
+  agent_id?: string | null;
+  session_id?: string | null;
+  task_grant_id?: string | null;
+  status: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkflowTransition = {
+  id: string;
+  workflow_run_id: string;
+  from_step_run_id?: string | null;
+  from_step_key?: string | null;
+  to_step_run_id?: string | null;
+  to_step_key?: string | null;
+  transition_type: string;
+  status: string;
+  condition_payload: Record<string, unknown>;
+  result_payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type TaskGrant = {
+  id: string;
+  workflow_run_id: string;
+  workflow_step_run_id?: string | null;
+  session_id?: string | null;
+  grantee_agent_id?: string | null;
+  grantee_session_id?: string | null;
+  agent_class?: string | null;
+  risk_level: string;
+  status: string;
+  tool_scope: Record<string, unknown>;
+  connector_scope: Record<string, unknown>;
+  external_effects: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
 const ADMIN_TOKEN_KEY = "mandoforge.adminToken";
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {

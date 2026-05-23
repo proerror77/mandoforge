@@ -11,8 +11,9 @@ use crate::{
     ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
     SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Squad, SquadMember,
     TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry,
-    WorkItemAssignment, WorkItemReview, WorkflowDefinition, WorkflowPackInstallation,
-    WorkflowPackProfileAsset, WorkflowRun, WorkflowStepRun,
+    WorkItemAssignment, WorkItemReview, WorkflowDefinition, WorkflowPackBinding,
+    WorkflowPackInstallation, WorkflowPackProfileAsset, WorkflowRun, WorkflowStepRun,
+    WorkflowTransition,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
@@ -467,6 +468,24 @@ pub(crate) fn workflow_pack_profile_asset_from_row(
     })
 }
 
+pub(crate) fn workflow_pack_binding_from_row(row: PgRow) -> Result<WorkflowPackBinding, AppError> {
+    Ok(WorkflowPackBinding {
+        id: row.try_get("id")?,
+        installation_id: row.try_get("installation_id")?,
+        pack_id: row.try_get("pack_id")?,
+        pack_version: row.try_get("pack_version")?,
+        binding_type: row.try_get("binding_type")?,
+        binding_key: row.try_get("binding_key")?,
+        source_path: row.try_get("source_path")?,
+        target_kind: row.try_get("target_kind")?,
+        target_id: row.try_get("target_id")?,
+        status: row.try_get("status")?,
+        materialized_payload: row.try_get("materialized_payload")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 pub(crate) fn workflow_definition_from_row(row: PgRow) -> Result<WorkflowDefinition, AppError> {
     let eval_gate_refs: Value = row.try_get("eval_gate_refs")?;
     Ok(WorkflowDefinition {
@@ -539,6 +558,22 @@ pub(crate) fn workflow_step_run_from_row(row: PgRow) -> Result<WorkflowStepRun, 
         completed_at: row.try_get("completed_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn workflow_transition_from_row(row: PgRow) -> Result<WorkflowTransition, AppError> {
+    Ok(WorkflowTransition {
+        id: row.try_get("id")?,
+        workflow_run_id: row.try_get("workflow_run_id")?,
+        from_step_run_id: row.try_get("from_step_run_id")?,
+        from_step_key: row.try_get("from_step_key")?,
+        to_step_run_id: row.try_get("to_step_run_id")?,
+        to_step_key: row.try_get("to_step_key")?,
+        transition_type: row.try_get("transition_type")?,
+        status: row.try_get("status")?,
+        condition_payload: row.try_get("condition_payload")?,
+        result_payload: row.try_get("result_payload")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 

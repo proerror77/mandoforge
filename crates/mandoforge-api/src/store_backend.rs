@@ -15,8 +15,8 @@ use crate::{
     RemoteComputerStateLock, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
     SessionEvent, SessionLoopJob, SessionThread, Squad, SquadMember, TaskGrant, Team,
     TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment,
-    WorkItemReview, WorkflowDefinition, WorkflowPackInstallation, WorkflowPackProfileAsset,
-    WorkflowRun, WorkflowStepRun,
+    WorkItemReview, WorkflowDefinition, WorkflowPackBinding, WorkflowPackInstallation,
+    WorkflowPackProfileAsset, WorkflowRun, WorkflowStepRun, WorkflowTransition,
 };
 
 #[derive(Default)]
@@ -73,9 +73,11 @@ pub(crate) struct MemoryStore {
     pub(crate) manager_agent_plans: HashMap<Uuid, ManagerAgentPlan>,
     pub(crate) workflow_pack_installations: HashMap<Uuid, WorkflowPackInstallation>,
     pub(crate) workflow_pack_profile_assets: HashMap<Uuid, WorkflowPackProfileAsset>,
+    pub(crate) workflow_pack_bindings: HashMap<Uuid, WorkflowPackBinding>,
     pub(crate) workflow_definitions: HashMap<Uuid, WorkflowDefinition>,
     pub(crate) workflow_runs: HashMap<Uuid, WorkflowRun>,
     pub(crate) workflow_step_runs: HashMap<Uuid, WorkflowStepRun>,
+    pub(crate) workflow_transitions: HashMap<Uuid, WorkflowTransition>,
     pub(crate) task_grants: HashMap<Uuid, TaskGrant>,
     pub(crate) semantic_sources: HashMap<Uuid, SemanticSource>,
     pub(crate) semantic_objects: HashMap<Uuid, SemanticObject>,

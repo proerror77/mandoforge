@@ -61,6 +61,10 @@ asset_patterns=(
   "Managed agent observability"
   "Agents running"
   "Live log stream"
+  "Workflow"
+  "Steps"
+  "Transitions"
+  "Grants"
   "Approvals"
   "Tool calls"
   "Artifacts"
@@ -68,6 +72,9 @@ asset_patterns=(
   "/api/sessions"
   "/api/approvals"
   "/api/tool-calls"
+  "/api/workflow-runs"
+  "/transitions"
+  "/task-grants"
 )
 
 for pattern in "${asset_patterns[@]}"; do

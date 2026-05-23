@@ -445,17 +445,7 @@ pub(crate) async fn run_execution_job(
         }
         "agent_cli.exec" => execute_approved_agent_cli(state, &approval, &tool_call).await,
         "mcp.call" => execute_approved_mcp_call(state, &approval, &tool_call).await,
-        _ => {
-            state
-                .update_tool_call_status(
-                    tool_call.id,
-                    "completed",
-                    Some(json!({"approval": "approved"})),
-                    None,
-                )
-                .await?;
-            Ok(())
-        }
+        _ => execute_approved_native_connector_or_generic_tool(state, &approval, &tool_call).await,
     };
     if result.is_ok() {
         let completed = state
@@ -484,6 +474,31 @@ pub(crate) async fn run_execution_job(
         )
         .await
     }
+}
+
+async fn execute_approved_native_connector_or_generic_tool(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<(), AppError> {
+    let result = if tool_call.normalized_args_hash.is_some() {
+        let token =
+            crate::consume_valid_approval_commit_token_for_tool_call(state, approval, tool_call)
+                .await?;
+        json!({
+            "approval": "approved",
+            "status": "native_connector_committed",
+            "approval_commit_token_id": token.id,
+            "normalized_args_hash": token.normalized_args_hash,
+            "target_binding": token.target_binding,
+        })
+    } else {
+        json!({"approval": "approved"})
+    };
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result), None)
+        .await?;
+    Ok(())
 }
 
 async fn execute_approved_mcp_call(

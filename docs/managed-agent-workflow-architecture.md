@@ -93,29 +93,40 @@ The repository already has the managed runtime kernel:
   active TaskGrants before policy, tool, connector, or memory access.
 - MemoryScope now gates context object type/id/max count, trust threshold, and
   writeback permission.
-- ApprovalCommitToken is implemented for `mcp.call` with `commit_write`
-  ConnectorScope: approval binds the normalized args hash and target binding,
-  and worker execution revalidates session/team MCP scope, grant liveness,
-  connector scope, secret refs, and the token before calling MCP.
+- ApprovalCommitToken is implemented for `mcp.call`, `native.connector.call`,
+  and external-write scoped commit tools when `ConnectorScope.mode =
+  commit_write`: approval binds the normalized args hash and target binding, and
+  worker execution revalidates the active grant, connector scope, secret refs
+  where applicable, and the token before execution.
+- Durable `WorkflowTransition` records are written for start-step
+  materialization, dependency advancement, and workflow completion.
+- Workflow Pack stage now materializes durable `workflow_pack_bindings` for
+  manifest objects such as workflows, agents, connectors, policies, evals,
+  schemas, skills, profiles, onboarding schemas, and release gates; release,
+  rollback, and archive update their binding status.
+- Native connector commit writes now enforce connector id, operation,
+  side-effect class, external effect flag, and exact approval digest binding
+  before the approved execution path can mark the call complete.
+- The web console now observes workflow runs, steps, transitions, task grants,
+  workers, approvals, tool calls, artifacts, and session events from live APIs.
 
 The main gap is not "can it run a tool". The main gap is "can an installed
 Workflow Pack become an executable, governed, observable workflow graph".
 
-Remaining first-class concepts and execution gaps:
+Remaining first-class execution gaps:
 
-- `WorkflowTransition`
-- Pack materialization bindings:
-  - `PackAgentBinding`
-  - `PackAgentVersionDraft`
-  - `PackConnectorBinding`
-  - `PackPolicyRevisionBinding`
-  - `PackEvalSuiteBinding`
-  - `PackScheduleBinding`
-- Durable `WorkflowTransition` records and richer branch/skip/fail transition
-  scheduling beyond dependency-based step advancement.
-- ConnectorScope still needs deeper tenant/account target and side-effect-class
-  enforcement across native connectors beyond the `mcp.call commit_write`
-  token path.
+- Workflow graph scheduling is still dependency-based. It has durable transition
+  records, but not full branch/skip/fail/retry/compensation policy execution.
+- Pack bindings are materialized as generic durable binding records. Native
+  runtime objects for schedules, connector accounts, and provider-specific
+  deployment handles still need dedicated adapters.
+- Native connector enforcement is implemented at the generic
+  `native.connector.call` boundary. Production connector adapters still need
+  service-specific target validation, rate limits, reconciliation, and rollback
+  semantics.
+- Workflow observability is now present in the web console, but richer graph
+  visualization, transition filtering, and pack-binding inspection remain UI
+  follow-ups.
 
 Current boundary status:
 
@@ -124,15 +135,13 @@ Current boundary status:
   checks, MCP connector allowlist checks, context-packet memory object
   filtering, MemoryScope writeback/trust gates, handoff-to-step/grant
   materialization, `step_graph` start-step materialization plus dependency
-  advancement, and `ApprovalCommitToken` exact binding for `mcp.call
-  commit_write`.
+  advancement, durable transition recording, pack binding materialization, and
+  `ApprovalCommitToken` exact binding for MCP and native connector commit
+  writes.
 - Clear but only partially enforced now: worker/agent class authority,
-  durable `WorkflowTransition` records, branch/skip/fail transition policies,
-  connector side-effect classes beyond MCP commit-write, and full workflow
-  observability UI.
-- Not yet implemented: durable WorkflowTransition model, pack binding
-  materialization objects, native connector side-effect-class enforcement, and
-  full workflow observability UI.
+  branch/skip/fail/retry/compensation transition policies, production native
+  connector transport semantics, provider-specific pack binding deployment, and
+  advanced workflow observability UI.
 
 ## Product Object Model
 
@@ -353,21 +362,23 @@ Publishing, payment, ad spend mutation, or external messages require:
   limit, and content digest.
 - Worker revalidates the grant and token immediately before execution.
 
-Current runtime enforcement is narrower: generic `mcp.call commit_write` binds
-the full call args hash, payload digest, target fields, optional
+Current runtime enforcement covers `mcp.call`, `native.connector.call`, and
+external-write scoped commit tools. The generic commit binding includes the
+full call args hash, payload digest, target fields, optional
 side-effect-class/account/channel/recipient/amount/spend-limit fields, and a
 content digest when content-like payload fields are present. It rechecks active
-grant and MCP connector scope at worker time and blocks stale approvals when
-the team MCP server/tool scope changes. Native connector adapters still need
-their own first-class amount, spend-limit, and content-digest semantics.
+grant, connector scope, and ApprovalCommitToken at worker time. MCP execution
+also rechecks team MCP server/tool scope and runtime secret refs before the
+gateway call. Native connector adapters still need service-specific transport,
+amount/spend reconciliation, and rollback semantics.
 
 ### ApprovalCommitToken
 
 Normal Approval means a human reviewed a blocking request. For irreversible
 external effects, approval must bind the exact side effect.
 
-Current implementation covers `mcp.call` with `ConnectorScope.mode =
-commit_write`. The token binds:
+Current implementation covers MCP and native connector commit calls with
+`ConnectorScope.mode = commit_write`. The token binds:
 
 - `grant_id`
 - `tool_name`
@@ -379,9 +390,11 @@ commit_write`. The token binds:
 - `expires_at`
 - `approver_subject`
 
-Changing target, recipient, platform, account, or call args after approval
-invalidates the token. Future native connector adapters should add explicit
-amount/spend/content-digest fields where those concepts are first-class.
+Changing target, recipient, platform, account, side-effect class, payload, or
+call args after approval invalidates the token. Production native connector
+adapters should add explicit service-specific validation and reconciliation
+where amount, spend, content digest, campaign, recipient, or account concepts
+are first-class.
 
 ## Runtime Flow
 
@@ -624,8 +637,11 @@ Hourly metrics trigger
   -> ad-executor: mutate spend only within grant and approval token
 ```
 
-The runtime can support these. The missing pieces are workflow run objects,
-task-level grants, connector scopes, approval token binding, and workflow UI.
+The runtime can support these. The first governed slice now exists: workflow
+run objects, task-level grants, connector scopes, approval token binding, and
+workflow UI are in the runtime path. The remaining work is deeper transition
+policy, production connector adapters, provider-specific pack deployment, and
+rich graph observability.
 
 ## Implementation Plan
 
@@ -645,10 +661,10 @@ Acceptance:
 ### Slice 2: Workflow Run Store
 
 - Status: implemented for definition/run/step persistence, APIs, root grant
-  issuance, start-step materialization from `step_graph`, step update API, and
-  dependency-based graph advancement on step completion. Durable
-  `WorkflowTransition` records and branch/skip/fail policy scheduling remain
-  pending.
+  issuance, start-step materialization from `step_graph`, step update API,
+  dependency-based graph advancement on step completion, and durable
+  `WorkflowTransition` records for start, dependency, and completion events.
+  Branch/skip/fail/retry/compensation policy scheduling remains pending.
 - Add migrations and store modules for `workflow_definitions`,
   `workflow_runs`, `workflow_step_runs`, and `workflow_transitions`.
 - Add read APIs for workflow run console.
@@ -661,6 +677,10 @@ Acceptance:
 
 ### Slice 3: Pack Materialization
 
+- Status: implemented as durable generic `workflow_pack_bindings` for manifest
+  objects including workflows, agents, connectors, policies, evals, schemas,
+  skills, profiles, onboarding schemas, and release gates. Dedicated provider
+  deployment handles and schedule adapters remain pending.
 - Stage pack into draft AgentVersion, WorkflowDefinition, ConnectorBinding,
   PolicyRevision, EvalSuite, and ScheduleBinding objects.
 - Release activates those bindings.
@@ -689,12 +709,13 @@ Acceptance:
 
 ### Slice 5: MemoryScope, ToolScope, ConnectorScope Enforcement
 
-- Status: partially implemented. Workflow session loops and context packets now
-  require active TaskGrant authority. Tool scope, MCP connector allowlists,
-  MemoryScope trust thresholds, and memory writeback permission are enforced.
-  `mcp.call commit_write` external commits require ApprovalCommitToken exact
-  binding. Broader native connector target scoping and side-effect-class
-  enforcement remain pending.
+- Status: implemented for workflow session loops and context packets requiring
+  active TaskGrant authority. Tool scope, MCP connector allowlists, generic
+  native connector id/operation/side-effect-class allowlists, MemoryScope trust
+  thresholds, and memory writeback permission are enforced. MCP and native
+  connector `commit_write` calls require ApprovalCommitToken exact binding.
+  Production native connector transports still need service-specific
+  reconciliation and rollback semantics.
 - Apply grant checks before context packet creation.
 - Apply grant checks before tool policy.
 - Apply connector scope checks before MCP/native connector calls.
@@ -708,14 +729,17 @@ Acceptance:
 
 ### Slice 6: ApprovalCommitToken
 
-- Status: implemented for `mcp.call` when the active TaskGrant has
+- Status: implemented for `mcp.call`, `native.connector.call`, and
+  external-write scoped commit tools when the active TaskGrant has
   `ConnectorScope.mode = commit_write`.
 - Approval binds args hash, target binding, grant, tool call, and approver.
 - Worker revalidates session/team MCP server+tool scope, runtime secret refs,
   active/non-expired TaskGrant liveness, ConnectorScope allowlists, and the
   token digest, then consumes the token immediately before the MCP Gateway call.
-- Future native connectors should extend this to explicit side-effect class,
-  amount/spend limit, content digest, and context packet fields.
+- Native connector bindings include connector id, operation, side-effect class,
+  payload digest, amount/spend/account/resource fields where present, content
+  digest where content-like payload is present, and context packet id where
+  present.
 
 Acceptance:
 

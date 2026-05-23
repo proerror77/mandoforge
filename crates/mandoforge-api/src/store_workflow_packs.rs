@@ -5,9 +5,12 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{
-    workflow_pack_installation_from_row, workflow_pack_profile_asset_from_row,
+    workflow_pack_binding_from_row, workflow_pack_installation_from_row,
+    workflow_pack_profile_asset_from_row,
 };
-use crate::{AppError, AppState, WorkflowPackInstallation, WorkflowPackProfileAsset};
+use crate::{
+    AppError, AppState, WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
+};
 
 impl AppState {
     pub(crate) async fn create_workflow_pack_installation_with_profile_assets(
@@ -368,6 +371,159 @@ impl AppState {
 
                 tx.commit().await?;
                 workflow_pack_profile_asset_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn create_workflow_pack_bindings(
+        &self,
+        bindings: Vec<WorkflowPackBinding>,
+    ) -> Result<Vec<WorkflowPackBinding>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                for binding in store.workflow_pack_bindings.values_mut() {
+                    if bindings.first().is_some_and(|new_binding| {
+                        binding.installation_id == new_binding.installation_id
+                    }) {
+                        binding.status = "superseded".to_string();
+                        binding.updated_at = Utc::now();
+                    }
+                }
+                for binding in &bindings {
+                    store
+                        .workflow_pack_bindings
+                        .insert(binding.id, binding.clone());
+                }
+                Ok(bindings)
+            }
+            StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                if let Some(first) = bindings.first() {
+                    sqlx::query(
+                        "UPDATE workflow_pack_bindings
+                         SET status = 'superseded', updated_at = now()
+                         WHERE tenant_id = $1 AND installation_id = $2",
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(first.installation_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                let mut created = Vec::with_capacity(bindings.len());
+                for binding in bindings {
+                    let row = sqlx::query(
+                        "INSERT INTO workflow_pack_bindings
+                            (id, tenant_id, installation_id, pack_id, pack_version, binding_type, binding_key, source_path, target_kind, target_id, status, materialized_payload, created_at, updated_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                         RETURNING id, installation_id, pack_id, pack_version, binding_type, binding_key, source_path, target_kind, target_id, status, materialized_payload, created_at, updated_at",
+                    )
+                    .bind(binding.id)
+                    .bind(self.current_tenant_id())
+                    .bind(binding.installation_id)
+                    .bind(&binding.pack_id)
+                    .bind(&binding.pack_version)
+                    .bind(&binding.binding_type)
+                    .bind(&binding.binding_key)
+                    .bind(&binding.source_path)
+                    .bind(&binding.target_kind)
+                    .bind(binding.target_id)
+                    .bind(&binding.status)
+                    .bind(&binding.materialized_payload)
+                    .bind(binding.created_at)
+                    .bind(binding.updated_at)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    created.push(workflow_pack_binding_from_row(row)?);
+                }
+                tx.commit().await?;
+                Ok(created)
+            }
+        }
+    }
+
+    pub(crate) async fn list_workflow_pack_bindings(
+        &self,
+        installation_id: Uuid,
+    ) -> Result<Vec<WorkflowPackBinding>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut bindings: Vec<_> = inner
+                    .read()
+                    .await
+                    .workflow_pack_bindings
+                    .values()
+                    .filter(|binding| {
+                        binding.installation_id == installation_id && binding.status != "superseded"
+                    })
+                    .cloned()
+                    .collect();
+                bindings.sort_by(|left, right| {
+                    left.binding_type
+                        .cmp(&right.binding_type)
+                        .then(left.binding_key.cmp(&right.binding_key))
+                });
+                Ok(bindings)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, installation_id, pack_id, pack_version, binding_type, binding_key, source_path, target_kind, target_id, status, materialized_payload, created_at, updated_at
+                     FROM workflow_pack_bindings
+                     WHERE tenant_id = $1 AND installation_id = $2 AND status <> 'superseded'
+                     ORDER BY binding_type ASC, binding_key ASC",
+                )
+                .bind(self.current_tenant_id())
+                .bind(installation_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(workflow_pack_binding_from_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn update_workflow_pack_binding_statuses(
+        &self,
+        installation_id: Uuid,
+        status: &str,
+    ) -> Result<Vec<WorkflowPackBinding>, AppError> {
+        let updated_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let mut bindings = Vec::new();
+                for binding in store.workflow_pack_bindings.values_mut() {
+                    if binding.installation_id == installation_id && binding.status != "superseded"
+                    {
+                        binding.status = status.to_string();
+                        binding.updated_at = updated_at;
+                        bindings.push(binding.clone());
+                    }
+                }
+                bindings.sort_by(|left, right| {
+                    left.binding_type
+                        .cmp(&right.binding_type)
+                        .then(left.binding_key.cmp(&right.binding_key))
+                });
+                Ok(bindings)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "UPDATE workflow_pack_bindings
+                     SET status = $3, updated_at = $4
+                     WHERE tenant_id = $1 AND installation_id = $2 AND status <> 'superseded'
+                     RETURNING id, installation_id, pack_id, pack_version, binding_type, binding_key, source_path, target_kind, target_id, status, materialized_payload, created_at, updated_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(installation_id)
+                .bind(status)
+                .bind(updated_at)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(workflow_pack_binding_from_row)
+                    .collect()
             }
         }
     }

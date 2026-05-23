@@ -3,9 +3,12 @@ use anyhow::Result;
 use crate::store_backend::StoreBackend;
 use crate::store_rows::{
     task_grant_from_row, workflow_definition_from_row, workflow_run_from_row,
-    workflow_step_run_from_row,
+    workflow_step_run_from_row, workflow_transition_from_row,
 };
-use crate::{AppError, AppState, TaskGrant, WorkflowDefinition, WorkflowRun, WorkflowStepRun};
+use crate::{
+    AppError, AppState, TaskGrant, WorkflowDefinition, WorkflowRun, WorkflowStepRun,
+    WorkflowTransition,
+};
 
 impl AppState {
     pub(crate) async fn create_workflow_definition(
@@ -460,6 +463,78 @@ impl AppState {
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(workflow_step_run_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn create_workflow_transition(
+        &self,
+        transition: WorkflowTransition,
+    ) -> Result<WorkflowTransition, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                inner
+                    .write()
+                    .await
+                    .workflow_transitions
+                    .insert(transition.id, transition.clone());
+                Ok(transition)
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "INSERT INTO workflow_transitions
+                        (id, tenant_id, workflow_run_id, from_step_run_id, from_step_key, to_step_run_id, to_step_key, transition_type, status, condition_payload, result_payload, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     RETURNING id, workflow_run_id, from_step_run_id, from_step_key, to_step_run_id, to_step_key, transition_type, status, condition_payload, result_payload, created_at",
+                )
+                .bind(transition.id)
+                .bind(self.current_tenant_id())
+                .bind(transition.workflow_run_id)
+                .bind(transition.from_step_run_id)
+                .bind(&transition.from_step_key)
+                .bind(transition.to_step_run_id)
+                .bind(&transition.to_step_key)
+                .bind(&transition.transition_type)
+                .bind(&transition.status)
+                .bind(&transition.condition_payload)
+                .bind(&transition.result_payload)
+                .bind(transition.created_at)
+                .fetch_one(pool)
+                .await?;
+                workflow_transition_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn list_workflow_transitions(
+        &self,
+        workflow_run_id: uuid::Uuid,
+    ) -> Result<Vec<WorkflowTransition>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut transitions: Vec<_> = inner
+                    .read()
+                    .await
+                    .workflow_transitions
+                    .values()
+                    .filter(|transition| transition.workflow_run_id == workflow_run_id)
+                    .cloned()
+                    .collect();
+                transitions.sort_by_key(|transition| transition.created_at);
+                Ok(transitions)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, workflow_run_id, from_step_run_id, from_step_key, to_step_run_id, to_step_key, transition_type, status, condition_payload, result_payload, created_at
+                     FROM workflow_transitions
+                     WHERE tenant_id = $1 AND workflow_run_id = $2
+                     ORDER BY created_at ASC",
+                )
+                .bind(self.current_tenant_id())
+                .bind(workflow_run_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(workflow_transition_from_row).collect()
             }
         }
     }
