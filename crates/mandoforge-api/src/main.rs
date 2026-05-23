@@ -12624,7 +12624,7 @@ fn workflow_graph_step_retry_max_attempts(step: &Value) -> Result<usize, AppErro
 struct WorkflowGraphConditionEvaluation {
     condition: Value,
     source_step: Option<WorkflowStepRun>,
-    path: String,
+    path: Option<String>,
     actual: Value,
     expected: Value,
     matched: bool,
@@ -12637,6 +12637,68 @@ fn workflow_graph_step_condition_evaluation(
     let Some(condition) = step.get("condition").or_else(|| step.get("when")) else {
         return Ok(None);
     };
+    workflow_graph_condition_evaluation(condition, existing_steps).map(Some)
+}
+
+fn workflow_graph_condition_evaluation(
+    condition: &Value,
+    existing_steps: &[WorkflowStepRun],
+) -> Result<WorkflowGraphConditionEvaluation, AppError> {
+    if let Some(items) = condition.get("all") {
+        let children = workflow_graph_condition_array(items, existing_steps, "all")?;
+        let matched = children.iter().all(|child| child.matched);
+        return Ok(WorkflowGraphConditionEvaluation {
+            condition: condition.clone(),
+            source_step: children.iter().find_map(|child| child.source_step.clone()),
+            path: None,
+            actual: json!({
+                "operator": "all",
+                "matched": matched,
+                "all": children
+                    .iter()
+                    .map(workflow_graph_condition_evaluation_payload)
+                    .collect::<Vec<_>>()
+            }),
+            expected: json!(true),
+            matched,
+        });
+    }
+    if let Some(items) = condition.get("any") {
+        let children = workflow_graph_condition_array(items, existing_steps, "any")?;
+        let matched = children.iter().any(|child| child.matched);
+        return Ok(WorkflowGraphConditionEvaluation {
+            condition: condition.clone(),
+            source_step: children.iter().find_map(|child| child.source_step.clone()),
+            path: None,
+            actual: json!({
+                "operator": "any",
+                "matched": matched,
+                "any": children
+                    .iter()
+                    .map(workflow_graph_condition_evaluation_payload)
+                    .collect::<Vec<_>>()
+            }),
+            expected: json!(true),
+            matched,
+        });
+    }
+    if let Some(child) = condition.get("not") {
+        let child = workflow_graph_condition_evaluation(child, existing_steps)?;
+        let matched = !child.matched;
+        return Ok(WorkflowGraphConditionEvaluation {
+            condition: condition.clone(),
+            source_step: child.source_step.clone(),
+            path: None,
+            actual: json!({
+                "operator": "not",
+                "matched": matched,
+                "not": workflow_graph_condition_evaluation_payload(&child)
+            }),
+            expected: json!(true),
+            matched,
+        });
+    }
+
     let source_step_key = condition
         .get("source_step")
         .or_else(|| condition.get("step"))
@@ -12653,20 +12715,91 @@ fn workflow_graph_step_condition_evaluation(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::bad_request("workflow graph step condition requires path"))?
         .to_string();
-    let expected = condition.get("equals").cloned().unwrap_or(json!(true));
     let source_step = workflow_graph_latest_step(existing_steps, source_step_key).cloned();
     let actual = source_step
         .as_ref()
         .and_then(|step| workflow_graph_json_path(&step.output_payload, &path).cloned())
         .unwrap_or(Value::Null);
-    Ok(Some(WorkflowGraphConditionEvaluation {
+    let (expected, matched) = workflow_graph_leaf_condition_result(condition, &actual)?;
+    Ok(WorkflowGraphConditionEvaluation {
         condition: condition.clone(),
         source_step,
-        path,
-        matched: actual == expected,
+        path: Some(path),
         actual,
         expected,
-    }))
+        matched,
+    })
+}
+
+fn workflow_graph_condition_array(
+    value: &Value,
+    existing_steps: &[WorkflowStepRun],
+    operator: &str,
+) -> Result<Vec<WorkflowGraphConditionEvaluation>, AppError> {
+    let Value::Array(items) = value else {
+        return Err(AppError::bad_request(format!(
+            "workflow graph step condition {operator} must be an array"
+        )));
+    };
+    if items.is_empty() {
+        return Err(AppError::bad_request(format!(
+            "workflow graph step condition {operator} must not be empty"
+        )));
+    }
+    items
+        .iter()
+        .map(|item| workflow_graph_condition_evaluation(item, existing_steps))
+        .collect()
+}
+
+fn workflow_graph_condition_evaluation_payload(
+    evaluation: &WorkflowGraphConditionEvaluation,
+) -> Value {
+    json!({
+        "condition": evaluation.condition,
+        "path": evaluation.path,
+        "actual": evaluation.actual,
+        "expected": evaluation.expected,
+        "matched": evaluation.matched
+    })
+}
+
+fn workflow_graph_leaf_condition_result(
+    condition: &Value,
+    actual: &Value,
+) -> Result<(Value, bool), AppError> {
+    if let Some(expected) = condition.get("equals").cloned() {
+        return Ok((expected.clone(), actual == &expected));
+    }
+    if let Some(expected) = condition.get("not_equals").cloned() {
+        return Ok((expected.clone(), actual != &expected));
+    }
+    if let Some(expected) = condition.get("in") {
+        let Value::Array(items) = expected else {
+            return Err(AppError::bad_request(
+                "workflow graph step condition in must be an array",
+            ));
+        };
+        return Ok((expected.clone(), items.iter().any(|item| item == actual)));
+    }
+    if let Some(expected) = condition.get("not_in") {
+        let Value::Array(items) = expected else {
+            return Err(AppError::bad_request(
+                "workflow graph step condition not_in must be an array",
+            ));
+        };
+        return Ok((expected.clone(), !items.iter().any(|item| item == actual)));
+    }
+    if let Some(expected) = condition.get("exists") {
+        let Some(expected) = expected.as_bool() else {
+            return Err(AppError::bad_request(
+                "workflow graph step condition exists must be a boolean",
+            ));
+        };
+        return Ok((json!(expected), (actual != &Value::Null) == expected));
+    }
+    let expected = json!(true);
+    Ok((expected.clone(), actual == &expected))
 }
 
 fn workflow_graph_json_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
@@ -50654,6 +50787,163 @@ not json
                 && transition["to_step_key"] == json!("publish")
                 && transition["status"] == json!("skipped")
                 && transition["condition_payload"]["condition"]["path"] == json!("approved")
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_branch_all_condition_skips_when_any_predicate_fails() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Composite branch workflow",
+                    "entrypoint": "composite-branch-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true},
+                            {"key": "risk", "type": "agent", "start": true},
+                            {
+                                "key": "publish",
+                                "type": "agent",
+                                "depends_on": ["intake", "risk"],
+                                "condition": {
+                                    "all": [
+                                        {
+                                            "source_step": "intake",
+                                            "path": "approved",
+                                            "equals": true
+                                        },
+                                        {
+                                            "source_step": "risk",
+                                            "path": "rating",
+                                            "in": ["low", "medium"]
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "composite branch false skip"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let intake_step_id = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("intake"))
+            .and_then(|step| step["id"].as_str())
+            .expect("intake step id")
+            .to_string();
+        let risk_step_id = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("risk"))
+            .and_then(|step| step["id"].as_str())
+            .expect("risk step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{intake_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"approved": true}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{risk_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"rating": "high"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let publish_step = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("publish"))
+            .expect("publish branch step should be recorded");
+        assert_eq!(publish_step["status"], json!("skipped"));
+        assert_eq!(
+            publish_step["output_payload"]["skip_reason"],
+            json!("branch_condition_false")
+        );
+        assert_eq!(
+            publish_step["output_payload"]["actual"]["all"][1]["actual"],
+            json!("high")
+        );
+
+        let transitions: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("branch")
+                && transition["to_step_key"] == json!("publish")
+                && transition["status"] == json!("skipped")
+                && transition["condition_payload"]["actual"]["all"][1]["matched"] == json!(false)
         }));
     }
 
