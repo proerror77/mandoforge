@@ -78,10 +78,13 @@ The repository already has the managed runtime kernel:
 - WorkflowRun start now materializes the first `step_graph.steps` entry, or all
   entries marked `start: true` / `entrypoint: true`, into queued
   WorkflowStepRun records bound to the root TaskGrant.
-- WorkflowStepRun updates now advance dependency-based `step_graph` execution:
-  completed steps materialize downstream steps whose `depends_on` / `after` /
-  `needs` dependencies are satisfied, and the WorkflowRun reaches `completed`
-  after all graph steps are successful.
+- WorkflowStepRun updates now advance `step_graph` execution with durable
+  transition policy: completed steps materialize downstream steps whose
+  `depends_on` / `after` / `needs` dependencies are satisfied, condition-false
+  branches become skipped step runs, failed steps respect `retry.max_attempts`,
+  exhausted failures skip blocked downstream steps and materialize
+  `on_failure_of` / `compensates` compensation steps, and the WorkflowRun reaches
+  `completed` or `failed` only after terminal graph state is recorded.
 - TaskGrant persistence and APIs, root grant issuance on workflow start, child
   grant narrowing checks, and checked/denied audit events.
 - Handoff assignment now materializes specialist WorkflowStepRun records and
@@ -99,7 +102,8 @@ The repository already has the managed runtime kernel:
   worker execution revalidates the active grant, connector scope, secret refs
   where applicable, and the token before execution.
 - Durable `WorkflowTransition` records are written for start-step
-  materialization, dependency advancement, and workflow completion.
+  materialization, dependency advancement, branch skips, retries, failure skips,
+  compensation materialization, completion, and terminal failure.
 - Workflow Pack stage now materializes durable `workflow_pack_bindings` for
   manifest objects such as workflows, agents, connectors, policies, evals,
   schemas, skills, profiles, onboarding schemas, and release gates; release,
@@ -115,8 +119,10 @@ Workflow Pack become an executable, governed, observable workflow graph".
 
 Remaining first-class execution gaps:
 
-- Workflow graph scheduling is still dependency-based. It has durable transition
-  records, but not full branch/skip/fail/retry/compensation policy execution.
+- Workflow graph scheduling now has the first branch/skip/fail/retry/
+  compensation policy slice. It still needs richer expression language,
+  delayed retry/backoff scheduling, fan-out/fan-in policy controls, and
+  production rollback/compensation adapters.
 - Pack bindings are materialized as generic durable binding records. Native
   runtime objects for schedules, connector accounts, and provider-specific
   deployment handles still need dedicated adapters.
@@ -135,13 +141,15 @@ Current boundary status:
   checks, MCP connector allowlist checks, context-packet memory object
   filtering, MemoryScope writeback/trust gates, handoff-to-step/grant
   materialization, `step_graph` start-step materialization plus dependency
-  advancement, durable transition recording, pack binding materialization, and
-  `ApprovalCommitToken` exact binding for MCP and native connector commit
-  writes.
+  advancement, condition-false branch skipping, retry attempt materialization,
+  failure-driven downstream skip, compensation step materialization, durable
+  transition recording, pack binding materialization, and `ApprovalCommitToken`
+  exact binding for MCP and native connector commit writes.
 - Clear but only partially enforced now: worker/agent class authority,
-  branch/skip/fail/retry/compensation transition policies, production native
-  connector transport semantics, provider-specific pack binding deployment, and
-  advanced workflow observability UI.
+  advanced branch expression policy, delayed retry/backoff scheduling,
+  production native connector transport semantics, provider-specific pack
+  binding deployment, production compensation adapters, and advanced workflow
+  observability UI.
 
 ## Product Object Model
 
@@ -662,9 +670,12 @@ Acceptance:
 
 - Status: implemented for definition/run/step persistence, APIs, root grant
   issuance, start-step materialization from `step_graph`, step update API,
-  dependency-based graph advancement on step completion, and durable
-  `WorkflowTransition` records for start, dependency, and completion events.
-  Branch/skip/fail/retry/compensation policy scheduling remains pending.
+  dependency-based graph advancement on step completion, condition-false branch
+  skip records, retry attempt materialization, failure-driven downstream skip,
+  compensation step materialization, and durable `WorkflowTransition` records
+  for start, dependency, branch, retry, skip, compensation, completion, and
+  terminal failure events. Advanced expression policy, delayed backoff, and
+  production compensation adapters remain pending.
 - Add migrations and store modules for `workflow_definitions`,
   `workflow_runs`, `workflow_step_runs`, and `workflow_transitions`.
 - Add read APIs for workflow run console.

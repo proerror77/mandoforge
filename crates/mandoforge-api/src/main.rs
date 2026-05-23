@@ -12418,6 +12418,31 @@ async fn materialize_workflow_graph_step(
     root_grant: &TaskGrant,
     graph_step: &Value,
 ) -> Result<WorkflowStepRun, AppError> {
+    materialize_workflow_graph_step_with_policy_context(
+        state,
+        definition,
+        run,
+        session,
+        root_grant,
+        graph_step,
+        "queued",
+        empty_json_object(),
+        empty_json_object(),
+    )
+    .await
+}
+
+async fn materialize_workflow_graph_step_with_policy_context(
+    state: &AppState,
+    definition: &WorkflowDefinition,
+    run: &WorkflowRun,
+    session: &Session,
+    root_grant: &TaskGrant,
+    graph_step: &Value,
+    status: &str,
+    input_context: Value,
+    output_payload: Value,
+) -> Result<WorkflowStepRun, AppError> {
     let step_key = workflow_graph_step_key(graph_step)?;
     let step_type = graph_step
         .get("type")
@@ -12436,6 +12461,7 @@ async fn materialize_workflow_graph_step(
     let environment_id =
         workflow_graph_step_uuid(graph_step, "environment_id")?.or(session.environment_id);
     let now = Utc::now();
+    let terminal = workflow_step_status_terminal(status);
     let step = state
         .create_workflow_step_run(WorkflowStepRun {
             id: Uuid::new_v4(),
@@ -12449,24 +12475,37 @@ async fn materialize_workflow_graph_step(
             handoff_id: None,
             task_grant_id: Some(root_grant.id),
             environment_id,
-            status: "queued".to_string(),
-            input_payload: json!({
-                "source": "step_graph",
-                "graph_step": graph_step,
-                "workflow_input": run.input_payload.clone()
-            }),
-            output_payload: empty_json_object(),
+            status: status.to_string(),
+            input_payload: workflow_graph_step_input_payload(run, graph_step, input_context),
+            output_payload,
             artifact_ids: Vec::new(),
             approval_ids: Vec::new(),
             tool_call_ids: Vec::new(),
-            started_at: None,
-            completed_at: None,
+            started_at: terminal.then_some(now),
+            completed_at: terminal.then_some(now),
             created_at: now,
             updated_at: now,
         })
         .await?;
     record_workflow_step_run_created(state, run, &step).await?;
     Ok(step)
+}
+
+fn workflow_graph_step_input_payload(
+    run: &WorkflowRun,
+    graph_step: &Value,
+    input_context: Value,
+) -> Value {
+    let mut payload = serde_json::Map::new();
+    payload.insert("source".to_string(), json!("step_graph"));
+    payload.insert("graph_step".to_string(), graph_step.clone());
+    payload.insert("workflow_input".to_string(), run.input_payload.clone());
+    if let Value::Object(context) = input_context {
+        for (key, value) in context {
+            payload.insert(key, value);
+        }
+    }
+    Value::Object(payload)
 }
 
 fn workflow_graph_start_steps(step_graph: &Value) -> Result<Vec<&Value>, AppError> {
@@ -12530,6 +12569,118 @@ fn workflow_graph_step_dependencies(step: &Value) -> Result<Vec<String>, AppErro
     }
 }
 
+fn workflow_graph_step_failure_sources(step: &Value) -> Result<Vec<String>, AppError> {
+    let Some(value) = step
+        .get("on_failure_of")
+        .or_else(|| step.get("compensates"))
+        .or_else(|| step.get("compensation_for"))
+    else {
+        return Ok(Vec::new());
+    };
+    workflow_graph_string_or_string_array(value, "workflow graph failure source")
+}
+
+fn workflow_graph_string_or_string_array(
+    value: &Value,
+    label: &str,
+) -> Result<Vec<String>, AppError> {
+    match value {
+        Value::String(item) => Ok(normalize_optional_text(item.clone()).into_iter().collect()),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .and_then(|value| normalize_optional_text(value.to_string()))
+                    .ok_or_else(|| {
+                        AppError::bad_request(format!("{label} must be non-empty strings"))
+                    })
+            })
+            .collect(),
+        _ => Err(AppError::bad_request(format!(
+            "{label} must be a string or array"
+        ))),
+    }
+}
+
+fn workflow_graph_step_retry_max_attempts(step: &Value) -> Result<usize, AppError> {
+    let Some(policy) = step.get("retry").or_else(|| step.get("retry_policy")) else {
+        return Ok(1);
+    };
+    let Some(max_attempts) = policy.get("max_attempts").and_then(Value::as_u64) else {
+        return Err(AppError::bad_request(
+            "workflow graph step retry.max_attempts must be a positive integer",
+        ));
+    };
+    if max_attempts == 0 {
+        return Err(AppError::bad_request(
+            "workflow graph step retry.max_attempts must be at least 1",
+        ));
+    }
+    usize::try_from(max_attempts)
+        .map_err(|_| AppError::bad_request("workflow graph step retry.max_attempts is too large"))
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowGraphConditionEvaluation {
+    condition: Value,
+    source_step: Option<WorkflowStepRun>,
+    path: String,
+    actual: Value,
+    expected: Value,
+    matched: bool,
+}
+
+fn workflow_graph_step_condition_evaluation(
+    step: &Value,
+    existing_steps: &[WorkflowStepRun],
+) -> Result<Option<WorkflowGraphConditionEvaluation>, AppError> {
+    let Some(condition) = step.get("condition").or_else(|| step.get("when")) else {
+        return Ok(None);
+    };
+    let source_step_key = condition
+        .get("source_step")
+        .or_else(|| condition.get("step"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("workflow graph step condition requires source_step")
+        })?;
+    let path = condition
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("workflow graph step condition requires path"))?
+        .to_string();
+    let expected = condition.get("equals").cloned().unwrap_or(json!(true));
+    let source_step = workflow_graph_latest_step(existing_steps, source_step_key).cloned();
+    let actual = source_step
+        .as_ref()
+        .and_then(|step| workflow_graph_json_path(&step.output_payload, &path).cloned())
+        .unwrap_or(Value::Null);
+    Ok(Some(WorkflowGraphConditionEvaluation {
+        condition: condition.clone(),
+        source_step,
+        path,
+        matched: actual == expected,
+        actual,
+        expected,
+    }))
+}
+
+fn workflow_graph_json_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path
+        .split('.')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
 fn workflow_graph_step_keys(step_graph: &Value) -> Result<BTreeSet<String>, AppError> {
     let mut keys = BTreeSet::new();
     let Some(steps) = step_graph.get("steps").and_then(Value::as_array) else {
@@ -12571,6 +12722,21 @@ fn workflow_graph_ready_steps<'a>(
         }
     }
     Ok(ready)
+}
+
+fn workflow_graph_step_by_key<'a>(
+    step_graph: &'a Value,
+    step_key: &str,
+) -> Result<Option<&'a Value>, AppError> {
+    let Some(steps) = step_graph.get("steps").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    for step in steps {
+        if workflow_graph_step_key(step)? == step_key {
+            return Ok(Some(step));
+        }
+    }
+    Ok(None)
 }
 
 fn workflow_graph_step_uuid(step: &Value, key: &str) -> Result<Option<Uuid>, AppError> {
@@ -13525,7 +13691,7 @@ async fn advance_workflow_graph_after_step_update(
     step: &WorkflowStepRun,
 ) -> Result<(), AppError> {
     if step.status == "failed" || step.status == "canceled" {
-        update_workflow_run_status_and_record(state, run, &step.status).await?;
+        advance_workflow_graph_after_step_failure(state, run, step).await?;
         return Ok(());
     }
     if !workflow_step_status_successful(&step.status) {
@@ -13543,37 +13709,190 @@ async fn advance_workflow_graph_after_step_update(
         .root_task_grant_id
         .ok_or_else(|| AppError::forbidden("workflow run requires root task grant"))?;
     let root_grant = state.get_task_grant(root_task_grant_id).await?;
-    let existing_steps = state.list_workflow_step_runs(run.id).await?;
-    let ready_steps = workflow_graph_ready_steps(&definition.step_graph, &existing_steps)?;
-    for graph_step in ready_steps {
-        let materialized = materialize_workflow_graph_step(
-            state,
-            &definition,
-            run,
-            &session,
-            &root_grant,
-            graph_step,
-        )
-        .await?;
-        record_workflow_transition(
-            state,
-            run,
-            Some(step),
-            Some(&materialized),
-            "dependency",
-            "materialized",
-            json!({
-                "source": "step_graph_dependency",
-                "dependencies": workflow_graph_step_dependencies(graph_step)?,
-                "graph_step": graph_step
-            }),
-            empty_json_object(),
-        )
-        .await?;
+    loop {
+        let existing_steps = state.list_workflow_step_runs(run.id).await?;
+        let ready_steps = workflow_graph_ready_steps(&definition.step_graph, &existing_steps)?;
+        if ready_steps.is_empty() {
+            break;
+        }
+        for graph_step in ready_steps {
+            if let Some(evaluation) =
+                workflow_graph_step_condition_evaluation(graph_step, &existing_steps)?
+            {
+                if !evaluation.matched {
+                    let condition = evaluation.condition.clone();
+                    let path = evaluation.path.clone();
+                    let actual = evaluation.actual.clone();
+                    let expected = evaluation.expected.clone();
+                    let skipped = materialize_workflow_graph_step_with_policy_context(
+                        state,
+                        &definition,
+                        run,
+                        &session,
+                        &root_grant,
+                        graph_step,
+                        "skipped",
+                        json!({
+                            "branch": {
+                                "condition": condition.clone(),
+                                "path": path.clone(),
+                                "actual": actual.clone(),
+                                "expected": expected.clone(),
+                                "reason": "branch_condition_false"
+                            }
+                        }),
+                        json!({
+                            "skip_reason": "branch_condition_false",
+                            "condition": condition,
+                            "actual": actual,
+                            "expected": expected
+                        }),
+                    )
+                    .await?;
+                    record_workflow_transition(
+                        state,
+                        run,
+                        evaluation.source_step.as_ref().or(Some(step)),
+                        Some(&skipped),
+                        "branch",
+                        "skipped",
+                        json!({
+                            "source": "step_graph_branch",
+                            "condition": skipped.output_payload["condition"].clone(),
+                            "actual": skipped.output_payload["actual"].clone(),
+                            "expected": skipped.output_payload["expected"].clone(),
+                            "graph_step": graph_step
+                        }),
+                        json!({
+                            "workflow_step_run_id": skipped.id,
+                            "skip_reason": "branch_condition_false"
+                        }),
+                    )
+                    .await?;
+                    continue;
+                }
+            }
+            let materialized = materialize_workflow_graph_step(
+                state,
+                &definition,
+                run,
+                &session,
+                &root_grant,
+                graph_step,
+            )
+            .await?;
+            record_workflow_transition(
+                state,
+                run,
+                Some(step),
+                Some(&materialized),
+                "dependency",
+                "materialized",
+                json!({
+                    "source": "step_graph_dependency",
+                    "dependencies": workflow_graph_step_dependencies(graph_step)?,
+                    "graph_step": graph_step
+                }),
+                empty_json_object(),
+            )
+            .await?;
+        }
     }
 
+    finalize_workflow_graph_after_transition_policy(state, &definition, run, step).await?;
+    Ok(())
+}
+
+async fn advance_workflow_graph_after_step_failure(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+) -> Result<(), AppError> {
+    let definition = state
+        .get_workflow_definition(run.workflow_definition_id)
+        .await?;
+    let session = state.get_session(run.primary_session_id).await?;
+    let root_task_grant_id = run
+        .root_task_grant_id
+        .ok_or_else(|| AppError::forbidden("workflow run requires root task grant"))?;
+    let root_grant = state.get_task_grant(root_task_grant_id).await?;
+    let existing_steps = state.list_workflow_step_runs(run.id).await?;
+    let Some(graph_step) = workflow_graph_step_by_key(&definition.step_graph, &step.step_key)?
+    else {
+        update_workflow_run_status_and_record(state, run, &step.status).await?;
+        return Ok(());
+    };
+
+    if step.status == "failed" {
+        let attempts = workflow_graph_step_attempt_count(&existing_steps, &step.step_key);
+        let max_attempts = workflow_graph_step_retry_max_attempts(graph_step)?;
+        if attempts < max_attempts {
+            let next_attempt = attempts + 1;
+            let retry_step = materialize_workflow_graph_step_with_policy_context(
+                state,
+                &definition,
+                run,
+                &session,
+                &root_grant,
+                graph_step,
+                "queued",
+                json!({
+                    "retry": {
+                        "attempt": next_attempt,
+                        "max_attempts": max_attempts,
+                        "previous_step_run_id": step.id,
+                        "previous_status": step.status,
+                        "previous_output": step.output_payload
+                    }
+                }),
+                empty_json_object(),
+            )
+            .await?;
+            record_workflow_transition(
+                state,
+                run,
+                Some(step),
+                Some(&retry_step),
+                "retry",
+                "queued",
+                json!({
+                    "source": "step_graph_retry",
+                    "attempt": next_attempt,
+                    "max_attempts": max_attempts,
+                    "graph_step": graph_step
+                }),
+                json!({
+                    "workflow_status": "running",
+                    "retry_step_run_id": retry_step.id
+                }),
+            )
+            .await?;
+            update_workflow_run_status_and_record(state, run, "running").await?;
+            return Ok(());
+        }
+    }
+
+    materialize_workflow_graph_failure_policy_steps(
+        state,
+        &definition,
+        run,
+        &session,
+        &root_grant,
+        step,
+    )
+    .await?;
+    finalize_workflow_graph_after_transition_policy(state, &definition, run, step).await?;
+    Ok(())
+}
+
+async fn finalize_workflow_graph_after_transition_policy(
+    state: &AppState,
+    definition: &WorkflowDefinition,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+) -> Result<(), AppError> {
     let current_run = state.get_workflow_run(run.id).await?;
-    if workflow_graph_run_completed(state, &definition, &current_run).await? {
+    if workflow_graph_run_completed(state, definition, &current_run).await? {
         let updated =
             update_workflow_run_status_and_record(state, &current_run, "completed").await?;
         record_workflow_transition(
@@ -13595,10 +13914,235 @@ async fn advance_workflow_graph_after_step_update(
             }),
         )
         .await?;
+    } else if let Some(failure_status) =
+        workflow_graph_terminal_failure_status(state, &current_run).await?
+    {
+        let updated =
+            update_workflow_run_status_and_record(state, &current_run, &failure_status).await?;
+        let failed_step_keys = workflow_graph_failed_step_keys(state, &updated).await?;
+        record_workflow_transition(
+            state,
+            &updated,
+            Some(step),
+            None,
+            "fail",
+            &failure_status,
+            json!({
+                "source": "step_graph_terminal_failure",
+                "graph_keys": workflow_graph_step_keys(&definition.step_graph)?
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            }),
+            json!({
+                "workflow_status": updated.status,
+                "completed_at": updated.completed_at,
+                "failed_step_keys": failed_step_keys
+            }),
+        )
+        .await?;
     } else {
         update_workflow_run_status_and_record(state, &current_run, "running").await?;
     }
     Ok(())
+}
+
+async fn materialize_workflow_graph_failure_policy_steps(
+    state: &AppState,
+    definition: &WorkflowDefinition,
+    run: &WorkflowRun,
+    session: &Session,
+    root_grant: &TaskGrant,
+    failed_step: &WorkflowStepRun,
+) -> Result<(), AppError> {
+    let Some(steps) = definition.step_graph.get("steps").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    loop {
+        let existing_steps = state.list_workflow_step_runs(run.id).await?;
+        let failed_keys = workflow_graph_blocking_failure_keys(&existing_steps);
+        let mut materialized_any = false;
+        for graph_step in steps {
+            let key = workflow_graph_step_key(graph_step)?;
+            if workflow_graph_latest_step(&existing_steps, &key).is_some() {
+                continue;
+            }
+            let failure_sources = workflow_graph_step_failure_sources(graph_step)?;
+            if failure_sources
+                .iter()
+                .any(|source| source == &failed_step.step_key)
+            {
+                let compensation_step = materialize_workflow_graph_step_with_policy_context(
+                    state,
+                    definition,
+                    run,
+                    session,
+                    root_grant,
+                    graph_step,
+                    "queued",
+                    json!({
+                        "failure_trigger": {
+                            "failed_step_run_id": failed_step.id,
+                            "failed_step_key": failed_step.step_key,
+                            "failed_status": failed_step.status,
+                            "failed_output": failed_step.output_payload
+                        }
+                    }),
+                    empty_json_object(),
+                )
+                .await?;
+                record_workflow_transition(
+                    state,
+                    run,
+                    Some(failed_step),
+                    Some(&compensation_step),
+                    "compensation",
+                    "materialized",
+                    json!({
+                        "source": "step_graph_failure_policy",
+                        "failure_sources": failure_sources,
+                        "graph_step": graph_step
+                    }),
+                    empty_json_object(),
+                )
+                .await?;
+                materialized_any = true;
+                continue;
+            }
+
+            if !failure_sources.is_empty() {
+                continue;
+            }
+            let dependencies = workflow_graph_step_dependencies(graph_step)?;
+            let failed_dependencies = dependencies
+                .iter()
+                .filter(|dependency| failed_keys.contains(*dependency))
+                .cloned()
+                .collect::<Vec<_>>();
+            if failed_dependencies.is_empty() {
+                continue;
+            }
+            let skipped_step = materialize_workflow_graph_step_with_policy_context(
+                state,
+                definition,
+                run,
+                session,
+                root_grant,
+                graph_step,
+                "skipped",
+                json!({
+                    "skip": {
+                        "reason": "dependency_failed",
+                        "failed_dependencies": failed_dependencies,
+                        "source_step_run_id": failed_step.id,
+                        "source_step_key": failed_step.step_key
+                    }
+                }),
+                json!({
+                    "skip_reason": "dependency_failed",
+                    "failed_dependencies": failed_dependencies
+                }),
+            )
+            .await?;
+            record_workflow_transition(
+                state,
+                run,
+                Some(failed_step),
+                Some(&skipped_step),
+                "skip",
+                "skipped",
+                json!({
+                    "source": "step_graph_failure_policy",
+                    "dependencies": dependencies,
+                    "failed_dependencies": skipped_step.output_payload["failed_dependencies"].clone(),
+                    "graph_step": graph_step
+                }),
+                json!({
+                    "workflow_step_run_id": skipped_step.id,
+                    "skip_reason": "dependency_failed"
+                }),
+            )
+            .await?;
+            materialized_any = true;
+        }
+        if !materialized_any {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn workflow_graph_step_attempt_count(existing_steps: &[WorkflowStepRun], step_key: &str) -> usize {
+    existing_steps
+        .iter()
+        .filter(|step| step.step_key == step_key)
+        .count()
+}
+
+fn workflow_graph_latest_step<'a>(
+    existing_steps: &'a [WorkflowStepRun],
+    step_key: &str,
+) -> Option<&'a WorkflowStepRun> {
+    existing_steps
+        .iter()
+        .rev()
+        .find(|step| step.step_key == step_key)
+}
+
+fn workflow_graph_blocking_failure_keys(existing_steps: &[WorkflowStepRun]) -> HashSet<String> {
+    let mut latest_by_key = HashMap::new();
+    for step in existing_steps {
+        latest_by_key.insert(step.step_key.as_str(), step);
+    }
+    latest_by_key
+        .values()
+        .filter(|step| {
+            matches!(step.status.as_str(), "failed" | "canceled")
+                || (step.status == "skipped"
+                    && step
+                        .output_payload
+                        .get("skip_reason")
+                        .and_then(Value::as_str)
+                        == Some("dependency_failed"))
+        })
+        .map(|step| step.step_key.clone())
+        .collect()
+}
+
+async fn workflow_graph_terminal_failure_status(
+    state: &AppState,
+    run: &WorkflowRun,
+) -> Result<Option<String>, AppError> {
+    let steps = state.list_workflow_step_runs(run.id).await?;
+    if steps
+        .iter()
+        .any(|step| !workflow_step_status_terminal(&step.status))
+    {
+        return Ok(None);
+    }
+    if steps.iter().any(|step| step.status == "failed") {
+        return Ok(Some("failed".to_string()));
+    }
+    if steps.iter().any(|step| step.status == "canceled") {
+        return Ok(Some("canceled".to_string()));
+    }
+    Ok(None)
+}
+
+async fn workflow_graph_failed_step_keys(
+    state: &AppState,
+    run: &WorkflowRun,
+) -> Result<Vec<String>, AppError> {
+    let mut keys = state
+        .list_workflow_step_runs(run.id)
+        .await?
+        .into_iter()
+        .filter(|step| step.status == "failed")
+        .map(|step| step.step_key)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    keys.sort();
+    Ok(keys)
 }
 
 async fn workflow_graph_run_completed(
@@ -49625,6 +50169,491 @@ not json
                 && transition["from_step_run_id"] == json!(draft_step_id)
                 && transition["from_step_key"] == json!("draft")
                 && transition["status"] == json!("completed")
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_step_failure_retries_then_compensates_and_skips_dependents() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Retry compensation workflow",
+                    "entrypoint": "retry-compensation-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true},
+                            {"key": "enrich", "type": "agent", "depends_on": ["intake"], "retry": {"max_attempts": 2}},
+                            {"key": "publish", "type": "agent", "depends_on": ["enrich"]},
+                            {"key": "notify", "type": "agent", "depends_on": ["publish"]},
+                            {"key": "cleanup", "type": "agent", "on_failure_of": ["enrich"]}
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "retry and compensate"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let intake_step_id = steps[0]["id"].as_str().expect("intake step id").to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{intake_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"summary": "intake complete"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let enrich_step_id = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("enrich"))
+            .and_then(|step| step["id"].as_str())
+            .expect("enrich step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{enrich_step_id}"),
+                json!({
+                    "status": "failed",
+                    "output_payload": {"error": "transient upstream failure"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps_after_retry: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let enrich_attempts = steps_after_retry
+            .iter()
+            .filter(|step| step["step_key"] == json!("enrich"))
+            .collect::<Vec<_>>();
+        assert_eq!(enrich_attempts.len(), 2);
+        let retry_step = enrich_attempts
+            .iter()
+            .find(|step| step["status"] == json!("queued"))
+            .expect("retry attempt should be queued");
+        assert_eq!(retry_step["input_payload"]["retry"]["attempt"], json!(2));
+        assert_eq!(
+            retry_step["input_payload"]["retry"]["max_attempts"],
+            json!(2)
+        );
+
+        let run_after_retry: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run_after_retry["status"], json!("running"));
+
+        let retry_step_id = retry_step["id"]
+            .as_str()
+            .expect("retry step id")
+            .to_string();
+        let transitions_after_retry: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(transitions_after_retry.iter().any(|transition| {
+            transition["transition_type"] == json!("retry")
+                && transition["from_step_run_id"] == json!(enrich_step_id)
+                && transition["to_step_run_id"] == json!(retry_step_id)
+                && transition["condition_payload"]["attempt"] == json!(2)
+        }));
+
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{retry_step_id}"),
+                json!({
+                    "status": "failed",
+                    "output_payload": {"error": "permanent upstream failure"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps_after_failure: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let publish_step = steps_after_failure
+            .iter()
+            .find(|step| step["step_key"] == json!("publish"))
+            .expect("publish should be skipped after enrich failure");
+        assert_eq!(publish_step["status"], json!("skipped"));
+        assert_eq!(
+            publish_step["output_payload"]["skip_reason"],
+            json!("dependency_failed")
+        );
+        let notify_step = steps_after_failure
+            .iter()
+            .find(|step| step["step_key"] == json!("notify"))
+            .expect("notify should be skipped after publish is skipped");
+        assert_eq!(notify_step["status"], json!("skipped"));
+        assert_eq!(
+            notify_step["output_payload"]["skip_reason"],
+            json!("dependency_failed")
+        );
+        let cleanup_step = steps_after_failure
+            .iter()
+            .find(|step| step["step_key"] == json!("cleanup"))
+            .expect("cleanup should be materialized as compensation");
+        assert_eq!(cleanup_step["status"], json!("queued"));
+        assert_eq!(
+            cleanup_step["input_payload"]["failure_trigger"]["failed_step_key"],
+            json!("enrich")
+        );
+        let cleanup_step_id = cleanup_step["id"]
+            .as_str()
+            .expect("cleanup step id")
+            .to_string();
+
+        let transitions_after_failure: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(transitions_after_failure.iter().any(|transition| {
+            transition["transition_type"] == json!("skip")
+                && transition["from_step_run_id"] == json!(retry_step_id)
+                && transition["to_step_key"] == json!("publish")
+                && transition["status"] == json!("skipped")
+        }));
+        assert!(transitions_after_failure.iter().any(|transition| {
+            transition["transition_type"] == json!("compensation")
+                && transition["from_step_run_id"] == json!(retry_step_id)
+                && transition["to_step_run_id"] == json!(cleanup_step_id)
+                && transition["status"] == json!("materialized")
+        }));
+
+        let run_after_failure: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(run_after_failure["status"], json!("running"));
+
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{cleanup_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"summary": "cleanup complete"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let final_run: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(final_run["status"], json!("failed"));
+        assert!(final_run["completed_at"].as_str().is_some());
+
+        let final_transitions: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(final_transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("fail")
+                && transition["from_step_run_id"] == json!(cleanup_step_id)
+                && transition["status"] == json!("failed")
+                && transition["result_payload"]["failed_step_keys"] == json!(["enrich"])
+        }));
+    }
+
+    #[test]
+    fn workflow_blocking_failure_keys_use_latest_step_attempt_status() {
+        let run_id = Uuid::new_v4();
+        let now = Utc::now();
+        let failed_attempt =
+            test_workflow_step_run(run_id, "enrich", "failed", empty_json_object(), now);
+        let successful_retry = test_workflow_step_run(
+            run_id,
+            "enrich",
+            "completed",
+            empty_json_object(),
+            now + chrono::Duration::milliseconds(1),
+        );
+        let dependency_skip = test_workflow_step_run(
+            run_id,
+            "publish",
+            "skipped",
+            json!({"skip_reason": "dependency_failed"}),
+            now + chrono::Duration::milliseconds(2),
+        );
+
+        let blocking_keys = workflow_graph_blocking_failure_keys(&[
+            failed_attempt,
+            successful_retry,
+            dependency_skip,
+        ]);
+
+        assert!(!blocking_keys.contains("enrich"));
+        assert!(blocking_keys.contains("publish"));
+    }
+
+    fn test_workflow_step_run(
+        workflow_run_id: Uuid,
+        step_key: &str,
+        status: &str,
+        output_payload: Value,
+        created_at: DateTime<Utc>,
+    ) -> WorkflowStepRun {
+        WorkflowStepRun {
+            id: Uuid::new_v4(),
+            workflow_run_id,
+            step_key: step_key.to_string(),
+            step_type: "agent".to_string(),
+            agent_id: None,
+            agent_version_id: None,
+            session_id: None,
+            thread_id: None,
+            handoff_id: None,
+            task_grant_id: None,
+            environment_id: None,
+            status: status.to_string(),
+            input_payload: empty_json_object(),
+            output_payload,
+            artifact_ids: Vec::new(),
+            approval_ids: Vec::new(),
+            tool_call_ids: Vec::new(),
+            started_at: None,
+            completed_at: workflow_step_status_terminal(status).then_some(created_at),
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_branch_condition_false_skips_step_and_completes_run() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Branch condition workflow",
+                    "entrypoint": "branch-condition-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true},
+                            {
+                                "key": "publish",
+                                "type": "agent",
+                                "depends_on": ["intake"],
+                                "condition": {
+                                    "source_step": "intake",
+                                    "path": "approved",
+                                    "equals": true
+                                }
+                            }
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "branch false skip"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let intake_step_id = steps[0]["id"].as_str().expect("intake step id").to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{intake_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"approved": false}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let publish_step = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("publish"))
+            .expect("publish branch step should be recorded");
+        assert_eq!(publish_step["status"], json!("skipped"));
+        assert_eq!(
+            publish_step["output_payload"]["skip_reason"],
+            json!("branch_condition_false")
+        );
+
+        let completed_run: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed_run["status"], json!("completed"));
+
+        let transitions: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("branch")
+                && transition["from_step_run_id"] == json!(intake_step_id)
+                && transition["to_step_key"] == json!("publish")
+                && transition["status"] == json!("skipped")
+                && transition["condition_payload"]["condition"]["path"] == json!("approved")
         }));
     }
 
