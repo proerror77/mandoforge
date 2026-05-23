@@ -21,6 +21,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool, postgres::PgPoolOptions};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -76,6 +77,7 @@ mod store_session_threads;
 mod store_tool_calls;
 mod store_usage_rollups;
 mod store_workflow_packs;
+mod store_workflows;
 mod workflow_pack;
 
 use authorization::{
@@ -1097,6 +1099,253 @@ struct WorkflowPackProfileAsset {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowDefinition {
+    id: Uuid,
+    pack_installation_id: Option<Uuid>,
+    pack_id: Option<String>,
+    pack_version: Option<String>,
+    name: String,
+    entrypoint: String,
+    trigger_type: String,
+    default_agent_id: Uuid,
+    default_environment_id: Option<Uuid>,
+    input_schema_ref: Option<String>,
+    output_schema_ref: Option<String>,
+    step_graph: Value,
+    handoff_rules: Value,
+    approval_policy_ref: Option<String>,
+    eval_gate_refs: Vec<String>,
+    release_state: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkflowDefinition {
+    #[serde(default)]
+    pack_installation_id: Option<Uuid>,
+    name: String,
+    entrypoint: String,
+    #[serde(default = "default_workflow_trigger_type")]
+    trigger_type: String,
+    default_agent_id: Uuid,
+    #[serde(default)]
+    default_environment_id: Option<Uuid>,
+    #[serde(default)]
+    input_schema_ref: Option<String>,
+    #[serde(default)]
+    output_schema_ref: Option<String>,
+    #[serde(default = "empty_json_object")]
+    step_graph: Value,
+    #[serde(default = "empty_json_object")]
+    handoff_rules: Value,
+    #[serde(default)]
+    approval_policy_ref: Option<String>,
+    #[serde(default)]
+    eval_gate_refs: Vec<String>,
+    #[serde(default = "default_workflow_release_state")]
+    release_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowRun {
+    id: Uuid,
+    workflow_definition_id: Uuid,
+    pack_installation_id: Option<Uuid>,
+    source_event_id: Option<Uuid>,
+    source_work_item_id: Option<Uuid>,
+    source_schedule_id: Option<Uuid>,
+    status: String,
+    primary_session_id: Uuid,
+    root_task_grant_id: Option<Uuid>,
+    input_payload: Value,
+    input_digest: String,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    audit_trace_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkflowRun {
+    workflow_definition_id: Uuid,
+    #[serde(default)]
+    source_event_id: Option<Uuid>,
+    #[serde(default)]
+    source_work_item_id: Option<Uuid>,
+    #[serde(default)]
+    source_schedule_id: Option<Uuid>,
+    #[serde(default)]
+    environment_id: Option<Uuid>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default = "empty_json_object")]
+    input_payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowStepRun {
+    id: Uuid,
+    workflow_run_id: Uuid,
+    step_key: String,
+    step_type: String,
+    agent_id: Option<Uuid>,
+    agent_version_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    thread_id: Option<Uuid>,
+    handoff_id: Option<Uuid>,
+    task_grant_id: Option<Uuid>,
+    environment_id: Option<Uuid>,
+    status: String,
+    input_payload: Value,
+    output_payload: Value,
+    artifact_ids: Vec<Uuid>,
+    approval_ids: Vec<Uuid>,
+    tool_call_ids: Vec<Uuid>,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkflowStepRun {
+    step_key: String,
+    step_type: String,
+    #[serde(default)]
+    agent_id: Option<Uuid>,
+    #[serde(default)]
+    agent_version_id: Option<Uuid>,
+    #[serde(default)]
+    session_id: Option<Uuid>,
+    #[serde(default)]
+    thread_id: Option<Uuid>,
+    #[serde(default)]
+    handoff_id: Option<Uuid>,
+    #[serde(default)]
+    task_grant_id: Option<Uuid>,
+    #[serde(default)]
+    environment_id: Option<Uuid>,
+    #[serde(default = "default_workflow_run_status")]
+    status: String,
+    #[serde(default = "empty_json_object")]
+    input_payload: Value,
+    #[serde(default = "empty_json_object")]
+    output_payload: Value,
+    #[serde(default)]
+    artifact_ids: Vec<Uuid>,
+    #[serde(default)]
+    approval_ids: Vec<Uuid>,
+    #[serde(default)]
+    tool_call_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateWorkflowStepRun {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    output_payload: Option<Value>,
+    #[serde(default)]
+    artifact_ids: Option<Vec<Uuid>>,
+    #[serde(default)]
+    approval_ids: Option<Vec<Uuid>>,
+    #[serde(default)]
+    tool_call_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskGrant {
+    id: Uuid,
+    workflow_run_id: Uuid,
+    workflow_step_run_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    parent_grant_id: Option<Uuid>,
+    source_event_id: Option<Uuid>,
+    source_handoff_id: Option<Uuid>,
+    issuer_subject: String,
+    grantee_agent_id: Option<Uuid>,
+    grantee_session_id: Option<Uuid>,
+    agent_class: Option<String>,
+    objective: String,
+    risk_level: String,
+    status: String,
+    expires_at: Option<DateTime<Utc>>,
+    max_turns: Option<i32>,
+    max_tool_calls: Option<i32>,
+    max_runtime_seconds: Option<i32>,
+    max_cost_usd_micros: Option<i64>,
+    semantic_scopes: Value,
+    memory_scope: Value,
+    tool_scope: Value,
+    connector_scope: Value,
+    approval_policy: Value,
+    external_effects: Value,
+    context_packet_id: Option<Uuid>,
+    policy_revision_id: Option<Uuid>,
+    immutable_args_hash: Option<String>,
+    audit_trace_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTaskGrant {
+    #[serde(default)]
+    parent_grant_id: Option<Uuid>,
+    #[serde(default)]
+    workflow_step_run_id: Option<Uuid>,
+    #[serde(default)]
+    session_id: Option<Uuid>,
+    #[serde(default)]
+    source_event_id: Option<Uuid>,
+    #[serde(default)]
+    source_handoff_id: Option<Uuid>,
+    #[serde(default)]
+    issuer_subject: Option<String>,
+    #[serde(default)]
+    grantee_agent_id: Option<Uuid>,
+    #[serde(default)]
+    grantee_session_id: Option<Uuid>,
+    #[serde(default)]
+    agent_class: Option<String>,
+    #[serde(default)]
+    objective: Option<String>,
+    #[serde(default = "default_task_grant_risk_level")]
+    risk_level: String,
+    #[serde(default)]
+    expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    max_turns: Option<i32>,
+    #[serde(default)]
+    max_tool_calls: Option<i32>,
+    #[serde(default)]
+    max_runtime_seconds: Option<i32>,
+    #[serde(default)]
+    max_cost_usd_micros: Option<i64>,
+    #[serde(default = "empty_json_object")]
+    semantic_scopes: Value,
+    #[serde(default = "default_task_grant_memory_scope")]
+    memory_scope: Value,
+    #[serde(default = "default_task_grant_tool_scope")]
+    tool_scope: Value,
+    #[serde(default = "default_task_grant_connector_scope")]
+    connector_scope: Value,
+    #[serde(default = "default_task_grant_approval_policy")]
+    approval_policy: Value,
+    #[serde(default = "default_task_grant_external_effects")]
+    external_effects: Value,
+    #[serde(default)]
+    context_packet_id: Option<Uuid>,
+    #[serde(default)]
+    policy_revision_id: Option<Uuid>,
+    #[serde(default)]
+    immutable_args_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SemanticSource {
     id: Uuid,
     source_type: String,
@@ -1600,6 +1849,23 @@ struct Approval {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalCommitToken {
+    id: Uuid,
+    approval_id: Uuid,
+    tool_call_id: Uuid,
+    task_grant_id: Uuid,
+    session_id: Uuid,
+    tool_name: String,
+    normalized_args_hash: String,
+    target_binding: Value,
+    approver_subject: String,
+    status: String,
+    expires_at: DateTime<Utc>,
+    consumed_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ApprovalGroup {
     id: Uuid,
     name: String,
@@ -2022,6 +2288,9 @@ struct ToolCall {
     event_id: Option<Uuid>,
     tool_name: String,
     args: Value,
+    task_grant_id: Option<Uuid>,
+    normalized_args_hash: Option<String>,
+    target_binding: Value,
     status: String,
     risk_level: String,
     policy_decision: Value,
@@ -4852,6 +5121,8 @@ struct McpCallTool;
 #[derive(Debug, Deserialize)]
 struct ExecuteTool {
     session_id: Uuid,
+    #[serde(default)]
+    task_grant_id: Option<Uuid>,
     args: Value,
 }
 
@@ -5230,6 +5501,32 @@ fn build_router(state: AppState) -> Router {
             "/api/sessions/{id}/audit-logs",
             get(list_session_audit_logs),
         )
+        .route(
+            "/api/workflow-definitions",
+            get(list_workflow_definitions_route).post(create_workflow_definition_route),
+        )
+        .route(
+            "/api/workflow-definitions/{id}",
+            get(get_workflow_definition_route),
+        )
+        .route(
+            "/api/workflow-runs",
+            get(list_workflow_runs_route).post(create_workflow_run_route),
+        )
+        .route("/api/workflow-runs/{id}", get(get_workflow_run_route))
+        .route(
+            "/api/workflow-runs/{id}/steps",
+            get(list_workflow_step_runs_route).post(create_workflow_step_run_route),
+        )
+        .route(
+            "/api/workflow-step-runs/{id}",
+            patch(update_workflow_step_run_route),
+        )
+        .route(
+            "/api/workflow-runs/{id}/task-grants",
+            get(list_workflow_task_grants_route).post(create_workflow_task_grant_route),
+        )
+        .route("/api/task-grants/{id}", get(get_task_grant_route))
         .route("/api/tools", get(list_tools))
         .route("/api/tools/{name}/execute", post(execute_tool))
         .route("/api/tool-calls", get(list_tool_calls))
@@ -10739,6 +11036,16 @@ async fn assign_agent_handoff_event(
         Some(parent_thread.id),
     )
     .await?;
+    materialize_workflow_handoff_assignment(
+        &state,
+        &handoff,
+        &assignment,
+        &manager_plan,
+        &target_agent,
+        &specialist_session,
+        &child_thread,
+    )
+    .await?;
     state
         .append_event(
             "system",
@@ -10758,6 +11065,158 @@ async fn assign_agent_handoff_event(
         )
         .await?;
     Ok(Json(assignment))
+}
+
+async fn materialize_workflow_handoff_assignment(
+    state: &AppState,
+    handoff: &AgentHandoffEvent,
+    assignment: &AgentHandoffAssignment,
+    manager_plan: &ManagerAgentPlan,
+    target_agent: &Agent,
+    specialist_session: &Session,
+    child_thread: &SessionThread,
+) -> Result<Option<(WorkflowStepRun, TaskGrant)>, AppError> {
+    let Some((run, parent_grant)) =
+        active_task_grant_for_session(state, handoff.source_session_id).await?
+    else {
+        return Ok(None);
+    };
+    let step_id = Uuid::new_v4();
+    let now = Utc::now();
+    let objective = manager_plan
+        .task_intake
+        .get("goal")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(handoff.intent.as_str())
+        .to_string();
+    let child_grant = TaskGrant {
+        id: Uuid::new_v4(),
+        workflow_run_id: run.id,
+        workflow_step_run_id: Some(step_id),
+        session_id: Some(specialist_session.id),
+        parent_grant_id: Some(parent_grant.id),
+        source_event_id: None,
+        source_handoff_id: Some(handoff.id),
+        issuer_subject: assignment
+            .assigned_by
+            .clone()
+            .unwrap_or_else(|| "system".to_string()),
+        grantee_agent_id: Some(target_agent.id),
+        grantee_session_id: Some(specialist_session.id),
+        agent_class: Some("specialist".to_string()),
+        objective,
+        risk_level: handoff.risk_level.clone(),
+        status: "active".to_string(),
+        expires_at: parent_grant.expires_at,
+        max_turns: parent_grant.max_turns,
+        max_tool_calls: parent_grant.max_tool_calls,
+        max_runtime_seconds: parent_grant.max_runtime_seconds,
+        max_cost_usd_micros: parent_grant.max_cost_usd_micros,
+        semantic_scopes: handoff.semantic_scopes.clone(),
+        memory_scope: child_handoff_memory_scope(&parent_grant.memory_scope),
+        tool_scope: child_tool_scope_for_agent(&parent_grant.tool_scope, target_agent),
+        connector_scope: parent_grant.connector_scope.clone(),
+        approval_policy: parent_grant.approval_policy.clone(),
+        external_effects: parent_grant.external_effects.clone(),
+        context_packet_id: None,
+        policy_revision_id: parent_grant.policy_revision_id,
+        immutable_args_hash: None,
+        audit_trace_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    validate_task_grant_scope_objects(&child_grant)?;
+    ensure_child_task_grant_within_parent(&parent_grant, &child_grant)?;
+
+    let agent_version_id = Some(state.current_agent_version(target_agent.id).await?.id);
+    let step = state
+        .create_workflow_step_run(WorkflowStepRun {
+            id: step_id,
+            workflow_run_id: run.id,
+            step_key: handoff.intent.clone(),
+            step_type: "handoff".to_string(),
+            agent_id: Some(target_agent.id),
+            agent_version_id,
+            session_id: Some(specialist_session.id),
+            thread_id: Some(child_thread.id),
+            handoff_id: Some(handoff.id),
+            task_grant_id: None,
+            environment_id: specialist_session.environment_id,
+            status: if assignment.status == "waiting_remote_computer" {
+                "requires_action".to_string()
+            } else {
+                "queued".to_string()
+            },
+            input_payload: json!({
+                "agent_handoff_assignment_id": assignment.id,
+                "agent_handoff_event_id": handoff.id,
+                "manager_plan_id": manager_plan.id,
+                "payload": handoff.payload.clone(),
+                "semantic_scopes": handoff.semantic_scopes.clone(),
+                "remote_computer_required": assignment.remote_computer_required
+            }),
+            output_payload: empty_json_object(),
+            artifact_ids: Vec::new(),
+            approval_ids: Vec::new(),
+            tool_call_ids: Vec::new(),
+            started_at: None,
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    let child_grant = state.create_task_grant(child_grant).await?;
+    record_task_grant_issued(state, &child_grant, run.primary_session_id).await?;
+    let step = state
+        .update_workflow_step_run_task_grant(step.id, child_grant.id)
+        .await?;
+    record_workflow_step_run_created(state, &run, &step).await?;
+    Ok(Some((step, child_grant)))
+}
+
+fn child_handoff_memory_scope(parent: &Value) -> Value {
+    let mut memory_scope = parent.clone();
+    if let Some(object) = memory_scope.as_object_mut()
+        && object.contains_key("writeback_allowed")
+    {
+        object.insert("writeback_allowed".to_string(), json!(false));
+    }
+    memory_scope
+}
+
+fn child_tool_scope_for_agent(parent: &Value, agent: &Agent) -> Value {
+    let agent_tools = agent
+        .tools
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut scope = serde_json::Map::new();
+    for key in ["read", "write", "external_write"] {
+        let values = parent
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .flat_map(|tool| {
+                        if tool == "*" {
+                            agent_tools.iter().copied().collect::<Vec<_>>()
+                        } else if agent_tools.contains(tool) {
+                            vec![tool]
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .map(|tool| Value::String(tool.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        scope.insert(key.to_string(), Value::Array(values));
+    }
+    Value::Object(scope)
 }
 
 async fn attach_agent_handoff_remote_computer_assignment(
@@ -11191,6 +11650,162 @@ fn normalize_manager_plan_status(value: &str) -> Result<String, AppError> {
     }
 }
 
+fn require_non_empty(value: String, field: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::bad_request(format!("{field} is required")));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_workflow_trigger_type(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "manual" | "schedule" | "webhook" | "work_item" | "connector_event" | "api" => {
+            Ok(normalized)
+        }
+        _ => Err(AppError::bad_request(
+            "workflow trigger_type must be manual, schedule, webhook, work_item, connector_event, or api",
+        )),
+    }
+}
+
+fn normalize_workflow_release_state(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "draft" | "staged" | "released" | "rolled_back" | "archived" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "workflow release_state must be draft, staged, released, rolled_back, or archived",
+        )),
+    }
+}
+
+fn normalize_workflow_run_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "queued" | "running" | "requires_action" | "completed" | "failed" | "canceled"
+        | "skipped" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "workflow status must be queued, running, requires_action, completed, failed, canceled, or skipped",
+        )),
+    }
+}
+
+async fn ensure_session_event_exists(state: &AppState, event_id: Uuid) -> Result<(), AppError> {
+    for session in state.list_sessions().await? {
+        if state
+            .list_events(session.id)
+            .await?
+            .iter()
+            .any(|event| event.id == event_id)
+        {
+            return Ok(());
+        }
+    }
+    Err(AppError::not_found("session event not found"))
+}
+
+fn normalize_task_grant_risk_level(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "low" | "medium" | "high" | "critical" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "task grant risk_level must be low, medium, high, or critical",
+        )),
+    }
+}
+
+fn validate_task_grant_scope_objects(grant: &TaskGrant) -> Result<(), AppError> {
+    for (field, value) in [
+        ("semantic_scopes", &grant.semantic_scopes),
+        ("memory_scope", &grant.memory_scope),
+        ("tool_scope", &grant.tool_scope),
+        ("connector_scope", &grant.connector_scope),
+        ("approval_policy", &grant.approval_policy),
+        ("external_effects", &grant.external_effects),
+    ] {
+        if !value.is_object() {
+            return Err(AppError::bad_request(format!(
+                "task grant {field} must be a JSON object"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn workflow_definition_root_task_grant_scope(
+    definition: &WorkflowDefinition,
+    key: &str,
+    default_value: impl FnOnce() -> Value,
+) -> Value {
+    definition
+        .handoff_rules
+        .get("root_task_grant")
+        .and_then(|value| value.get(key))
+        .or_else(|| {
+            definition
+                .handoff_rules
+                .get("task_grant_template")
+                .and_then(|value| value.get(key))
+        })
+        .cloned()
+        .unwrap_or_else(default_value)
+}
+
+fn ensure_child_task_grant_within_parent(
+    parent: &TaskGrant,
+    child: &TaskGrant,
+) -> Result<(), AppError> {
+    let within_parent = child.workflow_run_id == parent.workflow_run_id
+        && limit_within_parent(parent.max_turns, child.max_turns)
+        && limit_within_parent(parent.max_tool_calls, child.max_tool_calls)
+        && limit_within_parent(parent.max_runtime_seconds, child.max_runtime_seconds)
+        && limit_within_parent(parent.max_cost_usd_micros, child.max_cost_usd_micros)
+        && json_scope_contains(&parent.semantic_scopes, &child.semantic_scopes)
+        && json_scope_contains(&parent.memory_scope, &child.memory_scope)
+        && json_scope_contains(&parent.tool_scope, &child.tool_scope)
+        && json_scope_contains(&parent.connector_scope, &child.connector_scope)
+        && json_scope_contains(&parent.approval_policy, &child.approval_policy)
+        && json_scope_contains(&parent.external_effects, &child.external_effects);
+    if within_parent {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "child task grant cannot expand parent grant",
+        ))
+    }
+}
+
+fn limit_within_parent<T>(parent: Option<T>, child: Option<T>) -> bool
+where
+    T: PartialOrd,
+{
+    match (parent, child) {
+        (Some(parent), Some(child)) => child <= parent,
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
+fn json_scope_contains(parent: &Value, child: &Value) -> bool {
+    match (parent, child) {
+        (_, Value::Null) => true,
+        (Value::Object(parent), Value::Object(child)) => child.iter().all(|(key, child_value)| {
+            parent
+                .get(key)
+                .is_some_and(|parent_value| json_scope_contains(parent_value, child_value))
+        }),
+        (Value::Array(parent), Value::Array(child)) => child.iter().all(|child_value| {
+            parent.iter().any(|parent_value| {
+                parent_value == child_value
+                    || (parent_value.as_str() == Some("*") && child_value.is_string())
+            })
+        }),
+        (Value::Bool(true), Value::Bool(_)) => true,
+        _ => parent == child,
+    }
+}
+
 fn ensure_agent_handoff_transition(current: &str, next: &str) -> Result<(), AppError> {
     let allowed = matches!(
         (current, next),
@@ -11379,9 +11994,12 @@ fn handoff_rule_bool(rule: &Value, key: &str) -> Option<bool> {
 }
 
 fn json_string_array_contains(value: Option<&Value>, expected: &str) -> bool {
-    value
-        .and_then(Value::as_array)
-        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(expected)))
+    value.and_then(Value::as_array).is_some_and(|items| {
+        items.iter().any(|item| {
+            item.as_str()
+                .is_some_and(|value| value == "*" || value == expected)
+        })
+    })
 }
 
 fn json_optional_string_array_contains(value: Option<&Value>, expected: &str) -> bool {
@@ -11459,6 +12077,1441 @@ async fn validate_workflow_pack_route(
     let report = workflow_pack::validate_workflow_pack_manifest_path(&manifest_path)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     Ok(Json(report))
+}
+
+async fn list_workflow_definitions_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkflowDefinition>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_definitions",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_workflow_definitions().await?))
+}
+
+async fn get_workflow_definition_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<WorkflowDefinition>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_definition",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.get_workflow_definition(id).await?))
+}
+
+async fn create_workflow_definition_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateWorkflowDefinition>,
+) -> Result<Json<WorkflowDefinition>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_definitions",
+        None,
+    )
+    .await?;
+    let name = require_non_empty(input.name, "workflow definition name")?;
+    let entrypoint = require_non_empty(input.entrypoint, "workflow definition entrypoint")?;
+    let trigger_type = normalize_workflow_trigger_type(&input.trigger_type)?;
+    let release_state = normalize_workflow_release_state(&input.release_state)?;
+    state.get_agent(input.default_agent_id).await?;
+    if let Some(environment_id) = input.default_environment_id {
+        state.get_environment(environment_id).await?;
+    }
+    if !input.step_graph.is_object() {
+        return Err(AppError::bad_request(
+            "workflow definition step_graph must be a JSON object",
+        ));
+    }
+    if !input.handoff_rules.is_object() {
+        return Err(AppError::bad_request(
+            "workflow definition handoff_rules must be a JSON object",
+        ));
+    }
+    let (pack_id, pack_version) = if let Some(installation_id) = input.pack_installation_id {
+        let installation = state
+            .get_workflow_pack_installation(installation_id)
+            .await?;
+        (Some(installation.pack_id), Some(installation.version))
+    } else {
+        (None, None)
+    };
+    let now = Utc::now();
+    let definition = state
+        .create_workflow_definition(WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: input.pack_installation_id,
+            pack_id,
+            pack_version,
+            name,
+            entrypoint,
+            trigger_type,
+            default_agent_id: input.default_agent_id,
+            default_environment_id: input.default_environment_id,
+            input_schema_ref: input.input_schema_ref,
+            output_schema_ref: input.output_schema_ref,
+            step_graph: input.step_graph,
+            handoff_rules: input.handoff_rules,
+            approval_policy_ref: input.approval_policy_ref,
+            eval_gate_refs: input.eval_gate_refs,
+            release_state,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        })
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "workflow_definition.created",
+            "workflow_definition",
+            Some(definition.id),
+            json!({
+                "name": definition.name,
+                "entrypoint": definition.entrypoint,
+                "default_agent_id": definition.default_agent_id,
+                "pack_installation_id": definition.pack_installation_id,
+                "release_state": definition.release_state
+            }),
+        ))
+        .await?;
+    Ok(Json(definition))
+}
+
+async fn list_workflow_runs_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkflowRun>>, AppError> {
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::SessionsRead, "workflow_runs")
+            .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_workflow_runs()
+            .await?
+            .into_iter()
+            .filter(|run| visible_session_ids.contains(&run.primary_session_id))
+            .collect(),
+    ))
+}
+
+async fn get_workflow_run_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<WorkflowRun>, AppError> {
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(run))
+}
+
+async fn create_workflow_run_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateWorkflowRun>,
+) -> Result<Json<WorkflowRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsWrite,
+        "workflow_runs",
+        None,
+    )
+    .await?;
+    let definition = state
+        .get_workflow_definition(input.workflow_definition_id)
+        .await?;
+    if definition.release_state != "released" {
+        return Err(AppError::bad_request(
+            "workflow run requires a released workflow definition",
+        ));
+    }
+    if let Some(work_item_id) = input.source_work_item_id {
+        state.ensure_work_item_exists(work_item_id).await?;
+    }
+    if let Some(source_event_id) = input.source_event_id {
+        ensure_session_event_exists(&state, source_event_id).await?;
+    }
+    let environment_id = input.environment_id.or(definition.default_environment_id);
+    if let Some(environment_id) = environment_id {
+        state.get_environment(environment_id).await?;
+    }
+    let title = input
+        .title
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| format!("Workflow: {}", definition.name));
+    let session = state
+        .create_session(CreateSession {
+            agent_id: definition.default_agent_id,
+            environment_id,
+            title,
+            message: None,
+        })
+        .await?;
+    ensure_primary_session_thread(&state, session.id).await?;
+    let now = Utc::now();
+    let input_digest = workflow_input_digest(&input.input_payload);
+    let run = state
+        .create_workflow_run(WorkflowRun {
+            id: Uuid::new_v4(),
+            workflow_definition_id: definition.id,
+            pack_installation_id: definition.pack_installation_id,
+            source_event_id: input.source_event_id,
+            source_work_item_id: input.source_work_item_id,
+            source_schedule_id: input.source_schedule_id,
+            status: "queued".to_string(),
+            primary_session_id: session.id,
+            root_task_grant_id: None,
+            input_payload: input.input_payload,
+            input_digest,
+            started_at: None,
+            completed_at: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    let root_grant =
+        issue_root_task_grant_for_workflow_run(&state, &run, &definition, &session).await?;
+    let run = state
+        .update_workflow_run_root_task_grant(run.id, root_grant.id)
+        .await?;
+    materialize_workflow_graph_start_steps(&state, &definition, &run, &session, &root_grant)
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(run.id),
+            session.id,
+            "workflow.run.created",
+            json!({
+                "workflow_run_id": run.id,
+                "workflow_definition_id": run.workflow_definition_id,
+                "pack_installation_id": run.pack_installation_id,
+                "root_task_grant_id": run.root_task_grant_id,
+                "input_digest": run.input_digest,
+                "status": run.status
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session.id),
+            "system",
+            Some(run.id),
+            "workflow_run.created",
+            "workflow_run",
+            Some(run.id),
+            json!({
+                "workflow_definition_id": run.workflow_definition_id,
+                "pack_installation_id": run.pack_installation_id,
+                "primary_session_id": run.primary_session_id,
+                "root_task_grant_id": run.root_task_grant_id,
+                "input_digest": run.input_digest
+            }),
+        ))
+        .await?;
+    Ok(Json(run))
+}
+
+async fn materialize_workflow_graph_start_steps(
+    state: &AppState,
+    definition: &WorkflowDefinition,
+    run: &WorkflowRun,
+    session: &Session,
+    root_grant: &TaskGrant,
+) -> Result<Vec<WorkflowStepRun>, AppError> {
+    let start_steps = workflow_graph_start_steps(&definition.step_graph)?;
+    let mut materialized = Vec::new();
+    for graph_step in start_steps {
+        let step = materialize_workflow_graph_step(
+            state, definition, run, session, root_grant, graph_step,
+        )
+        .await?;
+        materialized.push(step);
+    }
+    Ok(materialized)
+}
+
+async fn materialize_workflow_graph_step(
+    state: &AppState,
+    definition: &WorkflowDefinition,
+    run: &WorkflowRun,
+    session: &Session,
+    root_grant: &TaskGrant,
+    graph_step: &Value,
+) -> Result<WorkflowStepRun, AppError> {
+    let step_key = workflow_graph_step_key(graph_step)?;
+    let step_type = graph_step
+        .get("type")
+        .or_else(|| graph_step.get("step_type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("agent")
+        .to_string();
+    let agent_id =
+        workflow_graph_step_uuid(graph_step, "agent_id")?.or(Some(definition.default_agent_id));
+    let agent_version_id = match agent_id {
+        Some(agent_id) => Some(state.current_agent_version(agent_id).await?.id),
+        None => None,
+    };
+    let environment_id =
+        workflow_graph_step_uuid(graph_step, "environment_id")?.or(session.environment_id);
+    let now = Utc::now();
+    let step = state
+        .create_workflow_step_run(WorkflowStepRun {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            step_key,
+            step_type,
+            agent_id,
+            agent_version_id,
+            session_id: Some(session.id),
+            thread_id: None,
+            handoff_id: None,
+            task_grant_id: Some(root_grant.id),
+            environment_id,
+            status: "queued".to_string(),
+            input_payload: json!({
+                "source": "step_graph",
+                "graph_step": graph_step,
+                "workflow_input": run.input_payload.clone()
+            }),
+            output_payload: empty_json_object(),
+            artifact_ids: Vec::new(),
+            approval_ids: Vec::new(),
+            tool_call_ids: Vec::new(),
+            started_at: None,
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    record_workflow_step_run_created(state, run, &step).await?;
+    Ok(step)
+}
+
+fn workflow_graph_start_steps(step_graph: &Value) -> Result<Vec<&Value>, AppError> {
+    let Some(steps) = step_graph.get("steps").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    if steps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let explicit_starts = steps
+        .iter()
+        .filter(|step| {
+            step.get("start")
+                .or_else(|| step.get("entrypoint"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    if !explicit_starts.is_empty() {
+        return Ok(explicit_starts);
+    }
+    Ok(vec![steps.first().ok_or_else(|| {
+        AppError::bad_request("workflow graph steps cannot be empty")
+    })?])
+}
+
+fn workflow_graph_step_key(step: &Value) -> Result<String, AppError> {
+    step.get("key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| AppError::bad_request("workflow graph step requires key"))
+}
+
+fn workflow_graph_step_dependencies(step: &Value) -> Result<Vec<String>, AppError> {
+    let Some(value) = step
+        .get("depends_on")
+        .or_else(|| step.get("after"))
+        .or_else(|| step.get("needs"))
+    else {
+        return Ok(Vec::new());
+    };
+    match value {
+        Value::String(item) => Ok(normalize_optional_text(item.clone()).into_iter().collect()),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .and_then(|value| normalize_optional_text(value.to_string()))
+                    .ok_or_else(|| {
+                        AppError::bad_request(
+                            "workflow graph step dependencies must be non-empty strings",
+                        )
+                    })
+            })
+            .collect(),
+        _ => Err(AppError::bad_request(
+            "workflow graph step dependencies must be a string or array",
+        )),
+    }
+}
+
+fn workflow_graph_step_keys(step_graph: &Value) -> Result<BTreeSet<String>, AppError> {
+    let mut keys = BTreeSet::new();
+    let Some(steps) = step_graph.get("steps").and_then(Value::as_array) else {
+        return Ok(keys);
+    };
+    for step in steps {
+        keys.insert(workflow_graph_step_key(step)?);
+    }
+    Ok(keys)
+}
+
+fn workflow_graph_ready_steps<'a>(
+    step_graph: &'a Value,
+    existing_steps: &[WorkflowStepRun],
+) -> Result<Vec<&'a Value>, AppError> {
+    let Some(steps) = step_graph.get("steps").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let existing_by_key = existing_steps
+        .iter()
+        .map(|step| (step.step_key.as_str(), step.status.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut ready = Vec::new();
+    for graph_step in steps {
+        let key = workflow_graph_step_key(graph_step)?;
+        if existing_by_key.contains_key(key.as_str()) {
+            continue;
+        }
+        let dependencies = workflow_graph_step_dependencies(graph_step)?;
+        if dependencies.is_empty() {
+            continue;
+        }
+        if dependencies.iter().all(|dependency| {
+            existing_by_key
+                .get(dependency.as_str())
+                .is_some_and(|status| workflow_step_status_successful(status))
+        }) {
+            ready.push(graph_step);
+        }
+    }
+    Ok(ready)
+}
+
+fn workflow_graph_step_uuid(step: &Value, key: &str) -> Result<Option<Uuid>, AppError> {
+    step.get(key)
+        .and_then(Value::as_str)
+        .map(|value| {
+            Uuid::parse_str(value.trim()).map_err(|_| {
+                AppError::bad_request(format!("workflow graph step {key} must be a UUID"))
+            })
+        })
+        .transpose()
+}
+
+async fn issue_root_task_grant_for_workflow_run(
+    state: &AppState,
+    run: &WorkflowRun,
+    definition: &WorkflowDefinition,
+    session: &Session,
+) -> Result<TaskGrant, AppError> {
+    let now = Utc::now();
+    let grant = TaskGrant {
+        id: Uuid::new_v4(),
+        workflow_run_id: run.id,
+        workflow_step_run_id: None,
+        session_id: Some(session.id),
+        parent_grant_id: None,
+        source_event_id: run.source_event_id,
+        source_handoff_id: None,
+        issuer_subject: "system".to_string(),
+        grantee_agent_id: Some(definition.default_agent_id),
+        grantee_session_id: Some(session.id),
+        agent_class: Some("orchestrator".to_string()),
+        objective: session.title.clone(),
+        risk_level: "low".to_string(),
+        status: "active".to_string(),
+        expires_at: None,
+        max_turns: None,
+        max_tool_calls: None,
+        max_runtime_seconds: None,
+        max_cost_usd_micros: None,
+        semantic_scopes: workflow_definition_root_task_grant_scope(
+            definition,
+            "semantic_scopes",
+            empty_json_object,
+        ),
+        memory_scope: workflow_definition_root_task_grant_scope(
+            definition,
+            "memory_scope",
+            default_task_grant_memory_scope,
+        ),
+        tool_scope: workflow_definition_root_task_grant_scope(
+            definition,
+            "tool_scope",
+            default_task_grant_tool_scope,
+        ),
+        connector_scope: workflow_definition_root_task_grant_scope(
+            definition,
+            "connector_scope",
+            default_task_grant_connector_scope,
+        ),
+        approval_policy: workflow_definition_root_task_grant_scope(
+            definition,
+            "approval_policy",
+            default_task_grant_approval_policy,
+        ),
+        external_effects: workflow_definition_root_task_grant_scope(
+            definition,
+            "external_effects",
+            default_task_grant_external_effects,
+        ),
+        context_packet_id: None,
+        policy_revision_id: None,
+        immutable_args_hash: None,
+        audit_trace_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    validate_task_grant_scope_objects(&grant)?;
+    let grant = state.create_task_grant(grant).await?;
+    record_task_grant_issued(state, &grant, run.primary_session_id).await?;
+    Ok(grant)
+}
+
+async fn record_task_grant_issued(
+    state: &AppState,
+    grant: &TaskGrant,
+    primary_session_id: Uuid,
+) -> Result<(), AppError> {
+    state
+        .append_event(
+            "system",
+            Some(grant.id),
+            primary_session_id,
+            "task_grant.issued",
+            json!({
+                "task_grant_id": grant.id,
+                "workflow_run_id": grant.workflow_run_id,
+                "parent_grant_id": grant.parent_grant_id,
+                "workflow_step_run_id": grant.workflow_step_run_id,
+                "grantee_agent_id": grant.grantee_agent_id,
+                "grantee_session_id": grant.grantee_session_id,
+                "agent_class": grant.agent_class,
+                "risk_level": grant.risk_level,
+                "status": grant.status
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(primary_session_id),
+            "system",
+            Some(grant.id),
+            "task_grant.issued",
+            "task_grant",
+            Some(grant.id),
+            json!({
+                "workflow_run_id": grant.workflow_run_id,
+                "parent_grant_id": grant.parent_grant_id,
+                "grantee_agent_id": grant.grantee_agent_id,
+                "grantee_session_id": grant.grantee_session_id,
+                "risk_level": grant.risk_level,
+                "status": grant.status
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn record_workflow_step_run_created(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+) -> Result<(), AppError> {
+    state
+        .append_event(
+            "system",
+            Some(step.id),
+            run.primary_session_id,
+            "workflow.step.created",
+            json!({
+                "workflow_run_id": run.id,
+                "workflow_step_run_id": step.id,
+                "step_key": step.step_key,
+                "step_type": step.step_type,
+                "status": step.status,
+                "agent_id": step.agent_id,
+                "session_id": step.session_id,
+                "handoff_id": step.handoff_id,
+                "task_grant_id": step.task_grant_id
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(run.primary_session_id),
+            "system",
+            Some(step.id),
+            "workflow_step_run.created",
+            "workflow_step_run",
+            Some(step.id),
+            json!({
+                "workflow_run_id": run.id,
+                "step_key": step.step_key,
+                "step_type": step.step_type,
+                "status": step.status,
+                "handoff_id": step.handoff_id,
+                "task_grant_id": step.task_grant_id
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn record_task_grant_checked(
+    state: &AppState,
+    grant: &TaskGrant,
+    session_id: Uuid,
+    tool_name: &str,
+) -> Result<(), AppError> {
+    state
+        .append_event(
+            "system",
+            Some(grant.id),
+            session_id,
+            "task_grant.checked",
+            json!({
+                "task_grant_id": grant.id,
+                "workflow_run_id": grant.workflow_run_id,
+                "tool": tool_name,
+                "status": "allowed"
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "system",
+            Some(grant.id),
+            "task_grant.checked",
+            "task_grant",
+            Some(grant.id),
+            json!({
+                "workflow_run_id": grant.workflow_run_id,
+                "tool": tool_name,
+                "status": "allowed"
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn record_task_grant_denied(
+    state: &AppState,
+    session_id: Uuid,
+    grant: Option<&TaskGrant>,
+    workflow_run_id: Option<Uuid>,
+    tool_name: &str,
+    reason: &str,
+) -> Result<(), AppError> {
+    state
+        .append_event(
+            "system",
+            grant.map(|grant| grant.id),
+            session_id,
+            "task_grant.denied",
+            json!({
+                "task_grant_id": grant.map(|grant| grant.id),
+                "workflow_run_id": grant.map(|grant| grant.workflow_run_id).or(workflow_run_id),
+                "tool": tool_name,
+                "status": "denied",
+                "reason": reason
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "system",
+            grant.map(|grant| grant.id),
+            "task_grant.denied",
+            "task_grant",
+            grant.map(|grant| grant.id),
+            json!({
+                "workflow_run_id": grant.map(|grant| grant.workflow_run_id).or(workflow_run_id),
+                "tool": tool_name,
+                "status": "denied",
+                "reason": reason
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn enforce_task_grant_for_tool_invocation(
+    state: &AppState,
+    tool_name: &str,
+    input: &ExecuteTool,
+) -> Result<Option<TaskGrant>, AppError> {
+    let workflow_run = workflow_run_for_session(state, input.session_id).await?;
+
+    let Some(task_grant_id) = input.task_grant_id else {
+        if let Some(run) = workflow_run {
+            let reason = "task grant is required for workflow tool execution";
+            record_task_grant_denied(
+                state,
+                input.session_id,
+                None,
+                Some(run.id),
+                tool_name,
+                reason,
+            )
+            .await?;
+            return Err(AppError::forbidden(reason));
+        }
+        return Ok(None);
+    };
+
+    let grant = state.get_task_grant(task_grant_id).await?;
+    let run = state.get_workflow_run(grant.workflow_run_id).await?;
+    if workflow_run
+        .as_ref()
+        .is_some_and(|workflow_run| workflow_run.id != run.id)
+        || !task_grant_session_matches(&grant, &run, input.session_id)
+    {
+        let reason = "task grant is not valid for this session";
+        record_task_grant_denied(
+            state,
+            input.session_id,
+            Some(&grant),
+            Some(run.id),
+            tool_name,
+            reason,
+        )
+        .await?;
+        return Err(AppError::forbidden(reason));
+    }
+    let session = state.get_session(input.session_id).await?;
+    if grant
+        .grantee_agent_id
+        .is_some_and(|agent_id| agent_id != session.agent_id)
+    {
+        let reason = "task grant grantee agent does not match this session";
+        record_task_grant_denied(
+            state,
+            input.session_id,
+            Some(&grant),
+            Some(run.id),
+            tool_name,
+            reason,
+        )
+        .await?;
+        return Err(AppError::forbidden(reason));
+    }
+    if let Some(agent_class) = grant.agent_class.as_deref() {
+        let agent = state.get_agent(session.agent_id).await?;
+        if !task_grant_agent_class_matches(&agent, agent_class) {
+            let reason = "task grant agent class does not match this session";
+            record_task_grant_denied(
+                state,
+                input.session_id,
+                Some(&grant),
+                Some(run.id),
+                tool_name,
+                reason,
+            )
+            .await?;
+            return Err(AppError::forbidden(reason));
+        }
+    }
+    if grant.status != "active" {
+        let reason = "task grant is not active";
+        record_task_grant_denied(
+            state,
+            input.session_id,
+            Some(&grant),
+            Some(run.id),
+            tool_name,
+            reason,
+        )
+        .await?;
+        return Err(AppError::forbidden(reason));
+    }
+    if grant
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Utc::now())
+    {
+        let reason = "task grant is expired";
+        record_task_grant_denied(
+            state,
+            input.session_id,
+            Some(&grant),
+            Some(run.id),
+            tool_name,
+            reason,
+        )
+        .await?;
+        return Err(AppError::forbidden(reason));
+    }
+    if !task_grant_allows_tool(&grant, tool_name) {
+        let reason = "task grant tool scope does not allow tool";
+        record_task_grant_denied(
+            state,
+            input.session_id,
+            Some(&grant),
+            Some(run.id),
+            tool_name,
+            reason,
+        )
+        .await?;
+        return Err(AppError::forbidden(reason));
+    }
+    if tool_name == "mcp.call" && !task_grant_allows_mcp_call(&grant, &input.args) {
+        let reason = "task grant connector scope does not allow MCP call";
+        record_task_grant_denied(
+            state,
+            input.session_id,
+            Some(&grant),
+            Some(run.id),
+            tool_name,
+            reason,
+        )
+        .await?;
+        return Err(AppError::forbidden(reason));
+    }
+
+    record_task_grant_checked(state, &grant, input.session_id, tool_name).await?;
+    Ok(Some(grant))
+}
+
+fn task_grant_session_matches(grant: &TaskGrant, run: &WorkflowRun, session_id: Uuid) -> bool {
+    run.primary_session_id == session_id
+        || grant.session_id == Some(session_id)
+        || grant.grantee_session_id == Some(session_id)
+}
+
+fn task_grant_agent_class_matches(agent: &Agent, agent_class: &str) -> bool {
+    let expected = agent_class.trim();
+    expected.is_empty() || agent.kind == expected || agent.agent_role == expected
+}
+
+async fn workflow_run_for_session(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Option<WorkflowRun>, AppError> {
+    let runs = state.list_workflow_runs().await?;
+    if let Some(run) = runs
+        .iter()
+        .find(|run| run.primary_session_id == session_id)
+        .cloned()
+    {
+        return Ok(Some(run));
+    }
+    for run in runs {
+        if state
+            .list_workflow_step_runs(run.id)
+            .await?
+            .into_iter()
+            .any(|step| step.session_id == Some(session_id))
+        {
+            return Ok(Some(run));
+        }
+        if state
+            .list_task_grants_for_workflow_run(run.id)
+            .await?
+            .into_iter()
+            .any(|grant| task_grant_session_matches(&grant, &run, session_id))
+        {
+            return Ok(Some(run));
+        }
+    }
+    Ok(None)
+}
+
+async fn active_task_grant_for_session(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Option<(WorkflowRun, TaskGrant)>, AppError> {
+    let Some(run) = workflow_run_for_session(state, session_id).await? else {
+        return Ok(None);
+    };
+    if run.primary_session_id == session_id {
+        let root_task_grant_id = run
+            .root_task_grant_id
+            .ok_or_else(|| AppError::forbidden("task grant is required for workflow session"))?;
+        let grant = state.get_task_grant(root_task_grant_id).await?;
+        return Ok(Some((run, grant)));
+    }
+    let mut grants = state
+        .list_task_grants_for_workflow_run(run.id)
+        .await?
+        .into_iter()
+        .filter(|grant| grant.status == "active")
+        .filter(|grant| task_grant_session_matches(grant, &run, session_id))
+        .collect::<Vec<_>>();
+    grants.sort_by_key(|grant| grant.created_at);
+    let Some(grant) = grants.pop() else {
+        return Err(AppError::forbidden(
+            "task grant is required for workflow session",
+        ));
+    };
+    Ok(Some((run, grant)))
+}
+
+fn task_grant_allows_tool(grant: &TaskGrant, tool_name: &str) -> bool {
+    ["read", "write", "external_write"]
+        .iter()
+        .any(|key| json_string_array_contains(grant.tool_scope.get(*key), tool_name))
+}
+
+fn task_grant_allows_mcp_call(grant: &TaskGrant, args: &Value) -> bool {
+    let server = args
+        .get("server")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let tool = args
+        .get("tool")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if server.is_empty() || tool.is_empty() {
+        return false;
+    }
+    let mode = grant
+        .connector_scope
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    matches!(mode, "read_only" | "draft_write" | "commit_write")
+        && json_string_array_contains(grant.connector_scope.get("allowed_connector_ids"), server)
+        && json_string_array_contains(grant.connector_scope.get("allowed_tool_names"), tool)
+}
+
+async fn list_workflow_step_runs_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkflowStepRun>>, AppError> {
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(state.list_workflow_step_runs(id).await?))
+}
+
+async fn create_workflow_step_run_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateWorkflowStepRun>,
+) -> Result<Json<WorkflowStepRun>, AppError> {
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    let step_key = require_non_empty(input.step_key, "workflow step key")?;
+    let step_type = require_non_empty(input.step_type, "workflow step type")?;
+    let status = normalize_workflow_run_status(&input.status)?;
+    if let Some(environment_id) = input.environment_id {
+        state.get_environment(environment_id).await?;
+    }
+    if let Some(session_id) = input.session_id {
+        state.get_session(session_id).await?;
+    }
+    if let Some(thread_id) = input.thread_id {
+        state.get_session_thread(thread_id).await?;
+    }
+    if let Some(handoff_id) = input.handoff_id {
+        state.get_agent_handoff_event(handoff_id).await?;
+    }
+    let agent_version_id = match (input.agent_version_id, input.agent_id) {
+        (Some(agent_version_id), Some(agent_id)) => {
+            state.get_agent(agent_id).await?;
+            let versions = state.list_agent_versions(agent_id).await?;
+            if !versions
+                .iter()
+                .any(|version| version.id == agent_version_id)
+            {
+                return Err(AppError::bad_request(
+                    "workflow step agent_version_id must belong to agent_id",
+                ));
+            }
+            Some(agent_version_id)
+        }
+        (Some(_), None) => {
+            return Err(AppError::bad_request(
+                "workflow step agent_id is required when agent_version_id is provided",
+            ));
+        }
+        (None, Some(agent_id)) => {
+            state.get_agent(agent_id).await?;
+            Some(state.current_agent_version(agent_id).await?.id)
+        }
+        (None, None) => None,
+    };
+    if let Some(task_grant_id) = input.task_grant_id {
+        let grant = state.get_task_grant(task_grant_id).await?;
+        if grant.workflow_run_id != run.id || grant.status != "active" {
+            return Err(AppError::bad_request(
+                "workflow step task_grant_id must reference an active grant for the workflow run",
+            ));
+        }
+    }
+    let now = Utc::now();
+    let step = state
+        .create_workflow_step_run(WorkflowStepRun {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            step_key,
+            step_type,
+            agent_id: input.agent_id,
+            agent_version_id,
+            session_id: input.session_id,
+            thread_id: input.thread_id,
+            handoff_id: input.handoff_id,
+            task_grant_id: input.task_grant_id,
+            environment_id: input.environment_id,
+            status,
+            input_payload: input.input_payload,
+            output_payload: input.output_payload,
+            artifact_ids: input.artifact_ids,
+            approval_ids: input.approval_ids,
+            tool_call_ids: input.tool_call_ids,
+            started_at: None,
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    record_workflow_step_run_created(&state, &run, &step).await?;
+    Ok(Json(step))
+}
+
+async fn update_workflow_step_run_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateWorkflowStepRun>,
+) -> Result<Json<WorkflowStepRun>, AppError> {
+    let current = state.get_workflow_step_run(id).await?;
+    let run = state.get_workflow_run(current.workflow_run_id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+
+    let previous_status = current.status.clone();
+    let next_status = input
+        .status
+        .as_deref()
+        .map(normalize_workflow_run_status)
+        .transpose()?
+        .unwrap_or_else(|| current.status.clone());
+    if workflow_step_status_terminal(&previous_status) && previous_status != next_status {
+        return Err(AppError::bad_request(
+            "terminal workflow step runs cannot be transitioned",
+        ));
+    }
+
+    let now = Utc::now();
+    let mut next = current;
+    next.status = next_status;
+    if let Some(output_payload) = input.output_payload {
+        if !output_payload.is_object() {
+            return Err(AppError::bad_request(
+                "workflow step output_payload must be a JSON object",
+            ));
+        }
+        next.output_payload = output_payload;
+    }
+    if let Some(artifact_ids) = input.artifact_ids {
+        next.artifact_ids = artifact_ids;
+    }
+    if let Some(approval_ids) = input.approval_ids {
+        next.approval_ids = approval_ids;
+    }
+    if let Some(tool_call_ids) = input.tool_call_ids {
+        next.tool_call_ids = tool_call_ids;
+    }
+    if next.status == "running" && next.started_at.is_none() {
+        next.started_at = Some(now);
+    }
+    if workflow_step_status_terminal(&next.status) && next.completed_at.is_none() {
+        next.completed_at = Some(now);
+        if next.started_at.is_none() {
+            next.started_at = Some(now);
+        }
+    }
+    next.updated_at = now;
+
+    let updated = state.update_workflow_step_run(next).await?;
+    record_workflow_step_run_updated(&state, &run, &updated, &previous_status).await?;
+    if previous_status != updated.status {
+        advance_workflow_graph_after_step_update(&state, &run, &updated).await?;
+    }
+    Ok(Json(updated))
+}
+
+fn workflow_step_status_terminal(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "canceled" | "skipped")
+}
+
+fn workflow_step_status_successful(status: &str) -> bool {
+    matches!(status, "completed" | "skipped")
+}
+
+async fn record_workflow_step_run_updated(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+    previous_status: &str,
+) -> Result<(), AppError> {
+    let status_changed = previous_status != step.status;
+    let event_type = if status_changed {
+        format!("workflow.step.{}", step.status)
+    } else {
+        "workflow.step.updated".to_string()
+    };
+    state
+        .append_event(
+            "system",
+            Some(step.id),
+            run.primary_session_id,
+            &event_type,
+            json!({
+                "workflow_run_id": run.id,
+                "workflow_step_run_id": step.id,
+                "step_key": step.step_key,
+                "previous_status": previous_status,
+                "status": step.status,
+                "output_payload": step.output_payload,
+                "artifact_ids": step.artifact_ids,
+                "approval_ids": step.approval_ids,
+                "tool_call_ids": step.tool_call_ids
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(run.primary_session_id),
+            "system",
+            Some(step.id),
+            event_type
+                .replace("workflow.step", "workflow_step_run")
+                .as_str(),
+            "workflow_step_run",
+            Some(step.id),
+            json!({
+                "workflow_run_id": run.id,
+                "step_key": step.step_key,
+                "previous_status": previous_status,
+                "status": step.status
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn advance_workflow_graph_after_step_update(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+) -> Result<(), AppError> {
+    if step.status == "failed" || step.status == "canceled" {
+        update_workflow_run_status_and_record(state, run, &step.status).await?;
+        return Ok(());
+    }
+    if !workflow_step_status_successful(&step.status) {
+        if step.status == "running" {
+            update_workflow_run_status_and_record(state, run, "running").await?;
+        }
+        return Ok(());
+    }
+
+    let definition = state
+        .get_workflow_definition(run.workflow_definition_id)
+        .await?;
+    let session = state.get_session(run.primary_session_id).await?;
+    let root_task_grant_id = run
+        .root_task_grant_id
+        .ok_or_else(|| AppError::forbidden("workflow run requires root task grant"))?;
+    let root_grant = state.get_task_grant(root_task_grant_id).await?;
+    let existing_steps = state.list_workflow_step_runs(run.id).await?;
+    let ready_steps = workflow_graph_ready_steps(&definition.step_graph, &existing_steps)?;
+    for graph_step in ready_steps {
+        materialize_workflow_graph_step(state, &definition, run, &session, &root_grant, graph_step)
+            .await?;
+    }
+
+    let current_run = state.get_workflow_run(run.id).await?;
+    if workflow_graph_run_completed(state, &definition, &current_run).await? {
+        update_workflow_run_status_and_record(state, &current_run, "completed").await?;
+    } else {
+        update_workflow_run_status_and_record(state, &current_run, "running").await?;
+    }
+    Ok(())
+}
+
+async fn workflow_graph_run_completed(
+    state: &AppState,
+    definition: &WorkflowDefinition,
+    run: &WorkflowRun,
+) -> Result<bool, AppError> {
+    let graph_keys = workflow_graph_step_keys(&definition.step_graph)?;
+    if graph_keys.is_empty() {
+        return Ok(false);
+    }
+    let existing_by_key = state
+        .list_workflow_step_runs(run.id)
+        .await?
+        .into_iter()
+        .map(|step| (step.step_key, step.status))
+        .collect::<HashMap<_, _>>();
+    Ok(graph_keys.iter().all(|key| {
+        existing_by_key
+            .get(key)
+            .is_some_and(|status| workflow_step_status_successful(status))
+    }))
+}
+
+async fn update_workflow_run_status_and_record(
+    state: &AppState,
+    run: &WorkflowRun,
+    status: &str,
+) -> Result<WorkflowRun, AppError> {
+    if run.status == status {
+        return Ok(run.clone());
+    }
+    let now = Utc::now();
+    let terminal = workflow_step_status_terminal(status);
+    let started_at = run.started_at.or(Some(now));
+    let completed_at = if terminal {
+        run.completed_at.or(Some(now))
+    } else {
+        None
+    };
+    let updated = state
+        .update_workflow_run_status(run.id, status.to_string(), started_at, completed_at)
+        .await?;
+    let event_type = format!("workflow.run.{status}");
+    state
+        .append_event(
+            "system",
+            Some(run.id),
+            run.primary_session_id,
+            &event_type,
+            json!({
+                "workflow_run_id": run.id,
+                "previous_status": run.status,
+                "status": updated.status,
+                "started_at": updated.started_at,
+                "completed_at": updated.completed_at
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(run.primary_session_id),
+            "system",
+            Some(run.id),
+            event_type.replace("workflow.run", "workflow_run").as_str(),
+            "workflow_run",
+            Some(run.id),
+            json!({
+                "previous_status": run.status,
+                "status": updated.status,
+                "started_at": updated.started_at,
+                "completed_at": updated.completed_at
+            }),
+        ))
+        .await?;
+    Ok(updated)
+}
+
+async fn list_workflow_task_grants_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TaskGrant>>, AppError> {
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(state.list_task_grants_for_workflow_run(id).await?))
+}
+
+async fn get_task_grant_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<TaskGrant>, AppError> {
+    let grant = state.get_task_grant(id).await?;
+    let run = state.get_workflow_run(grant.workflow_run_id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(grant))
+}
+
+async fn create_workflow_task_grant_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateTaskGrant>,
+) -> Result<Json<TaskGrant>, AppError> {
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let parent_grant_id = input
+        .parent_grant_id
+        .ok_or_else(|| AppError::bad_request("task grant parent_grant_id is required"))?;
+    let parent = state.get_task_grant(parent_grant_id).await?;
+    if parent.workflow_run_id != run.id {
+        return Err(AppError::bad_request(
+            "task grant parent_grant_id must belong to workflow run",
+        ));
+    }
+    if parent.status != "active" {
+        return Err(AppError::bad_request(
+            "task grant parent_grant_id must reference an active grant",
+        ));
+    }
+    if let Some(step_run_id) = input.workflow_step_run_id {
+        let step_exists = state
+            .list_workflow_step_runs(run.id)
+            .await?
+            .into_iter()
+            .any(|step| step.id == step_run_id);
+        if !step_exists {
+            return Err(AppError::bad_request(
+                "task grant workflow_step_run_id must belong to workflow run",
+            ));
+        }
+    }
+    if let Some(session_id) = input.session_id {
+        state.get_session(session_id).await?;
+    }
+    if let Some(source_event_id) = input.source_event_id {
+        ensure_session_event_exists(&state, source_event_id).await?;
+    }
+    if let Some(handoff_id) = input.source_handoff_id {
+        state.get_agent_handoff_event(handoff_id).await?;
+    }
+    if let Some(agent_id) = input.grantee_agent_id {
+        state.get_agent(agent_id).await?;
+    }
+    if let Some(session_id) = input.grantee_session_id {
+        state.get_session(session_id).await?;
+    }
+    if let Some(context_packet_id) = input.context_packet_id {
+        state.get_context_packet(context_packet_id).await?;
+    }
+    if let Some(policy_revision_id) = input.policy_revision_id {
+        state.get_policy_revision(policy_revision_id).await?;
+    }
+    let now = Utc::now();
+    let issuer_subject = input
+        .issuer_subject
+        .filter(|subject| !subject.trim().is_empty())
+        .unwrap_or(principal.subject_id);
+    let objective = input
+        .objective
+        .filter(|objective| !objective.trim().is_empty())
+        .unwrap_or_else(|| parent.objective.clone());
+    let grant = TaskGrant {
+        id: Uuid::new_v4(),
+        workflow_run_id: run.id,
+        workflow_step_run_id: input.workflow_step_run_id,
+        session_id: input.session_id.or(Some(run.primary_session_id)),
+        parent_grant_id: Some(parent.id),
+        source_event_id: input.source_event_id,
+        source_handoff_id: input.source_handoff_id,
+        issuer_subject,
+        grantee_agent_id: input.grantee_agent_id,
+        grantee_session_id: input.grantee_session_id,
+        agent_class: input.agent_class.filter(|value| !value.trim().is_empty()),
+        objective,
+        risk_level: normalize_task_grant_risk_level(&input.risk_level)?,
+        status: "active".to_string(),
+        expires_at: input.expires_at,
+        max_turns: input.max_turns,
+        max_tool_calls: input.max_tool_calls,
+        max_runtime_seconds: input.max_runtime_seconds,
+        max_cost_usd_micros: input.max_cost_usd_micros,
+        semantic_scopes: input.semantic_scopes,
+        memory_scope: input.memory_scope,
+        tool_scope: input.tool_scope,
+        connector_scope: input.connector_scope,
+        approval_policy: input.approval_policy,
+        external_effects: input.external_effects,
+        context_packet_id: input.context_packet_id,
+        policy_revision_id: input.policy_revision_id,
+        immutable_args_hash: input
+            .immutable_args_hash
+            .filter(|value| !value.trim().is_empty()),
+        audit_trace_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    validate_task_grant_scope_objects(&grant)?;
+    ensure_child_task_grant_within_parent(&parent, &grant)?;
+    let grant = state.create_task_grant(grant).await?;
+    record_task_grant_issued(&state, &grant, run.primary_session_id).await?;
+    Ok(Json(grant))
 }
 
 async fn list_workflow_pack_installations_route(
@@ -13198,6 +15251,9 @@ async fn run_session_loop(state: &AppState, job: &SessionLoopJob) -> Result<Sess
         )
         .await?;
 
+    let session_task_grant_id = active_task_grant_for_session(&state, id)
+        .await?
+        .map(|(_, grant)| grant.id);
     let mut waiting_for_approval = false;
     for tool_call in provider_response.tool_calls {
         let result = execute_tool_invocation(
@@ -13205,6 +15261,7 @@ async fn run_session_loop(state: &AppState, job: &SessionLoopJob) -> Result<Sess
             &tool_call.tool_name,
             ExecuteTool {
                 session_id: id,
+                task_grant_id: session_task_grant_id,
                 args: tool_call.args,
             },
             ToolInvocationOrigin::SessionLoop,
@@ -13757,6 +15814,22 @@ async fn generate_memory_writeback_candidates(
     input: CreateMemoryWritebackCandidates,
 ) -> Result<Vec<MemoryWritebackCandidate>, AppError> {
     let session = state.get_session(session_id).await?;
+    if let Some((run, grant)) = active_task_grant_for_session(state, session_id).await? {
+        if !task_grant_memory_scope_allows_writeback(&grant.memory_scope) {
+            let reason = "task grant memory scope does not allow memory writeback";
+            record_task_grant_denied(
+                state,
+                session_id,
+                Some(&grant),
+                Some(run.id),
+                "memory_writeback",
+                reason,
+            )
+            .await?;
+            return Err(AppError::forbidden(reason));
+        }
+        record_task_grant_checked(state, &grant, session_id, "memory_writeback").await?;
+    }
     let events = state.list_events(session_id).await?;
     let session_reached_checkpoint = events.iter().any(|event| {
         matches!(
@@ -13848,6 +15921,13 @@ async fn generate_memory_writeback_candidates(
         )
         .await?;
     Ok(created)
+}
+
+fn task_grant_memory_scope_allows_writeback(memory_scope: &Value) -> bool {
+    memory_scope
+        .get("writeback_allowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn memory_candidate_from_session(
@@ -14152,6 +16232,24 @@ async fn build_context_packet(
     session_id: Uuid,
 ) -> Result<ContextPacket, AppError> {
     let session = state.get_session(session_id).await?;
+    let context_task_grant =
+        if let Some((run, grant)) = active_task_grant_for_session(state, session_id).await? {
+            if grant.status != "active" {
+                record_task_grant_denied(
+                    state,
+                    session_id,
+                    Some(&grant),
+                    Some(run.id),
+                    "context_packet",
+                    "task grant is not active",
+                )
+                .await?;
+                return Err(AppError::forbidden("task grant is not active"));
+            }
+            Some(grant)
+        } else {
+            None
+        };
     let agent = state.get_agent(session.agent_id).await?;
     let handoff_assignment_context =
         effective_handoff_assignment_context(state, session_id).await?;
@@ -14181,8 +16279,15 @@ async fn build_context_packet(
         .as_ref()
         .and_then(|(profile_id, result)| result.as_ref().err().map(|error| (*profile_id, error)));
     let version = state.next_context_packet_version(session_id).await?;
-    let retrieved_objects =
+    let mut retrieved_objects =
         retrieve_context_packet_semantic_objects(state, &effective_semantic_scopes).await?;
+    if let Some(grant) = context_task_grant.as_ref() {
+        retrieved_objects = apply_task_grant_memory_scope_to_context_objects(
+            retrieved_objects,
+            &grant.memory_scope,
+        );
+        record_task_grant_checked(state, grant, session_id, "context_packet").await?;
+    }
     let source_refs = build_context_packet_source_refs(
         &session,
         &agent,
@@ -14279,6 +16384,73 @@ fn context_packet_runtime_profile(profile: &AgentRuntimeProfile) -> ContextPacke
         runtime_type: profile.runtime_type.clone(),
         remote_computer_required: profile.remote_computer_required,
         status: profile.status.clone(),
+    }
+}
+
+fn apply_task_grant_memory_scope_to_context_objects(
+    objects: Vec<ContextPacketSemanticObject>,
+    memory_scope: &Value,
+) -> Vec<ContextPacketSemanticObject> {
+    let allowed_object_types = memory_scope
+        .get("allowed_object_types")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let allowed_object_ids = memory_scope
+        .get("allowed_object_ids")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let minimum_trust_level = memory_scope
+        .get("minimum_trust_level")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut filtered = objects
+        .into_iter()
+        .filter(|object| {
+            allowed_object_types.is_empty() || allowed_object_types.contains(&object.object_type)
+        })
+        .filter(|object| {
+            allowed_object_ids.is_empty() || allowed_object_ids.contains(&object.id.to_string())
+        })
+        .filter(|object| {
+            minimum_trust_level
+                .is_none_or(|minimum| memory_trust_level_satisfies(&object.trust_level, minimum))
+        })
+        .collect::<Vec<_>>();
+    if let Some(max_objects) = memory_scope.get("max_objects").and_then(Value::as_u64) {
+        filtered.truncate(max_objects as usize);
+    }
+    filtered
+}
+
+fn memory_trust_level_satisfies(actual: &str, minimum: &str) -> bool {
+    match (memory_trust_rank(actual), memory_trust_rank(minimum)) {
+        (Some(actual), Some(minimum)) => actual >= minimum,
+        _ => actual == minimum,
+    }
+}
+
+fn memory_trust_rank(value: &str) -> Option<i32> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" | "unverified" => Some(0),
+        "verified" | "source_attested" => Some(1),
+        "human_verified" => Some(2),
+        "system_verified" => Some(3),
+        _ => None,
     }
 }
 
@@ -14977,7 +17149,7 @@ impl ToolExecutor for ShellExecTool {
         ToolDescriptor {
             name: "shell.exec",
             risk: "high",
-            description: "Run a low-risk read-only shell command without approval",
+            description: "Run a shell command after policy approval",
         }
     }
 
@@ -14999,21 +17171,6 @@ impl ToolExecutor for ShellExecTool {
             .map_err(|error| {
                 AppError::bad_request(format!("failed to prepare session workspace: {error}"))
             })?;
-        if low_risk_pwd_command(command) {
-            let workspace_text = workspace.display().to_string();
-            return Ok(json!({
-                "command": command,
-                "runner": "internal",
-                "workspace": workspace_text,
-                "exit_code": 0,
-                "stdout": format!("{workspace_text}\n"),
-                "stderr": "",
-                "stdout_original_bytes": workspace_text.len() + 1,
-                "stderr_original_bytes": 0,
-                "stdout_truncated": false,
-                "stderr_truncated": false,
-            }));
-        }
         if !host_shell_exec_allowed_for_inline_tool() {
             return Err(AppError::bad_request(
                 "host shell.exec is disabled; use Remote Computer execution or set MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1",
@@ -15024,7 +17181,9 @@ impl ToolExecutor for ShellExecTool {
         let output = tokio::time::timeout(Duration::from_secs(30), process.output())
             .await
             .map_err(|_| AppError::bad_request("shell.exec timed out"))?
-            .map_err(|error| AppError::bad_request(format!("failed to execute shell.exec: {error}")))?;
+            .map_err(|error| {
+                AppError::bad_request(format!("failed to execute shell.exec: {error}"))
+            })?;
         let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout), 64 * 1024);
         let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr), 64 * 1024);
         let result = json!({
@@ -15269,6 +17428,14 @@ impl ToolExecutor for McpCallTool {
         _input: &ExecuteTool,
         _tool_call: &ToolCall,
     ) -> Result<Value, AppError> {
+        if let Some(task_grant_id) = _input.task_grant_id {
+            let grant = state.get_task_grant(task_grant_id).await?;
+            if task_grant_requires_approval_commit_token(&grant, "mcp.call") {
+                return Err(AppError::forbidden(
+                    "commit_write MCP calls require ApprovalCommitToken approved execution",
+                ));
+            }
+        }
         let config = state
             .mcp_gateway_config
             .as_ref()
@@ -15311,10 +17478,6 @@ fn host_shell_exec_allowed_for_inline_tool() -> bool {
     std::env::var("MANDOFORGE_ALLOW_HOST_SHELL_EXEC")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
-}
-
-fn low_risk_pwd_command(command: &str) -> bool {
-    matches!(command.trim(), "pwd" | "pwd -P" | "pwd -L")
 }
 
 fn tool_descriptors() -> Vec<ToolDescriptor> {
@@ -15609,16 +17772,141 @@ enum ToolInvocationOrigin {
     SessionLoop,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ApprovalCommitBinding {
+    pub(crate) normalized_args_hash: String,
+    pub(crate) target_binding: Value,
+}
+
+pub(crate) fn task_grant_requires_approval_commit_token(
+    grant: &TaskGrant,
+    tool_name: &str,
+) -> bool {
+    tool_name == "mcp.call"
+        && grant.connector_scope.get("mode").and_then(Value::as_str) == Some("commit_write")
+}
+
+fn approval_commit_binding_for_invocation(
+    tool_name: &str,
+    args: &Value,
+    grant: Option<&TaskGrant>,
+) -> Result<Option<ApprovalCommitBinding>, AppError> {
+    let Some(grant) = grant else {
+        return Ok(None);
+    };
+    if !task_grant_requires_approval_commit_token(grant, tool_name) {
+        return Ok(None);
+    }
+    approval_commit_binding_for_mcp_args(args).map(Some)
+}
+
+pub(crate) fn approval_commit_binding_for_mcp_args(
+    args: &Value,
+) -> Result<ApprovalCommitBinding, AppError> {
+    Ok(ApprovalCommitBinding {
+        normalized_args_hash: normalized_json_sha256(args),
+        target_binding: mcp_call_target_binding(args)?,
+    })
+}
+
+pub(crate) fn normalized_json_sha256(value: &Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
+fn mcp_call_target_binding(args: &Value) -> Result<Value, AppError> {
+    let request: McpCallRequest = serde_json::from_value(args.clone())?;
+    let mut binding = serde_json::Map::new();
+    binding.insert("server".to_string(), json!(request.server));
+    binding.insert("tool".to_string(), json!(request.tool));
+    if let Some(object) = request.args.as_object() {
+        binding.insert(
+            "payload_digest".to_string(),
+            json!(normalized_json_sha256(&request.args)),
+        );
+        for key in [
+            "side_effect_class",
+            "account",
+            "channel",
+            "recipient",
+            "resource_id",
+            "campaign_id",
+            "ad_account_id",
+            "amount",
+            "amount_usd",
+            "currency",
+            "spend_limit",
+            "spend_limit_usd",
+            "context_packet_id",
+        ] {
+            if let Some(value) = object.get(key) {
+                binding.insert(key.to_string(), value.clone());
+            }
+        }
+        if let Some(content_digest) = object.get("content_digest") {
+            binding.insert("content_digest".to_string(), content_digest.clone());
+        } else if let Some(content) = [
+            "content", "body", "text", "message", "post", "creative", "caption",
+        ]
+        .iter()
+        .find_map(|key| object.get(*key))
+        {
+            binding.insert(
+                "content_digest".to_string(),
+                json!(normalized_json_sha256(content)),
+            );
+        }
+    }
+    Ok(Value::Object(binding))
+}
+
+async fn refresh_tool_call_commit_binding_if_required(
+    state: &AppState,
+    tool_call: ToolCall,
+) -> Result<ToolCall, AppError> {
+    let Some(task_grant_id) = tool_call.task_grant_id else {
+        return Ok(tool_call);
+    };
+    let grant = state.get_task_grant(task_grant_id).await?;
+    if !task_grant_requires_approval_commit_token(&grant, &tool_call.tool_name) {
+        return Ok(tool_call);
+    }
+    let binding = approval_commit_binding_for_mcp_args(&tool_call.args)?;
+    state
+        .update_tool_call_commit_binding(
+            tool_call.id,
+            Some(binding.normalized_args_hash),
+            binding.target_binding,
+        )
+        .await
+}
+
 async fn execute_tool_invocation(
     state: &AppState,
     name: &str,
     input: ExecuteTool,
     origin: ToolInvocationOrigin,
 ) -> Result<Value, AppError> {
+    let task_grant = enforce_task_grant_for_tool_invocation(state, name, &input).await?;
     let agent_version = state.agent_version_for_session(input.session_id).await?;
     let policy = state.policy_for_session(input.session_id).await;
-    let policy_decision =
+    let mut policy_decision =
         policy.evaluate_tool_for_agent_version_with_args(name, &input.args, &agent_version);
+    let commit_binding =
+        approval_commit_binding_for_invocation(name, &input.args, task_grant.as_ref())?;
+    if commit_binding.is_some() && policy_decision.decision != "denied" {
+        policy_decision.decision = "requires_approval";
+        policy_decision.risk_level = "critical".to_string();
+        policy_decision.reason =
+            "mcp.call commit_write requires ApprovalCommitToken exact digest binding".to_string();
+    }
     let session = state.get_session(input.session_id).await?;
     let agent = state.get_agent(session.agent_id).await?;
     let semantic_context_gate = evaluate_semantic_context_gate(
@@ -15641,6 +17929,12 @@ async fn execute_tool_invocation(
     });
     if let Some(gate) = semantic_context_gate.clone() {
         policy_decision_payload["semantic_context_gate"] = gate;
+    }
+    if let Some(binding) = commit_binding.as_ref() {
+        policy_decision_payload["approval_commit_binding"] = json!({
+            "normalized_args_hash": binding.normalized_args_hash,
+            "target_binding": binding.target_binding
+        });
     }
     let call_event = state
         .append_event(
@@ -15673,6 +17967,14 @@ async fn execute_tool_invocation(
             event_id: Some(call_event.id),
             tool_name: name.to_string(),
             args: input.args.clone(),
+            task_grant_id: task_grant.as_ref().map(|grant| grant.id),
+            normalized_args_hash: commit_binding
+                .as_ref()
+                .map(|binding| binding.normalized_args_hash.clone()),
+            target_binding: commit_binding
+                .as_ref()
+                .map(|binding| binding.target_binding.clone())
+                .unwrap_or_else(empty_json_object),
             status: if semantic_context_gate_blocked {
                 "denied"
             } else {
@@ -15778,7 +18080,15 @@ async fn execute_tool_invocation(
             action: name.to_string(),
             risk_level: policy_decision.risk_level.clone(),
             reason: policy_decision.reason.clone(),
-            evidence: json!({"tool": name, "args": input.args}),
+            evidence: json!({
+                "tool": name,
+                "args": input.args,
+                "task_grant_id": task_grant.as_ref().map(|grant| grant.id),
+                "approval_commit_binding": commit_binding.as_ref().map(|binding| json!({
+                    "normalized_args_hash": binding.normalized_args_hash,
+                    "target_binding": binding.target_binding
+                }))
+            }),
             decision_payload: json!({}),
             status: "pending".to_string(),
             expires_at: approval_expires_at(created_at, None),
@@ -16503,6 +18813,10 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "manager_agent_plans",
         "workflow_pack_installations",
         "workflow_pack_profile_assets",
+        "workflow_definitions",
+        "workflow_runs",
+        "workflow_step_runs",
+        "task_grants",
         "agent_runtime_profiles",
         "environments",
         "mcp_servers",
@@ -24896,7 +27210,9 @@ fn mcp_secret_ref_from_stored_value(value: &str) -> Result<SecretRef, AppError> 
     SecretRef::new(path, key)
 }
 
-async fn resolve_mcp_runtime_secret_refs(server: &McpServerRecord) -> Result<usize, AppError> {
+pub(crate) async fn resolve_mcp_runtime_secret_refs(
+    server: &McpServerRecord,
+) -> Result<usize, AppError> {
     let refs = mcp_config_secret_refs(&server.config);
     if refs.is_empty() {
         return Ok(0);
@@ -33412,8 +35728,8 @@ async fn approve(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Approval>, AppError> {
-    authorize_approval_decision(&state, &headers, id).await?;
-    decide_approval(state, id, "approved").await
+    let principal = authorize_approval_decision(&state, &headers, id).await?;
+    decide_approval(state, id, "approved", Some(principal.subject_id)).await
 }
 
 async fn reject(
@@ -33422,7 +35738,7 @@ async fn reject(
     headers: HeaderMap,
 ) -> Result<Json<Approval>, AppError> {
     authorize_approval_decision(&state, &headers, id).await?;
-    decide_approval(state, id, "rejected").await
+    decide_approval(state, id, "rejected", None).await
 }
 
 async fn expire(
@@ -33452,9 +35768,10 @@ async fn modify_approval(
         return Err(AppError::bad_request("approval expired"));
     }
     if let Some(tool_call_id) = approval.tool_call_id {
-        state
+        let tool_call = state
             .update_tool_call_args(tool_call_id, input.args.clone())
             .await?;
+        refresh_tool_call_commit_binding_if_required(&state, tool_call).await?;
     }
     let updated = state
         .modify_approval(id, input.args.clone(), input.comment.clone())
@@ -35391,7 +37708,7 @@ async fn authorize_approval_decision(
     state: &AppState,
     headers: &HeaderMap,
     approval_id: Uuid,
-) -> Result<(), AppError> {
+) -> Result<Principal, AppError> {
     let principal = principal_from_request(state, headers).await?;
     let request = AuthorizationRequest {
         tenant_id: state.current_tenant_id(),
@@ -35408,7 +37725,8 @@ async fn authorize_approval_decision(
         resource_id: Some(approval.session_id),
     };
     enforce_resource_scope(state, &principal, &session_request).await?;
-    enforce_delegated_approver(state, &principal, &approval).await
+    enforce_delegated_approver(state, &principal, &approval).await?;
+    Ok(principal)
 }
 
 async fn enforce_delegated_approver(
@@ -39431,6 +41749,7 @@ async fn decide_approval(
     state: AppState,
     approval_id: Uuid,
     status: &str,
+    decider_subject: Option<String>,
 ) -> Result<Json<Approval>, AppError> {
     let approval = state.get_approval(approval_id).await?;
     if approval.status != "pending" {
@@ -39443,6 +41762,9 @@ async fn decide_approval(
         return Err(AppError::bad_request("approval expired"));
     }
     let updated = state.decide_approval(approval_id, status).await?;
+    if status == "approved" {
+        maybe_issue_approval_commit_token(&state, &updated, decider_subject.as_deref()).await?;
+    }
     let decision_result = match status {
         "rejected" => record_rejected_approval_tool_result(&state, &updated).await?,
         _ => None,
@@ -39496,6 +41818,194 @@ async fn decide_approval(
         ))
         .await?;
     Ok(Json(updated))
+}
+
+async fn maybe_issue_approval_commit_token(
+    state: &AppState,
+    approval: &Approval,
+    approver_subject: Option<&str>,
+) -> Result<Option<ApprovalCommitToken>, AppError> {
+    let Some(tool_call_id) = approval.tool_call_id else {
+        return Ok(None);
+    };
+    let tool_call = state.get_tool_call(tool_call_id).await?;
+    let Some(task_grant_id) = tool_call.task_grant_id else {
+        return Ok(None);
+    };
+    let grant = state.get_task_grant(task_grant_id).await?;
+    if !task_grant_requires_approval_commit_token(&grant, &tool_call.tool_name) {
+        return Ok(None);
+    }
+    if state
+        .approval_commit_token_for_approval(approval.id)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let binding = approval_commit_binding_for_mcp_args(&tool_call.args)?;
+    if tool_call.normalized_args_hash.as_deref() != Some(binding.normalized_args_hash.as_str())
+        || tool_call.target_binding != binding.target_binding
+    {
+        return Err(AppError::forbidden(
+            "approval commit binding does not match current tool call args",
+        ));
+    }
+    let created_at = Utc::now();
+    let token = state
+        .create_approval_commit_token(ApprovalCommitToken {
+            id: Uuid::new_v4(),
+            approval_id: approval.id,
+            tool_call_id: tool_call.id,
+            task_grant_id,
+            session_id: approval.session_id,
+            tool_name: tool_call.tool_name.clone(),
+            normalized_args_hash: binding.normalized_args_hash,
+            target_binding: binding.target_binding,
+            approver_subject: approver_subject.unwrap_or("unknown").to_string(),
+            status: "issued".to_string(),
+            expires_at: approval
+                .expires_at
+                .unwrap_or_else(|| created_at + ChronoDuration::minutes(15)),
+            consumed_at: None,
+            created_at,
+        })
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(token.id),
+            approval.session_id,
+            "approval_commit_token.issued",
+            json!({
+                "approval_commit_token_id": token.id,
+                "approval_id": approval.id,
+                "tool_call_id": token.tool_call_id,
+                "task_grant_id": token.task_grant_id,
+                "tool": token.tool_name,
+                "normalized_args_hash": token.normalized_args_hash,
+                "target_binding": token.target_binding,
+                "expires_at": token.expires_at
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "system",
+            Some(token.id),
+            "approval_commit_token.issued",
+            "approval_commit_token",
+            Some(token.id),
+            json!({
+                "approval_id": approval.id,
+                "tool_call_id": token.tool_call_id,
+                "task_grant_id": token.task_grant_id,
+                "tool": token.tool_name,
+                "normalized_args_hash": token.normalized_args_hash,
+                "target_binding": token.target_binding
+            }),
+        ))
+        .await?;
+    Ok(Some(token))
+}
+
+pub(crate) async fn consume_valid_approval_commit_token_for_tool_call(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<ApprovalCommitToken, AppError> {
+    let token = state
+        .approval_commit_token_for_approval(approval.id)
+        .await?
+        .ok_or_else(|| AppError::forbidden("approval commit token is required"))?;
+    if token.status != "issued" {
+        return Err(AppError::forbidden("approval commit token is not issued"));
+    }
+    if token.expires_at <= Utc::now() {
+        return Err(AppError::forbidden("approval commit token is expired"));
+    }
+    if token.tool_call_id != tool_call.id
+        || token.session_id != approval.session_id
+        || token.tool_name != tool_call.tool_name
+    {
+        return Err(AppError::forbidden(
+            "approval commit token does not match tool call",
+        ));
+    }
+    let Some(task_grant_id) = tool_call.task_grant_id else {
+        return Err(AppError::forbidden(
+            "approval commit token requires task grant binding",
+        ));
+    };
+    if token.task_grant_id != task_grant_id {
+        return Err(AppError::forbidden(
+            "approval commit token task grant does not match tool call",
+        ));
+    }
+    let grant = state.get_task_grant(task_grant_id).await?;
+    if grant.status != "active" {
+        return Err(AppError::forbidden("task grant is not active"));
+    }
+    if grant
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Utc::now())
+    {
+        return Err(AppError::forbidden("task grant is expired"));
+    }
+    if !task_grant_requires_approval_commit_token(&grant, &tool_call.tool_name) {
+        return Err(AppError::forbidden(
+            "approval commit token is only valid for commit_write effects",
+        ));
+    }
+    if tool_call.tool_name == "mcp.call" && !task_grant_allows_mcp_call(&grant, &tool_call.args) {
+        return Err(AppError::forbidden(
+            "task grant connector scope does not allow MCP call",
+        ));
+    }
+    let binding = approval_commit_binding_for_mcp_args(&tool_call.args)?;
+    if token.normalized_args_hash != binding.normalized_args_hash
+        || token.target_binding != binding.target_binding
+    {
+        return Err(AppError::forbidden(
+            "approval commit token digest does not match current tool call args",
+        ));
+    }
+    let consumed = state.consume_approval_commit_token(token.id).await?;
+    state
+        .append_event(
+            "system",
+            Some(consumed.id),
+            approval.session_id,
+            "approval_commit_token.consumed",
+            json!({
+                "approval_commit_token_id": consumed.id,
+                "approval_id": approval.id,
+                "tool_call_id": tool_call.id,
+                "task_grant_id": consumed.task_grant_id,
+                "tool": consumed.tool_name,
+                "normalized_args_hash": consumed.normalized_args_hash
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "worker",
+            Some(consumed.id),
+            "approval_commit_token.consumed",
+            "approval_commit_token",
+            Some(consumed.id),
+            json!({
+                "approval_id": approval.id,
+                "tool_call_id": tool_call.id,
+                "task_grant_id": consumed.task_grant_id,
+                "tool": consumed.tool_name,
+                "normalized_args_hash": consumed.normalized_args_hash
+            }),
+        ))
+        .await?;
+    Ok(consumed)
 }
 
 async fn record_rejected_approval_tool_result(
@@ -39804,8 +42314,83 @@ fn default_session_title() -> String {
     "Untitled session".to_string()
 }
 
+fn default_workflow_trigger_type() -> String {
+    "manual".to_string()
+}
+
+fn default_workflow_release_state() -> String {
+    "draft".to_string()
+}
+
+fn default_workflow_run_status() -> String {
+    "queued".to_string()
+}
+
+fn default_task_grant_risk_level() -> String {
+    "low".to_string()
+}
+
+fn default_task_grant_memory_scope() -> Value {
+    json!({
+        "mode": "snapshot_only",
+        "allowed_scope_keys": [],
+        "allowed_object_types": [],
+        "allowed_source_types": [],
+        "allowed_object_ids": [],
+        "minimum_trust_level": "verified",
+        "max_objects": 0,
+        "approval_memory_allowed": false,
+        "handoff_memory_allowed": false,
+        "writeback_allowed": false
+    })
+}
+
+fn default_task_grant_tool_scope() -> Value {
+    json!({
+        "read": [],
+        "write": [],
+        "external_write": []
+    })
+}
+
+fn default_task_grant_connector_scope() -> Value {
+    json!({
+        "mode": "read_only",
+        "allowed_connector_ids": [],
+        "allowed_tool_names": [],
+        "tenant_scope": {},
+        "side_effect_classes": []
+    })
+}
+
+fn default_task_grant_approval_policy() -> Value {
+    json!({
+        "mode": "approval_required_for_mutation"
+    })
+}
+
+fn default_task_grant_external_effects() -> Value {
+    json!({
+        "publish": false,
+        "payment": false,
+        "external_message": false,
+        "account_mutation": false,
+        "ad_spend_mutation": false
+    })
+}
+
 fn empty_json_object() -> Value {
     json!({})
+}
+
+fn workflow_input_digest(value: &Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 #[derive(Debug)]
@@ -45887,6 +48472,1473 @@ not json
     }
 
     #[tokio::test]
+    async fn workflow_runs_create_primary_session_and_step_runs() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "AI use case triage",
+                    "entrypoint": "ai-use-case-triage",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "agent_role": "orchestrator"},
+                            {"key": "draft", "agent_role": "writer"}
+                        ]
+                    },
+                    "handoff_rules": {},
+                    "eval_gate_refs": ["pack-regression"],
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(definition["name"], json!("AI use case triage"));
+        assert_eq!(definition["default_agent_id"], json!(agent.id));
+
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "triage first AI use case",
+                    "input_payload": {
+                        "use_case_id": "AI-001",
+                        "owner": "legal"
+                    }
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(run["workflow_definition_id"], definition["id"]);
+        assert_eq!(run["status"], json!("queued"));
+        assert!(run["primary_session_id"].as_str().is_some());
+        assert!(run["root_task_grant_id"].as_str().is_some());
+        assert!(run["input_digest"].as_str().is_some_and(|digest| {
+            digest.starts_with("fnv1a64:") && digest.len() == "fnv1a64:0000000000000000".len()
+        }));
+
+        let session_id = run["primary_session_id"].as_str().expect("session id");
+        let root_task_grant_id = run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id");
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/events"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "workflow.run.created"
+                && event.payload["workflow_run_id"] == run["id"]
+                && event.payload["workflow_definition_id"] == definition["id"]
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "task_grant.issued"
+                && event.payload["task_grant_id"] == json!(root_task_grant_id)
+                && event.payload["workflow_run_id"] == run["id"]
+        }));
+
+        let initial_steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{}/steps",
+                    run["id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(initial_steps.len(), 1);
+        assert_eq!(initial_steps[0]["step_key"], json!("intake"));
+        assert_eq!(initial_steps[0]["session_id"], json!(session_id));
+        assert_eq!(initial_steps[0]["task_grant_id"], json!(root_task_grant_id));
+
+        let grants: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{}/task-grants",
+                    run["id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0]["id"], json!(root_task_grant_id));
+        assert_eq!(grants[0]["parent_grant_id"], Value::Null);
+        assert_eq!(grants[0]["status"], json!("active"));
+        assert_eq!(grants[0]["memory_scope"]["mode"], json!("snapshot_only"));
+
+        let step: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
+                json!({
+                    "step_key": "draft",
+                    "step_type": "agent",
+                    "agent_id": agent.id,
+                    "session_id": session_id,
+                    "task_grant_id": root_task_grant_id,
+                    "status": "queued",
+                    "input_payload": {"source": "workflow run test"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(step["workflow_run_id"], run["id"]);
+        assert_eq!(step["step_key"], json!("draft"));
+        assert_eq!(step["session_id"], json!(session_id));
+        assert_eq!(step["task_grant_id"], json!(root_task_grant_id));
+
+        let listed_steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{}/steps",
+                    run["id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(listed_steps.len(), 2);
+        assert!(listed_steps.iter().any(|listed| listed["id"] == step["id"]));
+        assert!(
+            listed_steps
+                .iter()
+                .any(|listed| listed["id"] == initial_steps[0]["id"])
+        );
+
+        let listed_runs: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/workflow-runs")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(listed_runs.iter().any(|listed| listed["id"] == run["id"]));
+    }
+
+    #[tokio::test]
+    async fn workflow_step_completion_advances_dependency_graph() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Dependency graph workflow",
+                    "entrypoint": "dependency-graph-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true},
+                            {"key": "research", "type": "agent", "depends_on": ["intake"]},
+                            {"key": "draft", "type": "agent", "depends_on": ["research"]}
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "advance dependency graph"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+        let root_task_grant_id = run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id");
+
+        let mut steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["step_key"], json!("intake"));
+        let intake_step_id = steps[0]["id"].as_str().expect("intake step id").to_string();
+
+        let completed_intake: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{intake_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"summary": "intake complete"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(completed_intake["status"], json!("completed"));
+        assert!(completed_intake["completed_at"].as_str().is_some());
+
+        steps = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(steps.len(), 2);
+        let research_step = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("research"))
+            .expect("research step should be materialized after intake");
+        assert_eq!(research_step["status"], json!("queued"));
+        assert_eq!(research_step["task_grant_id"], json!(root_task_grant_id));
+        assert!(
+            steps.iter().all(|step| step["step_key"] != json!("draft")),
+            "draft must wait until research completes"
+        );
+
+        let research_step_id = research_step
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("research step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{research_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"summary": "research complete"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        steps = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let draft_step = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("draft"))
+            .expect("draft step should be materialized after research");
+        assert_eq!(draft_step["status"], json!("queued"));
+        let draft_step_id = draft_step
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("draft step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{draft_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"summary": "draft complete"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let completed_run: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed_run["status"], json!("completed"));
+        assert!(completed_run["completed_at"].as_str().is_some());
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/events",
+                    completed_run["primary_session_id"].as_str().unwrap()
+                ))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "workflow.step.completed"
+                && event.payload["workflow_step_run_id"] == json!(draft_step_id)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "workflow.run.completed"
+                && event.payload["workflow_run_id"] == completed_run["id"]
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
+        let app = test_app().await;
+        let specialist: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Workflow Legal Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.read", "agent_cli.exec"],
+                    "semantic_scopes": {
+                        "domain_scope": "legal",
+                        "workflow_scope": "contract-review"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Workflow Legal Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": specialist.id,
+                                "intents": ["review_contract"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["medium"],
+                                "approval_required": false
+                            }]
+                        }
+                    },
+                    "semantic_scopes": {
+                        "domain_scope": "legal",
+                        "workflow_scope": "contract-review"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Contract review managed agent",
+                    "entrypoint": "contract-review",
+                    "trigger_type": "manual",
+                    "default_agent_id": manager.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "agent_role": "manager"},
+                            {"key": "review_contract", "agent_role": "specialist"}
+                        ]
+                    },
+                    "handoff_rules": {
+                        "root_task_grant": {
+                            "semantic_scopes": {
+                                "domain_scope": "legal",
+                                "workflow_scope": "contract-review"
+                            },
+                            "memory_scope": {
+                                "mode": "snapshot_only",
+                                "allowed_scope_keys": [],
+                                "allowed_object_types": [],
+                                "allowed_source_types": [],
+                                "allowed_object_ids": [],
+                                "minimum_trust_level": "verified",
+                                "max_objects": 0,
+                                "approval_memory_allowed": false,
+                                "handoff_memory_allowed": false,
+                                "writeback_allowed": false
+                            },
+                            "tool_scope": {
+                                "read": ["file.read"],
+                                "write": ["agent_cli.exec"],
+                                "external_write": []
+                            },
+                            "connector_scope": {
+                                "mode": "read_only",
+                                "allowed_connector_ids": [],
+                                "allowed_tool_names": [],
+                                "tenant_scope": {},
+                                "side_effect_classes": []
+                            }
+                        }
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "review vendor contract"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let manager_session_id =
+            Uuid::parse_str(run["primary_session_id"].as_str().unwrap()).unwrap();
+        let root_task_grant_id =
+            Uuid::parse_str(run["root_task_grant_id"].as_str().unwrap()).unwrap();
+
+        let plan: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{manager_session_id}/manager-plans"),
+                json!({
+                    "specialist_agent_id": specialist.id,
+                    "task_intake": {"goal": "Review the vendor contract for legal risk"},
+                    "decomposition": {"steps": ["assign specialist", "collect findings"]},
+                    "specialist_selection": {"selected_agent_id": specialist.id},
+                    "risk_classification": "medium",
+                    "review": {"status": "pending"}
+                }),
+            ),
+        )
+        .await;
+        let reviewed: ManagerAgentPlan = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/manager-plans/{}/review", plan.id),
+                json!({
+                    "status": "approved",
+                    "review": {"status": "approved", "summary": "Legal review can be delegated"}
+                }),
+            ),
+        )
+        .await;
+        let handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{manager_session_id}/agent-handoffs"),
+                json!({
+                    "target_agent_id": specialist.id,
+                    "manager_plan_id": reviewed.id,
+                    "intent": "review_contract",
+                    "payload": {"contract_id": "vendor-001"},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "medium",
+                    "semantic_scopes": {
+                        "domain_scope": "legal",
+                        "workflow_scope": "contract-review"
+                    }
+                }),
+            ),
+        )
+        .await;
+        let _: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/accept", handoff.id),
+                json!({"reason": "approved by manager"}),
+            ),
+        )
+        .await;
+        let assignment: AgentHandoffAssignment = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/assignment", handoff.id),
+                json!({"assigned_by": "manager-agent"}),
+            ),
+        )
+        .await;
+
+        let steps: Vec<WorkflowStepRun> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{}/steps",
+                    run["id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let handoff_step = steps
+            .iter()
+            .find(|step| step.handoff_id == Some(handoff.id))
+            .expect("handoff assignment should create a workflow step run");
+        assert_eq!(handoff_step.step_key, "review_contract");
+        assert_eq!(handoff_step.step_type, "handoff");
+        assert_eq!(handoff_step.agent_id, Some(specialist.id));
+        assert_eq!(
+            handoff_step.session_id,
+            Some(assignment.specialist_session_id)
+        );
+        assert!(handoff_step.task_grant_id.is_some());
+
+        let grants: Vec<TaskGrant> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{}/task-grants",
+                    run["id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let child_grant = grants
+            .iter()
+            .find(|grant| grant.source_handoff_id == Some(handoff.id))
+            .expect("handoff assignment should issue a child task grant");
+        assert_eq!(child_grant.parent_grant_id, Some(root_task_grant_id));
+        assert_eq!(child_grant.workflow_step_run_id, Some(handoff_step.id));
+        assert_eq!(child_grant.grantee_agent_id, Some(specialist.id));
+        assert_eq!(
+            child_grant.grantee_session_id,
+            Some(assignment.specialist_session_id)
+        );
+        assert_eq!(child_grant.agent_class.as_deref(), Some("specialist"));
+        assert_eq!(handoff_step.task_grant_id, Some(child_grant.id));
+        assert_eq!(child_grant.tool_scope["read"], json!(["file.read"]));
+        assert_eq!(child_grant.tool_scope["write"], json!(["agent_cli.exec"]));
+
+        let context_packet: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/context-packet",
+                    assignment.specialist_session_id
+                ))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(context_packet.session_id, assignment.specialist_session_id);
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{manager_session_id}/events"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "workflow.step.created"
+                && event.payload["workflow_step_run_id"] == json!(handoff_step.id)
+                && event.payload["task_grant_id"] == json!(child_grant.id)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "task_grant.issued"
+                && event.payload["task_grant_id"] == json!(child_grant.id)
+                && event.payload["parent_grant_id"] == json!(root_task_grant_id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let versions: Vec<AgentVersion> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/agents/{}/versions", agent.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let current_version = versions.first().expect("seeded agent version");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Scoped worker boundary",
+                    "entrypoint": "scoped-worker-boundary",
+                    "default_agent_id": agent.id,
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "reject unscoped worker version"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let (status, error) = request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
+                json!({
+                    "step_key": "worker",
+                    "step_type": "agent",
+                    "agent_version_id": current_version.id
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"],
+            "workflow step agent_id is required when agent_version_id is provided"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_task_grant_rejects_child_scope_expansion() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Grant scope boundary",
+                    "entrypoint": "grant-scope-boundary",
+                    "default_agent_id": agent.id,
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "reject expanded child grant"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let (status, error) = request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-runs/{}/task-grants",
+                    run["id"].as_str().unwrap()
+                ),
+                json!({
+                    "parent_grant_id": run["root_task_grant_id"],
+                    "issuer_subject": "operator",
+                    "grantee_agent_id": agent.id,
+                    "grantee_session_id": run["primary_session_id"],
+                    "agent_class": "worker",
+                    "objective": "fetch external page",
+                    "risk_level": "low",
+                    "tool_scope": {
+                        "read": ["web.fetch"]
+                    }
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"],
+            "child task grant cannot expand parent grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_tool_execution_enforces_task_grant_scope() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Grant checked tool run",
+                    "entrypoint": "grant-checked-tool-run",
+                    "default_agent_id": agent.id,
+                    "handoff_rules": {
+                        "root_task_grant": {
+                            "tool_scope": {
+                                "read": ["file.read", "mcp.call"],
+                                "write": [],
+                                "external_write": []
+                            },
+                            "connector_scope": {
+                                "mode": "read_only",
+                                "allowed_connector_ids": [],
+                                "allowed_tool_names": []
+                            }
+                        }
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({"workflow_definition_id": definition["id"]}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let session_id = run["primary_session_id"].as_str().expect("session id");
+        let root_task_grant_id = run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id");
+
+        let (status, missing_grant) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.read/execute",
+                json!({"session_id": session_id, "args": {"path": "README.md"}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            missing_grant["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("task grant is required")
+        );
+
+        let read_result: Value = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/file.read/execute",
+                json!({
+                    "session_id": session_id,
+                    "task_grant_id": root_task_grant_id,
+                    "args": {"path": "README.md"}
+                }),
+            ),
+        )
+        .await;
+        assert!(read_result.get("files").is_some());
+
+        let (status, connector_denial) = request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/tools/mcp.call/execute",
+                json!({
+                    "session_id": session_id,
+                    "task_grant_id": root_task_grant_id,
+                    "args": {
+                        "server": "docs",
+                        "tool": "search",
+                        "args": {"q": "policy"}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            connector_denial["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("connector scope")
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/events"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "task_grant.checked"
+                && event.payload["task_grant_id"] == json!(root_task_grant_id)
+                && event.payload["tool"] == json!("file.read")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "task_grant.denied" && event.payload["tool"] == json!("file.read")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "task_grant.denied" && event.payload["tool"] == json!("mcp.call")
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_session_loop_uses_root_task_grant_for_tool_calls() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.name == "Generic Orchestrator Agent")
+            .expect("seeded generic orchestrator agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Granted session loop",
+                    "entrypoint": "granted-session-loop",
+                    "default_agent_id": agent.id,
+                    "handoff_rules": {
+                        "root_task_grant": {
+                            "tool_scope": {
+                                "read": ["file.read", "sql.get_schema", "sql.query"],
+                                "write": ["shell.exec"],
+                                "external_write": []
+                            }
+                        }
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "granted workflow session loop"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let session_id = run["primary_session_id"].as_str().expect("session id");
+        let root_task_grant_id = run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id");
+
+        let _run: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/run"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let completed_loop = run_next_session_loop_job(
+            app.clone(),
+            Uuid::parse_str(session_id).unwrap(),
+            "workflow-worker",
+        )
+        .await;
+        assert_eq!(completed_loop.status, SessionLoopJobStatus::Completed);
+
+        let session: Session = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(session.status, SessionStatus::RequiresAction);
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/tool-calls"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(tool_calls.iter().any(|call| {
+            call.tool_name == "shell.exec"
+                && call.status == "waiting_approval"
+                && call.policy_decision["decision"] == "requires_approval"
+        }));
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/events"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for tool in ["file.read", "sql.get_schema", "sql.query", "shell.exec"] {
+            assert!(
+                events.iter().any(|event| {
+                    event.event_type == "task_grant.checked"
+                        && event.payload["task_grant_id"] == json!(root_task_grant_id)
+                        && event.payload["tool"] == json!(tool)
+                }),
+                "missing task grant check for {tool}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_context_packet_applies_task_grant_memory_scope() {
+        let app = test_app().await;
+        let semantic_scopes = json!({
+            "project_scope": "mandoforge",
+            "repo_scope": "mandoforge",
+            "service_scope": "mandoforge-api",
+            "workflow_scope": "grant-memory-scope",
+            "policy_scope": "approval-required",
+            "memory_scope": "engineering"
+        });
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "repo_doc",
+                    "source_uri": "repo://docs/grant-memory.md",
+                    "display_name": "Grant Memory Source",
+                    "metadata": {},
+                    "freshness": {"state": "workspace_current"}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let object: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "workflow",
+                    "object_key": "workflow:grant-memory-scope",
+                    "title": "Grant memory scope object",
+                    "summary": "This should match the agent scope but be withheld by the grant.",
+                    "content": {"policy": "withhold"},
+                    "semantic_scopes": semantic_scopes,
+                    "provenance": {"source_ref": "docs/grant-memory.md"},
+                    "trust_level": "human_verified",
+                    "freshness": "current"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Grant Memory Scoped Agent",
+                    "kind": "orchestrator",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.read"],
+                    "semantic_scopes": semantic_scopes,
+                    "release_state": "active"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Grant memory context",
+                    "entrypoint": "grant-memory-context",
+                    "default_agent_id": agent.id,
+                    "handoff_rules": {
+                        "root_task_grant": {
+                            "memory_scope": {
+                                "mode": "snapshot_only",
+                                "max_objects": 0
+                            }
+                        }
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({"workflow_definition_id": definition["id"]}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let session_id = run["primary_session_id"].as_str().expect("session id");
+        let root_task_grant_id = run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id");
+
+        let packet: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/context-packet"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            !packet
+                .retrieved_objects
+                .iter()
+                .any(|retrieved| retrieved.id == object.id),
+            "grant max_objects=0 must withhold matching semantic objects"
+        );
+        assert_eq!(packet.replay_summary["retrieved_object_count"], json!(0));
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/events"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "task_grant.checked"
+                && event.payload["task_grant_id"] == json!(root_task_grant_id)
+                && event.payload["tool"] == json!("context_packet")
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_context_packet_applies_memory_scope_trust_threshold() {
+        let app = test_app().await;
+        let semantic_scopes = json!({
+            "project_scope": "mandoforge",
+            "repo_scope": "mandoforge",
+            "service_scope": "mandoforge-api",
+            "workflow_scope": "grant-memory-trust",
+            "policy_scope": "approval-required",
+            "memory_scope": "engineering"
+        });
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "repo_doc",
+                    "source_uri": "repo://docs/grant-memory-trust.md",
+                    "display_name": "Grant Memory Trust Source",
+                    "metadata": {},
+                    "freshness": {"state": "workspace_current"}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let unverified: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "workflow",
+                    "object_key": "workflow:grant-memory-trust:unverified",
+                    "title": "Unverified workflow memory",
+                    "summary": "This matching object must be withheld by minimum_trust_level.",
+                    "content": {"policy": "withhold"},
+                    "semantic_scopes": semantic_scopes,
+                    "provenance": {"source_ref": "docs/grant-memory-trust.md"},
+                    "trust_level": "unverified",
+                    "freshness": "current"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let verified: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "workflow",
+                    "object_key": "workflow:grant-memory-trust:human",
+                    "title": "Human verified workflow memory",
+                    "summary": "This matching object may enter context.",
+                    "content": {"policy": "allow"},
+                    "semantic_scopes": semantic_scopes,
+                    "provenance": {"source_ref": "docs/grant-memory-trust.md"},
+                    "trust_level": "human_verified",
+                    "freshness": "current"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Grant Memory Trust Agent",
+                    "kind": "orchestrator",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.read"],
+                    "semantic_scopes": semantic_scopes,
+                    "release_state": "active"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Grant memory trust context",
+                    "entrypoint": "grant-memory-trust-context",
+                    "default_agent_id": agent.id,
+                    "handoff_rules": {
+                        "root_task_grant": {
+                            "memory_scope": {
+                                "mode": "snapshot_only",
+                                "minimum_trust_level": "human_verified",
+                                "max_objects": 10
+                            }
+                        }
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({"workflow_definition_id": definition["id"]}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let session_id = run["primary_session_id"].as_str().expect("session id");
+
+        let packet: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/context-packet"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            !packet
+                .retrieved_objects
+                .iter()
+                .any(|retrieved| retrieved.id == unverified.id),
+            "minimum_trust_level must withhold lower-trust matching memory"
+        );
+        assert!(
+            packet
+                .retrieved_objects
+                .iter()
+                .any(|retrieved| retrieved.id == verified.id),
+            "minimum_trust_level should keep sufficiently trusted matching memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_memory_writeback_requires_task_grant_writeback_permission() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let now = Utc::now();
+        let definition = state
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                pack_installation_id: None,
+                pack_id: None,
+                pack_version: None,
+                name: "Writeback denied workflow".to_string(),
+                entrypoint: "writeback-denied".to_string(),
+                trigger_type: "manual".to_string(),
+                default_agent_id: agent.id,
+                default_environment_id: None,
+                input_schema_ref: None,
+                output_schema_ref: None,
+                step_graph: empty_json_object(),
+                handoff_rules: json!({
+                    "root_task_grant": {
+                        "memory_scope": {
+                            "mode": "snapshot_only",
+                            "allowed_scope_keys": [],
+                            "allowed_object_types": [],
+                            "allowed_source_types": [],
+                            "allowed_object_ids": [],
+                            "minimum_trust_level": "verified",
+                            "max_objects": 0,
+                            "approval_memory_allowed": false,
+                            "handoff_memory_allowed": false,
+                            "writeback_allowed": false
+                        }
+                    }
+                }),
+                approval_policy_ref: None,
+                eval_gate_refs: Vec::new(),
+                release_state: "released".to_string(),
+                created_at: now,
+                updated_at: now,
+                archived_at: None,
+            })
+            .await
+            .expect("workflow definition");
+        let session = state
+            .create_session(CreateSession {
+                agent_id: agent.id,
+                environment_id: None,
+                title: "writeback denied session".to_string(),
+                message: None,
+            })
+            .await
+            .expect("session");
+        let run = state
+            .create_workflow_run(WorkflowRun {
+                id: Uuid::new_v4(),
+                workflow_definition_id: definition.id,
+                pack_installation_id: None,
+                source_event_id: None,
+                source_work_item_id: None,
+                source_schedule_id: None,
+                status: "queued".to_string(),
+                primary_session_id: session.id,
+                root_task_grant_id: None,
+                input_payload: empty_json_object(),
+                input_digest: workflow_input_digest(&empty_json_object()),
+                started_at: None,
+                completed_at: None,
+                audit_trace_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("workflow run");
+        let root_grant =
+            issue_root_task_grant_for_workflow_run(&state, &run, &definition, &session)
+                .await
+                .expect("root task grant");
+        let run = state
+            .update_workflow_run_root_task_grant(run.id, root_grant.id)
+            .await
+            .expect("root task grant binding");
+        state
+            .append_event(
+                "system",
+                None,
+                session.id,
+                "session.loop.idle",
+                json!({"reason": "test checkpoint"}),
+            )
+            .await
+            .expect("idle event");
+
+        let error = generate_memory_writeback_candidates(
+            &state,
+            session.id,
+            CreateMemoryWritebackCandidates {
+                include_session_summary: None,
+                include_artifacts: None,
+                include_handoffs: None,
+                include_approvals: None,
+            },
+        )
+        .await
+        .expect_err("writeback must be denied by task grant memory scope");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message,
+            "task grant memory scope does not allow memory writeback"
+        );
+
+        let events = state.list_events(session.id).await.expect("events");
+        assert!(events.iter().any(|event| {
+            event.event_type == "task_grant.denied"
+                && event.payload["workflow_run_id"] == json!(run.id)
+                && event.payload["task_grant_id"] == json!(root_grant.id)
+                && event.payload["tool"] == json!("memory_writeback")
+        }));
+    }
+
+    #[tokio::test]
     async fn workflow_pack_onboarding_assessment_reports_blocked_and_ready_states() {
         let app = test_app().await;
         let installed: WorkflowPackInstallation = request_json(
@@ -46459,6 +50511,8 @@ not json
         assert!(names.contains(&"0040_session_threads.sql"));
         assert!(names.contains(&"0041_session_loop_event_cursor.sql"));
         assert!(names.contains(&"0042_session_managed_statuses.sql"));
+        assert!(names.contains(&"0050_managed_workflows.sql"));
+        assert!(names.contains(&"0051_task_grants.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -46489,7 +50543,7 @@ not json
     #[test]
     fn tenant_rls_migration_covers_tracked_tables() {
         let migration = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("../../../db/migrations/0024_tenant_rls_policies.sql"),
             include_str!("../../../db/migrations/0025_remote_computer_state_locks.sql"),
             include_str!("../../../db/migrations/0026_remote_computer_sidecar_heartbeats.sql"),
@@ -46504,7 +50558,9 @@ not json
             include_str!("../../../db/migrations/0037_memory_writeback_candidates.sql"),
             include_str!("../../../db/migrations/0038_environments.sql"),
             include_str!("../../../db/migrations/0039_session_loop_jobs.sql"),
-            include_str!("../../../db/migrations/0040_session_threads.sql")
+            include_str!("../../../db/migrations/0040_session_threads.sql"),
+            include_str!("../../../db/migrations/0050_managed_workflows.sql"),
+            include_str!("../../../db/migrations/0051_task_grants.sql")
         );
         assert!(migration.contains("mandoforge_current_tenant_id"));
         assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
@@ -60249,6 +64305,551 @@ not json
         );
     }
 
+    #[tokio::test]
+    async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
+        let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
+        let state = AppState {
+            store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+            execution_queue: ExecutionQueue::default(),
+            execution_worker: Arc::new(QueueBackedExecutionWorker),
+            authorizer: Arc::new(RoleBasedAuthorizer),
+            observability_config: ObservabilityConfig {
+                service_name: "mandoforge-api-test".to_string(),
+                otlp_endpoint: None,
+                collector_health_endpoint: None,
+                sample_ratio: 1.0,
+            },
+            telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+            mcp_gateway_config: Some(McpGatewayConfig {
+                endpoint: "http://mcp.test".to_string(),
+                timeout_seconds: 5,
+                allowed_servers: vec!["social".to_string()],
+            }),
+            mcp_gateway_client: mcp_client.clone(),
+            codex_app_server_config: None,
+            codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+            eval_judge_config: None,
+            eval_judge_client: Arc::new(ReservedEvalJudgeClient),
+            cost_alert_webhook_url: None,
+            cost_alert_email_relay_url: None,
+            cost_alert_smtp_config: None,
+            approval_webhook_url: None,
+            workspace_root: test_workspace_root(),
+            tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+            tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
+            policy: runtime_policy(PolicyConfig::default()),
+        };
+        let organization = state
+            .create_organization(
+                CreateOrganization {
+                    name: "MCP Commit Org".to_string(),
+                    slug: "mcp-commit-org".to_string(),
+                },
+                Some("admin-1".to_string()),
+            )
+            .await
+            .expect("create org");
+        let team = state
+            .create_team(
+                organization.id,
+                CreateTeam {
+                    name: "MCP Commit Team".to_string(),
+                    slug: "mcp-commit-team".to_string(),
+                },
+            )
+            .await
+            .expect("create team");
+        state
+            .create_provider_access(
+                team.id,
+                CreateProviderAccess {
+                    provider_name: "openai-compatible".to_string(),
+                    model_allowlist: vec!["gpt-5.4-mini".to_string()],
+                },
+            )
+            .await
+            .expect("create provider access");
+        let mcp_server = state
+            .create_mcp_server(
+                team.id,
+                CreateMcpServerRecord {
+                    name: "social".to_string(),
+                    transport: "http".to_string(),
+                    config: json!({"source": "test"}),
+                    tool_allowlist: vec!["publish_post".to_string()],
+                },
+            )
+            .await
+            .expect("create mcp server");
+        let agent = state
+            .create_agent(CreateAgent {
+                name: "Social Commit Agent".to_string(),
+                kind: "orchestrator".to_string(),
+                provider: "openai-compatible".to_string(),
+                model: "gpt-5.4-mini".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                runtime_profile_id: None,
+                agent_role: "manager".to_string(),
+                system_prompt: "Publish only through governed commit tokens.".to_string(),
+                runtime_config: json!({}),
+                tools: vec!["mcp.call".to_string()],
+                tool_policy: json!({}),
+                mcp_server_ids: vec![],
+                skill_ids: vec![],
+                workflow_pack_ids: vec![],
+                remote_computer_profile: json!({}),
+                semantic_scopes: json!({}),
+                release_state: "draft".to_string(),
+            })
+            .await
+            .expect("create agent");
+        let definition = state
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                pack_installation_id: None,
+                pack_id: None,
+                pack_version: None,
+                name: "Social publish workflow".to_string(),
+                entrypoint: "social-publish".to_string(),
+                trigger_type: "manual".to_string(),
+                default_agent_id: agent.id,
+                default_environment_id: None,
+                input_schema_ref: None,
+                output_schema_ref: None,
+                step_graph: empty_json_object(),
+                handoff_rules: json!({
+                    "root_task_grant": {
+                        "tool_scope": {
+                            "read": [],
+                            "write": [],
+                            "external_write": ["mcp.call"]
+                        },
+                        "connector_scope": {
+                            "mode": "commit_write",
+                            "allowed_connector_ids": ["social"],
+                            "allowed_tool_names": ["publish_post"],
+                            "tenant_scope": {},
+                            "side_effect_classes": ["publish"]
+                        },
+                        "external_effects": {
+                            "publish": true,
+                            "payment": false,
+                            "external_message": false,
+                            "account_mutation": false,
+                            "ad_spend_mutation": false
+                        }
+                    }
+                }),
+                approval_policy_ref: None,
+                eval_gate_refs: Vec::new(),
+                release_state: "released".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                archived_at: None,
+            })
+            .await
+            .expect("workflow definition");
+        let app = build_router(state.clone());
+        let run: WorkflowRun = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({"workflow_definition_id": definition.id}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let root_task_grant_id = run.root_task_grant_id.expect("root grant");
+
+        let approval_required: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/mcp.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": run.primary_session_id,
+                        "task_grant_id": root_task_grant_id,
+                        "args": {
+                            "server": "social",
+                            "tool": "publish_post",
+                            "args": {
+                                "side_effect_class": "publish",
+                                "account": "brand-main",
+                                "channel": "x",
+                                "content": "Approved post"
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approval_required["status"], json!("approval_required"));
+        assert_eq!(mcp_client.requests.lock().await.len(), 0);
+        let approval_id = Uuid::parse_str(
+            approval_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval id");
+        let waiting_call = state
+            .list_tool_calls(Some(run.primary_session_id))
+            .await
+            .expect("tool calls")
+            .into_iter()
+            .find(|call| call.tool_name == "mcp.call")
+            .expect("mcp tool call");
+        assert_eq!(waiting_call.status, "waiting_approval");
+        assert_eq!(waiting_call.task_grant_id, Some(root_task_grant_id));
+        assert!(
+            waiting_call
+                .normalized_args_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(waiting_call.target_binding["server"], json!("social"));
+        assert_eq!(waiting_call.target_binding["tool"], json!("publish_post"));
+        assert_eq!(
+            waiting_call.target_binding["side_effect_class"],
+            json!("publish")
+        );
+        assert!(
+            waiting_call.target_binding["content_digest"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert!(
+            waiting_call.target_binding["payload_digest"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+
+        let approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approved.status, "approved");
+        let issued_token = state
+            .approval_commit_token_for_approval(approval_id)
+            .await
+            .expect("commit token")
+            .expect("approval should issue commit token");
+        assert_eq!(issued_token.status, "issued");
+        assert_eq!(issued_token.task_grant_id, root_task_grant_id);
+        assert_eq!(
+            issued_token.normalized_args_hash,
+            waiting_call.normalized_args_hash.expect("call args hash")
+        );
+        assert_eq!(issued_token.target_binding, waiting_call.target_binding);
+
+        let job = state
+            .execution_queue
+            .list()
+            .await
+            .expect("execution jobs")
+            .into_iter()
+            .find(|job| job.approval_id == approval_id)
+            .expect("queued approved mcp commit");
+        let completed = run_execution_job(&state, job.id, "mcp-commit-worker")
+            .await
+            .expect("approved mcp commit executes");
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        let consumed_token = state
+            .approval_commit_token_for_approval(approval_id)
+            .await
+            .expect("commit token")
+            .expect("approval should still have commit token");
+        assert_eq!(consumed_token.status, "consumed");
+        assert!(consumed_token.consumed_at.is_some());
+        let requests = mcp_client.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].server, "social");
+        assert_eq!(requests[0].tool, "publish_post");
+        assert_eq!(requests[0].args["content"], json!("Approved post"));
+        drop(requests);
+
+        let tamper_required: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/mcp.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": run.primary_session_id,
+                        "task_grant_id": root_task_grant_id,
+                        "args": {
+                            "server": "social",
+                            "tool": "publish_post",
+                            "args": {
+                                "account": "brand-main",
+                                "channel": "x",
+                                "content": "Original approved post"
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let tamper_approval_id = Uuid::parse_str(
+            tamper_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval id");
+        let tamper_approved: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{tamper_approval_id}/approve"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let tamper_tool_call_id = tamper_approved.tool_call_id.expect("tool call id");
+        state
+            .update_tool_call_args(
+                tamper_tool_call_id,
+                json!({
+                    "server": "social",
+                    "tool": "publish_post",
+                    "args": {
+                        "account": "brand-main",
+                        "channel": "x",
+                        "content": "Tampered post"
+                    }
+                }),
+            )
+            .await
+            .expect("tamper waiting tool call args");
+        let tamper_job = state
+            .execution_queue
+            .list()
+            .await
+            .expect("execution jobs")
+            .into_iter()
+            .find(|job| job.approval_id == tamper_approval_id)
+            .expect("queued tampered mcp commit");
+        let tamper_retry = run_execution_job(&state, tamper_job.id, "mcp-commit-worker")
+            .await
+            .expect("tampered mcp commit should be retried without external call");
+        assert_eq!(tamper_retry.status, ExecutionJobStatus::Queued);
+        assert!(
+            tamper_retry
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("approval commit token digest does not match")
+        );
+        let tamper_token = state
+            .approval_commit_token_for_approval(tamper_approval_id)
+            .await
+            .expect("commit token")
+            .expect("tamper approval should have commit token");
+        assert_eq!(tamper_token.status, "issued");
+        assert_eq!(mcp_client.requests.lock().await.len(), 1);
+
+        let expired_required: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/mcp.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": run.primary_session_id,
+                        "task_grant_id": root_task_grant_id,
+                        "args": {
+                            "server": "social",
+                            "tool": "publish_post",
+                            "args": {
+                                "account": "brand-main",
+                                "channel": "x",
+                                "content": "Expired grant post"
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let expired_approval_id = Uuid::parse_str(
+            expired_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval id");
+        let _: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{expired_approval_id}/approve"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        match &state.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let grant = store
+                    .task_grants
+                    .get_mut(&root_task_grant_id)
+                    .expect("root task grant");
+                grant.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
+                grant.updated_at = Utc::now();
+            }
+            StoreBackend::Postgres(_) => panic!("test uses memory store"),
+        }
+        let expired_job = state
+            .execution_queue
+            .list()
+            .await
+            .expect("execution jobs")
+            .into_iter()
+            .find(|job| job.approval_id == expired_approval_id)
+            .expect("queued expired-grant mcp commit");
+        let expired_retry = run_execution_job(&state, expired_job.id, "mcp-commit-worker")
+            .await
+            .expect("expired grant should be retried without external call");
+        assert_eq!(expired_retry.status, ExecutionJobStatus::Queued);
+        assert!(
+            expired_retry
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("task grant is expired")
+        );
+        let expired_token = state
+            .approval_commit_token_for_approval(expired_approval_id)
+            .await
+            .expect("commit token")
+            .expect("expired approval should have commit token");
+        assert_eq!(expired_token.status, "issued");
+        assert_eq!(
+            mcp_client.requests.lock().await.len(),
+            1,
+            "gateway should not be called after task grant expires"
+        );
+        match &state.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let grant = store
+                    .task_grants
+                    .get_mut(&root_task_grant_id)
+                    .expect("root task grant");
+                grant.expires_at = None;
+                grant.updated_at = Utc::now();
+            }
+            StoreBackend::Postgres(_) => panic!("test uses memory store"),
+        }
+
+        let revoked_required: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/mcp.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": run.primary_session_id,
+                        "task_grant_id": root_task_grant_id,
+                        "args": {
+                            "server": "social",
+                            "tool": "publish_post",
+                            "args": {
+                                "account": "brand-main",
+                                "channel": "x",
+                                "content": "Revoked connector post"
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        let revoked_approval_id = Uuid::parse_str(
+            revoked_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval id");
+        let _: Approval = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{revoked_approval_id}/approve"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        state
+            .update_mcp_server_status(team.id, mcp_server.id, "disabled")
+            .await
+            .expect("disable mcp server after approval");
+        let revoked_job = state
+            .execution_queue
+            .list()
+            .await
+            .expect("execution jobs")
+            .into_iter()
+            .find(|job| job.approval_id == revoked_approval_id)
+            .expect("queued revoked-scope mcp commit");
+        let revoked_retry = run_execution_job(&state, revoked_job.id, "mcp-commit-worker")
+            .await
+            .expect("revoked connector should be retried without external call");
+        assert_eq!(revoked_retry.status, ExecutionJobStatus::Queued);
+        assert!(
+            revoked_retry
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not registered for this session team")
+        );
+        let revoked_token = state
+            .approval_commit_token_for_approval(revoked_approval_id)
+            .await
+            .expect("commit token")
+            .expect("revoked approval should have commit token");
+        assert_eq!(revoked_token.status, "issued");
+        assert_eq!(
+            mcp_client.requests.lock().await.len(),
+            1,
+            "gateway should not be called after connector scope is revoked"
+        );
+    }
+
     fn test_workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.mandoforge/test-workspaces")
     }
@@ -62387,8 +66988,8 @@ not json
         assert_eq!(shell.risk_level, "high");
 
         let pwd = policy.evaluate_tool_with_args("shell.exec", &json!({"command": "pwd"}));
-        assert_eq!(pwd.decision, "allowed");
-        assert_eq!(pwd.risk_level, "low");
+        assert_eq!(pwd.decision, "requires_approval");
+        assert_eq!(pwd.risk_level, "high");
 
         let destructive_shell =
             policy.evaluate_tool_with_args("shell.exec", &json!({"command": "rm -rf /tmp/x"}));

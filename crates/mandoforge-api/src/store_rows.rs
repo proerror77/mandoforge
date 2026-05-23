@@ -4,14 +4,15 @@ use sqlx::{Row, postgres::PgRow};
 
 use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
-    AgentTeammate, AgentVersion, AppError, Approval, ApprovalEscalationRule, ApprovalGroup,
-    ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket, CostAlertRoute,
-    Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord, Membership,
-    MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
+    AgentTeammate, AgentVersion, AppError, Approval, ApprovalCommitToken, ApprovalEscalationRule,
+    ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket,
+    CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord,
+    Membership, MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
     ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
-    SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Squad, SquadMember, Team,
-    TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment,
-    WorkItemReview, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Squad, SquadMember,
+    TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry,
+    WorkItemAssignment, WorkItemReview, WorkflowDefinition, WorkflowPackInstallation,
+    WorkflowPackProfileAsset, WorkflowRun, WorkflowStepRun,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
@@ -466,6 +467,117 @@ pub(crate) fn workflow_pack_profile_asset_from_row(
     })
 }
 
+pub(crate) fn workflow_definition_from_row(row: PgRow) -> Result<WorkflowDefinition, AppError> {
+    let eval_gate_refs: Value = row.try_get("eval_gate_refs")?;
+    Ok(WorkflowDefinition {
+        id: row.try_get("id")?,
+        pack_installation_id: row.try_get("pack_installation_id")?,
+        pack_id: row.try_get("pack_id")?,
+        pack_version: row.try_get("pack_version")?,
+        name: row.try_get("name")?,
+        entrypoint: row.try_get("entrypoint")?,
+        trigger_type: row.try_get("trigger_type")?,
+        default_agent_id: row.try_get("default_agent_id")?,
+        default_environment_id: row.try_get("default_environment_id")?,
+        input_schema_ref: row.try_get("input_schema_ref")?,
+        output_schema_ref: row.try_get("output_schema_ref")?,
+        step_graph: row.try_get("step_graph")?,
+        handoff_rules: row.try_get("handoff_rules")?,
+        approval_policy_ref: row.try_get("approval_policy_ref")?,
+        eval_gate_refs: json_array_from_row(eval_gate_refs, "workflow_definitions.eval_gate_refs")?,
+        release_state: row.try_get("release_state")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn workflow_run_from_row(row: PgRow) -> Result<WorkflowRun, AppError> {
+    Ok(WorkflowRun {
+        id: row.try_get("id")?,
+        workflow_definition_id: row.try_get("workflow_definition_id")?,
+        pack_installation_id: row.try_get("pack_installation_id")?,
+        source_event_id: row.try_get("source_event_id")?,
+        source_work_item_id: row.try_get("source_work_item_id")?,
+        source_schedule_id: row.try_get("source_schedule_id")?,
+        status: row.try_get("status")?,
+        primary_session_id: row.try_get("primary_session_id")?,
+        root_task_grant_id: row.try_get("root_task_grant_id")?,
+        input_payload: row.try_get("input_payload")?,
+        input_digest: row.try_get("input_digest")?,
+        started_at: row.try_get("started_at")?,
+        completed_at: row.try_get("completed_at")?,
+        audit_trace_id: row.try_get("audit_trace_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn workflow_step_run_from_row(row: PgRow) -> Result<WorkflowStepRun, AppError> {
+    let artifact_ids: Value = row.try_get("artifact_ids")?;
+    let approval_ids: Value = row.try_get("approval_ids")?;
+    let tool_call_ids: Value = row.try_get("tool_call_ids")?;
+    Ok(WorkflowStepRun {
+        id: row.try_get("id")?,
+        workflow_run_id: row.try_get("workflow_run_id")?,
+        step_key: row.try_get("step_key")?,
+        step_type: row.try_get("step_type")?,
+        agent_id: row.try_get("agent_id")?,
+        agent_version_id: row.try_get("agent_version_id")?,
+        session_id: row.try_get("session_id")?,
+        thread_id: row.try_get("thread_id")?,
+        handoff_id: row.try_get("handoff_id")?,
+        task_grant_id: row.try_get("task_grant_id")?,
+        environment_id: row.try_get("environment_id")?,
+        status: row.try_get("status")?,
+        input_payload: row.try_get("input_payload")?,
+        output_payload: row.try_get("output_payload")?,
+        artifact_ids: json_array_from_row(artifact_ids, "workflow_step_runs.artifact_ids")?,
+        approval_ids: json_array_from_row(approval_ids, "workflow_step_runs.approval_ids")?,
+        tool_call_ids: json_array_from_row(tool_call_ids, "workflow_step_runs.tool_call_ids")?,
+        started_at: row.try_get("started_at")?,
+        completed_at: row.try_get("completed_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn task_grant_from_row(row: PgRow) -> Result<TaskGrant, AppError> {
+    Ok(TaskGrant {
+        id: row.try_get("id")?,
+        workflow_run_id: row.try_get("workflow_run_id")?,
+        workflow_step_run_id: row.try_get("workflow_step_run_id")?,
+        session_id: row.try_get("session_id")?,
+        parent_grant_id: row.try_get("parent_grant_id")?,
+        source_event_id: row.try_get("source_event_id")?,
+        source_handoff_id: row.try_get("source_handoff_id")?,
+        issuer_subject: row.try_get("issuer_subject")?,
+        grantee_agent_id: row.try_get("grantee_agent_id")?,
+        grantee_session_id: row.try_get("grantee_session_id")?,
+        agent_class: row.try_get("agent_class")?,
+        objective: row.try_get("objective")?,
+        risk_level: row.try_get("risk_level")?,
+        status: row.try_get("status")?,
+        expires_at: row.try_get("expires_at")?,
+        max_turns: row.try_get("max_turns")?,
+        max_tool_calls: row.try_get("max_tool_calls")?,
+        max_runtime_seconds: row.try_get("max_runtime_seconds")?,
+        max_cost_usd_micros: row.try_get("max_cost_usd_micros")?,
+        semantic_scopes: row.try_get("semantic_scopes")?,
+        memory_scope: row.try_get("memory_scope")?,
+        tool_scope: row.try_get("tool_scope")?,
+        connector_scope: row.try_get("connector_scope")?,
+        approval_policy: row.try_get("approval_policy")?,
+        external_effects: row.try_get("external_effects")?,
+        context_packet_id: row.try_get("context_packet_id")?,
+        policy_revision_id: row.try_get("policy_revision_id")?,
+        immutable_args_hash: row.try_get("immutable_args_hash")?,
+        audit_trace_id: row.try_get("audit_trace_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 pub(crate) fn artifact_from_row(row: PgRow) -> Result<Artifact, AppError> {
     Ok(Artifact {
         id: row.try_get("id")?,
@@ -548,6 +660,9 @@ pub(crate) fn tool_call_from_row(row: PgRow) -> Result<ToolCall, AppError> {
         event_id: row.try_get("event_id")?,
         tool_name: row.try_get("tool_name")?,
         args: row.try_get("args")?,
+        task_grant_id: row.try_get("task_grant_id")?,
+        normalized_args_hash: row.try_get("normalized_args_hash")?,
+        target_binding: row.try_get("target_binding")?,
         status: row.try_get("status")?,
         risk_level: row.try_get("risk_level")?,
         policy_decision: row.try_get("policy_decision")?,
@@ -555,6 +670,24 @@ pub(crate) fn tool_call_from_row(row: PgRow) -> Result<ToolCall, AppError> {
         error: row.try_get("error")?,
         started_at: row.try_get("started_at")?,
         completed_at: row.try_get("completed_at")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub(crate) fn approval_commit_token_from_row(row: PgRow) -> Result<ApprovalCommitToken, AppError> {
+    Ok(ApprovalCommitToken {
+        id: row.try_get("id")?,
+        approval_id: row.try_get("approval_id")?,
+        tool_call_id: row.try_get("tool_call_id")?,
+        task_grant_id: row.try_get("task_grant_id")?,
+        session_id: row.try_get("session_id")?,
+        tool_name: row.try_get("tool_name")?,
+        normalized_args_hash: row.try_get("normalized_args_hash")?,
+        target_binding: row.try_get("target_binding")?,
+        approver_subject: row.try_get("approver_subject")?,
+        status: row.try_get("status")?,
+        expires_at: row.try_get("expires_at")?,
+        consumed_at: row.try_get("consumed_at")?,
         created_at: row.try_get("created_at")?,
     })
 }

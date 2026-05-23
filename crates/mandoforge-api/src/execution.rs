@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnResponse};
 use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
+use crate::mcp_gateway::McpCallRequest;
 use crate::remote_computer_runner::{
     RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
     remote_computer_runner_for_config,
@@ -23,6 +24,7 @@ use crate::{
     AppError, AppState, Approval, Artifact, CreateRemoteComputerJobAssignment,
     CreateRemoteComputerLease, Environment, RemoteComputer, RemoteComputerJobAssignment,
     RemoteComputerLease, ToolCall, new_audit_log, record_remote_computer_job_assignment_event,
+    resolve_mcp_runtime_secret_refs,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -442,6 +444,7 @@ pub(crate) async fn run_execution_job(
             .await
         }
         "agent_cli.exec" => execute_approved_agent_cli(state, &approval, &tool_call).await,
+        "mcp.call" => execute_approved_mcp_call(state, &approval, &tool_call).await,
         _ => {
             state
                 .update_tool_call_status(
@@ -481,6 +484,69 @@ pub(crate) async fn run_execution_job(
         )
         .await
     }
+}
+
+async fn execute_approved_mcp_call(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<(), AppError> {
+    let config = state
+        .mcp_gateway_config
+        .as_ref()
+        .ok_or_else(|| AppError::bad_request("MCP gateway is not configured"))?;
+    let request: McpCallRequest = serde_json::from_value(tool_call.args.clone())?;
+    let scoped_server = state
+        .mcp_server_for_session_tool(approval.session_id, &request.server, &request.tool)
+        .await?;
+    let secret_refs_resolved = if let Some(server) = scoped_server.as_ref() {
+        resolve_mcp_runtime_secret_refs(server).await?
+    } else {
+        0
+    };
+    let token =
+        crate::consume_valid_approval_commit_token_for_tool_call(state, approval, tool_call)
+            .await?;
+    let response = state.mcp_gateway_client.call(config, request).await?;
+    let result = json!({
+        "approval": "approved",
+        "status": "called",
+        "approval_commit_token_id": token.id,
+        "normalized_args_hash": token.normalized_args_hash,
+        "target_binding": token.target_binding,
+        "secret_refs_resolved_count": secret_refs_resolved,
+        "result": response.result,
+    });
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+        )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "worker",
+            Some(tool_call.id),
+            "tool.completed",
+            "tool_call",
+            Some(tool_call.id),
+            json!({
+                "tool": tool_call.tool_name,
+                "approval_id": approval.id,
+                "approval_commit_token_id": token.id,
+                "normalized_args_hash": token.normalized_args_hash,
+                "resumed_after_approval": true
+            }),
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn record_execution_completed_event(

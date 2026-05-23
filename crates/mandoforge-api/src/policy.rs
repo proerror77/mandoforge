@@ -120,21 +120,12 @@ impl PolicyConfig {
         self.evaluate_tool_with_args(name, &Value::Null)
     }
 
-    pub(crate) fn evaluate_tool_with_args(&self, name: &str, args: &Value) -> ToolPolicyDecision {
+    pub(crate) fn evaluate_tool_with_args(&self, name: &str, _args: &Value) -> ToolPolicyDecision {
         if self.blocked_tools.iter().any(|tool| tool == name) {
             return ToolPolicyDecision {
                 decision: "denied",
                 risk_level: tool_risk_level(name).to_string(),
                 reason: format!("{name} is blocked by config/policy.stage1.yaml"),
-            };
-        }
-
-        if name == "shell.exec" && is_low_risk_shell_exec(args) {
-            return ToolPolicyDecision {
-                decision: "allowed",
-                risk_level: "low".to_string(),
-                reason: "shell.exec low-risk read-only command is allowed by config/policy.stage1.yaml"
-                    .to_string(),
             };
         }
 
@@ -201,16 +192,6 @@ impl PolicyConfig {
         if let Some(decision) = evaluate_agent_version_policy(name, agent_version) {
             if decision.decision == "denied" {
                 return decision;
-            }
-            if name == "shell.exec" && is_low_risk_shell_exec(args) {
-                return ToolPolicyDecision {
-                    decision: "allowed",
-                    risk_level: "low".to_string(),
-                    reason: format!(
-                        "shell.exec low-risk read-only command is allowed for agent version {}",
-                        agent_version.version
-                    ),
-                };
             }
             return decision;
         }
@@ -344,16 +325,4 @@ fn approval_required_risk(value: Option<&Value>, name: &str) -> Option<String> {
 
 fn default_sql_max_rows() -> i64 {
     500
-}
-
-fn is_low_risk_shell_exec(args: &Value) -> bool {
-    let Some(command) = args
-        .get("command")
-        .or_else(|| args.get("cmd"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-    else {
-        return false;
-    };
-    matches!(command, "pwd" | "pwd -P" | "pwd -L")
 }

@@ -6,16 +6,17 @@ use uuid::Uuid;
 
 use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
-    AgentTeammate, AgentVersion, Approval, ApprovalEscalationRule, ApprovalGroup,
-    ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun, ContextPacket,
-    CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord,
-    Membership, MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
-    ProviderRecord, RemoteComputer, RemoteComputerAttachment, RemoteComputerJobAssignment,
-    RemoteComputerLease, RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord,
-    SemanticLink, SemanticObject, SemanticSource, Session, SessionEvent, SessionLoopJob,
-    SessionThread, Squad, SquadMember, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem,
-    WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkflowPackInstallation,
-    WorkflowPackProfileAsset,
+    AgentTeammate, AgentVersion, Approval, ApprovalCommitToken, ApprovalEscalationRule,
+    ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun,
+    ContextPacket, CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan,
+    McpServerRecord, Membership, MemoryWritebackCandidate, Organization, PolicyRevision, Project,
+    ProviderAccess, ProviderRecord, RemoteComputer, RemoteComputerAttachment,
+    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerSidecarHeartbeat,
+    RemoteComputerStateLock, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
+    SessionEvent, SessionLoopJob, SessionThread, Squad, SquadMember, TaskGrant, Team,
+    TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment,
+    WorkItemReview, WorkflowDefinition, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    WorkflowRun, WorkflowStepRun,
 };
 
 #[derive(Default)]
@@ -32,6 +33,7 @@ pub(crate) struct MemoryStore {
     pub(crate) session_loop_jobs: HashMap<Uuid, SessionLoopJob>,
     pub(crate) session_threads: HashMap<Uuid, SessionThread>,
     pub(crate) approvals: HashMap<Uuid, Approval>,
+    pub(crate) approval_commit_tokens: HashMap<Uuid, ApprovalCommitToken>,
     pub(crate) approval_groups: HashMap<Uuid, ApprovalGroup>,
     pub(crate) approval_escalation_rules: HashMap<Uuid, ApprovalEscalationRule>,
     pub(crate) approval_notification_channel_policies:
@@ -71,6 +73,10 @@ pub(crate) struct MemoryStore {
     pub(crate) manager_agent_plans: HashMap<Uuid, ManagerAgentPlan>,
     pub(crate) workflow_pack_installations: HashMap<Uuid, WorkflowPackInstallation>,
     pub(crate) workflow_pack_profile_assets: HashMap<Uuid, WorkflowPackProfileAsset>,
+    pub(crate) workflow_definitions: HashMap<Uuid, WorkflowDefinition>,
+    pub(crate) workflow_runs: HashMap<Uuid, WorkflowRun>,
+    pub(crate) workflow_step_runs: HashMap<Uuid, WorkflowStepRun>,
+    pub(crate) task_grants: HashMap<Uuid, TaskGrant>,
     pub(crate) semantic_sources: HashMap<Uuid, SemanticSource>,
     pub(crate) semantic_objects: HashMap<Uuid, SemanticObject>,
     pub(crate) semantic_links: HashMap<Uuid, SemanticLink>,

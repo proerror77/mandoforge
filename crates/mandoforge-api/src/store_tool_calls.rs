@@ -20,8 +20,8 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
                     "INSERT INTO tool_calls
-                        (id, tenant_id, session_id, event_id, tool_name, args, result, status, risk_level, policy_decision, started_at, completed_at, error, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                        (id, tenant_id, session_id, event_id, tool_name, args, task_grant_id, normalized_args_hash, target_binding, result, status, risk_level, policy_decision, started_at, completed_at, error, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
                 )
                 .bind(tool_call.id)
                 .bind(self.current_tenant_id())
@@ -29,6 +29,9 @@ impl AppState {
                 .bind(tool_call.event_id)
                 .bind(&tool_call.tool_name)
                 .bind(&tool_call.args)
+                .bind(tool_call.task_grant_id)
+                .bind(&tool_call.normalized_args_hash)
+                .bind(&tool_call.target_binding)
                 .bind(&tool_call.result)
                 .bind(&tool_call.status)
                 .bind(&tool_call.risk_level)
@@ -69,7 +72,7 @@ impl AppState {
                     "UPDATE tool_calls
                      SET status = $1, result = $2, error = $3, completed_at = now()
                      WHERE tenant_id = $4 AND id = $5
-                     RETURNING id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at",
+                     RETURNING id, session_id, event_id, tool_name, args, task_grant_id, normalized_args_hash, target_binding, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at",
                 )
                 .bind(status)
                 .bind(result)
@@ -109,7 +112,7 @@ impl AppState {
                     "UPDATE tool_calls
                      SET args = $1
                      WHERE tenant_id = $2 AND id = $3 AND status = 'waiting_approval'
-                     RETURNING id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at",
+                     RETURNING id, session_id, event_id, tool_name, args, task_grant_id, normalized_args_hash, target_binding, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at",
                 )
                 .bind(args)
                 .bind(self.current_tenant_id())
@@ -117,6 +120,42 @@ impl AppState {
                 .fetch_optional(pool)
                 .await?
                 .ok_or_else(|| AppError::not_found("waiting approval tool call not found"))?;
+                tool_call_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn update_tool_call_commit_binding(
+        &self,
+        id: Uuid,
+        normalized_args_hash: Option<String>,
+        target_binding: Value,
+    ) -> Result<ToolCall, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let tool_call = store
+                    .tool_calls
+                    .get_mut(&id)
+                    .ok_or_else(|| AppError::not_found("tool call not found"))?;
+                tool_call.normalized_args_hash = normalized_args_hash;
+                tool_call.target_binding = target_binding;
+                Ok(tool_call.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE tool_calls
+                     SET normalized_args_hash = $1, target_binding = $2
+                     WHERE tenant_id = $3 AND id = $4
+                     RETURNING id, session_id, event_id, tool_name, args, task_grant_id, normalized_args_hash, target_binding, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at",
+                )
+                .bind(&normalized_args_hash)
+                .bind(&target_binding)
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("tool call not found"))?;
                 tool_call_from_row(row)
             }
         }
@@ -133,7 +172,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("tool call not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at
+                    "SELECT id, session_id, event_id, tool_name, args, task_grant_id, normalized_args_hash, target_binding, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at
                      FROM tool_calls
                      WHERE tenant_id = $1 AND id = $2",
                 )
@@ -169,7 +208,7 @@ impl AppState {
                 let rows = match session_id {
                     Some(session_id) => {
                         sqlx::query(
-                            "SELECT id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at
+                            "SELECT id, session_id, event_id, tool_name, args, task_grant_id, normalized_args_hash, target_binding, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at
                              FROM tool_calls
                              WHERE tenant_id = $1 AND session_id = $2
                              ORDER BY created_at DESC",
@@ -181,7 +220,7 @@ impl AppState {
                     }
                     None => {
                         sqlx::query(
-                            "SELECT id, session_id, event_id, tool_name, args, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at
+                            "SELECT id, session_id, event_id, tool_name, args, task_grant_id, normalized_args_hash, target_binding, status, risk_level, policy_decision, result, error, started_at, completed_at, created_at
                              FROM tool_calls
                              WHERE tenant_id = $1
                              ORDER BY created_at DESC",

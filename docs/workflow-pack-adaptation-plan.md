@@ -6,6 +6,12 @@ Add `Workflow Pack` / `Domain Pack` as a first-class MandoForge product concept.
 
 MandoForge should not copy a vertical legal AI product. The useful abstraction is an installable, versioned, auditable industry workflow package that runs on top of the Agent OS kernel.
 
+The executable managed-workflow target is specified in
+[Managed Agent Workflow Architecture](managed-agent-workflow-architecture.md).
+This plan defines the pack concept; the architecture document defines how packs
+materialize into WorkflowDefinition, WorkflowRun, TaskGrant, scoped worker
+agents, runtime adapters, and workflow observability.
+
 The runtime stays generic:
 
 ```text

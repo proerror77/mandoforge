@@ -139,10 +139,9 @@ impl ProviderClient for MockProviderClient {
             .as_deref()
             .is_some_and(looks_like_codex_app_server_delegation_request)
         {
-            let task = context
-                .last_user_message
-                .clone()
-                .unwrap_or_else(|| "Open the requested webpage and extract useful facts.".to_string());
+            let task = context.last_user_message.clone().unwrap_or_else(|| {
+                "Open the requested webpage and extract useful facts.".to_string()
+            });
             return Ok(ProviderResponse {
                 plan: vec![
                     "Delegate the user request to Codex App Server through codex.exec".to_string(),

@@ -34,6 +34,12 @@ The current repository is strongest in the Managed Runtime Layer. Claude Managed
 Agents is a useful reference for that layer only: Agent, Environment, Session,
 Events, and Threads. It does not define the whole Agent OS.
 
+The workflow-level target architecture is defined in
+[Managed Agent Workflow Architecture](managed-agent-workflow-architecture.md).
+That document covers WorkflowRun, WorkflowStepRun, TaskGrant, MemoryScope,
+ConnectorScope, pack materialization, worker-agent boundaries, and workflow UI
+observability.
+
 Core ownership:
 
 - MandoForge Agent Runtime owns sessions, event logs, policy, approval, audit,
