@@ -45,6 +45,28 @@ export type SemanticLink = {
   archived_at?: string | null;
 };
 
+export type OntologyRegistry = {
+  version: string;
+  object_types: OntologyObjectType[];
+  relation_types: OntologyRelationType[];
+};
+
+export type OntologyObjectType = {
+  name: string;
+  description: string;
+  entity_type?: string;
+  memory_level?: string;
+  governance_boundary: string;
+};
+
+export type OntologyRelationType = {
+  name: string;
+  from_entity_type: string;
+  to_entity_type: string;
+  description: string;
+  governance_boundary: string;
+};
+
 export type ContextPacket = {
   id: string;
   session_id: string;

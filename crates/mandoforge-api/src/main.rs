@@ -1770,6 +1770,33 @@ struct UpdateSemanticLink {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyRegistry {
+    version: String,
+    object_types: Vec<OntologyObjectType>,
+    relation_types: Vec<OntologyRelationType>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyObjectType {
+    name: String,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entity_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_level: Option<String>,
+    governance_boundary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyRelationType {
+    name: String,
+    from_entity_type: String,
+    to_entity_type: String,
+    description: String,
+    governance_boundary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ContextPacket {
     id: Uuid,
     session_id: Uuid,
@@ -5750,6 +5777,7 @@ fn build_router(state: AppState) -> Router {
                 .patch(update_semantic_object)
                 .delete(archive_semantic_object),
         )
+        .route("/api/ontology/registry", get(get_ontology_registry))
         .route(
             "/api/semantic-links",
             get(list_semantic_links).post(create_semantic_link),
@@ -8790,6 +8818,316 @@ async fn archive_semantic_object(
     Ok(Json(object))
 }
 
+async fn get_ontology_registry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyRegistry>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_registry",
+        None,
+    )
+    .await?;
+    Ok(Json(ontology_registry()))
+}
+
+fn ontology_registry() -> OntologyRegistry {
+    OntologyRegistry {
+        version: "core-v0.1".to_string(),
+        object_types: vec![
+            ontology_object_type(
+                "agent",
+                "Configured worker persona that can receive governed workflow tasks.",
+                Some("agent"),
+                None,
+                "agent capability and release policy",
+            ),
+            ontology_object_type(
+                "artifact",
+                "Versioned output or evidence object produced during a managed run.",
+                Some("artifact"),
+                None,
+                "session, workflow, and retention policy",
+            ),
+            ontology_object_type(
+                "approval_rule",
+                "Human-in-the-loop rule for risky workflow decisions or side effects.",
+                None,
+                None,
+                "approval policy boundary",
+            ),
+            ontology_object_type(
+                "case",
+                "Customer, legal, commerce, or operations case boundary.",
+                None,
+                None,
+                "domain and customer isolation policy",
+            ),
+            ontology_object_type(
+                "decision",
+                "Human or system decision that explains why a workflow path changed.",
+                None,
+                None,
+                "approval and audit policy",
+            ),
+            ontology_object_type(
+                "memory",
+                "Governed memory object that can be shared or isolated by semantic scope.",
+                Some("memory"),
+                Some("L0-L4"),
+                "tenant, domain, workflow, and trust partition",
+            ),
+            ontology_object_type(
+                "metric",
+                "Observed runtime, quality, cost, or business signal.",
+                None,
+                None,
+                "observability and evaluation policy",
+            ),
+            ontology_object_type(
+                "team",
+                "Organization team that owns agents, packs, memory, or workflows.",
+                None,
+                None,
+                "tenant and team isolation policy",
+            ),
+            ontology_object_type(
+                "tenant",
+                "Top-level organization memory, policy, and execution boundary.",
+                None,
+                None,
+                "hard tenant isolation policy",
+            ),
+            ontology_object_type(
+                "tool",
+                "Capability endpoint or adapter available behind governed runtime policy.",
+                None,
+                None,
+                "tool policy and approval boundary",
+            ),
+            ontology_object_type(
+                "pack",
+                "Installed workflow pack or skill bundle boundary.",
+                Some("pack"),
+                None,
+                "pack installation and version policy",
+            ),
+            ontology_object_type(
+                "policy",
+                "Runtime rule that constrains tools, memory, approvals, and side effects.",
+                Some("policy"),
+                None,
+                "policy rollout and approval policy",
+            ),
+            ontology_object_type(
+                "project",
+                "Project-level scope for work, memory, artifacts, and workflows.",
+                Some("project"),
+                None,
+                "project and tenant isolation policy",
+            ),
+            ontology_object_type(
+                "repo",
+                "Source repository or codebase scope.",
+                Some("repo"),
+                None,
+                "repository access policy",
+            ),
+            ontology_object_type(
+                "runtime_profile",
+                "Execution runtime profile available to an agent or workflow step.",
+                Some("runtime_profile"),
+                None,
+                "runtime and remote-computer policy",
+            ),
+            ontology_object_type(
+                "semantic_object",
+                "Canonical semantic fact, rule, runbook, memory, or decision node.",
+                Some("semantic_object"),
+                None,
+                "source provenance, trust, freshness, and semantic scope",
+            ),
+            ontology_object_type(
+                "semantic_source",
+                "Ingested source that semantic objects can cite.",
+                Some("semantic_source"),
+                None,
+                "source ownership and freshness policy",
+            ),
+            ontology_object_type(
+                "service",
+                "Internal or external service involved in a workflow.",
+                Some("service"),
+                None,
+                "service access policy",
+            ),
+            ontology_object_type(
+                "session",
+                "Managed agent session event-log boundary.",
+                Some("session"),
+                None,
+                "session execution and retention policy",
+            ),
+            ontology_object_type(
+                "workflow_pack",
+                "Productized workflow package that materializes pack-scoped runtime objects.",
+                Some("pack"),
+                None,
+                "pack installation and version policy",
+            ),
+            ontology_object_type(
+                "workflow",
+                "Managed workflow or workflow step graph.",
+                Some("workflow"),
+                None,
+                "workflow graph and task-grant policy",
+            ),
+        ],
+        relation_types: vec![
+            ontology_relation_type(
+                "applies_to",
+                "policy",
+                "runtime_profile",
+                "Policy constrains a runtime profile.",
+                "runtime policy binding",
+            ),
+            ontology_relation_type(
+                "belongs_to",
+                "artifact",
+                "session",
+                "Artifact is owned by a session.",
+                "session evidence boundary",
+            ),
+            ontology_relation_type(
+                "belongs_to",
+                "repo",
+                "project",
+                "Repository is scoped under a project.",
+                "project isolation boundary",
+            ),
+            ontology_relation_type(
+                "belongs_to",
+                "workflow",
+                "pack",
+                "Workflow is delivered by a workflow pack.",
+                "pack installation boundary",
+            ),
+            ontology_relation_type(
+                "contradicts",
+                "semantic_object",
+                "semantic_object",
+                "One semantic object conflicts with another and requires review.",
+                "memory conflict governance",
+            ),
+            ontology_relation_type(
+                "defines_scope_for",
+                "semantic_object",
+                "workflow",
+                "Semantic object defines the intended scope for a workflow.",
+                "workflow context boundary",
+            ),
+            ontology_relation_type(
+                "derived_from",
+                "semantic_object",
+                "artifact",
+                "Semantic object was derived from a concrete artifact.",
+                "provenance boundary",
+            ),
+            ontology_relation_type(
+                "executes",
+                "agent",
+                "workflow",
+                "Agent can execute or claim work for a workflow.",
+                "agent task-grant boundary",
+            ),
+            ontology_relation_type(
+                "requires",
+                "workflow",
+                "policy",
+                "Workflow requires a policy to be active.",
+                "workflow policy boundary",
+            ),
+            ontology_relation_type(
+                "supports",
+                "semantic_object",
+                "semantic_object",
+                "One semantic object supports another.",
+                "memory evidence governance",
+            ),
+            ontology_relation_type(
+                "supersedes",
+                "semantic_object",
+                "semantic_object",
+                "One semantic object replaces an older object.",
+                "memory freshness governance",
+            ),
+        ],
+    }
+}
+
+fn ontology_object_type(
+    name: &str,
+    description: &str,
+    entity_type: Option<&str>,
+    memory_level: Option<&str>,
+    governance_boundary: &str,
+) -> OntologyObjectType {
+    OntologyObjectType {
+        name: name.to_string(),
+        description: description.to_string(),
+        entity_type: entity_type.map(ToString::to_string),
+        memory_level: memory_level.map(ToString::to_string),
+        governance_boundary: governance_boundary.to_string(),
+    }
+}
+
+fn ontology_relation_type(
+    name: &str,
+    from_entity_type: &str,
+    to_entity_type: &str,
+    description: &str,
+    governance_boundary: &str,
+) -> OntologyRelationType {
+    OntologyRelationType {
+        name: name.to_string(),
+        from_entity_type: from_entity_type.to_string(),
+        to_entity_type: to_entity_type.to_string(),
+        description: description.to_string(),
+        governance_boundary: governance_boundary.to_string(),
+    }
+}
+
+fn validate_semantic_link_against_ontology(input: &CreateSemanticLink) -> Result<(), AppError> {
+    let relation = normalized_ontology_token(&input.relation_type);
+    if relation.is_empty() {
+        return Err(AppError::bad_request(
+            "semantic relation_type cannot be empty",
+        ));
+    }
+    let from_entity_type = normalized_ontology_token(&input.from_entity_type);
+    let to_entity_type = normalized_ontology_token(&input.to_entity_type);
+    let allowed = ontology_registry()
+        .relation_types
+        .into_iter()
+        .any(|allowed| {
+            allowed.name == relation
+                && allowed.from_entity_type == from_entity_type
+                && allowed.to_entity_type == to_entity_type
+        });
+    if !allowed {
+        return Err(AppError::bad_request(
+            "semantic relation_type is not allowed by ontology registry",
+        ));
+    }
+    Ok(())
+}
+
+fn normalized_ontology_token(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 async fn list_semantic_links(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -8818,6 +9156,7 @@ async fn create_semantic_link(
         None,
     )
     .await?;
+    validate_semantic_link_against_ontology(&input)?;
     let link = state.create_semantic_link(input).await?;
     record_semantic_link_audit(&state, &headers, &link, "semantic_link.created").await?;
     Ok(Json(link))
@@ -52654,6 +52993,86 @@ not json
                 && log.details["trust_level"] == "human_verified"
                 && log.details["semantic_scopes"]["project_scope"] == "mandoforge"
         }));
+    }
+
+    #[tokio::test]
+    async fn ontology_registry_exposes_core_objects_and_allowed_relations() {
+        let app = test_app().await;
+
+        let registry: Value = request_json(
+            app,
+            Request::builder()
+                .uri("/api/ontology/registry")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(registry["version"], "core-v0.1");
+        assert!(
+            registry["object_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|object| { object["name"] == "memory" && object["memory_level"] == "L0-L4" })
+        );
+        assert!(
+            registry["relation_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|relation| {
+                    relation["name"] == "derived_from"
+                        && relation["from_entity_type"] == "semantic_object"
+                        && relation["to_entity_type"] == "artifact"
+                })
+        );
+        assert!(
+            registry["relation_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|relation| {
+                    relation["name"] == "defines_scope_for"
+                        && relation["from_entity_type"] == "semantic_object"
+                        && relation["to_entity_type"] == "workflow"
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_links_reject_relations_not_declared_in_ontology() {
+        let app = test_app().await;
+
+        let (status, body) = request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-links",
+                json!({
+                    "from_entity_type": "semantic_object",
+                    "from_entity_id": Uuid::new_v4().to_string(),
+                    "relation_type": "freeform_relation",
+                    "to_entity_type": "semantic_object",
+                    "to_entity_id": Uuid::new_v4().to_string(),
+                    "metadata": {"source": "ontology-test"},
+                    "provenance": {"created_from": "test"},
+                    "confidence": 0.75
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("semantic relation_type is not allowed by ontology registry"),
+            "unexpected error body: {body}"
+        );
     }
 
     #[test]

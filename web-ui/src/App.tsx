@@ -17,6 +17,7 @@ import {
   type MemoryGovernanceSummary,
   type MemoryGovernanceWritebackQueue,
   type MemoryWritebackCandidate,
+  type OntologyRegistry,
   type RunWorkflowStepRunResponse,
   type SemanticLink,
   type SemanticObject,
@@ -199,6 +200,11 @@ export function App() {
     queryFn: () => api<SemanticLink[]>("/api/semantic-links"),
     refetchInterval: 5000,
   });
+  const ontologyRegistry = useQuery({
+    queryKey: ["ontology-registry"],
+    queryFn: () => api<OntologyRegistry>("/api/ontology/registry"),
+    refetchInterval: 30000,
+  });
   const semanticBackends = useQuery({
     queryKey: ["semantic-retrieval-backends"],
     queryFn: () => api<SemanticRetrievalBackendRegistry>("/api/semantic-retrieval/backends"),
@@ -338,6 +344,7 @@ export function App() {
     agentInbox.error,
     semanticObjects.error,
     semanticLinks.error,
+    ontologyRegistry.error,
     semanticBackends.error,
     contextPackets.error,
     sessionWritebackCandidates.error,
@@ -605,6 +612,7 @@ export function App() {
           </Panel>
 
           <Panel title="Ontology links">
+            <OntologyRegistryPanel registry={ontologyRegistry.data} />
             <SemanticObjectBrowser
               objects={visibleSemanticObjects}
               objectTypes={semanticObjectTypes}
@@ -615,6 +623,7 @@ export function App() {
               objects={semanticObjects.data ?? []}
               links={semanticLinks.data ?? []}
               draft={linkDraft}
+              registry={ontologyRegistry.data}
               isSaving={createSemanticLink.isPending}
               error={createSemanticLink.error}
               onDraftChange={setLinkDraft}
@@ -1102,6 +1111,32 @@ function WritebackReviewPanel({
   );
 }
 
+function OntologyRegistryPanel({ registry }: { registry?: OntologyRegistry }) {
+  if (!registry) {
+    return <p className="muted">Ontology registry is loading.</p>;
+  }
+  return (
+    <div className="ontology-registry">
+      <div className="graph-summary">
+        <KeyValue label="Version" value={registry.version} />
+        <KeyValue label="Objects" value={String(registry.object_types.length)} />
+        <KeyValue label="Relations" value={String(registry.relation_types.length)} />
+      </div>
+      <div className="ontology-matrix">
+        {registry.relation_types.map((relation, index) => (
+          <div
+            key={`${relation.from_entity_type}-${relation.name}-${relation.to_entity_type}-${index}`}
+            className="obs-row ontology-row"
+          >
+            <strong>{relation.from_entity_type} {"->"} {relation.to_entity_type}</strong>
+            <span>{relation.name} · {relation.governance_boundary}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SemanticObjectBrowser({
   objects,
   objectTypes,
@@ -1142,6 +1177,7 @@ function SemanticLinkManager({
   objects,
   links,
   draft,
+  registry,
   isSaving,
   error,
   onDraftChange,
@@ -1150,12 +1186,19 @@ function SemanticLinkManager({
   objects: SemanticObject[];
   links: SemanticLink[];
   draft: SemanticLinkDraft;
+  registry?: OntologyRegistry;
   isSaving: boolean;
   error: unknown;
   onDraftChange: React.Dispatch<React.SetStateAction<SemanticLinkDraft>>;
   onCreate: () => void;
 }) {
-  const canLink = objects.length >= 2 && draft.from && draft.to && draft.from !== draft.to && draft.relation.trim();
+  const relationOptions = useMemo(() => {
+    return (registry?.relation_types ?? []).filter((relation) => (
+      relation.from_entity_type === "semantic_object" && relation.to_entity_type === "semantic_object"
+    ));
+  }, [registry?.relation_types]);
+  const selectedRelationIsAllowed = relationOptions.some((relation) => relation.name === draft.relation);
+  const canLink = objects.length >= 2 && draft.from && draft.to && draft.from !== draft.to && selectedRelationIsAllowed;
   return (
     <div className="semantic-links">
       <div className="link-editor">
@@ -1163,7 +1206,18 @@ function SemanticLinkManager({
           <option value="">From object</option>
           {objects.map((object) => <option key={object.id} value={object.id}>{object.title}</option>)}
         </select>
-        <input value={draft.relation} onChange={(event) => onDraftChange((value) => ({ ...value, relation: event.target.value }))} placeholder="relation" />
+        <select
+          value={draft.relation}
+          disabled={!relationOptions.length}
+          onChange={(event) => onDraftChange((value) => ({ ...value, relation: event.target.value }))}
+        >
+          {!relationOptions.length ? <option value="">No allowed relation</option> : null}
+          {relationOptions.map((relation) => (
+            <option key={relation.name} value={relation.name}>
+              {relation.name}
+            </option>
+          ))}
+        </select>
         <select value={draft.to} onChange={(event) => onDraftChange((value) => ({ ...value, to: event.target.value }))}>
           <option value="">To object</option>
           {objects.map((object) => <option key={object.id} value={object.id}>{object.title}</option>)}
@@ -1171,6 +1225,9 @@ function SemanticLinkManager({
         <button disabled={!canLink || isSaving} onClick={onCreate}>{isSaving ? "Saving..." : "Link"}</button>
       </div>
       {draft.from && draft.to && draft.from === draft.to ? <p className="error-note">Choose two different semantic objects.</p> : null}
+      {draft.relation && relationOptions.length && !selectedRelationIsAllowed ? (
+        <p className="error-note">Relation is not allowed by ontology registry.</p>
+      ) : null}
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}
       {links.slice(0, 8).map((link) => (
         <div key={link.id} className="obs-row semantic-link-row">

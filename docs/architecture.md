@@ -286,8 +286,16 @@ The semantic layer gives agents stable business context:
 - Semantic sources.
 - Semantic objects.
 - Semantic links.
+- Ontology registry.
 - Context packets.
 - Memory writeback candidates.
+
+The current ontology contract is `/api/ontology/registry` version `core-v0.1`.
+It exposes the canonical object catalog and the allowed semantic relation
+triples. New semantic links must match a declared
+`from_entity_type/relation_type/to_entity_type` triple before they can be
+persisted. This keeps memory and evidence relations inspectable instead of
+letting workers mint arbitrary relation names at write time.
 
 Context packets should be replayable so operators can inspect what an agent saw
 before it acted. Memory writeback remains approval-gated.

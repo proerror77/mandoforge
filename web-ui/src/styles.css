@@ -793,6 +793,7 @@ h1 {
 .semantic-backends,
 .context-packet,
 .writeback-review,
+.ontology-registry,
 .semantic-objects,
 .semantic-links {
   display: grid;
@@ -804,6 +805,7 @@ h1 {
 .semantic-object-row span,
 .semantic-object-row small,
 .semantic-link-row span,
+.ontology-row span,
 .backend-row span,
 .backend-row small,
 .review-row span,
@@ -818,6 +820,14 @@ h1 {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+
+.ontology-matrix {
+  display: grid;
+  max-height: 220px;
+  gap: 6px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .mini-counts {
