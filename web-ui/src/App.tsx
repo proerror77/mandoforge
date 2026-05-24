@@ -19,6 +19,7 @@ import {
   type MemoryWritebackCandidate,
   type OntologyRegistry,
   type RunWorkflowStepRunResponse,
+  type SemanticIngestionBatchResult,
   type SemanticLink,
   type SemanticObject,
   type SemanticRetrievalBackendRegistry,
@@ -38,6 +39,37 @@ import {
 
 const DEFAULT_TASK =
   "检查 runtime 当前状态，列出 worker、tool call、approval 和 artifact 的真实运行证据。";
+
+const DEFAULT_INGESTION_BATCH = JSON.stringify({
+  source: {
+    source_type: "repo_doc",
+    source_uri: "repo://docs/semantic-ingestion-console.md",
+    display_name: "Semantic ingestion console note",
+    metadata: { path: "docs/semantic-ingestion-console.md" },
+    provenance: { ingested_by: "web-ui" },
+    freshness: { state: "operator_submitted" },
+  },
+  objects: [
+    {
+      temp_ref: "note",
+      object_type: "memory",
+      object_key: "memory:semantic-console:note",
+      title: "Semantic console note",
+      summary: "Operator submitted semantic memory through the ingestion batch endpoint.",
+      content: { note: "Replace this sample before submitting." },
+      semantic_scopes: {
+        project_scope: "mandoforge",
+        workflow_scope: "semantic-ingestion",
+        memory_scope: "engineering",
+        share_policy: "isolated",
+      },
+      provenance: { source: "console" },
+      trust_level: "source_attested",
+      freshness: "current",
+    },
+  ],
+  links: [],
+}, null, 2);
 
 type RowStatus = "needs_input" | "running" | "queued" | "completed" | "failed" | "idle";
 
@@ -72,6 +104,7 @@ export function App() {
   const [writebackStatus, setWritebackStatus] = useState("pending");
   const [selectedContextPacketId, setSelectedContextPacketId] = useState("");
   const [semanticObjectType, setSemanticObjectType] = useState("all");
+  const [semanticIngestionDraft, setSemanticIngestionDraft] = useState(DEFAULT_INGESTION_BATCH);
   const [linkDraft, setLinkDraft] = useState({
     from: "",
     relation: "supports",
@@ -329,6 +362,21 @@ export function App() {
       invalidateAll(queryClient);
     },
   });
+  const createSemanticIngestionBatch = useMutation({
+    mutationFn: () => {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(semanticIngestionDraft);
+      } catch (error) {
+        throw new Error(`invalid ingestion JSON: ${errorMessage(error)}`);
+      }
+      return api<SemanticIngestionBatchResult>("/api/semantic-ingestion/batches", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    onSuccess: () => invalidateAll(queryClient),
+  });
 
   const activeCount = rows.filter((row) => row.status === "running" || row.status === "queued").length;
   const blockedCount = rows.filter((row) => row.status === "needs_input").length;
@@ -345,6 +393,7 @@ export function App() {
     semanticObjects.error,
     semanticLinks.error,
     ontologyRegistry.error,
+    createSemanticIngestionBatch.error,
     semanticBackends.error,
     contextPackets.error,
     sessionWritebackCandidates.error,
@@ -613,6 +662,14 @@ export function App() {
 
           <Panel title="Ontology links">
             <OntologyRegistryPanel registry={ontologyRegistry.data} />
+            <SemanticIngestionPanel
+              draft={semanticIngestionDraft}
+              result={createSemanticIngestionBatch.data}
+              isSaving={createSemanticIngestionBatch.isPending}
+              error={createSemanticIngestionBatch.error}
+              onDraftChange={setSemanticIngestionDraft}
+              onCreate={() => createSemanticIngestionBatch.mutate()}
+            />
             <SemanticObjectBrowser
               objects={visibleSemanticObjects}
               objectTypes={semanticObjectTypes}
@@ -1133,6 +1190,46 @@ function OntologyRegistryPanel({ registry }: { registry?: OntologyRegistry }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function SemanticIngestionPanel({
+  draft,
+  result,
+  isSaving,
+  error,
+  onDraftChange,
+  onCreate,
+}: {
+  draft: string;
+  result?: SemanticIngestionBatchResult;
+  isSaving: boolean;
+  error: unknown;
+  onDraftChange: (value: string) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <div className="semantic-ingestion">
+      <textarea
+        value={draft}
+        rows={9}
+        spellCheck={false}
+        onChange={(event) => onDraftChange(event.target.value)}
+      />
+      <div className="action-row">
+        <button disabled={isSaving || !draft.trim()} onClick={onCreate}>
+          {isSaving ? "Ingesting..." : "Ingest batch"}
+        </button>
+        <span>{result ? `${result.objects.length} objects · ${result.links.length} links` : "waiting"}</span>
+      </div>
+      {result ? (
+        <div className="queue-peek">
+          <strong>{result.source.display_name}</strong>
+          <span>{result.status} · {shortId(result.source.id)}</span>
+        </div>
+      ) : null}
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
     </div>
   );
 }

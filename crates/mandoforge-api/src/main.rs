@@ -1796,6 +1796,68 @@ struct OntologyRelationType {
     governance_boundary: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateSemanticIngestionBatch {
+    source: CreateSemanticSource,
+    objects: Vec<SemanticIngestionObjectInput>,
+    #[serde(default)]
+    links: Vec<SemanticIngestionLinkInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticIngestionObjectInput {
+    temp_ref: String,
+    object_type: String,
+    object_key: String,
+    title: String,
+    summary: String,
+    #[serde(default = "empty_json_object")]
+    content: Value,
+    #[serde(default = "empty_json_object")]
+    semantic_scopes: Value,
+    #[serde(default = "empty_json_object")]
+    provenance: Value,
+    #[serde(default = "default_semantic_trust_level")]
+    trust_level: String,
+    #[serde(default = "default_semantic_freshness")]
+    freshness: String,
+    #[serde(default = "default_semantic_record_status")]
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticIngestionLinkInput {
+    from_ref: String,
+    relation_type: String,
+    to_ref: String,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+    #[serde(default = "empty_json_object")]
+    provenance: Value,
+    #[serde(default = "default_semantic_confidence")]
+    confidence: f64,
+    #[serde(default = "default_semantic_record_status")]
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticIngestionBatchResult {
+    status: String,
+    source: SemanticSource,
+    objects: Vec<SemanticObject>,
+    object_refs: Vec<SemanticIngestionObjectRef>,
+    links: Vec<SemanticLink>,
+    ingested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticIngestionObjectRef {
+    temp_ref: String,
+    semantic_object_id: Uuid,
+    object_key: String,
+    title: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ContextPacket {
     id: Uuid,
@@ -5779,6 +5841,10 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/ontology/registry", get(get_ontology_registry))
         .route(
+            "/api/semantic-ingestion/batches",
+            post(create_semantic_ingestion_batch),
+        )
+        .route(
             "/api/semantic-links",
             get(list_semantic_links).post(create_semantic_link),
         )
@@ -9126,6 +9192,214 @@ fn validate_semantic_link_against_ontology(input: &CreateSemanticLink) -> Result
 
 fn normalized_ontology_token(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+async fn create_semantic_ingestion_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSemanticIngestionBatch>,
+) -> Result<Json<SemanticIngestionBatchResult>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_ingestion_batch",
+        None,
+    )
+    .await?;
+    validate_semantic_ingestion_batch(&input)?;
+    let result = materialize_semantic_ingestion_batch(&state, &headers, input).await?;
+    Ok(Json(result))
+}
+
+fn validate_semantic_ingestion_batch(input: &CreateSemanticIngestionBatch) -> Result<(), AppError> {
+    if input.objects.is_empty() {
+        return Err(AppError::bad_request(
+            "semantic ingestion batch requires at least one object",
+        ));
+    }
+    let mut refs = HashSet::new();
+    for object in &input.objects {
+        let temp_ref = normalize_ingestion_temp_ref(&object.temp_ref)?;
+        if !refs.insert(temp_ref.clone()) {
+            return Err(AppError::bad_request(format!(
+                "semantic ingestion object temp_ref is duplicated: {temp_ref}"
+            )));
+        }
+    }
+    for link in &input.links {
+        let from_ref = normalize_ingestion_temp_ref(&link.from_ref)?;
+        if !refs.contains(&from_ref) {
+            return Err(AppError::bad_request(format!(
+                "semantic ingestion link from_ref is unknown: {from_ref}"
+            )));
+        }
+        let to_ref = normalize_ingestion_temp_ref(&link.to_ref)?;
+        if !refs.contains(&to_ref) {
+            return Err(AppError::bad_request(format!(
+                "semantic ingestion link to_ref is unknown: {to_ref}"
+            )));
+        }
+        validate_semantic_link_against_ontology(&CreateSemanticLink {
+            from_entity_type: "semantic_object".to_string(),
+            from_entity_id: from_ref,
+            relation_type: link.relation_type.clone(),
+            to_entity_type: "semantic_object".to_string(),
+            to_entity_id: to_ref,
+            metadata: empty_json_object(),
+            provenance: empty_json_object(),
+            confidence: link.confidence,
+            status: link.status.clone(),
+        })?;
+    }
+    Ok(())
+}
+
+async fn materialize_semantic_ingestion_batch(
+    state: &AppState,
+    headers: &HeaderMap,
+    input: CreateSemanticIngestionBatch,
+) -> Result<SemanticIngestionBatchResult, AppError> {
+    let source = state.create_semantic_source(input.source).await?;
+    record_semantic_source_audit(state, headers, &source, "semantic_source.created").await?;
+
+    let mut objects = Vec::new();
+    let mut object_refs = Vec::new();
+    let mut ids_by_ref = HashMap::new();
+    for object_input in input.objects {
+        let temp_ref = normalize_ingestion_temp_ref(&object_input.temp_ref)?;
+        let object = state
+            .create_semantic_object(CreateSemanticObject {
+                source_id: Some(source.id),
+                object_type: object_input.object_type,
+                object_key: object_input.object_key,
+                title: object_input.title,
+                summary: object_input.summary,
+                content: object_input.content,
+                semantic_scopes: object_input.semantic_scopes,
+                source_uri: None,
+                provenance: merge_json_objects(
+                    object_input.provenance,
+                    json!({
+                        "ingestion_source_id": source.id,
+                        "ingestion_source_uri": source.source_uri,
+                        "ingestion_temp_ref": temp_ref,
+                    }),
+                )?,
+                trust_level: object_input.trust_level,
+                freshness: object_input.freshness,
+                status: object_input.status,
+            })
+            .await?;
+        record_semantic_object_audit(state, headers, &object, "semantic_object.created").await?;
+        ids_by_ref.insert(temp_ref.clone(), object.id);
+        object_refs.push(SemanticIngestionObjectRef {
+            temp_ref,
+            semantic_object_id: object.id,
+            object_key: object.object_key.clone(),
+            title: object.title.clone(),
+        });
+        objects.push(object);
+    }
+
+    let mut links = Vec::new();
+    for link_input in input.links {
+        let from_ref = normalize_ingestion_temp_ref(&link_input.from_ref)?;
+        let to_ref = normalize_ingestion_temp_ref(&link_input.to_ref)?;
+        let from_id = ids_by_ref
+            .get(&from_ref)
+            .ok_or_else(|| AppError::bad_request("semantic ingestion link from_ref is unknown"))?;
+        let to_id = ids_by_ref
+            .get(&to_ref)
+            .ok_or_else(|| AppError::bad_request("semantic ingestion link to_ref is unknown"))?;
+        let link = state
+            .create_semantic_link(CreateSemanticLink {
+                from_entity_type: "semantic_object".to_string(),
+                from_entity_id: from_id.to_string(),
+                relation_type: link_input.relation_type,
+                to_entity_type: "semantic_object".to_string(),
+                to_entity_id: to_id.to_string(),
+                metadata: link_input.metadata,
+                provenance: merge_json_objects(
+                    link_input.provenance,
+                    json!({
+                        "ingestion_source_id": source.id,
+                        "ingestion_source_uri": source.source_uri,
+                        "from_temp_ref": from_ref,
+                        "to_temp_ref": to_ref,
+                    }),
+                )?,
+                confidence: link_input.confidence,
+                status: link_input.status,
+            })
+            .await?;
+        record_semantic_link_audit(state, headers, &link, "semantic_link.created").await?;
+        links.push(link);
+    }
+
+    let ingested_at = Utc::now();
+    let result = SemanticIngestionBatchResult {
+        status: "completed".to_string(),
+        source,
+        objects,
+        object_refs,
+        links,
+        ingested_at,
+    };
+    record_semantic_ingestion_batch_audit(state, headers, &result).await?;
+    Ok(result)
+}
+
+fn normalize_ingestion_temp_ref(value: &str) -> Result<String, AppError> {
+    let temp_ref = value.trim();
+    if temp_ref.is_empty() {
+        Err(AppError::bad_request(
+            "semantic ingestion object temp_ref cannot be empty",
+        ))
+    } else {
+        Ok(temp_ref.to_string())
+    }
+}
+
+fn merge_json_objects(base: Value, extra: Value) -> Result<Value, AppError> {
+    let mut merged = base.as_object().cloned().ok_or_else(|| {
+        AppError::bad_request("semantic ingestion provenance must be a JSON object")
+    })?;
+    let extra = extra.as_object().ok_or_else(|| {
+        AppError::bad_request("semantic ingestion provenance must be a JSON object")
+    })?;
+    for (key, value) in extra {
+        merged.insert(key.clone(), value.clone());
+    }
+    Ok(Value::Object(merged))
+}
+
+async fn record_semantic_ingestion_batch_audit(
+    state: &AppState,
+    headers: &HeaderMap,
+    result: &SemanticIngestionBatchResult,
+) -> Result<(), AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_ingestion.batch_created",
+            "semantic_source",
+            Some(result.source.id),
+            json!({
+                "subject": principal.subject_id,
+                "source_id": result.source.id,
+                "source_uri": result.source.source_uri,
+                "object_count": result.objects.len(),
+                "link_count": result.links.len(),
+                "object_refs": result.object_refs,
+                "ingested_at": result.ingested_at,
+            }),
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn list_semantic_links(
@@ -53073,6 +53347,189 @@ not json
                 .contains("semantic relation_type is not allowed by ontology registry"),
             "unexpected error body: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn semantic_ingestion_batch_materializes_source_objects_links_and_audit() {
+        let app = test_app().await;
+
+        let result: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-ingestion/batches",
+                json!({
+                    "source": {
+                        "source_type": "repo_doc",
+                        "source_uri": "repo://docs/semantic-ingestion.md",
+                        "display_name": "Semantic ingestion contract",
+                        "metadata": {"path": "docs/semantic-ingestion.md"},
+                        "provenance": {"ingested_by": "semantic-ingestion-test"},
+                        "freshness": {"state": "workspace_current"}
+                    },
+                    "objects": [
+                        {
+                            "temp_ref": "scope-rule",
+                            "object_type": "memory",
+                            "object_key": "memory:semantic-ingestion:scope-rule",
+                            "title": "Scope rule",
+                            "summary": "Ingestion records must preserve semantic scopes.",
+                            "content": {"rule": "scope required"},
+                            "semantic_scopes": {
+                                "project_scope": "mandoforge",
+                                "workflow_scope": "semantic-ingestion",
+                                "memory_scope": "engineering",
+                                "share_policy": "isolated"
+                            },
+                            "provenance": {"line": 12},
+                            "trust_level": "source_attested",
+                            "freshness": "current"
+                        },
+                        {
+                            "temp_ref": "write-rule",
+                            "object_type": "memory",
+                            "object_key": "memory:semantic-ingestion:write-rule",
+                            "title": "Write rule",
+                            "summary": "Batch ingestion must write through ontology-governed links.",
+                            "content": {"rule": "ontology link required"},
+                            "semantic_scopes": {
+                                "project_scope": "mandoforge",
+                                "workflow_scope": "semantic-ingestion",
+                                "memory_scope": "engineering",
+                                "share_policy": "isolated"
+                            },
+                            "provenance": {"line": 20},
+                            "trust_level": "source_attested",
+                            "freshness": "current"
+                        }
+                    ],
+                    "links": [
+                        {
+                            "from_ref": "write-rule",
+                            "relation_type": "supports",
+                            "to_ref": "scope-rule",
+                            "metadata": {"reason": "same ingestion source"},
+                            "provenance": {"created_from": "semantic-ingestion-test"},
+                            "confidence": 0.86
+                        }
+                    ]
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        assert_eq!(result["status"], "completed");
+        assert_eq!(
+            result["source"]["source_uri"],
+            "repo://docs/semantic-ingestion.md"
+        );
+        assert_eq!(result["objects"].as_array().unwrap().len(), 2);
+        assert_eq!(result["links"].as_array().unwrap().len(), 1);
+        assert_eq!(result["links"][0]["relation_type"], "supports");
+        assert_eq!(
+            result["object_refs"][0]["temp_ref"]
+                .as_str()
+                .unwrap_or_default(),
+            "scope-rule"
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "semantic_ingestion.batch_created"
+                    && log.details["object_count"] == json!(2)
+                    && log.details["link_count"] == json!(1))
+        );
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "semantic_link.created"
+                    && log.details["relation_type"] == "supports")
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_ingestion_batch_rejects_disallowed_relations_before_writing() {
+        let app = test_app().await;
+
+        let (status, body) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-ingestion/batches",
+                json!({
+                    "source": {
+                        "source_type": "repo_doc",
+                        "source_uri": "repo://docs/semantic-ingestion-invalid.md",
+                        "display_name": "Invalid semantic ingestion",
+                        "metadata": {},
+                        "provenance": {},
+                        "freshness": {}
+                    },
+                    "objects": [
+                        {
+                            "temp_ref": "a",
+                            "object_type": "memory",
+                            "object_key": "memory:semantic-ingestion:invalid-a",
+                            "title": "Invalid A",
+                            "summary": "Invalid relation source.",
+                            "content": {},
+                            "semantic_scopes": {"project_scope": "mandoforge"},
+                            "provenance": {}
+                        },
+                        {
+                            "temp_ref": "b",
+                            "object_type": "memory",
+                            "object_key": "memory:semantic-ingestion:invalid-b",
+                            "title": "Invalid B",
+                            "summary": "Invalid relation target.",
+                            "content": {},
+                            "semantic_scopes": {"project_scope": "mandoforge"},
+                            "provenance": {}
+                        }
+                    ],
+                    "links": [
+                        {
+                            "from_ref": "a",
+                            "relation_type": "freeform_relation",
+                            "to_ref": "b"
+                        }
+                    ]
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("semantic relation_type is not allowed by ontology registry"),
+            "unexpected error body: {body}"
+        );
+
+        let objects: Vec<SemanticObject> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/semantic-objects")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(objects.is_empty(), "batch should fail before object writes");
     }
 
     #[test]

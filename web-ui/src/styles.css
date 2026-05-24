@@ -794,6 +794,7 @@ h1 {
 .context-packet,
 .writeback-review,
 .ontology-registry,
+.semantic-ingestion,
 .semantic-objects,
 .semantic-links {
   display: grid;
@@ -828,6 +829,13 @@ h1 {
   gap: 6px;
   overflow: auto;
   padding-right: 2px;
+}
+
+.semantic-ingestion textarea {
+  min-height: 190px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .mini-counts {

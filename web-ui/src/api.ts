@@ -10,6 +10,23 @@ export type Agent = {
   release_state: string;
 };
 
+export type SemanticSource = {
+  id: string;
+  source_type: string;
+  source_uri: string;
+  display_name: string;
+  owner_type?: string | null;
+  owner_id?: string | null;
+  metadata: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  freshness: Record<string, unknown>;
+  status: string;
+  last_ingested_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+};
+
 export type SemanticObject = {
   id: string;
   source_id?: string | null;
@@ -65,6 +82,20 @@ export type OntologyRelationType = {
   to_entity_type: string;
   description: string;
   governance_boundary: string;
+};
+
+export type SemanticIngestionBatchResult = {
+  status: string;
+  source: SemanticSource;
+  objects: SemanticObject[];
+  object_refs: Array<{
+    temp_ref: string;
+    semantic_object_id: string;
+    object_key: string;
+    title: string;
+  }>;
+  links: SemanticLink[];
+  ingested_at: string;
 };
 
 export type ContextPacket = {

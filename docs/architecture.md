@@ -297,6 +297,14 @@ triples. New semantic links must match a declared
 persisted. This keeps memory and evidence relations inspectable instead of
 letting workers mint arbitrary relation names at write time.
 
+Workers and managed agents should submit normalized semantic material through
+`POST /api/semantic-ingestion/batches` when they need to persist multiple
+objects and links from the same source. The batch contract creates one
+`SemanticSource`, materializes temp-ref addressed `SemanticObject` records, then
+creates ontology-governed `SemanticLink` records after all relation triples have
+been validated. This gives ingestion, reflection, and future dreaming workflows
+one audited write path instead of a collection of ad hoc object/link writes.
+
 Context packets should be replayable so operators can inspect what an agent saw
 before it acted. Memory writeback remains approval-gated.
 
