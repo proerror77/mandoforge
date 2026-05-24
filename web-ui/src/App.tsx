@@ -11,11 +11,11 @@ import {
   type Agent,
   type Approval,
   type Artifact,
-  type ClaimWorkflowStepRunResponse,
   type Environment,
   type MemoryGovernancePartitionDetail,
   type MemoryGovernanceSummary,
   type MemoryGovernanceWritebackQueue,
+  type RunWorkflowStepRunResponse,
   type Session,
   type SessionEvent,
   type TaskGrant,
@@ -200,8 +200,8 @@ export function App() {
     mutationFn: ({ id, decision }: { id: string; decision: "approve" | "reject" }) => decideApproval(id, decision),
     onSuccess: () => invalidateAll(queryClient),
   });
-  const claimStep = useMutation({
-    mutationFn: ({ stepId, agentId }: { stepId: string; agentId: string }) => api<ClaimWorkflowStepRunResponse>(`/api/workflow-step-runs/${stepId}/claim`, {
+  const runStep = useMutation({
+    mutationFn: ({ stepId, agentId }: { stepId: string; agentId: string }) => api<RunWorkflowStepRunResponse>(`/api/workflow-step-runs/${stepId}/run`, {
       method: "POST",
       body: JSON.stringify({
         agent_id: agentId,
@@ -329,9 +329,9 @@ export function App() {
               <AgentInboxPanel
                 inbox={agentInbox.data}
                 agent={selectedAgent}
-                isClaiming={claimStep.isPending}
-                onClaim={(stepId) => {
-                  if (selectedAgent) claimStep.mutate({ stepId, agentId: selectedAgent.id });
+                isRunning={runStep.isPending}
+                onRun={(stepId) => {
+                  if (selectedAgent) runStep.mutate({ stepId, agentId: selectedAgent.id });
                 }}
               />
             ) : <p className="muted">No agent inbox loaded.</p>}
@@ -617,7 +617,7 @@ function TaskBoardPanel({ board, agents }: { board: TaskBoardSnapshot; agents: A
               {item.step_key} · {item.status} · {agentName(agents, item.agent_id)}
               {item.context_packet_id ? ` · ctx ${shortId(item.context_packet_id)}` : ""}
             </span>
-            {item.blockers.length ? <small>{item.blockers.join(", ")}</small> : <small>ready for claim</small>}
+            {item.blockers.length ? <small>{item.blockers.join(", ")}</small> : <small>ready for worker run</small>}
           </div>
         </div>
       ))}
@@ -628,13 +628,13 @@ function TaskBoardPanel({ board, agents }: { board: TaskBoardSnapshot; agents: A
 function AgentInboxPanel({
   inbox,
   agent,
-  isClaiming,
-  onClaim,
+  isRunning,
+  onRun,
 }: {
   inbox: AgentInboxSnapshot;
   agent?: Agent;
-  isClaiming: boolean;
-  onClaim: (stepId: string) => void;
+  isRunning: boolean;
+  onRun: (stepId: string) => void;
 }) {
   return (
     <div className="agent-inbox-panel">
@@ -654,11 +654,11 @@ function AgentInboxPanel({
                 {entry.claimed_by_worker ? ` · ${entry.claimed_by_worker}` : ""}
                 {entry.context_packet_id ? ` · ctx ${shortId(entry.context_packet_id)}` : ""}
               </span>
-              {entry.blockers.length ? <small>{entry.blockers.join(", ")}</small> : <small>grant and context will be bound on claim</small>}
+              {entry.blockers.length ? <small>{entry.blockers.join(", ")}</small> : <small>worker will bind context and execute</small>}
             </div>
           </div>
-          <button disabled={!entry.claimable || isClaiming} onClick={() => onClaim(entry.workflow_step_run_id)}>
-            Claim
+          <button disabled={!entry.claimable || isRunning} onClick={() => onRun(entry.workflow_step_run_id)}>
+            Run
           </button>
         </div>
       ))}

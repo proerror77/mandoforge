@@ -1483,6 +1483,32 @@ struct ClaimWorkflowStepRunResponse {
     context_packet: ContextPacket,
 }
 
+#[derive(Debug, Deserialize)]
+struct RunWorkflowStepRun {
+    #[serde(default)]
+    agent_id: Option<Uuid>,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    lease_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RunWorkflowStepRunResponse {
+    step: WorkflowStepRun,
+    task_grant: TaskGrant,
+    context_packet: ContextPacket,
+    session: Session,
+    session_loop_job: SessionLoopJob,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionRuntimeRefs {
+    artifact_ids: Vec<Uuid>,
+    approval_ids: Vec<Uuid>,
+    tool_call_ids: Vec<Uuid>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskGrant {
     id: Uuid,
@@ -5892,6 +5918,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-step-runs/{id}/claim",
             post(claim_workflow_step_run_route),
+        )
+        .route(
+            "/api/workflow-step-runs/{id}/run",
+            post(run_workflow_step_run_route),
         )
         .route(
             "/api/workflow-runs/{id}/task-grants",
@@ -14179,6 +14209,12 @@ async fn issue_root_task_grant_for_workflow_run(
     session: &Session,
 ) -> Result<TaskGrant, AppError> {
     let now = Utc::now();
+    let grantee_agent = state.get_agent(definition.default_agent_id).await?;
+    let agent_class = if grantee_agent.agent_role.trim().is_empty() {
+        grantee_agent.kind.clone()
+    } else {
+        grantee_agent.agent_role.clone()
+    };
     let grant = TaskGrant {
         id: Uuid::new_v4(),
         workflow_run_id: run.id,
@@ -14190,7 +14226,7 @@ async fn issue_root_task_grant_for_workflow_run(
         issuer_subject: "system".to_string(),
         grantee_agent_id: Some(definition.default_agent_id),
         grantee_session_id: Some(session.id),
-        agent_class: Some("orchestrator".to_string()),
+        agent_class: Some(agent_class),
         objective: session.title.clone(),
         risk_level: "low".to_string(),
         status: "active".to_string(),
@@ -15426,15 +15462,27 @@ async fn claim_workflow_step_run_route(
 ) -> Result<Json<ClaimWorkflowStepRunResponse>, AppError> {
     let current = state.get_workflow_step_run(id).await?;
     let run = state.get_workflow_run(current.workflow_run_id).await?;
+    Ok(Json(
+        claim_workflow_step_run(&state, &headers, current, run, input).await?,
+    ))
+}
+
+async fn claim_workflow_step_run(
+    state: &AppState,
+    headers: &HeaderMap,
+    current: WorkflowStepRun,
+    run: WorkflowRun,
+    input: ClaimWorkflowStepRun,
+) -> Result<ClaimWorkflowStepRunResponse, AppError> {
     authorize_request(
-        &state,
-        &headers,
+        state,
+        headers,
         Permission::SessionsRun,
         "session",
         Some(run.primary_session_id),
     )
     .await?;
-    let principal = principal_from_request(&state, &headers).await?;
+    let principal = principal_from_request(state, headers).await?;
     let agent = state.get_agent(input.agent_id).await?;
     if current.agent_id != Some(agent.id) {
         return Err(AppError::forbidden(
@@ -15492,11 +15540,11 @@ async fn claim_workflow_step_run_route(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("agent:{}", agent.id));
 
-    let context_packet = generate_and_persist_context_packet(&state, session_id).await?;
+    let context_packet = generate_and_persist_context_packet(state, session_id).await?;
     let task_grant = state
         .update_task_grant_context_packet(grant.id, context_packet.id)
         .await?;
-    record_task_grant_checked(&state, &task_grant, session_id, "agent_inbox.claim").await?;
+    record_task_grant_checked(state, &task_grant, session_id, "agent_inbox.claim").await?;
 
     let mut next = current;
     next.status = "running".to_string();
@@ -15507,7 +15555,7 @@ async fn claim_workflow_step_run_route(
     next.updated_at = now;
     let step = state.update_workflow_step_run(next).await?;
     record_agent_inbox_claimed(
-        &state,
+        state,
         &run,
         &step,
         &task_grant,
@@ -15540,11 +15588,440 @@ async fn claim_workflow_step_run_route(
             )
             .await?;
     }
-    Ok(Json(ClaimWorkflowStepRunResponse {
+    Ok(ClaimWorkflowStepRunResponse {
         step,
         task_grant,
         context_packet,
-    }))
+    })
+}
+
+async fn run_workflow_step_run_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RunWorkflowStepRun>,
+) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
+    let current = state.get_workflow_step_run(id).await?;
+    let run = state.get_workflow_run(current.workflow_run_id).await?;
+    let session_id = current.session_id.unwrap_or(run.primary_session_id);
+    enforce_worker_environment_binding(&state, &headers, session_id, current.environment_id)
+        .await?;
+    enforce_worker_pool_binding(&state, &headers, session_id, current.environment_id).await?;
+    let agent_id = input
+        .agent_id
+        .or(current.agent_id)
+        .ok_or_else(|| AppError::bad_request("workflow step run requires agent_id"))?;
+    let worker_id = input
+        .worker_id
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            headers
+                .get("x-mandoforge-worker-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("agent:{agent_id}"))
+        });
+    let claim = claim_workflow_step_run(
+        &state,
+        &headers,
+        current,
+        run.clone(),
+        ClaimWorkflowStepRun {
+            agent_id,
+            worker_id: Some(worker_id.clone()),
+            lease_seconds: input.lease_seconds,
+        },
+    )
+    .await?;
+    let session_id = claim.step.session_id.unwrap_or(run.primary_session_id);
+    let before_refs = collect_session_runtime_refs(&state, session_id).await?;
+    record_workflow_step_worker_started(
+        &state,
+        &run,
+        &claim.step,
+        &worker_id,
+        claim.context_packet.id,
+    )
+    .await?;
+    let trigger_event = append_user_message_event(
+        &state,
+        session_id,
+        workflow_step_worker_message(&claim.step, &claim.task_grant),
+    )
+    .await?;
+    let queued = enqueue_session_loop(
+        &state,
+        session_id,
+        Some(trigger_event.id),
+        "workflow.step.run",
+    )
+    .await?;
+    let running = state.start_session_loop_job(queued.id, &worker_id).await?;
+    state
+        .append_event(
+            "worker",
+            Some(running.id),
+            running.session_id,
+            "session.loop.started",
+            json!({
+                "session_loop_job_id": running.id,
+                "environment_id": running.environment_id,
+                "worker_id": worker_id,
+                "attempt_count": running.attempt_count,
+                "workflow_step_run_id": claim.step.id
+            }),
+        )
+        .await?;
+
+    match run_session_loop(&state, &running).await {
+        Ok(session) => {
+            let completed = state
+                .complete_session_loop_job(running.id, &worker_id)
+                .await?;
+            state
+                .append_event(
+                    "worker",
+                    Some(completed.id),
+                    completed.session_id,
+                    "session.loop.completed",
+                    json!({
+                        "session_loop_job_id": completed.id,
+                        "status": completed.status,
+                        "session_status": session.status,
+                        "worker_id": worker_id,
+                        "workflow_step_run_id": claim.step.id
+                    }),
+                )
+                .await?;
+            let refs = diff_session_runtime_refs(
+                &before_refs,
+                &collect_session_runtime_refs(&state, session_id).await?,
+            );
+            let step = update_workflow_step_after_worker_session(
+                &state,
+                &run,
+                &claim.step,
+                &session,
+                &completed,
+                &worker_id,
+                refs,
+                None,
+                false,
+            )
+            .await?;
+            Ok(Json(RunWorkflowStepRunResponse {
+                step,
+                task_grant: claim.task_grant,
+                context_packet: claim.context_packet,
+                session,
+                session_loop_job: completed,
+            }))
+        }
+        Err(error) => {
+            let error_message = error.message.clone();
+            let failed = state
+                .fail_session_loop_job(running.id, &worker_id, &error_message)
+                .await?;
+            set_managed_session_status(
+                &state,
+                failed.session_id,
+                SessionStatus::Failed,
+                "workflow step session loop failed",
+            )
+            .await?;
+            state
+                .append_event(
+                    "worker",
+                    Some(failed.id),
+                    failed.session_id,
+                    "session.loop.failed",
+                    json!({
+                        "session_loop_job_id": failed.id,
+                        "status": failed.status,
+                        "error": error_message,
+                        "worker_id": worker_id,
+                        "workflow_step_run_id": claim.step.id
+                    }),
+                )
+                .await?;
+            let session = state.get_session(session_id).await?;
+            let refs = diff_session_runtime_refs(
+                &before_refs,
+                &collect_session_runtime_refs(&state, session_id).await?,
+            );
+            let step = update_workflow_step_after_worker_session(
+                &state,
+                &run,
+                &claim.step,
+                &session,
+                &failed,
+                &worker_id,
+                refs,
+                Some(error_message),
+                false,
+            )
+            .await?;
+            Ok(Json(RunWorkflowStepRunResponse {
+                step,
+                task_grant: claim.task_grant,
+                context_packet: claim.context_packet,
+                session,
+                session_loop_job: failed,
+            }))
+        }
+    }
+}
+
+async fn record_workflow_step_worker_started(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+    worker_id: &str,
+    context_packet_id: Uuid,
+) -> Result<(), AppError> {
+    let session_id = step.session_id.unwrap_or(run.primary_session_id);
+    let payload = json!({
+        "workflow_run_id": run.id,
+        "workflow_step_run_id": step.id,
+        "step_key": step.step_key,
+        "worker_id": worker_id,
+        "context_packet_id": context_packet_id
+    });
+    state
+        .append_event(
+            "worker",
+            Some(step.id),
+            session_id,
+            "workflow.step.worker_started",
+            payload.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "worker",
+            Some(step.id),
+            "workflow_step_run.worker_started",
+            "workflow_step_run",
+            Some(step.id),
+            payload,
+        ))
+        .await?;
+    Ok(())
+}
+
+fn workflow_step_worker_message(step: &WorkflowStepRun, grant: &TaskGrant) -> String {
+    let objective = step
+        .input_payload
+        .get("graph_step")
+        .and_then(|graph_step| graph_step.get("input"))
+        .and_then(|input| input.get("objective"))
+        .and_then(Value::as_str)
+        .or_else(|| step.input_payload.get("objective").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(grant.objective.as_str());
+    format!(
+        "Execute workflow step `{}` ({}) for workflow run {}.\nObjective: {}\nInput payload: {}",
+        step.step_key,
+        step.step_type,
+        step.workflow_run_id,
+        objective,
+        workflow_graph_console_summary(&step.input_payload)
+    )
+}
+
+async fn collect_session_runtime_refs(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<SessionRuntimeRefs, AppError> {
+    Ok(SessionRuntimeRefs {
+        artifact_ids: state
+            .list_artifacts(session_id)
+            .await?
+            .into_iter()
+            .map(|artifact| artifact.id)
+            .collect(),
+        approval_ids: state
+            .list_approvals()
+            .await?
+            .into_iter()
+            .filter(|approval| approval.session_id == session_id)
+            .map(|approval| approval.id)
+            .collect(),
+        tool_call_ids: state
+            .list_tool_calls(Some(session_id))
+            .await?
+            .into_iter()
+            .map(|tool_call| tool_call.id)
+            .collect(),
+    })
+}
+
+fn diff_session_runtime_refs(
+    before: &SessionRuntimeRefs,
+    after: &SessionRuntimeRefs,
+) -> SessionRuntimeRefs {
+    let before_artifacts = before.artifact_ids.iter().copied().collect::<HashSet<_>>();
+    let before_approvals = before.approval_ids.iter().copied().collect::<HashSet<_>>();
+    let before_tool_calls = before.tool_call_ids.iter().copied().collect::<HashSet<_>>();
+    SessionRuntimeRefs {
+        artifact_ids: after
+            .artifact_ids
+            .iter()
+            .copied()
+            .filter(|id| !before_artifacts.contains(id))
+            .collect(),
+        approval_ids: after
+            .approval_ids
+            .iter()
+            .copied()
+            .filter(|id| !before_approvals.contains(id))
+            .collect(),
+        tool_call_ids: after
+            .tool_call_ids
+            .iter()
+            .copied()
+            .filter(|id| !before_tool_calls.contains(id))
+            .collect(),
+    }
+}
+
+async fn update_workflow_step_after_worker_session(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+    session: &Session,
+    session_loop_job: &SessionLoopJob,
+    worker_id: &str,
+    refs: SessionRuntimeRefs,
+    error_message: Option<String>,
+    session_loop_resume: bool,
+) -> Result<WorkflowStepRun, AppError> {
+    let previous_status = step.status.clone();
+    let now = Utc::now();
+    let next_status = if error_message.is_some()
+        || session.status == SessionStatus::Failed
+        || session_loop_job.status == SessionLoopJobStatus::Failed
+    {
+        "failed"
+    } else if session.status == SessionStatus::RequiresAction {
+        "requires_action"
+    } else {
+        "completed"
+    };
+    let mut next = step.clone();
+    next.status = next_status.to_string();
+    next.artifact_ids = refs.artifact_ids.clone();
+    next.approval_ids = refs.approval_ids.clone();
+    next.tool_call_ids = refs.tool_call_ids.clone();
+    next.output_payload = json!({
+        "worker_execution": {
+            "status": next_status,
+            "worker_id": worker_id,
+            "session_id": session.id,
+            "session_status": session.status,
+            "session_loop_job_id": session_loop_job.id,
+            "session_loop_job_status": session_loop_job.status,
+            "context_packet_id": step.context_packet_id,
+            "artifact_ids": refs.artifact_ids,
+            "approval_ids": refs.approval_ids,
+            "tool_call_ids": refs.tool_call_ids,
+            "error": error_message,
+            "session_loop_resume": session_loop_resume
+        }
+    });
+    if workflow_step_status_terminal(next_status) {
+        next.completed_at = next.completed_at.or(Some(now));
+    }
+    next.updated_at = now;
+    let updated = state.update_workflow_step_run(next).await?;
+    record_workflow_step_run_updated(state, run, &updated, &previous_status).await?;
+    record_workflow_step_worker_completed(state, run, &updated, worker_id, session_loop_job)
+        .await?;
+    if previous_status != updated.status {
+        advance_workflow_graph_after_step_update(state, run, &updated).await?;
+    }
+    Ok(updated)
+}
+
+async fn record_workflow_step_worker_completed(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+    worker_id: &str,
+    session_loop_job: &SessionLoopJob,
+) -> Result<(), AppError> {
+    let session_id = step.session_id.unwrap_or(run.primary_session_id);
+    let payload = json!({
+        "workflow_run_id": run.id,
+        "workflow_step_run_id": step.id,
+        "step_key": step.step_key,
+        "status": step.status,
+        "worker_id": worker_id,
+        "session_loop_job_id": session_loop_job.id,
+        "session_loop_job_status": session_loop_job.status,
+        "artifact_ids": step.artifact_ids,
+        "approval_ids": step.approval_ids,
+        "tool_call_ids": step.tool_call_ids
+    });
+    state
+        .append_event(
+            "worker",
+            Some(step.id),
+            session_id,
+            "workflow.step.worker_completed",
+            payload.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "worker",
+            Some(step.id),
+            "workflow_step_run.worker_completed",
+            "workflow_step_run",
+            Some(step.id),
+            payload,
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn reconcile_workflow_steps_after_session_loop_job(
+    state: &AppState,
+    session: &Session,
+    session_loop_job: &SessionLoopJob,
+    worker_id: &str,
+) -> Result<Vec<WorkflowStepRun>, AppError> {
+    let runtime_refs = collect_session_runtime_refs(state, session.id).await?;
+    let mut updated_steps = Vec::new();
+    for run in state.list_workflow_runs().await? {
+        let steps = state.list_workflow_step_runs(run.id).await?;
+        for step in steps.into_iter().filter(|step| {
+            matches!(step.status.as_str(), "running" | "requires_action")
+                && (step.session_id == Some(session.id) || run.primary_session_id == session.id)
+        }) {
+            let updated = update_workflow_step_after_worker_session(
+                state,
+                &run,
+                &step,
+                session,
+                session_loop_job,
+                worker_id,
+                runtime_refs.clone(),
+                None,
+                true,
+            )
+            .await?;
+            updated_steps.push(updated);
+        }
+    }
+    Ok(updated_steps)
 }
 
 async fn record_agent_inbox_claimed(
@@ -15885,6 +16362,8 @@ async fn advance_workflow_graph_after_step_update(
     if !workflow_step_status_successful(&step.status) {
         if step.status == "running" {
             update_workflow_run_status_and_record(state, run, "running").await?;
+        } else if step.status == "requires_action" {
+            update_workflow_run_status_and_record(state, run, "requires_action").await?;
         }
         return Ok(());
     }
@@ -45496,6 +45975,10 @@ async fn run_session_loop_job_route(
                     }),
                 )
                 .await?;
+            reconcile_workflow_steps_after_session_loop_job(
+                &state, &session, &completed, worker_id,
+            )
+            .await?;
             Ok(Json(completed))
         }
         Err(error) => {
@@ -55823,7 +56306,7 @@ not json
         );
 
         let events: Vec<SessionEvent> = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri(format!("/api/sessions/{session_id}/events"))
                 .body(Body::empty())
@@ -77076,6 +77559,257 @@ not json
                 && event.payload["workflow_step_run_id"] == json!(step_id)
                 && event.payload["context_packet_id"] == claim["context_packet"]["id"]
         }));
+    }
+
+    #[tokio::test]
+    async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let operator_headers = [
+            ("x-mandoforge-subject", "operator-1"),
+            ("x-mandoforge-roles", "operator"),
+        ];
+        let semantic_scopes = json!({
+            "project_scope": "agent-os",
+            "repo_scope": "mandoforge",
+            "service_scope": "mandoforge-api",
+            "workflow_scope": "workflow-step-worker",
+            "policy_scope": "managed-runtime",
+            "memory_scope": "task-board"
+        });
+
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Workflow Step Worker Agent",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec", "artifact.create"],
+                    "semantic_scopes": semantic_scopes,
+                    "release_state": "active"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let work_item: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Run observable workflow step",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {
+                        "semantic_scopes": semantic_scopes,
+                        "runtime_evidence_required": true
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item_id = work_item["id"].as_str().expect("work item id");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Workflow Step Worker Execution",
+                    "entrypoint": "workflow-step-worker-execution",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {
+                                "key": "collect_context",
+                                "type": "agent",
+                                "start": true,
+                                "input": {"objective": "Collect context and produce runtime evidence"}
+                            }
+                        ]
+                    },
+                    "handoff_rules": {
+                        "root_task_grant": {
+                            "semantic_scopes": semantic_scopes,
+                            "memory_scope": {
+                                "mode": "snapshot_only",
+                                "allowed_object_types": ["work_item"],
+                                "allowed_object_ids": [],
+                                "minimum_trust_level": "source_attested",
+                                "max_objects": 5,
+                                "writeback_allowed": true
+                            },
+                            "tool_scope": {
+                                "read": ["file.read", "sql.get_schema", "sql.query"],
+                                "write": ["artifact.create", "shell.exec"],
+                                "external_write": []
+                            },
+                            "connector_scope": {
+                                "mode": "read_only",
+                                "allowed_connector_ids": [],
+                                "allowed_tool_names": [],
+                                "tenant_scope": {},
+                                "side_effect_classes": []
+                            }
+                        }
+                    },
+                    "release_state": "released"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "source_work_item_id": work_item_id,
+                    "title": "worker executes workflow step"
+                }),
+                &operator_headers,
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+        let root_task_grant_id = run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id");
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let step_id = steps[0]["id"].as_str().expect("step id");
+
+        let executed: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-step-runs/{step_id}/run"),
+                json!({
+                    "agent_id": agent.id,
+                    "worker_id": "worker-whiskey-1",
+                    "lease_seconds": 600
+                }),
+                &operator_headers,
+            ),
+        )
+        .await;
+
+        assert_eq!(executed["step"]["status"], json!("requires_action"));
+        assert_eq!(
+            executed["step"]["claimed_by_worker"],
+            json!("worker-whiskey-1")
+        );
+        assert_eq!(executed["step"]["task_grant_id"], json!(root_task_grant_id));
+        assert_eq!(
+            executed["step"]["context_packet_id"],
+            executed["context_packet"]["id"]
+        );
+        assert_eq!(executed["session"]["status"], json!("requires_action"));
+        assert_eq!(executed["session_loop_job"]["status"], json!("completed"));
+        assert_eq!(
+            executed["step"]["output_payload"]["worker_execution"]["status"],
+            json!("requires_action")
+        );
+        assert_eq!(
+            executed["step"]["output_payload"]["worker_execution"]["worker_id"],
+            json!("worker-whiskey-1")
+        );
+        assert!(executed["step"]["approval_ids"].as_array().unwrap().len() >= 1);
+        assert!(executed["step"]["tool_call_ids"].as_array().unwrap().len() >= 1);
+        assert!(executed["step"]["artifact_ids"].as_array().unwrap().len() >= 1);
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/events",
+                    run["primary_session_id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "workflow.step.worker_started"
+                && event.payload["workflow_step_run_id"] == json!(step_id)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "workflow.step.requires_action"
+                && event.payload["workflow_step_run_id"] == json!(step_id)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "agent_inbox.claimed"
+                && event.payload["context_packet_id"] == executed["context_packet"]["id"]
+        }));
+
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/tools/file.read/execute",
+                json!({
+                    "session_id": run["primary_session_id"],
+                    "task_grant_id": root_task_grant_id,
+                    "args": {"path": "README.md"}
+                }),
+                &operator_headers,
+            ),
+        )
+        .await;
+        let resumed = run_next_session_loop_job(
+            app.clone(),
+            Uuid::parse_str(run["primary_session_id"].as_str().unwrap()).unwrap(),
+            "worker-whiskey-1",
+        )
+        .await;
+        assert_eq!(resumed.status, SessionLoopJobStatus::Completed);
+        let resumed_steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let completed_step = resumed_steps
+            .iter()
+            .find(|step| step["id"] == json!(step_id))
+            .expect("completed workflow step");
+        assert_eq!(completed_step["status"], json!("completed"));
+        assert!(completed_step["completed_at"].as_str().is_some());
+        assert!(
+            completed_step["output_payload"]["worker_execution"]["session_loop_resume"]
+                .as_bool()
+                .unwrap_or(false)
+        );
     }
 
     #[tokio::test]

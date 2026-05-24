@@ -276,6 +276,11 @@ export type ClaimWorkflowStepRunResponse = {
   };
 };
 
+export type RunWorkflowStepRunResponse = ClaimWorkflowStepRunResponse & {
+  session: Session;
+  session_loop_job: WorkerJob;
+};
+
 export type WorkflowPackBinding = {
   id: string;
   installation_id: string;

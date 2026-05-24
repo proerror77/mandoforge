@@ -2,7 +2,7 @@ use std::{env, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;
 
 #[derive(Debug, Deserialize)]
@@ -15,6 +15,37 @@ struct ExecutionJob {
 struct SessionLoopJob {
     id: String,
     status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskBoardSnapshot {
+    items: Vec<TaskBoardItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskBoardItem {
+    workflow_step_run_id: String,
+    agent_id: Option<String>,
+    claimable: bool,
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunWorkflowStepRunResponse {
+    step: WorkflowStepRunSummary,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowStepRunSummary {
+    id: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RunWorkflowStepRunRequest<'a> {
+    agent_id: &'a str,
+    worker_id: &'a str,
+    lease_seconds: i64,
 }
 
 #[tokio::main]
@@ -177,6 +208,26 @@ async fn main() -> Result<()> {
             }
         }
 
+        let workflow_step_processed = process_workflow_step_jobs(
+            &client,
+            &base_url,
+            &worker_id,
+            &worker_subject,
+            &worker_roles,
+            api_token.as_deref(),
+            worker_environment_id.as_deref(),
+            worker_pool.as_deref(),
+        )
+        .await?;
+        processed += workflow_step_processed;
+        if workflow_step_processed > 0 {
+            println!("workflow step attempts finished: {workflow_step_processed}");
+        }
+        if max_jobs != 0 && processed >= max_jobs {
+            println!("mandoforge worker processed {processed} job(s)");
+            return Ok(());
+        }
+
         if run_once {
             println!("mandoforge worker processed {processed} job(s)");
             return Ok(());
@@ -186,6 +237,98 @@ async fn main() -> Result<()> {
         }
         sleep(Duration::from_secs(poll_interval)).await;
     }
+}
+
+async fn process_workflow_step_jobs(
+    client: &reqwest::Client,
+    base_url: &str,
+    worker_id: &str,
+    worker_subject: &str,
+    worker_roles: &str,
+    api_token: Option<&str>,
+    worker_environment_id: Option<&str>,
+    worker_pool: Option<&str>,
+) -> Result<usize> {
+    let Some(board) = fetch_job_item::<TaskBoardSnapshot>(
+        client
+            .get(format!("{base_url}/api/task-board"))
+            .worker_auth(worker_subject, worker_roles, api_token)
+            .worker_environment(worker_environment_id)
+            .worker_pool(worker_pool),
+        "task board",
+    )
+    .await
+    else {
+        return Ok(0);
+    };
+    let mut processed = 0usize;
+    for item in board
+        .items
+        .into_iter()
+        .filter(|item| item.claimable)
+        .filter(|item| item.status == "queued" || item.status == "scheduled")
+    {
+        let Some(agent_id) = item
+            .agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            eprintln!(
+                "workflow step not runnable: {} missing agent_id",
+                item.workflow_step_run_id
+            );
+            continue;
+        };
+        let response = client
+            .post(format!(
+                "{base_url}/api/workflow-step-runs/{}/run",
+                item.workflow_step_run_id
+            ))
+            .header("x-mandoforge-worker-id", worker_id)
+            .worker_auth(worker_subject, worker_roles, api_token)
+            .worker_environment(worker_environment_id)
+            .worker_pool(worker_pool)
+            .json(&RunWorkflowStepRunRequest {
+                agent_id,
+                worker_id,
+                lease_seconds: 600,
+            })
+            .send()
+            .await
+            .with_context(|| format!("run workflow step {}", item.workflow_step_run_id))?;
+        if response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::BAD_REQUEST
+        {
+            eprintln!("workflow step not claimable: {}", item.workflow_step_run_id);
+            continue;
+        }
+        let updated: RunWorkflowStepRunResponse = match response.error_for_status() {
+            Ok(response) => match response.json().await {
+                Ok(updated) => updated,
+                Err(error) => {
+                    eprintln!(
+                        "parse workflow step {} run response failed: {error}",
+                        item.workflow_step_run_id
+                    );
+                    continue;
+                }
+            },
+            Err(error) => {
+                eprintln!(
+                    "run workflow step {} failed: {error}",
+                    item.workflow_step_run_id
+                );
+                continue;
+            }
+        };
+        processed += 1;
+        println!(
+            "workflow step attempt finished: {} status={}",
+            updated.step.id, updated.step.status
+        );
+    }
+    Ok(processed)
 }
 
 async fn fetch_job_list<T>(request: reqwest::RequestBuilder, label: &str) -> Vec<T>
@@ -211,6 +354,33 @@ where
         Err(error) => {
             eprintln!("parse {label} failed: {error}");
             Vec::new()
+        }
+    }
+}
+
+async fn fetch_job_item<T>(request: reqwest::RequestBuilder, label: &str) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("get {label} failed: {error}");
+            return None;
+        }
+    };
+    let response = match response.error_for_status() {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("get {label} failed: {error}");
+            return None;
+        }
+    };
+    match response.json().await {
+        Ok(item) => Some(item),
+        Err(error) => {
+            eprintln!("parse {label} failed: {error}");
+            None
         }
     }
 }
@@ -284,7 +454,16 @@ async fn wait_for_api(client: &reqwest::Client, base_url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, routing::get};
+    use axum::{
+        Json, Router,
+        extract::Path,
+        routing::{get, post},
+    };
+    use serde_json::json;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tokio::net::TcpListener;
 
     async fn serve_once(route: Router) -> String {
@@ -334,6 +513,68 @@ mod tests {
         .await;
 
         assert!(jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_workflow_step_jobs_runs_claimable_task_board_item() {
+        let run_count = Arc::new(AtomicUsize::new(0));
+        let run_count_for_route = Arc::clone(&run_count);
+        let step_id = "00000000-0000-4000-8000-000000000010";
+        let agent_id = "00000000-0000-4000-8000-000000000011";
+        let base_url = serve_once(
+            Router::new()
+                .route(
+                    "/api/task-board",
+                    get(move || async move {
+                        Json(json!({
+                            "items": [{
+                                "workflow_step_run_id": step_id,
+                                "agent_id": agent_id,
+                                "claimable": true,
+                                "status": "queued"
+                            }]
+                        }))
+                    }),
+                )
+                .route(
+                    "/api/workflow-step-runs/{id}/run",
+                    post(
+                        move |Path(id): Path<String>, Json(body): Json<serde_json::Value>| {
+                            let run_count = Arc::clone(&run_count_for_route);
+                            async move {
+                                assert_eq!(id, step_id);
+                                assert_eq!(body["agent_id"], json!(agent_id));
+                                assert_eq!(body["worker_id"], json!("worker-test-1"));
+                                run_count.fetch_add(1, Ordering::SeqCst);
+                                Json(json!({
+                                    "step": {
+                                        "id": step_id,
+                                        "status": "requires_action"
+                                    }
+                                }))
+                            }
+                        },
+                    ),
+                ),
+        )
+        .await;
+        let client = reqwest::Client::new();
+
+        let processed = process_workflow_step_jobs(
+            &client,
+            &base_url,
+            "worker-test-1",
+            "worker-subject",
+            "admin",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("process workflow step jobs");
+
+        assert_eq!(processed, 1);
+        assert_eq!(run_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
