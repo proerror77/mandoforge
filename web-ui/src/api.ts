@@ -601,6 +601,56 @@ export type MemoryGovernanceWritebackRef = {
   decided_at?: string | null;
 };
 
+export type SchedulerDuePlanItem = {
+  area: string;
+  action: string;
+  mode: string;
+  status: string;
+  due_count: number;
+  skipped_count: number;
+  target_count: number;
+  severity: string;
+  reason: string;
+};
+
+export type SchedulerDuePlan = {
+  status: string;
+  generated_at: string;
+  team_count: number;
+  item_count: number;
+  actionable_count: number;
+  actions: SchedulerDuePlanItem[];
+};
+
+export type SchedulerRunHistoryItem = {
+  audit_log_id: string;
+  run_id?: string | null;
+  idempotency_key?: string | null;
+  owner?: string | null;
+  status: string;
+  team_count: number;
+  action_count: number;
+  actions: string[];
+  created_at: string;
+};
+
+export type SchedulerOrchestrationSummary = {
+  generated_at: string;
+  status: string;
+  plan: SchedulerDuePlan;
+  deployment_readiness: Record<string, unknown>;
+  recent_run_count: number;
+  last_run_at?: string | null;
+  last_run_status?: string | null;
+  last_run_action_count: number;
+  recent_runs: SchedulerRunHistoryItem[];
+  attention_items: Array<{
+    severity: string;
+    kind: string;
+    message: string;
+  }>;
+};
+
 const ADMIN_TOKEN_KEY = "mandoforge.adminToken";
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {

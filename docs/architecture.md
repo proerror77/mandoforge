@@ -317,6 +317,13 @@ durable lessons into pending `MemoryWritebackCandidate` rows. It does not
 promote those lessons into durable semantic memory until a reviewer approves the
 candidate.
 
+Scheduled reflection/dreaming is scheduler-owned. Released or active Workflow
+Pack runtime objects with `runtime_kind=semantic_synthesis_schedule` are counted
+in `/api/scheduler/due-plan` and executed by `/api/scheduler/run-due` when their
+schedule policy is due. The scheduler still only records report artifacts and
+pending writeback candidates; one-shot schedules are de-duplicated by audit
+evidence, and recurring schedules require an explicit interval policy.
+
 ## Environment And Remote Computer Boundary
 
 Environment is the runtime placement contract. Remote Computer is one

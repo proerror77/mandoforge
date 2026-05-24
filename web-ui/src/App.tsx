@@ -19,6 +19,7 @@ import {
   type MemoryWritebackCandidate,
   type OntologyRegistry,
   type RunWorkflowStepRunResponse,
+  type SchedulerOrchestrationSummary,
   type SemanticIngestionBatchResult,
   type SemanticLink,
   type SemanticObject,
@@ -242,6 +243,11 @@ export function App() {
   const memoryWritebacks = useQuery({
     queryKey: ["memory-governance-writebacks", writebackStatus],
     queryFn: () => api<MemoryGovernanceWritebackQueue>(`/api/memory-governance/writebacks?status=${encodeURIComponent(writebackStatus)}`),
+    refetchInterval: 5000,
+  });
+  const schedulerSummary = useQuery({
+    queryKey: ["scheduler-summary"],
+    queryFn: () => api<SchedulerOrchestrationSummary>("/api/scheduler/summary"),
     refetchInterval: 5000,
   });
   const semanticObjects = useQuery({
@@ -613,6 +619,12 @@ export function App() {
                 ))}
               </>
             ) : <p className="muted">This workflow is not bound to a pack installation.</p>}
+          </Panel>
+
+          <Panel title="Scheduler">
+            {schedulerSummary.data ? (
+              <SchedulerPanel summary={schedulerSummary.data} />
+            ) : <p className="muted">Scheduler summary is loading.</p>}
           </Panel>
 
           <Panel title="Memory governance">
@@ -1062,6 +1074,40 @@ function BindingRow({ binding }: { binding: WorkflowPackBinding }) {
     <div className="obs-row binding-row">
       <strong>{binding.binding_type} · {binding.binding_key}</strong>
       <span>{binding.target_kind} · {binding.status}</span>
+    </div>
+  );
+}
+
+function SchedulerPanel({ summary }: { summary: SchedulerOrchestrationSummary }) {
+  const semanticSchedule = summary.plan.actions.find((item) => item.action === "semantic_synthesis_schedule_run");
+  const dueActions = summary.plan.actions.filter((item) => item.due_count > 0);
+  return (
+    <div className="scheduler-panel">
+      <div className="graph-summary">
+        <KeyValue label="Status" value={summary.status} />
+        <KeyValue label="Plan" value={`${summary.plan.status} · ${summary.plan.actionable_count} due`} />
+        <KeyValue label="Last run" value={summary.last_run_status ? `${summary.last_run_status} · ${relativeAge(summary.last_run_at ?? summary.generated_at)}` : "none"} />
+      </div>
+      {semanticSchedule ? (
+        <div className="obs-row">
+          <strong>semantic synthesis · {semanticSchedule.status}</strong>
+          <span>
+            {semanticSchedule.due_count} due · {semanticSchedule.skipped_count} skipped · {semanticSchedule.reason}
+          </span>
+        </div>
+      ) : <p className="muted">No semantic synthesis schedule is registered.</p>}
+      {dueActions.slice(0, 4).map((item) => (
+        <div key={`${item.area}-${item.action}`} className="obs-row">
+          <strong>{item.area} · {item.action}</strong>
+          <span>{item.due_count} due · {item.severity} · {item.reason}</span>
+        </div>
+      ))}
+      {summary.recent_runs.slice(0, 3).map((run) => (
+        <div key={run.audit_log_id} className="obs-row">
+          <strong>{run.status} · {relativeAge(run.created_at)}</strong>
+          <span>{run.actions.length ? run.actions.join(", ") : "no scheduler actions"}</span>
+        </div>
+      ))}
     </div>
   );
 }

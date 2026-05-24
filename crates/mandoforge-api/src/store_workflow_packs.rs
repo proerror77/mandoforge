@@ -636,6 +636,47 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn list_workflow_pack_runtime_objects_by_runtime_kind(
+        &self,
+        runtime_kind: &str,
+    ) -> Result<Vec<WorkflowPackRuntimeObject>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut objects: Vec<_> = inner
+                    .read()
+                    .await
+                    .workflow_pack_runtime_objects
+                    .values()
+                    .filter(|object| {
+                        object.runtime_kind == runtime_kind && object.status != "superseded"
+                    })
+                    .cloned()
+                    .collect();
+                objects.sort_by(|left, right| {
+                    left.object_type
+                        .cmp(&right.object_type)
+                        .then(left.object_key.cmp(&right.object_key))
+                });
+                Ok(objects)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, installation_id, binding_id, pack_id, pack_version, object_type, object_key, runtime_kind, status, spec, created_at, updated_at
+                     FROM workflow_pack_runtime_objects
+                     WHERE tenant_id = $1 AND runtime_kind = $2 AND status <> 'superseded'
+                     ORDER BY object_type ASC, object_key ASC",
+                )
+                .bind(self.current_tenant_id())
+                .bind(runtime_kind)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(workflow_pack_runtime_object_from_row)
+                    .collect()
+            }
+        }
+    }
+
     pub(crate) async fn update_workflow_pack_runtime_object_statuses(
         &self,
         installation_id: Uuid,

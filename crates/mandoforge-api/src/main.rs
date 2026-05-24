@@ -2656,6 +2656,7 @@ struct SchedulerDueRun {
     approval_escalations: ApprovalEscalationDueRun,
     agent_releases: AgentReleaseAutomationRun,
     workflow_scheduled_steps: Option<WorkflowScheduledStepActivationSweep>,
+    semantic_synthesis_schedules: Option<SemanticSynthesisScheduleSweep>,
     mcp_health_runs: Vec<McpServerScheduledHealthRun>,
     mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
     codex_app_server_stale_polls: CodexAppServerStalePollRun,
@@ -2663,6 +2664,31 @@ struct SchedulerDueRun {
     usage_finance_export: UsageFinanceExportDelivery,
     remote_computer_reclaim: RemoteComputerReclaimRun,
     remote_computer_sidecar_supervision: RemoteComputerSidecarSupervisionRun,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticSynthesisScheduleSweep {
+    status: String,
+    checked_at: DateTime<Utc>,
+    scheduled_count: usize,
+    due_count: usize,
+    created_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    runs: Vec<SemanticSynthesisScheduledRun>,
+    actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticSynthesisScheduledRun {
+    runtime_object_id: Uuid,
+    object_key: String,
+    session_id: Option<Uuid>,
+    synthesis_type: Option<String>,
+    status: String,
+    artifact_id: Option<Uuid>,
+    candidate_count: usize,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16963,6 +16989,409 @@ async fn execute_due_workflow_scheduled_steps(
     })
 }
 
+async fn build_semantic_synthesis_schedule_due_counts(
+    state: &AppState,
+    checked_at: DateTime<Utc>,
+) -> Result<(usize, usize, usize), AppError> {
+    let objects = state
+        .list_workflow_pack_runtime_objects_by_runtime_kind("semantic_synthesis_schedule")
+        .await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let mut scheduled_count = 0usize;
+    let mut due_count = 0usize;
+    let mut skipped_count = 0usize;
+    for object in objects {
+        scheduled_count += 1;
+        if !semantic_synthesis_schedule_is_runnable(&object) {
+            skipped_count += 1;
+            continue;
+        }
+        match semantic_synthesis_schedule_is_due(&object, &audit_logs, checked_at) {
+            Ok(true) => due_count += 1,
+            Ok(false) | Err(_) => skipped_count += 1,
+        }
+    }
+    Ok((scheduled_count, due_count, skipped_count))
+}
+
+async fn execute_due_semantic_synthesis_schedules(
+    state: &AppState,
+    checked_at: DateTime<Utc>,
+) -> Result<SemanticSynthesisScheduleSweep, AppError> {
+    let objects = state
+        .list_workflow_pack_runtime_objects_by_runtime_kind("semantic_synthesis_schedule")
+        .await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let mut scheduled_count = 0usize;
+    let mut due_count = 0usize;
+    let mut created_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut runs = Vec::new();
+
+    for object in objects {
+        scheduled_count += 1;
+        if !semantic_synthesis_schedule_is_runnable(&object) {
+            skipped_count += 1;
+            runs.push(semantic_synthesis_scheduled_run_skipped(
+                &object,
+                None,
+                None,
+                "schedule runtime object is not released or active",
+            ));
+            continue;
+        }
+        let is_due = match semantic_synthesis_schedule_is_due(&object, &audit_logs, checked_at) {
+            Ok(is_due) => is_due,
+            Err(error) => {
+                failed_count += 1;
+                runs.push(semantic_synthesis_scheduled_run_failed(
+                    &object,
+                    None,
+                    None,
+                    &error.message,
+                ));
+                continue;
+            }
+        };
+        if !is_due {
+            skipped_count += 1;
+            runs.push(semantic_synthesis_scheduled_run_skipped(
+                &object,
+                None,
+                None,
+                "schedule is not due or was already completed",
+            ));
+            continue;
+        }
+        due_count += 1;
+        let (session_id, synthesis_type, input) =
+            match semantic_synthesis_schedule_input_from_runtime_object(&object) {
+                Ok(input) => input,
+                Err(error) => {
+                    failed_count += 1;
+                    runs.push(semantic_synthesis_scheduled_run_failed(
+                        &object,
+                        None,
+                        None,
+                        &error.message,
+                    ));
+                    continue;
+                }
+            };
+        match materialize_semantic_synthesis_run_for_actor(
+            state,
+            session_id,
+            "system".to_string(),
+            "system",
+            input,
+        )
+        .await
+        {
+            Ok(result) => {
+                state
+                    .append_audit_log(new_audit_log(
+                        Some(session_id),
+                        "system",
+                        Some(object.id),
+                        "semantic_synthesis.schedule_run_created",
+                        "workflow_pack_runtime_object",
+                        Some(object.id),
+                        json!({
+                            "runtime_object_id": object.id,
+                            "object_key": object.object_key.clone(),
+                            "session_id": session_id,
+                            "synthesis_type": result.synthesis_type.clone(),
+                            "artifact_id": result.artifact.id,
+                            "candidate_count": result.candidates.len(),
+                            "checked_at": checked_at,
+                        }),
+                    ))
+                    .await?;
+                created_count += 1;
+                runs.push(SemanticSynthesisScheduledRun {
+                    runtime_object_id: object.id,
+                    object_key: object.object_key,
+                    session_id: Some(session_id),
+                    synthesis_type: Some(result.synthesis_type),
+                    status: "created".to_string(),
+                    artifact_id: Some(result.artifact.id),
+                    candidate_count: result.candidates.len(),
+                    reason: None,
+                });
+            }
+            Err(error) => {
+                failed_count += 1;
+                state
+                    .append_audit_log(new_audit_log(
+                        Some(session_id),
+                        "system",
+                        Some(object.id),
+                        "semantic_synthesis.schedule_run_failed",
+                        "workflow_pack_runtime_object",
+                        Some(object.id),
+                        json!({
+                            "runtime_object_id": object.id,
+                            "object_key": object.object_key.clone(),
+                            "session_id": session_id,
+                            "synthesis_type": synthesis_type.clone(),
+                            "error": error.message.clone(),
+                            "checked_at": checked_at,
+                        }),
+                    ))
+                    .await?;
+                runs.push(semantic_synthesis_scheduled_run_failed(
+                    &object,
+                    Some(session_id),
+                    Some(synthesis_type.as_str()),
+                    &error.message,
+                ));
+            }
+        }
+    }
+
+    let mut actions = Vec::new();
+    if created_count > 0 {
+        actions.push("run_due_semantic_synthesis_schedules".to_string());
+    }
+    let status = if failed_count > 0 && created_count > 0 {
+        "partial".to_string()
+    } else if failed_count > 0 {
+        "failed".to_string()
+    } else if created_count > 0 {
+        "completed".to_string()
+    } else if scheduled_count > 0 {
+        "waiting".to_string()
+    } else {
+        "noop".to_string()
+    };
+
+    Ok(SemanticSynthesisScheduleSweep {
+        status,
+        checked_at,
+        scheduled_count,
+        due_count,
+        created_count,
+        skipped_count,
+        failed_count,
+        runs,
+        actions,
+    })
+}
+
+fn semantic_synthesis_schedule_is_runnable(object: &WorkflowPackRuntimeObject) -> bool {
+    object.object_type == "schedule"
+        && object.runtime_kind == "semantic_synthesis_schedule"
+        && matches!(object.status.as_str(), "released" | "active")
+        && object
+            .spec
+            .pointer("/schedule_policy/enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+}
+
+fn semantic_synthesis_schedule_is_due(
+    object: &WorkflowPackRuntimeObject,
+    audit_logs: &[AuditLog],
+    checked_at: DateTime<Utc>,
+) -> Result<bool, AppError> {
+    let due_at = semantic_synthesis_schedule_due_at(object)?.unwrap_or(object.created_at);
+    if due_at > checked_at {
+        return Ok(false);
+    }
+    let Some(last_run_at) = semantic_synthesis_schedule_last_success_at(audit_logs, object.id)
+    else {
+        return Ok(true);
+    };
+    let interval_seconds = object
+        .spec
+        .pointer("/schedule_policy/interval_seconds")
+        .and_then(Value::as_i64)
+        .filter(|seconds| *seconds > 0);
+    let Some(interval_seconds) = interval_seconds else {
+        return Ok(false);
+    };
+    Ok(last_run_at + chrono::Duration::seconds(interval_seconds) <= checked_at)
+}
+
+fn semantic_synthesis_schedule_due_at(
+    object: &WorkflowPackRuntimeObject,
+) -> Result<Option<DateTime<Utc>>, AppError> {
+    let Some(value) = object
+        .spec
+        .pointer("/schedule_policy/due_at")
+        .or_else(|| object.spec.get("due_at"))
+    else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(AppError::bad_request(
+            "semantic synthesis schedule due_at must be an RFC3339 string",
+        ));
+    };
+    DateTime::parse_from_rfc3339(raw)
+        .map(|value| Some(value.with_timezone(&Utc)))
+        .map_err(|_| {
+            AppError::bad_request("semantic synthesis schedule due_at must be an RFC3339 string")
+        })
+}
+
+fn semantic_synthesis_schedule_last_success_at(
+    audit_logs: &[AuditLog],
+    runtime_object_id: Uuid,
+) -> Option<DateTime<Utc>> {
+    audit_logs
+        .iter()
+        .filter(|log| {
+            log.action == "semantic_synthesis.schedule_run_created"
+                && log
+                    .details
+                    .get("runtime_object_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    == Some(runtime_object_id)
+        })
+        .map(|log| log.created_at)
+        .max()
+}
+
+fn semantic_synthesis_schedule_input_from_runtime_object(
+    object: &WorkflowPackRuntimeObject,
+) -> Result<(Uuid, String, CreateSemanticSynthesisRun), AppError> {
+    let session_id = object
+        .spec
+        .get("session_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .spec
+                .pointer("/semantic_synthesis/session_id")
+                .and_then(Value::as_str)
+        })
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| {
+            AppError::bad_request("semantic synthesis schedule session_id must be a UUID string")
+        })?;
+    let synthesis_type = object
+        .spec
+        .get("synthesis_type")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .spec
+                .pointer("/semantic_synthesis/synthesis_type")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("post_run_reflection")
+        .to_string();
+    let goal_attempted = object
+        .spec
+        .get("goal_attempted")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .spec
+                .pointer("/semantic_synthesis/goal_attempted")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("Scheduled semantic synthesis")
+        .to_string();
+    let durable_memory_candidates =
+        serde_json::from_value::<Vec<SemanticSynthesisMemoryCandidateInput>>(
+            object
+                .spec
+                .get("durable_memory_candidates")
+                .or_else(|| {
+                    object
+                        .spec
+                        .pointer("/semantic_synthesis/durable_memory_candidates")
+                })
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        )
+        .map_err(|error| {
+            AppError::bad_request(format!(
+                "semantic synthesis schedule durable_memory_candidates are invalid: {error}"
+            ))
+        })?;
+    let metadata = object
+        .spec
+        .get("metadata")
+        .or_else(|| object.spec.pointer("/semantic_synthesis/metadata"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Ok((
+        session_id,
+        synthesis_type.clone(),
+        CreateSemanticSynthesisRun {
+            synthesis_type,
+            goal_attempted,
+            context_used: semantic_synthesis_schedule_string_array(&object.spec, "context_used"),
+            worked: semantic_synthesis_schedule_string_array(&object.spec, "worked"),
+            failed_or_corrected: semantic_synthesis_schedule_string_array(
+                &object.spec,
+                "failed_or_corrected",
+            ),
+            unsafe_assumptions: semantic_synthesis_schedule_string_array(
+                &object.spec,
+                "unsafe_assumptions",
+            ),
+            durable_memory_candidates,
+            metadata,
+        },
+    ))
+}
+
+fn semantic_synthesis_schedule_string_array(spec: &Value, key: &str) -> Vec<String> {
+    spec.get(key)
+        .or_else(|| spec.pointer(&format!("/semantic_synthesis/{key}")))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn semantic_synthesis_scheduled_run_skipped(
+    object: &WorkflowPackRuntimeObject,
+    session_id: Option<Uuid>,
+    synthesis_type: Option<&str>,
+    reason: &str,
+) -> SemanticSynthesisScheduledRun {
+    SemanticSynthesisScheduledRun {
+        runtime_object_id: object.id,
+        object_key: object.object_key.clone(),
+        session_id,
+        synthesis_type: synthesis_type.map(str::to_string),
+        status: "skipped".to_string(),
+        artifact_id: None,
+        candidate_count: 0,
+        reason: Some(reason.to_string()),
+    }
+}
+
+fn semantic_synthesis_scheduled_run_failed(
+    object: &WorkflowPackRuntimeObject,
+    session_id: Option<Uuid>,
+    synthesis_type: Option<&str>,
+    reason: &str,
+) -> SemanticSynthesisScheduledRun {
+    SemanticSynthesisScheduledRun {
+        runtime_object_id: object.id,
+        object_key: object.object_key.clone(),
+        session_id,
+        synthesis_type: synthesis_type.map(str::to_string),
+        status: "failed".to_string(),
+        artifact_id: None,
+        candidate_count: 0,
+        reason: Some(reason.to_string()),
+    }
+}
+
 async fn record_workflow_step_run_updated(
     state: &AppState,
     run: &WorkflowRun,
@@ -20833,6 +21262,16 @@ async fn materialize_semantic_synthesis_run(
     subject_id: String,
     input: CreateSemanticSynthesisRun,
 ) -> Result<SemanticSynthesisRunResult, AppError> {
+    materialize_semantic_synthesis_run_for_actor(state, session_id, subject_id, "user", input).await
+}
+
+async fn materialize_semantic_synthesis_run_for_actor(
+    state: &AppState,
+    session_id: Uuid,
+    subject_id: String,
+    actor_type: &str,
+    input: CreateSemanticSynthesisRun,
+) -> Result<SemanticSynthesisRunResult, AppError> {
     let synthesis_type = normalize_semantic_synthesis_type(&input.synthesis_type)?;
     let goal_attempted =
         normalize_required_synthesis_text(&input.goal_attempted, "goal_attempted")?;
@@ -20975,7 +21414,7 @@ async fn materialize_semantic_synthesis_run(
     state
         .append_audit_log(new_audit_log(
             Some(session_id),
-            "user",
+            actor_type,
             None,
             "semantic_synthesis.run_created",
             "artifact",
@@ -37698,6 +38137,27 @@ async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, 
         }
     }
 
+    let (
+        semantic_synthesis_scheduled_count,
+        semantic_synthesis_due_count,
+        semantic_synthesis_skipped_count,
+    ) = build_semantic_synthesis_schedule_due_counts(state, generated_at).await?;
+    actions.push(scheduler_due_plan_item(
+        "memory",
+        "semantic_synthesis_schedule_run",
+        "auto",
+        semantic_synthesis_due_count,
+        semantic_synthesis_skipped_count,
+        semantic_synthesis_scheduled_count,
+        if semantic_synthesis_due_count > 0 {
+            "create due reflection/dreaming artifacts and review-gated memory writeback candidates"
+        } else if semantic_synthesis_scheduled_count > 0 {
+            "semantic synthesis schedules exist but none are due"
+        } else {
+            "no semantic synthesis schedules are registered"
+        },
+    ));
+
     let stale_remote_computer_attachments = state.list_stale_remote_computer_attachments().await?;
     let remote_computer_leases = state.list_remote_computer_leases().await?;
     let expired_remote_computer_leases = remote_computer_leases
@@ -37886,6 +38346,8 @@ async fn execute_scheduler_due_tasks(
     )
     .await?;
     let workflow_scheduled_steps = execute_due_workflow_scheduled_steps(state, checked_at).await?;
+    let semantic_synthesis_schedules =
+        execute_due_semantic_synthesis_schedules(state, checked_at).await?;
     let usage = build_usage_summary(state).await?;
     let cost_alerts = build_cost_alerts(&usage.provider_budgets, checked_at);
     let active_alert_route_count = state
@@ -37956,6 +38418,11 @@ async fn execute_scheduler_due_tasks(
     if workflow_scheduled_steps.activated_count > 0 {
         actions.push("workflow_scheduled_steps_activated".to_string());
     }
+    if semantic_synthesis_schedules.created_count > 0
+        || semantic_synthesis_schedules.failed_count > 0
+    {
+        actions.push("semantic_synthesis_schedules_processed".to_string());
+    }
     if cost_alert_delivery.is_some() {
         actions.push("usage_cost_alert_delivery_processed".to_string());
     }
@@ -38000,6 +38467,7 @@ async fn execute_scheduler_due_tasks(
         approval_escalations,
         agent_releases,
         workflow_scheduled_steps: Some(workflow_scheduled_steps),
+        semantic_synthesis_schedules: Some(semantic_synthesis_schedules),
         mcp_health_runs,
         mcp_rollout_runs,
         codex_app_server_stale_polls,
@@ -38030,6 +38498,9 @@ async fn execute_scheduler_due_tasks(
                 "provider_policy_gate_status": run.provider_policy_gate.as_ref().map(|gate| gate.status.clone()),
                 "workflow_scheduled_step_status": run.workflow_scheduled_steps.as_ref().map(|workflow| workflow.status.clone()),
                 "workflow_scheduled_step_activated_count": run.workflow_scheduled_steps.as_ref().map(|workflow| workflow.activated_count).unwrap_or(0),
+                "semantic_synthesis_schedule_status": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.status.clone()),
+                "semantic_synthesis_schedule_created_count": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.created_count).unwrap_or(0),
+                "semantic_synthesis_schedule_failed_count": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.failed_count).unwrap_or(0),
                 "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
                 "remote_computer_sidecar_supervision_status": run.remote_computer_sidecar_supervision.status,
                 "remote_computer_sidecar_missing_heartbeat_count": run.remote_computer_sidecar_supervision.missing_heartbeat_count,
@@ -56460,6 +56931,167 @@ not json
             })
             .expect("activated normalize retry step");
         assert_eq!(activated_retry["status"], json!("queued"));
+    }
+
+    #[tokio::test]
+    async fn scheduler_due_run_materializes_due_semantic_synthesis_schedule_once() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let session = state
+            .create_session(CreateSession {
+                agent_id: agent.id,
+                environment_id: None,
+                title: "scheduled semantic synthesis".to_string(),
+                message: Some("Build a governed memory trail.".to_string()),
+            })
+            .await
+            .expect("session");
+        state
+            .append_event(
+                "system",
+                None,
+                session.id,
+                "session.goal.completed",
+                json!({"objective": "Build a governed memory trail."}),
+            )
+            .await
+            .expect("checkpoint");
+
+        let due_at = Utc::now() - chrono::Duration::minutes(5);
+        let runtime_object_id = Uuid::new_v4();
+        state
+            .create_workflow_pack_runtime_objects(vec![WorkflowPackRuntimeObject {
+                id: runtime_object_id,
+                installation_id: Uuid::new_v4(),
+                binding_id: Uuid::new_v4(),
+                pack_id: "semantic-memory-pack".to_string(),
+                pack_version: "0.1.0".to_string(),
+                object_type: "schedule".to_string(),
+                object_key: "semantic-synthesis:scheduled-memory-trail".to_string(),
+                runtime_kind: "semantic_synthesis_schedule".to_string(),
+                status: "released".to_string(),
+                spec: json!({
+                    "session_id": session.id,
+                    "synthesis_type": "dreaming_synthesis",
+                    "goal_attempted": "Synthesize durable lessons from completed managed work.",
+                    "context_used": ["scheduler_due_run", "session_events"],
+                    "worked": ["due schedule remained audit-bound"],
+                    "failed_or_corrected": [],
+                    "unsafe_assumptions": ["scheduler must not promote memory directly"],
+                    "durable_memory_candidates": [
+                        {
+                            "proposed_object_key": "memory:scheduled-semantic-synthesis:review-required",
+                            "title": "Scheduled synthesis remains review gated",
+                            "summary": "Scheduler-owned semantic synthesis should create review candidates, not durable memory directly.",
+                            "content": {"rule": "scheduled-candidate-first"},
+                            "trust_level": "source_attested",
+                            "freshness": "current"
+                        }
+                    ],
+                    "schedule_policy": {
+                        "mode": "scheduler",
+                        "due_at": due_at,
+                        "one_shot": true
+                    }
+                }),
+                created_at: due_at,
+                updated_at: due_at,
+            }])
+            .await
+            .expect("runtime object");
+
+        let plan = build_scheduler_due_plan(&state).await.expect("due plan");
+        let semantic_plan = plan
+            .actions
+            .iter()
+            .find(|item| item.action == "semantic_synthesis_schedule_run")
+            .expect("semantic synthesis schedule plan item");
+        assert_eq!(semantic_plan.area, "memory");
+        assert_eq!(semantic_plan.status, "due");
+        assert_eq!(semantic_plan.due_count, 1);
+
+        let first_run = execute_scheduler_due_tasks(
+            &state,
+            Some(SchedulerRunDueRequest {
+                idempotency_key: Some("semantic-synthesis-schedule-test".to_string()),
+                owner: Some("test".to_string()),
+                run_window_start: None,
+                run_window_end: None,
+                retry_policy: None,
+            }),
+        )
+        .await
+        .expect("first due run");
+        let first_run_value = serde_json::to_value(&first_run).expect("run value");
+        assert_eq!(
+            first_run_value["semantic_synthesis_schedules"]["status"],
+            json!("completed")
+        );
+        assert_eq!(
+            first_run_value["semantic_synthesis_schedules"]["created_count"],
+            json!(1)
+        );
+        assert!(
+            first_run
+                .actions
+                .iter()
+                .any(|action| action == "semantic_synthesis_schedules_processed")
+        );
+
+        let artifacts = state
+            .list_artifacts(session.id)
+            .await
+            .expect("session artifacts");
+        assert_eq!(
+            artifacts
+                .iter()
+                .filter(|artifact| artifact.artifact_type == "semantic_dreaming_report")
+                .count(),
+            1
+        );
+        let candidates = state
+            .list_memory_writeback_candidates(Some(session.id))
+            .await
+            .expect("memory writeback candidates");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].candidate_type, "dreaming_synthesis");
+        assert_eq!(candidates[0].status, "pending");
+
+        let second_run = execute_scheduler_due_tasks(
+            &state,
+            Some(SchedulerRunDueRequest {
+                idempotency_key: Some("semantic-synthesis-schedule-test-2".to_string()),
+                owner: Some("test".to_string()),
+                run_window_start: None,
+                run_window_end: None,
+                retry_policy: None,
+            }),
+        )
+        .await
+        .expect("second due run");
+        let second_run_value = serde_json::to_value(&second_run).expect("run value");
+        assert_eq!(
+            second_run_value["semantic_synthesis_schedules"]["created_count"],
+            json!(0)
+        );
+        let artifacts_after_second = state
+            .list_artifacts(session.id)
+            .await
+            .expect("session artifacts");
+        assert_eq!(
+            artifacts_after_second
+                .iter()
+                .filter(|artifact| artifact.artifact_type == "semantic_dreaming_report")
+                .count(),
+            1
+        );
     }
 
     #[test]

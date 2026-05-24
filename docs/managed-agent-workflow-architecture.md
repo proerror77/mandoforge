@@ -612,6 +612,15 @@ promote memory or change policies. The runtime-owned submission boundary is
 structured synthesis, while MandoForge records the report artifact, opens
 pending writeback candidates, and keeps final memory promotion behind review.
 
+The scheduler path now recognizes released/active Workflow Pack runtime objects
+whose `runtime_kind` is `semantic_synthesis_schedule`. `/api/scheduler/due-plan`
+surfaces due reflection/dreaming schedules under the memory area, and
+`/api/scheduler/run-due` materializes due schedules through the same governed
+synthesis API path. The schedule object is not allowed to promote memory
+directly; it can only produce an artifact plus review-gated writeback
+candidates, with audit evidence preventing one-shot schedules from being run
+twice.
+
 ## Agent Role Permission Matrix
 
 | Role | Default allowed | Default denied |
