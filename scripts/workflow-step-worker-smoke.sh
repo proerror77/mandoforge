@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
 SUBJECT="${MANDOFORGE_WORKFLOW_STEP_SMOKE_SUBJECT:-workflow-step-worker-smoke}"
 ROLES="${MANDOFORGE_WORKFLOW_STEP_SMOKE_ROLES:-admin,operator}"
+AUTH_TOKEN="${MANDOFORGE_WORKFLOW_STEP_SMOKE_AUTH_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-${MANDOFORGE_WORKER_TOKEN:-}}}"
 WORKER_POOL="${MANDOFORGE_WORKFLOW_STEP_SMOKE_WORKER_POOL:-managed-agent}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/workflow-step-worker-smoke}"
 RUN_ID="${MANDOFORGE_WORKFLOW_STEP_SMOKE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}}"
@@ -14,6 +15,9 @@ auth_headers=(
   -H "x-mandoforge-subject: $SUBJECT"
   -H "x-mandoforge-roles: $ROLES"
 )
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
