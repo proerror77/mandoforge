@@ -1,13 +1,13 @@
 # Whiskey Adoption Status
 
-Snapshot date: 2026-05-25 after semantic governance console deployment and workflow-step worker smoke.
+Snapshot date: 2026-05-25 after ontology registry deployment and semantic console smoke.
 
 This file tracks the current production-like adoption state for `wishky-2-1`. It is a release/status ledger, not a replacement for [Whiskey Adoption Runbook](whiskey-adoption-runbook.md).
 
 ## Current Deployment
 
 - Host: `wishky-2-1`.
-- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:whiskey-20260525-6e08fab`.
+- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:whiskey-20260525-78ccf78`.
 - API: `127.0.0.1:18787`.
 - Postgres: `127.0.0.1:15432`.
 - Compose project: `mandoforge-adoption`.
@@ -16,12 +16,13 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 - Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260518T050542Z.tar.gz`.
 - Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260518T050542Z.tar.gz`.
 - Latest strict archive summary: `stage2_status=ready`, `completion_blocked=false`, `open_gap_count=0`, `validation_missing_endpoint_count=0`, `validation_stale_endpoint_count=0`.
-- Latest semantic console / worker smoke: API and worker containers run image
-  `whiskey-20260525-6e08fab`; `/healthz` returns `{"status":"ok"}`;
-  static UI serves `index-BCX-AyF_.js` and `index-DeJQG8Pc.css`; authenticated
-  semantic API readback reports `scope_rank` as the effective retrieval backend,
-  memory governance `status=ready`, 3 semantic objects, and 0 semantic links.
-  The fixed workflow-step worker smoke passed with workflow run
+- Latest ontology registry / semantic console smoke: API container runs image
+  `whiskey-20260525-78ccf78`; `/healthz` returns `{"status":"ok"}`;
+  static UI serves `index-xUc4LsMW.js` and `index-PePX-HRX.css`; authenticated
+  `/api/ontology/registry` readback reports version `core-v0.1`, 21 object
+  types, 11 relation types, and semantic-object relations `contradicts`,
+  `supports`, and `supersedes`.
+- Latest workflow-step worker smoke: the fixed workflow-step worker smoke passed with workflow run
   `2cf0120b-89b6-4d11-bcc6-ad8aa428b34c`, completed step
   `c81855c4-acd9-4b27-8c89-0d0bf4c66f69`, worker
   `whiskey-pilot-worker-1`, context packet
