@@ -1,13 +1,13 @@
 # Whiskey Adoption Status
 
-Snapshot date: 2026-05-25 after semantic ingestion batch deployment and Whiskey smoke.
+Snapshot date: 2026-05-25 after semantic synthesis deployment and Whiskey smoke.
 
 This file tracks the current production-like adoption state for `wishky-2-1`. It is a release/status ledger, not a replacement for [Whiskey Adoption Runbook](whiskey-adoption-runbook.md).
 
 ## Current Deployment
 
 - Host: `wishky-2-1`.
-- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:whiskey-20260525-9d4eb07`.
+- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:whiskey-20260525-62609f5`.
 - API: `127.0.0.1:18787`.
 - Postgres: `127.0.0.1:15432`.
 - Compose project: `mandoforge-adoption`.
@@ -16,11 +16,12 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 - Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260518T050542Z.tar.gz`.
 - Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260518T050542Z.tar.gz`.
 - Latest strict archive summary: `stage2_status=ready`, `completion_blocked=false`, `open_gap_count=0`, `validation_missing_endpoint_count=0`, `validation_stale_endpoint_count=0`.
-- Latest semantic ingestion / console smoke: API container runs image
-  `whiskey-20260525-9d4eb07`; static UI serves `index-BxcdLo4K.js` and
-  `index-EEvGIjP9.css`; authenticated `POST /api/semantic-ingestion/batches`
-  for `repo://tmp/whiskey-ingestion-smoke-20260525043757.md` returned
-  `status=completed`, `object_count=2`, and `link_count=1`.
+- Latest semantic synthesis / console smoke: API container runs image
+  `whiskey-20260525-62609f5`; static UI serves `index-UxXs9wxD.js` and
+  `index-Bbll30WL.css`; authenticated
+  `POST /api/sessions/:id/semantic-synthesis-runs` returned `status=created`,
+  `artifact_type=semantic_reflection_report`, `candidate_count=1`, and
+  `candidate_type=session_reflection`.
 - Latest workflow-step worker smoke: the fixed workflow-step worker smoke passed with workflow run
   `2cf0120b-89b6-4d11-bcc6-ad8aa428b34c`, completed step
   `c81855c4-acd9-4b27-8c89-0d0bf4c66f69`, worker
