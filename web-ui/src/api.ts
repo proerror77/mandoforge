@@ -144,15 +144,19 @@ export type WorkflowGraphConsole = {
 
 export type WorkflowGraphConsoleNode = {
   id: string;
+  step_run_id?: string | null;
   step_key: string;
   step_type: string;
   status: string;
+  declared: boolean;
+  dependencies: string[];
   agent_id?: string | null;
   task_grant_id?: string | null;
   scheduled_at?: string | null;
   due: boolean;
   started_at?: string | null;
   completed_at?: string | null;
+  definition_summary: Record<string, unknown>;
   input_summary: Record<string, unknown>;
   output_summary: Record<string, unknown>;
 };
@@ -163,6 +167,7 @@ export type WorkflowGraphConsoleEdge = {
   to_step_key?: string | null;
   transition_type: string;
   status: string;
+  declared: boolean;
   condition_summary: Record<string, unknown>;
   result_summary: Record<string, unknown>;
   created_at: string;

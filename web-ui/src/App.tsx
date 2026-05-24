@@ -567,8 +567,12 @@ function WorkflowGraph({ graph }: { graph: WorkflowGraphConsole }) {
             <StatusLogo status={statusFromText(node.status)} />
             <div>
               <strong>{node.step_key}</strong>
-              <span>{node.step_type} · {node.status}{node.scheduled_at ? ` · ${node.due ? "due now" : `due ${relativeAge(node.scheduled_at)}`}` : ""}</span>
-              <small>{summaryLine(node.output_summary) || summaryLine(node.input_summary)}</small>
+              <span>
+                {node.step_type} · {node.declared ? "declared" : node.status}
+                {node.dependencies.length ? ` · after ${node.dependencies.join(", ")}` : ""}
+                {node.scheduled_at ? ` · ${node.due ? "due now" : `due ${relativeAge(node.scheduled_at)}`}` : ""}
+              </span>
+              <small>{summaryLine(node.output_summary) || summaryLine(node.input_summary) || summaryLine(node.definition_summary)}</small>
             </div>
           </div>
         ))}
@@ -576,7 +580,7 @@ function WorkflowGraph({ graph }: { graph: WorkflowGraphConsole }) {
       <div className="graph-edges">
         {graph.edges.slice(-8).map((edge) => (
           <span key={edge.id}>
-            {(edge.from_step_key ?? "start")} {"->"} {(edge.to_step_key ?? "run")} · {edge.transition_type}/{edge.status}
+            {(edge.from_step_key ?? "start")} {"->"} {(edge.to_step_key ?? "run")} · {edge.declared ? "declared" : edge.transition_type}/{edge.status}
           </span>
         ))}
       </div>

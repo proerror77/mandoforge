@@ -1371,15 +1371,19 @@ struct WorkflowRunGraphConsole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowGraphConsoleNode {
     id: Uuid,
+    step_run_id: Option<Uuid>,
     step_key: String,
     step_type: String,
     status: String,
+    declared: bool,
+    dependencies: Vec<String>,
     agent_id: Option<Uuid>,
     task_grant_id: Option<Uuid>,
     scheduled_at: Option<DateTime<Utc>>,
     due: bool,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
+    definition_summary: Value,
     input_summary: Value,
     output_summary: Value,
 }
@@ -1391,6 +1395,7 @@ struct WorkflowGraphConsoleEdge {
     to_step_key: Option<String>,
     transition_type: String,
     status: String,
+    declared: bool,
     condition_summary: Value,
     result_summary: Value,
     created_at: DateTime<Utc>,
@@ -13200,16 +13205,8 @@ async fn materialize_workflow_graph_step_with_policy_context(
     output_payload: Value,
 ) -> Result<WorkflowStepRun, AppError> {
     let step_key = workflow_graph_step_key(graph_step)?;
-    let step_type = graph_step
-        .get("type")
-        .or_else(|| graph_step.get("step_type"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("agent")
-        .to_string();
-    let agent_id =
-        workflow_graph_step_uuid(graph_step, "agent_id")?.or(Some(definition.default_agent_id));
+    let step_type = workflow_graph_step_type(graph_step);
+    let agent_id = workflow_graph_step_agent_id(definition, graph_step)?;
     let agent_version_id = match agent_id {
         Some(agent_id) => Some(state.current_agent_version(agent_id).await?.id),
         None => None,
@@ -13405,6 +13402,25 @@ fn workflow_graph_step_key(step: &Value) -> Result<String, AppError> {
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
         .ok_or_else(|| AppError::bad_request("workflow graph step requires key"))
+}
+
+fn workflow_graph_step_type(graph_step: &Value) -> String {
+    graph_step
+        .get("type")
+        .or_else(|| graph_step.get("step_type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("agent")
+        .to_string()
+}
+
+fn workflow_graph_step_agent_id(
+    definition: &WorkflowDefinition,
+    graph_step: &Value,
+) -> Result<Option<Uuid>, AppError> {
+    workflow_graph_step_uuid(graph_step, "agent_id")
+        .map(|agent_id| agent_id.or(Some(definition.default_agent_id)))
 }
 
 fn workflow_graph_step_dependencies(step: &Value) -> Result<Vec<String>, AppError> {
@@ -14831,6 +14847,9 @@ async fn build_workflow_run_graph_console(
     run: &WorkflowRun,
 ) -> Result<WorkflowRunGraphConsole, AppError> {
     let generated_at = Utc::now();
+    let definition = state
+        .get_workflow_definition(run.workflow_definition_id)
+        .await?;
     let steps = state.list_workflow_step_runs(run.id).await?;
     let transitions = state.list_workflow_transitions(run.id).await?;
     let mut status_counts = BTreeMap::new();
@@ -14843,15 +14862,30 @@ async fn build_workflow_run_graph_console(
                     .is_some_and(|scheduled_at| scheduled_at <= generated_at)
         })
         .count();
-    let nodes = steps
+    let materialized_step_keys = steps
         .iter()
-        .map(|step| {
+        .map(|step| step.step_key.clone())
+        .collect::<BTreeSet<_>>();
+    let mut nodes = steps
+        .iter()
+        .map(|step| -> Result<WorkflowGraphConsoleNode, AppError> {
             *status_counts.entry(step.status.clone()).or_insert(0) += 1;
-            WorkflowGraphConsoleNode {
+            let graph_step = workflow_graph_step_by_key(&definition.step_graph, &step.step_key)?;
+            let dependencies = graph_step
+                .map(workflow_graph_step_dependencies)
+                .transpose()?
+                .unwrap_or_default();
+            let definition_summary = graph_step
+                .map(workflow_graph_console_summary)
+                .unwrap_or_else(empty_json_object);
+            Ok(WorkflowGraphConsoleNode {
                 id: step.id,
+                step_run_id: Some(step.id),
                 step_key: step.step_key.clone(),
                 step_type: step.step_type.clone(),
                 status: step.status.clone(),
+                declared: false,
+                dependencies,
                 agent_id: step.agent_id,
                 task_grant_id: step.task_grant_id,
                 scheduled_at: step.scheduled_at,
@@ -14861,12 +14895,44 @@ async fn build_workflow_run_graph_console(
                         .is_some_and(|scheduled_at| scheduled_at <= generated_at),
                 started_at: step.started_at,
                 completed_at: step.completed_at,
+                definition_summary,
                 input_summary: workflow_graph_console_summary(&step.input_payload),
                 output_summary: workflow_graph_console_summary(&step.output_payload),
-            }
+            })
         })
-        .collect::<Vec<_>>();
-    let edges = transitions
+        .collect::<Result<Vec<_>, AppError>>()?;
+    if let Some(graph_steps) = definition.step_graph.get("steps").and_then(Value::as_array) {
+        for graph_step in graph_steps {
+            let step_key = workflow_graph_step_key(graph_step)?;
+            if materialized_step_keys.contains(&step_key) {
+                continue;
+            }
+            let status = "declared".to_string();
+            *status_counts.entry(status.clone()).or_insert(0) += 1;
+            nodes.push(WorkflowGraphConsoleNode {
+                id: workflow_graph_declared_node_id(run.id, &step_key),
+                step_run_id: None,
+                step_key: step_key.clone(),
+                step_type: workflow_graph_step_type(graph_step),
+                status,
+                declared: true,
+                dependencies: workflow_graph_step_dependencies(graph_step)?,
+                agent_id: workflow_graph_step_agent_id(&definition, graph_step)?,
+                task_grant_id: None,
+                scheduled_at: None,
+                due: false,
+                started_at: None,
+                completed_at: None,
+                definition_summary: workflow_graph_console_summary(graph_step),
+                input_summary: json!({
+                    "source": "workflow_definition",
+                    "graph_step": workflow_graph_console_summary(graph_step)
+                }),
+                output_summary: empty_json_object(),
+            });
+        }
+    }
+    let mut edges = transitions
         .iter()
         .map(|transition| WorkflowGraphConsoleEdge {
             id: transition.id,
@@ -14874,11 +14940,33 @@ async fn build_workflow_run_graph_console(
             to_step_key: transition.to_step_key.clone(),
             transition_type: transition.transition_type.clone(),
             status: transition.status.clone(),
+            declared: false,
             condition_summary: workflow_graph_console_summary(&transition.condition_payload),
             result_summary: workflow_graph_console_summary(&transition.result_payload),
             created_at: transition.created_at,
         })
         .collect::<Vec<_>>();
+    if let Some(graph_steps) = definition.step_graph.get("steps").and_then(Value::as_array) {
+        for graph_step in graph_steps {
+            let to_step_key = workflow_graph_step_key(graph_step)?;
+            if materialized_step_keys.contains(&to_step_key) {
+                continue;
+            }
+            for from_step_key in workflow_graph_step_dependencies(graph_step)? {
+                edges.push(WorkflowGraphConsoleEdge {
+                    id: workflow_graph_declared_edge_id(run.id, &from_step_key, &to_step_key),
+                    from_step_key: Some(from_step_key),
+                    to_step_key: Some(to_step_key.clone()),
+                    transition_type: "declared_dependency".to_string(),
+                    status: "declared".to_string(),
+                    declared: true,
+                    condition_summary: workflow_graph_console_summary(graph_step),
+                    result_summary: empty_json_object(),
+                    created_at: generated_at,
+                });
+            }
+        }
+    }
     Ok(WorkflowRunGraphConsole {
         workflow_run_id: run.id,
         workflow_definition_id: run.workflow_definition_id,
@@ -14892,6 +14980,31 @@ async fn build_workflow_run_graph_console(
         nodes,
         edges,
     })
+}
+
+fn workflow_graph_declared_node_id(run_id: Uuid, step_key: &str) -> Uuid {
+    workflow_graph_deterministic_uuid(run_id, "declared-node", &[step_key])
+}
+
+fn workflow_graph_declared_edge_id(run_id: Uuid, from_step_key: &str, to_step_key: &str) -> Uuid {
+    workflow_graph_deterministic_uuid(run_id, "declared-edge", &[from_step_key, to_step_key])
+}
+
+fn workflow_graph_deterministic_uuid(run_id: Uuid, kind: &str, parts: &[&str]) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mandoforge-workflow-graph-console");
+    hasher.update(run_id.as_bytes());
+    hasher.update(kind.as_bytes());
+    for part in parts {
+        hasher.update([0]);
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 fn workflow_graph_console_summary(value: &Value) -> Value {
@@ -52916,6 +53029,43 @@ not json
         assert_eq!(
             start_transitions[0]["to_step_run_id"],
             json!(intake_step_id)
+        );
+        let initial_graph: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/graph"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(initial_graph["node_count"], json!(3));
+        assert_eq!(initial_graph["status_counts"]["declared"], json!(2));
+        let initial_nodes = initial_graph["nodes"].as_array().expect("graph nodes");
+        let declared_research = initial_nodes
+            .iter()
+            .find(|node| node["step_key"] == json!("research"))
+            .expect("declared research node");
+        assert_eq!(declared_research["declared"], json!(true));
+        assert_eq!(declared_research["step_run_id"], Value::Null);
+        assert_eq!(declared_research["dependencies"], json!(["intake"]));
+        let declared_draft = initial_nodes
+            .iter()
+            .find(|node| node["step_key"] == json!("draft"))
+            .expect("declared draft node");
+        assert_eq!(declared_draft["declared"], json!(true));
+        assert_eq!(declared_draft["dependencies"], json!(["research"]));
+        assert!(
+            initial_graph["edges"]
+                .as_array()
+                .expect("graph edges")
+                .iter()
+                .any(|edge| {
+                    edge["declared"] == json!(true)
+                        && edge["transition_type"] == json!("declared_dependency")
+                        && edge["from_step_key"] == json!("research")
+                        && edge["to_step_key"] == json!("draft")
+                })
         );
 
         let completed_intake: Value = request_json(

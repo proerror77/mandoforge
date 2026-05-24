@@ -127,9 +127,9 @@ The repository already has the managed runtime kernel:
   before the approved execution path can mark the call complete.
 - The web console now observes workflow runs, steps, transitions, task grants,
   workers, approvals, tool calls, artifacts, session events, graph nodes,
-  server-backed transition filters, pack bindings, pack runtime objects, and
-  memory governance summary, partition drilldown, and writeback queue data from
-  live APIs.
+  declared-but-not-yet-materialized graph nodes, server-backed transition
+  filters, pack bindings, pack runtime objects, and memory governance summary,
+  partition drilldown, and writeback queue data from live APIs.
 - `/api/scheduler/run-due` now includes due scheduled workflow step activation,
   so delayed retry/backoff workflow steps can be advanced by the external
   scheduler path instead of only by a workflow-specific manual endpoint. Due
@@ -160,9 +160,10 @@ Remaining first-class execution gaps:
   service-specific target validation, rate limits, reconciliation, and rollback
   semantics.
 - Workflow observability is now present in the web console with graph
-  visualization, transition filtering, pack-binding inspection, runtime-object
-  inspection, memory-governance partition drilldown, and writeback queue
-  inspection. Deeper graph editing remains a follow-up.
+  visualization, declared future-node visibility, transition filtering,
+  pack-binding inspection, runtime-object inspection, memory-governance
+  partition drilldown, and writeback queue inspection. Deeper graph editing
+  remains a follow-up.
 
 Current boundary status:
 
@@ -817,9 +818,10 @@ Acceptance:
 ### Slice 8: Workflow Observability UI
 
 - Status: implemented for live workflow run console, durable graph console
-  endpoint, server-backed transition filtering, scheduled-step due visibility,
-  pack binding and runtime-object inspection, task grants, approvals, tool
-  calls, artifacts, worker logs, memory partitions, and memory writeback queues.
+  endpoint, declared future graph nodes/edges, server-backed transition
+  filtering, scheduled-step due visibility, pack binding and runtime-object
+  inspection, task grants, approvals, tool calls, artifacts, worker logs, memory
+  partitions, and memory writeback queues.
 - Show Pack, readiness, run status, step graph, agents, threads, grants,
   approvals, tool calls, artifacts, worker logs, and memory candidates.
 - Keep infrastructure panels advanced.
