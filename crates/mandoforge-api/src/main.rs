@@ -13569,8 +13569,117 @@ fn workflow_graph_leaf_condition_result(
         };
         return Ok((json!(expected), (actual != &Value::Null) == expected));
     }
+    for (key, comparator) in [
+        ("greater_than", WorkflowGraphNumericComparator::GreaterThan),
+        ("gt", WorkflowGraphNumericComparator::GreaterThan),
+        (
+            "greater_than_or_equals",
+            WorkflowGraphNumericComparator::GreaterThanOrEquals,
+        ),
+        ("gte", WorkflowGraphNumericComparator::GreaterThanOrEquals),
+        ("less_than", WorkflowGraphNumericComparator::LessThan),
+        ("lt", WorkflowGraphNumericComparator::LessThan),
+        (
+            "less_than_or_equals",
+            WorkflowGraphNumericComparator::LessThanOrEquals,
+        ),
+        ("lte", WorkflowGraphNumericComparator::LessThanOrEquals),
+    ] {
+        if let Some(expected) = condition.get(key).cloned() {
+            let expected_number = workflow_graph_condition_number(&expected, key)?;
+            let matched = workflow_graph_condition_number(actual, key)
+                .map(|actual_number| comparator.matches(actual_number, expected_number))
+                .unwrap_or(false);
+            return Ok((expected, matched));
+        }
+    }
+    for (key, comparator) in [
+        ("after", WorkflowGraphTimeComparator::After),
+        ("on_or_after", WorkflowGraphTimeComparator::OnOrAfter),
+        ("before", WorkflowGraphTimeComparator::Before),
+        ("on_or_before", WorkflowGraphTimeComparator::OnOrBefore),
+    ] {
+        if let Some(expected) = condition.get(key).cloned() {
+            let expected_time = workflow_graph_condition_datetime(&expected, key)?;
+            let matched = workflow_graph_condition_datetime(actual, key)
+                .map(|actual_time| comparator.matches(actual_time, expected_time))
+                .unwrap_or(false);
+            return Ok((expected, matched));
+        }
+    }
     let expected = json!(true);
     Ok((expected.clone(), actual == &expected))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WorkflowGraphNumericComparator {
+    GreaterThan,
+    GreaterThanOrEquals,
+    LessThan,
+    LessThanOrEquals,
+}
+
+impl WorkflowGraphNumericComparator {
+    fn matches(self, actual: f64, expected: f64) -> bool {
+        match self {
+            Self::GreaterThan => actual > expected,
+            Self::GreaterThanOrEquals => actual >= expected,
+            Self::LessThan => actual < expected,
+            Self::LessThanOrEquals => actual <= expected,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WorkflowGraphTimeComparator {
+    After,
+    OnOrAfter,
+    Before,
+    OnOrBefore,
+}
+
+impl WorkflowGraphTimeComparator {
+    fn matches(self, actual: DateTime<Utc>, expected: DateTime<Utc>) -> bool {
+        match self {
+            Self::After => actual > expected,
+            Self::OnOrAfter => actual >= expected,
+            Self::Before => actual < expected,
+            Self::OnOrBefore => actual <= expected,
+        }
+    }
+}
+
+fn workflow_graph_condition_number(value: &Value, key: &str) -> Result<f64, AppError> {
+    let Some(number) = value.as_f64() else {
+        return Err(AppError::bad_request(format!(
+            "workflow graph step condition {key} must be a number"
+        )));
+    };
+    if !number.is_finite() {
+        return Err(AppError::bad_request(format!(
+            "workflow graph step condition {key} must be finite"
+        )));
+    }
+    Ok(number)
+}
+
+fn workflow_graph_condition_datetime(value: &Value, key: &str) -> Result<DateTime<Utc>, AppError> {
+    let Some(value) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    else {
+        return Err(AppError::bad_request(format!(
+            "workflow graph step condition {key} must be an RFC3339 timestamp string"
+        )));
+    };
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|_| {
+            AppError::bad_request(format!(
+                "workflow graph step condition {key} must be an RFC3339 timestamp string"
+            ))
+        })
 }
 
 fn workflow_graph_json_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
@@ -15084,7 +15193,7 @@ async fn advance_workflow_graph_after_step_update(
                     continue;
                 }
             }
-            if let Some(evaluation) =
+            let branch_payload = if let Some(evaluation) =
                 workflow_graph_step_condition_evaluation(graph_step, &existing_steps)?
             {
                 if !evaluation.matched {
@@ -15143,6 +15252,21 @@ async fn advance_workflow_graph_after_step_update(
                     .await?;
                     continue;
                 }
+                Some(json!({
+                    "condition": evaluation.condition,
+                    "path": evaluation.path,
+                    "actual": evaluation.actual,
+                    "expected": evaluation.expected,
+                    "matched": true
+                }))
+            } else {
+                None
+            };
+            let mut policy_context = serde_json::Map::new();
+            policy_context.insert("fan_in".to_string(), fan_in_payload.clone());
+            policy_context.insert("fan_out".to_string(), fan_out_payload.clone());
+            if let Some(branch_payload) = &branch_payload {
+                policy_context.insert("branch".to_string(), branch_payload.clone());
             }
             let materialized = materialize_workflow_graph_step_with_policy_context(
                 state,
@@ -15153,10 +15277,7 @@ async fn advance_workflow_graph_after_step_update(
                 graph_step,
                 "queued",
                 None,
-                json!({
-                    "fan_in": fan_in_payload,
-                    "fan_out": fan_out_payload
-                }),
+                Value::Object(policy_context),
                 empty_json_object(),
             )
             .await?;
@@ -15189,6 +15310,7 @@ async fn advance_workflow_graph_after_step_update(
                     "successful_dependencies": ready_step.fan_in.successful_dependencies,
                     "failed_dependencies": ready_step.fan_in.failed_dependencies,
                     "pending_dependencies": ready_step.fan_in.pending_dependencies,
+                    "branch": branch_payload,
                     "graph_step": graph_step
                 }),
                 empty_json_object(),
@@ -53315,6 +53437,248 @@ not json
                 && transition["status"] == json!("skipped")
                 && transition["condition_payload"]["actual"]["all"][1]["matched"] == json!(false)
         }));
+    }
+
+    #[tokio::test]
+    async fn workflow_branch_numeric_and_time_conditions_materialize_when_true() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Numeric and time branch workflow",
+                    "entrypoint": "numeric-time-branch-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "metrics", "type": "agent", "start": true},
+                            {
+                                "key": "rebalance",
+                                "type": "agent",
+                                "depends_on": ["metrics"],
+                                "condition": {
+                                    "all": [
+                                        {
+                                            "source_step": "metrics",
+                                            "path": "spend",
+                                            "greater_than_or_equals": 100.0
+                                        },
+                                        {
+                                            "source_step": "metrics",
+                                            "path": "captured_at",
+                                            "on_or_before": "2026-05-24T10:00:00Z"
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "numeric time true"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let metrics_step_id = steps[0]["id"]
+            .as_str()
+            .expect("metrics step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{metrics_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {
+                        "spend": 125.5,
+                        "captured_at": "2026-05-24T09:30:00Z"
+                    }
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let rebalance_step = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("rebalance"))
+            .expect("rebalance branch step should be queued");
+        assert_eq!(rebalance_step["status"], json!("queued"));
+        assert_eq!(
+            rebalance_step["input_payload"]["branch"]["actual"]["all"][0]["matched"],
+            json!(true)
+        );
+        assert_eq!(
+            rebalance_step["input_payload"]["branch"]["actual"]["all"][1]["matched"],
+            json!(true)
+        );
+
+        let transitions: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("dependency")
+                && transition["to_step_key"] == json!("rebalance")
+                && transition["status"] == json!("materialized")
+                && transition["condition_payload"]["branch"]["matched"] == json!(true)
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_branch_numeric_condition_false_skips_step() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Numeric branch false workflow",
+                    "entrypoint": "numeric-branch-false-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "metrics", "type": "agent", "start": true},
+                            {
+                                "key": "rebalance",
+                                "type": "agent",
+                                "depends_on": ["metrics"],
+                                "condition": {
+                                    "source_step": "metrics",
+                                    "path": "spend",
+                                    "greater_than": 100.0
+                                }
+                            }
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "numeric branch false"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let metrics_step_id = steps[0]["id"]
+            .as_str()
+            .expect("metrics step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{metrics_step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"spend": 80.0}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let rebalance_step = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("rebalance"))
+            .expect("rebalance branch step should be skipped");
+        assert_eq!(rebalance_step["status"], json!("skipped"));
+        assert_eq!(rebalance_step["output_payload"]["actual"], json!(80.0));
+        assert_eq!(rebalance_step["output_payload"]["expected"], json!(100.0));
     }
 
     #[tokio::test]

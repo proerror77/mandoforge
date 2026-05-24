@@ -141,8 +141,8 @@ Remaining first-class execution gaps:
 - Workflow graph scheduling now has the first branch/skip/fail/retry/
   compensation policy slice, recursive branch-expression evaluator, delayed
   retry/backoff scheduling, due activation, fan-in policy, and fan-out
-  max-parallel controls. It still needs numeric/time comparisons and production
-  rollback/compensation adapters.
+  max-parallel controls, plus numeric and RFC3339 time branch comparisons. It
+  still needs production rollback/compensation adapters.
 - Pack bindings are materialized as generic durable binding records and generic
   runtime objects for schedules, connector accounts, and provider deployment
   handles. Provider-specific deployment adapters remain extension points.
@@ -168,12 +168,13 @@ Current boundary status:
   compensation step materialization, durable transition recording, pack binding
   materialization, generic pack runtime-object materialization, memory
   governance summary/drilldown/writeback queue, external scheduler activation
-  of scheduled workflow steps, and `ApprovalCommitToken` exact binding for MCP
-  and native connector commit writes.
+  of scheduled workflow steps, numeric/time branch expression policy, and
+  `ApprovalCommitToken` exact binding for MCP and native connector commit
+  writes.
 - Clear but only partially enforced now: worker/agent class authority,
-  numeric/time branch expression policy, production native connector transport
-  semantics, provider-specific pack binding deployment, production compensation
-  adapters, and graph authoring/editing UI.
+  production native connector transport semantics, provider-specific pack
+  binding deployment, production compensation adapters, and graph
+  authoring/editing UI.
 
 ## Product Object Model
 
@@ -671,9 +672,10 @@ Hourly metrics trigger
 
 The runtime can support these. The first governed slice now exists: workflow
 run objects, task-level grants, connector scopes, approval token binding, and
-workflow UI are in the runtime path. The remaining work is numeric/time branch
-policy, production connector adapters, provider-specific pack deployment, and
-production-grade compensation/rollback adapters.
+workflow UI are in the runtime path. The remaining work is richer
+domain-specific branch operators beyond numeric/RFC3339 comparisons, production
+connector adapters, provider-specific pack deployment, and production-grade
+compensation/rollback adapters.
 
 ## Implementation Plan
 
@@ -698,10 +700,13 @@ Acceptance:
   skip records, scheduled retry/backoff materialization and due activation,
   fan-in `all` / `any` / `quorum`, fan-out `max_parallel`, failure-driven
   downstream skip, compensation step materialization, recursive branch
-  expressions, and durable `WorkflowTransition` records for start, dependency,
-  fan-in, fan-out, branch, retry, schedule activation, skip, compensation,
-  completion, and terminal failure events. Numeric/time expression policy and
-  production compensation adapters remain pending.
+  expressions, numeric comparisons (`greater_than`, `greater_than_or_equals`,
+  `less_than`, `less_than_or_equals`, and `gt`/`gte`/`lt`/`lte` aliases),
+  RFC3339 time comparisons (`after`, `on_or_after`, `before`,
+  `on_or_before`), and durable `WorkflowTransition` records for start,
+  dependency, fan-in, fan-out, branch, retry, schedule activation, skip,
+  compensation, completion, and terminal failure events. Production
+  compensation adapters remain pending.
 - Add migrations and store modules for `workflow_definitions`,
   `workflow_runs`, `workflow_step_runs`, and `workflow_transitions`.
 - Add read APIs for workflow run console.
