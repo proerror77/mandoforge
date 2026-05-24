@@ -16043,7 +16043,9 @@ async fn stage_workflow_pack_installation_route(
         ));
     }
     let profile_assets = state.list_workflow_pack_profile_assets(id).await?;
-    let bindings = workflow_pack_materialized_bindings(&current, &profile_assets, "staged")?;
+    let bindings =
+        workflow_pack_materialized_bindings_with_runtime_targets(&state, &current, &profile_assets)
+            .await?;
     let staged_at = Utc::now();
     let installation = state
         .update_workflow_pack_installation_state(
@@ -16379,6 +16381,9 @@ async fn release_workflow_pack_installation_route(
             Some(released_at),
         )
         .await?;
+    let released_definitions = state
+        .update_workflow_definition_release_states_for_pack_installation(id, "released")
+        .await?;
     let released_bindings = state
         .update_workflow_pack_binding_statuses(id, "released")
         .await?;
@@ -16393,6 +16398,7 @@ async fn release_workflow_pack_installation_route(
             "eval_gate_status": installation.eval_gate_status,
             "release_gate_status": installation.release_gate_status,
             "gate_evidence": installation.gate_evidence,
+            "workflow_definition_count": released_definitions.len(),
             "binding_count": released_bindings.len(),
             "runtime_object_count": released_runtime_objects.len(),
         }),
@@ -16448,6 +16454,9 @@ async fn rollback_workflow_pack_installation_route(
         )
         .await?;
     state
+        .update_workflow_definition_release_states_for_pack_installation(id, "rolled_back")
+        .await?;
+    state
         .update_workflow_pack_binding_statuses(id, "rolled_back")
         .await?;
     state
@@ -16491,6 +16500,9 @@ async fn archive_workflow_pack_installation_route(
         ));
     }
     let installation = state.archive_workflow_pack_installation(id).await?;
+    state
+        .update_workflow_definition_release_states_for_pack_installation(id, "archived")
+        .await?;
     state
         .update_workflow_pack_binding_statuses(id, "archived")
         .await?;
@@ -16786,6 +16798,302 @@ fn workflow_pack_default_profile_assets(
         .collect()
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WorkflowPackWorkflowFile {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    entry_agent: Option<String>,
+    #[serde(default)]
+    trigger_type: Option<String>,
+    #[serde(default)]
+    input_schema_ref: Option<String>,
+    #[serde(default)]
+    output_schema_ref: Option<String>,
+    #[serde(default)]
+    approval_policy_ref: Option<String>,
+    #[serde(default)]
+    eval_gate_refs: Vec<String>,
+    #[serde(default)]
+    step_graph: Option<Value>,
+    #[serde(default)]
+    steps: Vec<Value>,
+    #[serde(default)]
+    approval: Value,
+    #[serde(default)]
+    output: Value,
+    #[serde(default)]
+    outputs: Vec<String>,
+    #[serde(default)]
+    handoff_rules: Value,
+}
+
+async fn workflow_pack_materialized_bindings_with_runtime_targets(
+    state: &AppState,
+    installation: &WorkflowPackInstallation,
+    profile_assets: &[WorkflowPackProfileAsset],
+) -> Result<Vec<WorkflowPackBinding>, AppError> {
+    let mut bindings = workflow_pack_materialized_bindings(installation, profile_assets, "staged")?;
+    let workflow_definitions =
+        workflow_pack_materialize_workflow_definitions(state, installation).await?;
+    for binding in &mut bindings {
+        if binding.binding_type != "workflow" {
+            continue;
+        }
+        let Some(definition) = workflow_definitions.get(&binding.binding_key) else {
+            continue;
+        };
+        binding.target_id = Some(definition.id);
+        let Value::Object(payload) = &mut binding.materialized_payload else {
+            continue;
+        };
+        payload.insert("workflow_definition_id".to_string(), json!(definition.id));
+        payload.insert("release_state".to_string(), json!(definition.release_state));
+        payload.insert(
+            "step_count".to_string(),
+            json!(
+                definition
+                    .step_graph
+                    .get("steps")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len)
+            ),
+        );
+    }
+    Ok(bindings)
+}
+
+async fn workflow_pack_materialize_workflow_definitions(
+    state: &AppState,
+    installation: &WorkflowPackInstallation,
+) -> Result<BTreeMap<String, WorkflowDefinition>, AppError> {
+    let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
+    let default_agent = workflow_pack_materialization_default_agent(state).await?;
+    let default_agent_id = default_agent.id;
+    let mut definitions = BTreeMap::new();
+    for workflow in &manifest.workflows {
+        let workflow_file = workflow_pack_load_workflow_file(&package_dir, workflow)?;
+        let declared_id = workflow_file
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if declared_id.is_some_and(|declared_id| declared_id != workflow.id) {
+            return Err(AppError::bad_request(format!(
+                "workflow pack workflow {} file declares mismatched id",
+                workflow.id
+            )));
+        }
+        let step_graph = workflow_pack_workflow_step_graph(workflow, &workflow_file)?;
+        workflow_graph_start_steps(&step_graph)?;
+        let trigger_type = normalize_workflow_trigger_type(
+            workflow_file.trigger_type.as_deref().unwrap_or("manual"),
+        )?;
+        let eval_gate_refs = if workflow_file.eval_gate_refs.is_empty() {
+            manifest
+                .evals
+                .iter()
+                .filter(|eval| eval.gate.required)
+                .map(|eval| eval.id.clone())
+                .collect::<Vec<_>>()
+        } else {
+            workflow_file.eval_gate_refs.clone()
+        };
+        let now = Utc::now();
+        let definition = state
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                pack_installation_id: Some(installation.id),
+                pack_id: Some(installation.pack_id.clone()),
+                pack_version: Some(installation.version.clone()),
+                name: workflow_file
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| workflow.id.clone()),
+                entrypoint: workflow.id.clone(),
+                trigger_type,
+                default_agent_id,
+                default_environment_id: None,
+                input_schema_ref: workflow_file.input_schema_ref.clone(),
+                output_schema_ref: workflow_pack_workflow_output_schema_ref(&workflow_file),
+                step_graph,
+                handoff_rules: workflow_pack_workflow_handoff_rules(workflow, &workflow_file),
+                approval_policy_ref: workflow_file.approval_policy_ref.clone(),
+                eval_gate_refs,
+                release_state: "staged".to_string(),
+                created_at: now,
+                updated_at: now,
+                archived_at: None,
+            })
+            .await?;
+        definitions.insert(workflow.id.clone(), definition);
+    }
+    Ok(definitions)
+}
+
+async fn workflow_pack_materialization_default_agent(state: &AppState) -> Result<Agent, AppError> {
+    let mut agents = state.list_agents().await?;
+    agents.sort_by_key(|agent| agent.created_at);
+    agents
+        .iter()
+        .find(|agent| agent.release_state == "active" && agent.agent_role == "manager")
+        .cloned()
+        .or_else(|| {
+            agents
+                .iter()
+                .find(|agent| agent.release_state == "active")
+                .cloned()
+        })
+        .or_else(|| agents.first().cloned())
+        .ok_or_else(|| {
+            AppError::bad_request("workflow pack staging requires at least one runtime agent")
+        })
+}
+
+fn workflow_pack_load_workflow_file(
+    package_dir: &FsPath,
+    workflow: &workflow_pack::WorkflowRef,
+) -> Result<WorkflowPackWorkflowFile, AppError> {
+    let path = package_dir.join(&workflow.path);
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("read workflow pack workflow {}", workflow.path))?;
+    serde_yaml::from_str::<WorkflowPackWorkflowFile>(&content).map_err(|error| {
+        AppError::bad_request(format!(
+            "workflow pack workflow {} is invalid YAML: {error}",
+            workflow.path
+        ))
+    })
+}
+
+fn workflow_pack_workflow_step_graph(
+    workflow: &workflow_pack::WorkflowRef,
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Result<Value, AppError> {
+    if let Some(step_graph) = &workflow_file.step_graph {
+        if !step_graph.is_object() {
+            return Err(AppError::bad_request(format!(
+                "workflow pack workflow {} step_graph must be a JSON object",
+                workflow.id
+            )));
+        }
+        return Ok(step_graph.clone());
+    }
+    let mut graph_steps = Vec::new();
+    let mut used_keys = BTreeSet::new();
+    let mut previous_key: Option<String> = None;
+    for (index, step) in workflow_file.steps.iter().enumerate() {
+        let step_key = workflow_pack_workflow_step_key(step, index, &mut used_keys);
+        let mut graph_step = serde_json::Map::new();
+        graph_step.insert("key".to_string(), json!(step_key));
+        graph_step.insert("type".to_string(), json!("agent"));
+        if let Some(agent_ref) = workflow_pack_workflow_step_string(step, "agent") {
+            graph_step.insert("workflow_agent_ref".to_string(), json!(agent_ref));
+        }
+        if index == 0 {
+            graph_step.insert("start".to_string(), json!(true));
+        } else if let Some(previous_key) = &previous_key {
+            graph_step.insert("depends_on".to_string(), json!([previous_key]));
+        }
+        for key in ["task", "output_schema", "handoff_intent"] {
+            if let Some(value) = step.get(key) {
+                graph_step.insert(key.to_string(), value.clone());
+            }
+        }
+        previous_key = Some(step_key);
+        graph_steps.push(Value::Object(graph_step));
+    }
+    if graph_steps.is_empty() {
+        graph_steps.push(json!({
+            "key": workflow.entry_agent,
+            "type": "agent",
+            "workflow_agent_ref": workflow.entry_agent,
+            "start": true
+        }));
+    }
+    Ok(json!({
+        "source": "workflow_pack_file",
+        "workflow_id": workflow.id,
+        "steps": graph_steps
+    }))
+}
+
+fn workflow_pack_workflow_step_key(
+    step: &Value,
+    index: usize,
+    used_keys: &mut BTreeSet<String>,
+) -> String {
+    let base = workflow_pack_workflow_step_string(step, "key")
+        .or_else(|| workflow_pack_workflow_step_string(step, "handoff_intent"))
+        .or_else(|| workflow_pack_workflow_step_string(step, "agent"))
+        .unwrap_or_else(|| format!("step-{}", index + 1));
+    let base = base
+        .chars()
+        .map(|item| {
+            if item.is_ascii_alphanumeric() || item == '-' || item == '_' {
+                item.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let base = if base.is_empty() {
+        format!("step-{}", index + 1)
+    } else {
+        base
+    };
+    if used_keys.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 2usize.. {
+        let candidate = format!("{base}-{suffix}");
+        if used_keys.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("workflow step key suffix search is unbounded")
+}
+
+fn workflow_pack_workflow_step_string(step: &Value, key: &str) -> Option<String> {
+    step.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn workflow_pack_workflow_output_schema_ref(
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Option<String> {
+    workflow_file.output_schema_ref.clone().or_else(|| {
+        workflow_file
+            .steps
+            .iter()
+            .find_map(|step| workflow_pack_workflow_step_string(step, "output_schema"))
+    })
+}
+
+fn workflow_pack_workflow_handoff_rules(
+    workflow: &workflow_pack::WorkflowRef,
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Value {
+    if workflow_file.handoff_rules.is_object() {
+        return workflow_file.handoff_rules.clone();
+    }
+    json!({
+        "source": "workflow_pack_file",
+        "workflow_id": workflow.id,
+        "entry_agent": workflow.entry_agent,
+        "steps": workflow_file.steps.clone(),
+        "approval": workflow_file.approval.clone(),
+        "output": workflow_file.output.clone(),
+        "outputs": workflow_file.outputs.clone()
+    })
+}
+
 fn workflow_pack_materialized_bindings(
     installation: &WorkflowPackInstallation,
     profile_assets: &[WorkflowPackProfileAsset],
@@ -17019,6 +17327,7 @@ fn workflow_pack_runtime_objects_from_bindings(
                 json!({
                     "binding_id": binding.id,
                     "workflow_id": binding.binding_key.clone(),
+                    "workflow_definition_id": binding.target_id,
                     "entry_agent": binding.materialized_payload.get("entry_agent").cloned(),
                     "source_path": binding.source_path.clone(),
                     "source_digest": binding.materialized_payload.get("source_digest").cloned(),
@@ -51662,17 +51971,59 @@ not json
                 .expect("valid request"),
         )
         .await;
+        let profile_onboarding_binding = staged_bindings
+            .iter()
+            .find(|binding| {
+                binding["binding_type"] == json!("workflow")
+                    && binding["binding_key"] == json!("profile-onboarding")
+            })
+            .expect("profile onboarding workflow binding");
+        let profile_onboarding_definition_id = profile_onboarding_binding["target_id"]
+            .as_str()
+            .expect("workflow definition target id")
+            .to_string();
         assert!(staged_bindings.iter().any(|binding| {
             binding["binding_type"] == json!("workflow")
                 && binding["binding_key"] == json!("profile-onboarding")
                 && binding["target_kind"] == json!("workflow_definition")
+                && binding["target_id"].as_str().is_some()
                 && binding["status"] == json!("staged")
                 && binding["source_path"] == json!("workflows/profile-onboarding.workflow.yaml")
                 && binding["materialized_payload"]["entry_agent"] == json!("reader")
+                && binding["materialized_payload"]["workflow_definition_id"] == binding["target_id"]
+                && binding["materialized_payload"]["step_count"] == json!(3)
                 && binding["materialized_payload"]["source_digest"]
                     .as_str()
                     .is_some_and(|digest| digest.starts_with("sha256:"))
         }));
+        let staged_workflow_definition: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-definitions/{profile_onboarding_definition_id}"
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            staged_workflow_definition["pack_installation_id"],
+            json!(installed.id)
+        );
+        assert_eq!(
+            staged_workflow_definition["pack_id"],
+            json!("ai-governance")
+        );
+        assert_eq!(
+            staged_workflow_definition["entrypoint"],
+            json!("profile-onboarding")
+        );
+        assert_eq!(staged_workflow_definition["release_state"], json!("staged"));
+        assert_eq!(
+            staged_workflow_definition["step_graph"]["steps"][0]["workflow_agent_ref"],
+            json!("reader")
+        );
         assert!(staged_bindings.iter().any(|binding| {
             binding["binding_type"] == json!("agent")
                 && binding["binding_key"] == json!("reader")
@@ -51711,6 +52062,8 @@ not json
                 && object["object_key"] == json!("workflow:profile-onboarding:schedule")
                 && object["status"] == json!("staged")
                 && object["spec"]["workflow_id"] == json!("profile-onboarding")
+                && object["spec"]["workflow_definition_id"]
+                    == json!(profile_onboarding_definition_id)
                 && object["spec"]["provider_specific_validation"] == json!("not_required")
         }));
         assert!(staged_runtime_objects.iter().any(|object| {
@@ -51810,6 +52163,39 @@ not json
                 .iter()
                 .all(|object| object["status"] == json!("released"))
         );
+        let released_workflow_definition: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-definitions/{profile_onboarding_definition_id}"
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            released_workflow_definition["release_state"],
+            json!("released")
+        );
+        let released_pack_run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": profile_onboarding_definition_id,
+                    "title": "start released pack workflow"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(
+            released_pack_run["workflow_definition_id"],
+            json!(profile_onboarding_definition_id)
+        );
+        assert_eq!(released_pack_run["status"], json!("queued"));
         assert_eq!(
             released.gate_evidence["evidence"]["eval_run_id"],
             json!("eval-ai-governance-1")
@@ -51856,6 +52242,39 @@ not json
         assert_eq!(
             rolled_back.gate_evidence["rollback"]["evidence"]["rollback_run_id"],
             json!("rollback-ai-governance-1")
+        );
+        let rolled_back_workflow_definition: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-definitions/{profile_onboarding_definition_id}"
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            rolled_back_workflow_definition["release_state"],
+            json!("rolled_back")
+        );
+        let (status, start_after_rollback_error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": profile_onboarding_definition_id,
+                    "title": "blocked rolled back pack workflow"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            start_after_rollback_error["error"].as_str(),
+            Some("workflow run requires a released workflow definition")
         );
 
         let update_manifest_path = ai_governance_update_manifest_path_string("0.1.1");
@@ -51932,6 +52351,22 @@ not json
         assert_eq!(archived.status, "archived");
         assert!(archived.archived_at.is_some());
         assert_eq!(archived.released_at, released.released_at);
+        let (status, definition_after_archive_error) = request_value(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-definitions/{profile_onboarding_definition_id}"
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            definition_after_archive_error["error"].as_str(),
+            Some("workflow definition not found")
+        );
 
         let (status, error) = request_value(
             app.clone(),

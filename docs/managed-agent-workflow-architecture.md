@@ -112,7 +112,9 @@ The repository already has the managed runtime kernel:
 - Workflow Pack stage now materializes durable `workflow_pack_bindings` for
   manifest objects such as workflows, agents, connectors, policies, evals,
   schemas, skills, profiles, onboarding schemas, and release gates; release,
-  rollback, and archive update their binding status.
+  rollback, and archive update their binding status. Workflow bindings now
+  carry `target_id` values that point to materialized `WorkflowDefinition`
+  rows, and release/rollback/archive propagate to those definitions.
 - Workflow Pack stage also materializes generic production runtime objects:
   workflow schedules, connector account handles, and provider deployment
   handles. These are durable, inspectable runtime objects, while
@@ -143,9 +145,10 @@ Remaining first-class execution gaps:
   retry/backoff scheduling, due activation, fan-in policy, and fan-out
   max-parallel controls, plus numeric and RFC3339 time branch comparisons. It
   still needs production rollback/compensation adapters.
-- Pack bindings are materialized as generic durable binding records and generic
-  runtime objects for schedules, connector accounts, and provider deployment
-  handles. Provider-specific deployment adapters remain extension points.
+- Pack bindings are materialized as durable binding records; workflow bindings
+  resolve to concrete `WorkflowDefinition` rows, and generic runtime objects
+  cover schedules, connector accounts, and provider deployment handles.
+  Provider-specific deployment adapters remain extension points.
 - Native connector enforcement is implemented at the generic
   `native.connector.call` boundary. Production connector adapters still need
   service-specific target validation, rate limits, reconciliation, and rollback
@@ -719,12 +722,14 @@ Acceptance:
 
 ### Slice 3: Pack Materialization
 
-- Status: implemented as durable generic `workflow_pack_bindings` for manifest
-  objects including workflows, agents, connectors, policies, evals, schemas,
-  skills, profiles, onboarding schemas, and release gates. Stage now also
-  creates durable `workflow_pack_runtime_objects` for workflow schedules,
-  connector account handles, and provider deployment handles. Provider-specific
-  adapters remain pending by design.
+- Status: implemented as durable `workflow_pack_bindings` for manifest objects
+  including workflows, agents, connectors, policies, evals, schemas, skills,
+  profiles, onboarding schemas, and release gates. Stage now materializes pack
+  workflow YAML files into `WorkflowDefinition` rows, writes the definition id
+  into the workflow binding `target_id`, and creates durable
+  `workflow_pack_runtime_objects` for workflow schedules, connector account
+  handles, and provider deployment handles. Provider-specific adapters remain
+  pending by design.
 - Stage pack into draft AgentVersion, WorkflowDefinition, ConnectorBinding,
   PolicyRevision, EvalSuite, and ScheduleBinding objects.
 - Release activates those bindings.

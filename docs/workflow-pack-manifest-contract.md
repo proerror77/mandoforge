@@ -76,7 +76,7 @@ The initial Stage 3 update API implements the immutable-version contract:
 
 ### Stage
 
-Stage should materialize draft agent versions, connector definitions, policy revisions, eval suites, and profile requirements in a non-production state. Staging must preserve tenant scope and must not bypass provider, tool, approval, MCP, or audit governance.
+Stage should materialize draft workflow definitions, agent versions, connector definitions, policy revisions, eval suites, and profile requirements in a non-production state. Workflow bindings must carry the materialized `WorkflowDefinition` id as `target_id`, and workflow schedule runtime objects must reference that definition id. Staging must preserve tenant scope and must not bypass provider, tool, approval, MCP, or audit governance.
 
 ### Onboarding Assessment
 
