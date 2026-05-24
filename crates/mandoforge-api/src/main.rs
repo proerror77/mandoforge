@@ -14963,17 +14963,20 @@ async fn activate_due_workflow_steps_for_run(
     scheduled_steps.sort_by_key(|step| step.scheduled_at);
 
     let mut activated_step_ids = Vec::new();
-    for mut step in scheduled_steps {
+    for step in scheduled_steps {
         let Some(scheduled_at) = step.scheduled_at else {
             continue;
         };
         if scheduled_at > checked_at {
             continue;
         }
-        let previous_status = step.status.clone();
-        step.status = "queued".to_string();
-        step.updated_at = checked_at;
-        let updated = state.update_workflow_step_run(step).await?;
+        let Some(updated) = state
+            .activate_scheduled_workflow_step_run(step.id, checked_at)
+            .await?
+        else {
+            continue;
+        };
+        let previous_status = "scheduled";
         record_workflow_step_run_updated(state, run, &updated, &previous_status).await?;
         record_workflow_transition(
             state,
@@ -53326,7 +53329,7 @@ not json
         assert_eq!(after_due["activated_step_ids"], json!([retry_step_id]));
 
         let steps_after_due: Vec<Value> = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri(format!("/api/workflow-runs/{run_id}/steps"))
                 .header("x-mandoforge-roles", "operator")
@@ -53339,6 +53342,39 @@ not json
             .find(|step| step["id"] == json!(retry_step_id))
             .expect("activated retry step");
         assert_eq!(activated["status"], json!("queued"));
+
+        let duplicate_due: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-runs/{run_id}/scheduled-steps/run-due"),
+                json!({}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(duplicate_due["activated_count"], json!(0));
+        assert_eq!(duplicate_due["activated_step_ids"], json!([]));
+
+        let transitions_after_duplicate: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/transitions"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            transitions_after_duplicate
+                .iter()
+                .filter(|transition| {
+                    transition["transition_type"] == json!("schedule")
+                        && transition["to_step_run_id"] == json!(retry_step_id)
+                })
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

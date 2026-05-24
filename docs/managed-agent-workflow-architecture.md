@@ -128,7 +128,9 @@ The repository already has the managed runtime kernel:
   summary, partition drilldown, and writeback queue data from live APIs.
 - `/api/scheduler/run-due` now includes due scheduled workflow step activation,
   so delayed retry/backoff workflow steps can be advanced by the external
-  scheduler path instead of only by a workflow-specific manual endpoint.
+  scheduler path instead of only by a workflow-specific manual endpoint. Due
+  activation is an atomic store-level claim on `scheduled` steps, so concurrent
+  scheduler scans do not duplicate activation transitions.
 - `scripts/managed-workflow-runtime-evidence-gate.sh` is the production-proof
   API gate for this slice: it creates a released workflow graph, exercises
   fan-out, scheduled retry, scheduler due activation, fan-in, completion,

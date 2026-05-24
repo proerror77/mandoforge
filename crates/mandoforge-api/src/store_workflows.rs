@@ -449,6 +449,49 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn activate_scheduled_workflow_step_run(
+        &self,
+        step_id: uuid::Uuid,
+        checked_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<WorkflowStepRun>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let Some(step) = store.workflow_step_runs.get_mut(&step_id) else {
+                    return Err(AppError::not_found("workflow step run not found"));
+                };
+                if step.status != "scheduled"
+                    || !step
+                        .scheduled_at
+                        .is_some_and(|scheduled_at| scheduled_at <= checked_at)
+                {
+                    return Ok(None);
+                }
+                step.status = "queued".to_string();
+                step.updated_at = checked_at;
+                Ok(Some(step.clone()))
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE workflow_step_runs
+                     SET status = 'queued', updated_at = $3
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND status = 'scheduled'
+                       AND scheduled_at IS NOT NULL
+                       AND scheduled_at <= $3
+                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, started_at, completed_at, scheduled_at, created_at, updated_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(step_id)
+                .bind(checked_at)
+                .fetch_optional(pool)
+                .await?;
+                row.map(workflow_step_run_from_row).transpose()
+            }
+        }
+    }
+
     pub(crate) async fn update_workflow_step_run_task_grant(
         &self,
         step_id: uuid::Uuid,
