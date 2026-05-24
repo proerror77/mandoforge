@@ -607,7 +607,10 @@ Memory writeback is never automatic high-trust memory. It should be:
 Reflection or "dreaming" should be implemented as a scheduled workflow, not as
 an unbounded background process. It can read completed runs, propose memory
 candidates, summarize lessons, and create eval cases, but it cannot silently
-promote memory or change policies.
+promote memory or change policies. The runtime-owned submission boundary is
+`POST /api/sessions/:id/semantic-synthesis-runs`: worker agents provide the
+structured synthesis, while MandoForge records the report artifact, opens
+pending writeback candidates, and keeps final memory promotion behind review.
 
 ## Agent Role Permission Matrix
 

@@ -2105,6 +2105,56 @@ struct CreateMemoryWritebackCandidates {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateSemanticSynthesisRun {
+    synthesis_type: String,
+    goal_attempted: String,
+    #[serde(default)]
+    context_used: Vec<String>,
+    #[serde(default)]
+    worked: Vec<String>,
+    #[serde(default)]
+    failed_or_corrected: Vec<String>,
+    #[serde(default)]
+    unsafe_assumptions: Vec<String>,
+    #[serde(default)]
+    durable_memory_candidates: Vec<SemanticSynthesisMemoryCandidateInput>,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticSynthesisMemoryCandidateInput {
+    #[serde(default = "default_memory_object_type")]
+    proposed_object_type: String,
+    proposed_object_key: String,
+    title: String,
+    summary: String,
+    #[serde(default = "empty_json_object")]
+    content: Value,
+    #[serde(default = "empty_json_object")]
+    semantic_scopes: Value,
+    #[serde(default = "empty_json_object")]
+    source_refs: Value,
+    #[serde(default = "empty_json_object")]
+    provenance: Value,
+    #[serde(default = "default_semantic_trust_level")]
+    trust_level: String,
+    #[serde(default = "default_semantic_freshness")]
+    freshness: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticSynthesisRunResult {
+    status: String,
+    synthesis_type: String,
+    session_id: Uuid,
+    checkpoint_event_id: Uuid,
+    artifact: Artifact,
+    candidates: Vec<MemoryWritebackCandidate>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ReviewMemoryWritebackCandidate {
     #[serde(default)]
     reason: Option<String>,
@@ -5932,6 +5982,10 @@ fn build_router(state: AppState) -> Router {
             "/api/sessions/{id}/memory-writeback-candidates",
             get(list_session_memory_writeback_candidates)
                 .post(create_session_memory_writeback_candidates),
+        )
+        .route(
+            "/api/sessions/{id}/semantic-synthesis-runs",
+            post(create_session_semantic_synthesis_run),
         )
         .route("/api/context-packets/{id}", get(get_context_packet))
         .route(
@@ -20609,6 +20663,26 @@ async fn create_session_memory_writeback_candidates(
     Ok(Json(candidates))
 }
 
+async fn create_session_semantic_synthesis_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSemanticSynthesisRun>,
+) -> Result<Json<SemanticSynthesisRunResult>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(id),
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let result =
+        materialize_semantic_synthesis_run(&state, id, principal.subject_id, input).await?;
+    Ok(Json(result))
+}
+
 async fn list_memory_writeback_candidates(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -20753,6 +20827,396 @@ async fn reject_memory_writeback_candidate(
     Ok(Json(updated))
 }
 
+async fn materialize_semantic_synthesis_run(
+    state: &AppState,
+    session_id: Uuid,
+    subject_id: String,
+    input: CreateSemanticSynthesisRun,
+) -> Result<SemanticSynthesisRunResult, AppError> {
+    let synthesis_type = normalize_semantic_synthesis_type(&input.synthesis_type)?;
+    let goal_attempted =
+        normalize_required_synthesis_text(&input.goal_attempted, "goal_attempted")?;
+    if !input.metadata.is_object() {
+        return Err(AppError::bad_request(
+            "semantic synthesis metadata must be a JSON object",
+        ));
+    }
+    ensure_memory_writeback_permitted_for_session(state, session_id, "semantic_synthesis").await?;
+    let session = state.get_session(session_id).await?;
+    let agent = state.get_agent(session.agent_id).await?;
+    let events = state.list_events(session_id).await?;
+    let checkpoint = semantic_synthesis_checkpoint_event(&events).ok_or_else(|| {
+        AppError::bad_request(
+            "semantic synthesis requires a completed session or idle managed-session checkpoint",
+        )
+    })?;
+    let artifacts_before = state.list_artifacts(session_id).await?;
+    let approvals = state
+        .list_approvals()
+        .await?
+        .into_iter()
+        .filter(|approval| approval.session_id == session_id)
+        .collect::<Vec<_>>();
+    let context_packets = state.list_context_packets(session_id).await?;
+    let handoffs = state
+        .list_agent_handoff_events(Some(session_id))
+        .await?
+        .into_iter()
+        .filter(|handoff| handoff.status == "completed")
+        .collect::<Vec<_>>();
+    let now = Utc::now();
+    let artifact_type = semantic_synthesis_artifact_type(&synthesis_type);
+    let candidate_type = semantic_synthesis_candidate_type(&synthesis_type);
+    let report = json!({
+        "synthesis_type": synthesis_type,
+        "session_id": session_id,
+        "agent_id": agent.id,
+        "goal_attempted": goal_attempted,
+        "context_used": input.context_used,
+        "worked": input.worked,
+        "failed_or_corrected": input.failed_or_corrected,
+        "unsafe_assumptions": input.unsafe_assumptions,
+        "metadata": input.metadata,
+        "checkpoint": {
+            "event_id": checkpoint.id,
+            "event_type": checkpoint.event_type,
+            "created_at": checkpoint.created_at
+        },
+        "evidence_counts": {
+            "event_count": events.len(),
+            "artifact_count": artifacts_before.len(),
+            "approval_count": approvals.len(),
+            "context_packet_count": context_packets.len(),
+            "completed_handoff_count": handoffs.len()
+        },
+        "candidate_count": input.durable_memory_candidates.len(),
+        "created_by": subject_id,
+        "created_at": now
+    });
+    let artifact = Artifact {
+        id: Uuid::new_v4(),
+        session_id,
+        artifact_type: artifact_type.to_string(),
+        name: semantic_synthesis_artifact_name(&synthesis_type).to_string(),
+        path: Some(format!(
+            "semantic-synthesis/{}/{}.json",
+            synthesis_type, session_id
+        )),
+        content: report,
+        created_at: now,
+    };
+    let artifact = state.insert_artifact(artifact).await?;
+    state
+        .append_event(
+            "system",
+            Some(artifact.id),
+            session_id,
+            "artifact.created",
+            json!({
+                "artifact_id": artifact.id,
+                "artifact_type": artifact.artifact_type,
+                "name": artifact.name,
+                "path": artifact.path,
+                "source": "semantic_synthesis"
+            }),
+        )
+        .await?;
+
+    let mut candidates = Vec::new();
+    for (index, candidate_input) in input.durable_memory_candidates.into_iter().enumerate() {
+        let candidate_event = state
+            .append_event(
+                "system",
+                Some(artifact.id),
+                session_id,
+                "semantic_synthesis.candidate_proposed",
+                json!({
+                    "artifact_id": artifact.id,
+                    "synthesis_type": synthesis_type,
+                    "candidate_type": candidate_type,
+                    "candidate_index": index,
+                    "proposed_object_key": candidate_input.proposed_object_key,
+                }),
+            )
+            .await?;
+        let candidate = semantic_synthesis_memory_candidate(
+            session_id,
+            &agent,
+            &synthesis_type,
+            candidate_type,
+            &artifact,
+            &candidate_event,
+            candidate_input,
+            now,
+        )?;
+        let candidate = state.create_memory_writeback_candidate(candidate).await?;
+        let audit = record_memory_writeback_candidate_created(state, &candidate).await?;
+        let candidate = state
+            .update_memory_writeback_candidate_audit_trace(candidate.id, audit.id)
+            .await?;
+        candidates.push(candidate);
+    }
+
+    state
+        .append_event(
+            "system",
+            Some(artifact.id),
+            session_id,
+            "semantic_synthesis.run_created",
+            json!({
+                "synthesis_type": synthesis_type,
+                "artifact_id": artifact.id,
+                "candidate_count": candidates.len(),
+                "candidate_ids": candidates.iter().map(|candidate| candidate.id).collect::<Vec<_>>(),
+                "checkpoint_event_id": checkpoint.id,
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "user",
+            None,
+            "semantic_synthesis.run_created",
+            "artifact",
+            Some(artifact.id),
+            json!({
+                "synthesis_type": synthesis_type,
+                "session_id": session_id,
+                "artifact_id": artifact.id,
+                "candidate_count": candidates.len(),
+                "candidate_ids": candidates.iter().map(|candidate| candidate.id).collect::<Vec<_>>(),
+                "checkpoint_event_id": checkpoint.id,
+                "subject": subject_id,
+            }),
+        ))
+        .await?;
+
+    Ok(SemanticSynthesisRunResult {
+        status: "created".to_string(),
+        synthesis_type,
+        session_id,
+        checkpoint_event_id: checkpoint.id,
+        artifact,
+        candidates,
+        created_at: now,
+    })
+}
+
+async fn ensure_memory_writeback_permitted_for_session(
+    state: &AppState,
+    session_id: Uuid,
+    tool: &str,
+) -> Result<(), AppError> {
+    if let Some((run, grant)) = active_task_grant_for_session(state, session_id).await? {
+        if !task_grant_memory_scope_allows_writeback(&grant.memory_scope) {
+            let reason = "task grant memory scope does not allow memory writeback";
+            record_task_grant_denied(state, session_id, Some(&grant), Some(run.id), tool, reason)
+                .await?;
+            return Err(AppError::forbidden(reason));
+        }
+        record_task_grant_checked(state, &grant, session_id, tool).await?;
+    }
+    Ok(())
+}
+
+fn semantic_synthesis_memory_candidate(
+    session_id: Uuid,
+    agent: &Agent,
+    synthesis_type: &str,
+    candidate_type: &str,
+    artifact: &Artifact,
+    candidate_event: &SessionEvent,
+    input: SemanticSynthesisMemoryCandidateInput,
+    created_at: DateTime<Utc>,
+) -> Result<MemoryWritebackCandidate, AppError> {
+    let proposed_object_type =
+        normalize_required_synthesis_text(&input.proposed_object_type, "proposed_object_type")?;
+    let proposed_object_key =
+        normalize_required_synthesis_text(&input.proposed_object_key, "proposed_object_key")?;
+    let title = normalize_required_synthesis_text(&input.title, "title")?;
+    let summary = normalize_required_synthesis_text(&input.summary, "summary")?;
+    if !input.content.is_object() {
+        return Err(AppError::bad_request(
+            "semantic synthesis candidate content must be a JSON object",
+        ));
+    }
+    if !input.semantic_scopes.is_object() {
+        return Err(AppError::bad_request(
+            "semantic synthesis candidate semantic_scopes must be a JSON object",
+        ));
+    }
+    if !input.provenance.is_object() {
+        return Err(AppError::bad_request(
+            "semantic synthesis candidate provenance must be a JSON object",
+        ));
+    }
+    let semantic_scopes = if input
+        .semantic_scopes
+        .as_object()
+        .is_none_or(|object| object.is_empty())
+    {
+        agent.semantic_scopes.clone()
+    } else {
+        input.semantic_scopes
+    };
+    let source_refs =
+        semantic_synthesis_source_refs(&input.source_refs, artifact, candidate_event)?;
+    Ok(MemoryWritebackCandidate {
+        id: Uuid::new_v4(),
+        session_id,
+        candidate_type: candidate_type.to_string(),
+        source_event_id: Some(candidate_event.id),
+        source_artifact_id: Some(artifact.id),
+        source_approval_id: None,
+        source_handoff_id: None,
+        proposed_object_type,
+        proposed_object_key,
+        title,
+        summary,
+        content: input.content,
+        semantic_scopes,
+        source_refs,
+        provenance: merge_semantic_synthesis_provenance(
+            input.provenance,
+            synthesis_type,
+            artifact,
+            candidate_event,
+        ),
+        trust_level: normalize_semantic_synthesis_trust_level(&input.trust_level)?,
+        freshness: normalize_semantic_synthesis_freshness(&input.freshness)?,
+        status: "pending".to_string(),
+        reviewer_subject: None,
+        review_reason: None,
+        semantic_object_id: None,
+        audit_trace_id: None,
+        created_at,
+        updated_at: created_at,
+        decided_at: None,
+    })
+}
+
+fn semantic_synthesis_source_refs(
+    input_source_refs: &Value,
+    artifact: &Artifact,
+    candidate_event: &SessionEvent,
+) -> Result<Value, AppError> {
+    if !input_source_refs.is_object() && !input_source_refs.is_array() {
+        return Err(AppError::bad_request(
+            "semantic synthesis candidate source_refs must be a JSON object or array",
+        ));
+    }
+    let mut refs = Vec::new();
+    refs.push(json!({"source_type": "artifact", "source_id": artifact.id}));
+    refs.push(json!({"source_type": "session_event", "source_id": candidate_event.id}));
+    if let Some(array) = input_source_refs.as_array() {
+        refs.extend(array.iter().cloned());
+    } else if input_source_refs
+        .as_object()
+        .is_some_and(|object| !object.is_empty())
+    {
+        refs.push(input_source_refs.clone());
+    }
+    Ok(Value::Array(refs))
+}
+
+fn merge_semantic_synthesis_provenance(
+    provenance: Value,
+    synthesis_type: &str,
+    artifact: &Artifact,
+    candidate_event: &SessionEvent,
+) -> Value {
+    let mut object = provenance.as_object().cloned().unwrap_or_default();
+    object.insert(
+        "source".to_string(),
+        Value::String("semantic_synthesis".to_string()),
+    );
+    object.insert(
+        "synthesis_type".to_string(),
+        Value::String(synthesis_type.to_string()),
+    );
+    object.insert("artifact_id".to_string(), json!(artifact.id));
+    object.insert("candidate_event_id".to_string(), json!(candidate_event.id));
+    Value::Object(object)
+}
+
+fn semantic_synthesis_checkpoint_event(events: &[SessionEvent]) -> Option<&SessionEvent> {
+    events.iter().rev().find(|event| {
+        matches!(
+            event.event_type.as_str(),
+            "session.loop.idle"
+                | "session.completed"
+                | "session.goal.completed"
+                | "workflow.run.completed"
+                | "agent_handoff.completed"
+        )
+    })
+}
+
+fn normalize_semantic_synthesis_type(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "post_run_reflection" | "session_reflection" | "reflection" => {
+            Ok("post_run_reflection".to_string())
+        }
+        "dreaming_synthesis" | "dreaming" | "dream" => Ok("dreaming_synthesis".to_string()),
+        _ => Err(AppError::bad_request(
+            "semantic synthesis type must be post_run_reflection or dreaming_synthesis",
+        )),
+    }
+}
+
+fn semantic_synthesis_artifact_type(synthesis_type: &str) -> &'static str {
+    match synthesis_type {
+        "dreaming_synthesis" => "semantic_dreaming_report",
+        _ => "semantic_reflection_report",
+    }
+}
+
+fn semantic_synthesis_artifact_name(synthesis_type: &str) -> &'static str {
+    match synthesis_type {
+        "dreaming_synthesis" => "semantic-dreaming-report.json",
+        _ => "semantic-reflection-report.json",
+    }
+}
+
+fn semantic_synthesis_candidate_type(synthesis_type: &str) -> &'static str {
+    match synthesis_type {
+        "dreaming_synthesis" => "dreaming_synthesis",
+        _ => "session_reflection",
+    }
+}
+
+fn normalize_required_synthesis_text(value: &str, label: &str) -> Result<String, AppError> {
+    let text = value.trim();
+    if text.is_empty() {
+        return Err(AppError::bad_request(format!(
+            "semantic synthesis {label} cannot be empty"
+        )));
+    }
+    Ok(text.to_string())
+}
+
+fn normalize_semantic_synthesis_trust_level(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "unverified" | "source_attested" | "human_verified" | "system_verified" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "semantic synthesis trust_level must be unverified, source_attested, human_verified, or system_verified",
+        )),
+    }
+}
+
+fn normalize_semantic_synthesis_freshness(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "unknown" | "current" | "stale" | "expired" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "semantic synthesis freshness must be unknown, current, stale, or expired",
+        )),
+    }
+}
+
 async fn generate_and_persist_context_packet(
     state: &AppState,
     session_id: Uuid,
@@ -20791,22 +21255,7 @@ async fn generate_memory_writeback_candidates(
     input: CreateMemoryWritebackCandidates,
 ) -> Result<Vec<MemoryWritebackCandidate>, AppError> {
     let session = state.get_session(session_id).await?;
-    if let Some((run, grant)) = active_task_grant_for_session(state, session_id).await? {
-        if !task_grant_memory_scope_allows_writeback(&grant.memory_scope) {
-            let reason = "task grant memory scope does not allow memory writeback";
-            record_task_grant_denied(
-                state,
-                session_id,
-                Some(&grant),
-                Some(run.id),
-                "memory_writeback",
-                reason,
-            )
-            .await?;
-            return Err(AppError::forbidden(reason));
-        }
-        record_task_grant_checked(state, &grant, session_id, "memory_writeback").await?;
-    }
+    ensure_memory_writeback_permitted_for_session(state, session_id, "memory_writeback").await?;
     let events = state.list_events(session_id).await?;
     let session_reached_checkpoint = events.iter().any(|event| {
         matches!(
@@ -47400,6 +47849,10 @@ fn default_semantic_record_status() -> String {
     "active".to_string()
 }
 
+fn default_memory_object_type() -> String {
+    "memory".to_string()
+}
+
 fn default_semantic_trust_level() -> String {
     "unverified".to_string()
 }
@@ -53530,6 +53983,243 @@ not json
         )
         .await;
         assert!(objects.is_empty(), "batch should fail before object writes");
+    }
+
+    #[tokio::test]
+    async fn semantic_synthesis_run_creates_reflection_artifact_and_review_candidates() {
+        let app = test_app().await;
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "semantic-reflection-agent",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["artifact.create"],
+                    "semantic_scopes": {
+                        "domain_scope": "platform",
+                        "workflow_scope": "semantic-reflection",
+                        "memory_scope": "engineering",
+                        "share_policy": "isolated"
+                    },
+                    "release_state": "draft"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "semantic reflection session",
+                    "message": "Collect evidence before proposing durable memory."
+                }),
+            ),
+        )
+        .await;
+        let _: Vec<SessionEvent> = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/sessions/{}/events", session.id),
+                json!({
+                    "events": [
+                        {
+                            "type": "session.goal.completed",
+                            "payload": {
+                                "objective": "Collect evidence before proposing durable memory."
+                            }
+                        }
+                    ]
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        let result: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/sessions/{}/semantic-synthesis-runs", session.id),
+                json!({
+                    "synthesis_type": "post_run_reflection",
+                    "goal_attempted": "Prove reflection creates reviewable memory instead of direct org memory.",
+                    "context_used": ["session_events", "context_packets"],
+                    "worked": ["checkpoint was replayable"],
+                    "failed_or_corrected": ["none"],
+                    "unsafe_assumptions": ["do not promote self-reflection automatically"],
+                    "durable_memory_candidates": [
+                        {
+                            "proposed_object_key": "memory:semantic-reflection:review-required",
+                            "title": "Reflection memory requires review",
+                            "summary": "Reflection output must enter the writeback review queue before becoming durable memory.",
+                            "content": {"rule": "candidate-first"},
+                            "trust_level": "source_attested",
+                            "freshness": "current"
+                        }
+                    ]
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        assert_eq!(result["status"], "created");
+        assert_eq!(result["synthesis_type"], "post_run_reflection");
+        assert_eq!(
+            result["artifact"]["artifact_type"],
+            "semantic_reflection_report"
+        );
+        assert_eq!(
+            result["artifact"]["content"]["goal_attempted"],
+            "Prove reflection creates reviewable memory instead of direct org memory."
+        );
+        assert!(
+            result["artifact"]["content"]["evidence_counts"]["event_count"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0
+        );
+        assert_eq!(result["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            result["candidates"][0]["candidate_type"],
+            "session_reflection"
+        );
+        assert_eq!(result["candidates"][0]["status"], "pending");
+        assert_eq!(
+            result["candidates"][0]["semantic_scopes"]["workflow_scope"],
+            "semantic-reflection"
+        );
+
+        let artifacts: Vec<Artifact> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/artifacts", session.id))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.artifact_type == "semantic_reflection_report"
+                && artifact.name == "semantic-reflection-report.json"
+        }));
+
+        let semantic_objects: Vec<SemanticObject> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-objects")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            !semantic_objects
+                .iter()
+                .any(|object| object.object_key == "memory:semantic-reflection:review-required"),
+            "reflection must not bypass memory writeback review"
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "semantic_synthesis.run_created"
+                && log.resource_type == "artifact"
+                && log.details["candidate_count"] == json!(1)
+        }));
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "semantic_synthesis.run_created"
+                && event.payload["candidate_count"] == json!(1)
+        }));
+    }
+
+    #[tokio::test]
+    async fn semantic_synthesis_run_requires_idle_or_completed_checkpoint() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "unfinished semantic reflection"
+                }),
+            ),
+        )
+        .await;
+
+        let (status, body) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/sessions/{}/semantic-synthesis-runs", session.id),
+                json!({
+                    "synthesis_type": "post_run_reflection",
+                    "goal_attempted": "should be rejected before checkpoint",
+                    "durable_memory_candidates": []
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains(
+                "semantic synthesis requires a completed session or idle managed-session checkpoint"
+            ),
+            "unexpected error body: {body}"
+        );
+        let artifacts: Vec<Artifact> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{}/artifacts", session.id))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            artifacts.is_empty(),
+            "rejected synthesis must not write artifacts"
+        );
     }
 
     #[test]

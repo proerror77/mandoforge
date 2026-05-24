@@ -308,6 +308,15 @@ one audited write path instead of a collection of ad hoc object/link writes.
 Context packets should be replayable so operators can inspect what an agent saw
 before it acted. Memory writeback remains approval-gated.
 
+Reflection and dreaming use the same governed writeback path. Workers submit
+structured synthesis results to
+`POST /api/sessions/:id/semantic-synthesis-runs` after a session, goal,
+workflow, or handoff checkpoint. The API writes a
+`semantic_reflection_report` or `semantic_dreaming_report` artifact and turns
+durable lessons into pending `MemoryWritebackCandidate` rows. It does not
+promote those lessons into durable semantic memory until a reviewer approves the
+candidate.
+
 ## Environment And Remote Computer Boundary
 
 Environment is the runtime placement contract. Remote Computer is one

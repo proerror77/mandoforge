@@ -795,6 +795,7 @@ h1 {
 .writeback-review,
 .ontology-registry,
 .semantic-ingestion,
+.semantic-synthesis,
 .semantic-objects,
 .semantic-links {
   display: grid;
@@ -831,7 +832,8 @@ h1 {
   padding-right: 2px;
 }
 
-.semantic-ingestion textarea {
+.semantic-ingestion textarea,
+.semantic-synthesis textarea {
   min-height: 190px;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 11px;

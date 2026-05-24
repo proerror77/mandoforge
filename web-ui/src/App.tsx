@@ -23,6 +23,7 @@ import {
   type SemanticLink,
   type SemanticObject,
   type SemanticRetrievalBackendRegistry,
+  type SemanticSynthesisRunResult,
   type Session,
   type SessionEvent,
   type TaskGrant,
@@ -71,6 +72,25 @@ const DEFAULT_INGESTION_BATCH = JSON.stringify({
   links: [],
 }, null, 2);
 
+const DEFAULT_SYNTHESIS_RUN = JSON.stringify({
+  synthesis_type: "post_run_reflection",
+  goal_attempted: "Summarize the completed run into reviewable memory candidates.",
+  context_used: ["session_events", "artifacts", "context_packets"],
+  worked: ["Replace with evidence-backed observations."],
+  failed_or_corrected: [],
+  unsafe_assumptions: ["Do not promote synthesis output without review."],
+  durable_memory_candidates: [
+    {
+      proposed_object_key: "memory:semantic-synthesis:replace-me",
+      title: "Reviewable synthesis memory",
+      summary: "Replace this sample with one evidence-backed durable memory candidate.",
+      content: { note: "candidate-first" },
+      trust_level: "source_attested",
+      freshness: "current",
+    },
+  ],
+}, null, 2);
+
 type RowStatus = "needs_input" | "running" | "queued" | "completed" | "failed" | "idle";
 
 type SessionRow = {
@@ -105,6 +125,7 @@ export function App() {
   const [selectedContextPacketId, setSelectedContextPacketId] = useState("");
   const [semanticObjectType, setSemanticObjectType] = useState("all");
   const [semanticIngestionDraft, setSemanticIngestionDraft] = useState(DEFAULT_INGESTION_BATCH);
+  const [semanticSynthesisDraft, setSemanticSynthesisDraft] = useState(DEFAULT_SYNTHESIS_RUN);
   const [linkDraft, setLinkDraft] = useState({
     from: "",
     relation: "supports",
@@ -377,6 +398,24 @@ export function App() {
     },
     onSuccess: () => invalidateAll(queryClient),
   });
+  const createSemanticSynthesisRun = useMutation({
+    mutationFn: () => {
+      if (!sessionId) {
+        throw new Error("select a session before creating semantic synthesis");
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(semanticSynthesisDraft);
+      } catch (error) {
+        throw new Error(`invalid synthesis JSON: ${errorMessage(error)}`);
+      }
+      return api<SemanticSynthesisRunResult>(`/api/sessions/${sessionId}/semantic-synthesis-runs`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    onSuccess: () => invalidateAll(queryClient),
+  });
 
   const activeCount = rows.filter((row) => row.status === "running" || row.status === "queued").length;
   const blockedCount = rows.filter((row) => row.status === "needs_input").length;
@@ -641,6 +680,18 @@ export function App() {
             {contextPacket ? (
               <ContextPacketTrace packet={contextPacket} />
             ) : <p className="muted">No context packet has been generated for this session.</p>}
+          </Panel>
+
+          <Panel title="Semantic synthesis">
+            <SemanticSynthesisPanel
+              sessionId={sessionId}
+              draft={semanticSynthesisDraft}
+              result={createSemanticSynthesisRun.data}
+              isSaving={createSemanticSynthesisRun.isPending}
+              error={createSemanticSynthesisRun.error}
+              onDraftChange={setSemanticSynthesisDraft}
+              onCreate={() => createSemanticSynthesisRun.mutate()}
+            />
           </Panel>
 
           <Panel title="Writeback review">
@@ -1227,6 +1278,48 @@ function SemanticIngestionPanel({
         <div className="queue-peek">
           <strong>{result.source.display_name}</strong>
           <span>{result.status} · {shortId(result.source.id)}</span>
+        </div>
+      ) : null}
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+    </div>
+  );
+}
+
+function SemanticSynthesisPanel({
+  sessionId,
+  draft,
+  result,
+  isSaving,
+  error,
+  onDraftChange,
+  onCreate,
+}: {
+  sessionId: string;
+  draft: string;
+  result?: SemanticSynthesisRunResult;
+  isSaving: boolean;
+  error: unknown;
+  onDraftChange: (value: string) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <div className="semantic-synthesis">
+      <textarea
+        value={draft}
+        rows={9}
+        spellCheck={false}
+        onChange={(event) => onDraftChange(event.target.value)}
+      />
+      <div className="action-row">
+        <button disabled={isSaving || !sessionId || !draft.trim()} onClick={onCreate}>
+          {isSaving ? "Creating..." : "Create synthesis"}
+        </button>
+        <span>{result ? `${result.artifact.artifact_type} · ${result.candidates.length} candidates` : sessionId ? "waiting" : "select session"}</span>
+      </div>
+      {result ? (
+        <div className="queue-peek">
+          <strong>{result.synthesis_type}</strong>
+          <span>{shortId(result.artifact.id)} · {relativeAge(result.created_at)}</span>
         </div>
       ) : null}
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}

@@ -98,6 +98,16 @@ export type SemanticIngestionBatchResult = {
   ingested_at: string;
 };
 
+export type SemanticSynthesisRunResult = {
+  status: string;
+  synthesis_type: string;
+  session_id: string;
+  checkpoint_event_id: string;
+  artifact: Artifact;
+  candidates: MemoryWritebackCandidate[];
+  created_at: string;
+};
+
 export type ContextPacket = {
   id: string;
   session_id: string;
@@ -166,7 +176,7 @@ export type MemoryWritebackCandidate = {
   summary: string;
   content: Record<string, unknown>;
   semantic_scopes: Record<string, unknown>;
-  source_refs: Record<string, unknown>;
+  source_refs: unknown;
   provenance: Record<string, unknown>;
   trust_level: string;
   freshness: string;
