@@ -1306,18 +1306,71 @@ struct UpdateWorkflowStepRun {
 }
 
 #[derive(Debug, Deserialize)]
-struct RunDueWorkflowSteps {
-    #[serde(default)]
-    now: Option<DateTime<Utc>>,
-}
+struct RunDueWorkflowSteps {}
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowScheduledStepActivationRun {
     workflow_run_id: Uuid,
     checked_at: DateTime<Utc>,
     activated_count: usize,
     activated_step_ids: Vec<Uuid>,
     remaining_scheduled_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowScheduledStepActivationSweep {
+    status: String,
+    checked_at: DateTime<Utc>,
+    workflow_run_count: usize,
+    scheduled_step_count: usize,
+    due_step_count: usize,
+    activated_count: usize,
+    activated_step_ids: Vec<Uuid>,
+    remaining_scheduled_count: usize,
+    actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowRunGraphConsole {
+    workflow_run_id: Uuid,
+    workflow_definition_id: Uuid,
+    pack_installation_id: Option<Uuid>,
+    generated_at: DateTime<Utc>,
+    status: String,
+    node_count: usize,
+    edge_count: usize,
+    due_scheduled_count: usize,
+    status_counts: BTreeMap<String, usize>,
+    nodes: Vec<WorkflowGraphConsoleNode>,
+    edges: Vec<WorkflowGraphConsoleEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowGraphConsoleNode {
+    id: Uuid,
+    step_key: String,
+    step_type: String,
+    status: String,
+    agent_id: Option<Uuid>,
+    task_grant_id: Option<Uuid>,
+    scheduled_at: Option<DateTime<Utc>>,
+    due: bool,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    input_summary: Value,
+    output_summary: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowGraphConsoleEdge {
+    id: Uuid,
+    from_step_key: Option<String>,
+    to_step_key: Option<String>,
+    transition_type: String,
+    status: String,
+    condition_summary: Value,
+    result_summary: Value,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1741,6 +1794,77 @@ struct MemoryGovernanceAttentionItem {
     kind: String,
     message: String,
     partition_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryGovernancePartitionQuery {
+    partition_key: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryGovernanceWritebackQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryGovernancePartitionDetail {
+    generated_at: DateTime<Utc>,
+    partition: MemoryGovernancePartition,
+    object_count: usize,
+    pending_writeback_count: usize,
+    access_policy: String,
+    risk_items: Vec<MemoryGovernanceAttentionItem>,
+    objects: Vec<MemoryGovernanceObjectRef>,
+    writeback_candidates: Vec<MemoryGovernanceWritebackRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryGovernanceObjectRef {
+    id: Uuid,
+    object_key: String,
+    title: String,
+    summary: String,
+    trust_level: String,
+    freshness: String,
+    status: String,
+    source_uri: Option<String>,
+    semantic_scopes: Value,
+    provenance: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryGovernanceWritebackQueue {
+    generated_at: DateTime<Utc>,
+    status_filter: Option<String>,
+    candidate_count: usize,
+    pending_count: usize,
+    candidates: Vec<MemoryGovernanceWritebackRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryGovernanceWritebackRef {
+    id: Uuid,
+    session_id: Uuid,
+    candidate_type: String,
+    proposed_object_type: String,
+    proposed_object_key: String,
+    title: String,
+    summary: String,
+    trust_level: String,
+    freshness: String,
+    status: String,
+    partition_key: String,
+    semantic_object_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    decided_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2256,6 +2380,7 @@ struct SchedulerDueRun {
     policy_rollout: PolicyScheduledRolloutRun,
     approval_escalations: ApprovalEscalationDueRun,
     agent_releases: AgentReleaseAutomationRun,
+    workflow_scheduled_steps: Option<WorkflowScheduledStepActivationSweep>,
     mcp_health_runs: Vec<McpServerScheduledHealthRun>,
     mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
     codex_app_server_stale_polls: CodexAppServerStalePollRun,
@@ -5503,6 +5628,14 @@ fn build_router(state: AppState) -> Router {
             "/api/memory-governance/summary",
             get(get_memory_governance_summary),
         )
+        .route(
+            "/api/memory-governance/partitions",
+            get(get_memory_governance_partition_detail),
+        )
+        .route(
+            "/api/memory-governance/writebacks",
+            get(get_memory_governance_writebacks),
+        )
         .route("/api/agents/{id}/versions", get(list_agent_versions))
         .route(
             "/api/agents/releases/summary",
@@ -5629,6 +5762,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/workflow-runs/{id}/transitions",
             get(list_workflow_transitions_route),
+        )
+        .route(
+            "/api/workflow-runs/{id}/graph",
+            get(get_workflow_run_graph_console_route),
         )
         .route(
             "/api/workflow-runs/{id}/scheduled-steps/run-due",
@@ -6825,6 +6962,36 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
             ],
         },
         Stage2EvidenceRequirementSpec {
+            id: "managed-workflow-runtime-proof",
+            title: "Managed workflow runtime proof",
+            category: "stage2_production",
+            required_for_stage2_production: true,
+            production_target: "End-to-end managed workflow proof covering graph transitions, scheduler due activation, result artifact, and memory governance drilldown",
+            evidence_scripts: vec!["./scripts/managed-workflow-runtime-evidence-gate.sh"],
+            evidence_job_manifests: vec![
+                "deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml",
+            ],
+            readiness_endpoints: vec![
+                "/api/workflow-runs",
+                "/api/scheduler/due-plan",
+                "/api/memory-governance/summary",
+            ],
+            validation_endpoints: vec!["./scripts/managed-workflow-runtime-evidence-gate.sh"],
+            required_flags: vec!["RUN_STAGE2_MANAGED_WORKFLOW_RUNTIME=1"],
+            required_artifacts: vec![
+                "local-script-scripts-managed-workflow-runtime-evidence-gate.sh.json",
+                "api-workflow-runtime-proof-graph.json",
+                "api-workflow-runtime-proof-transitions.json",
+                "api-workflow-runtime-proof-memory-governance-partition.json",
+            ],
+            required_evidence: vec![
+                "workflow graph reaches completed through durable transition records",
+                "scheduler due-run activates scheduled retry steps rather than a manual workflow-only endpoint",
+                "result artifact is linked to the workflow primary session",
+                "memory governance exposes partition drilldown and writeback queue evidence",
+            ],
+        },
+        Stage2EvidenceRequirementSpec {
             id: "eval-release",
             title: "Eval and release rollout orchestration",
             category: "stage2_production",
@@ -7936,21 +8103,209 @@ async fn get_memory_governance_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<MemoryGovernanceSummary>, AppError> {
-    authorize_request(
+    let principal = authorize_collection_request(
         &state,
         &headers,
-        Permission::AgentsRead,
+        Permission::SessionsRead,
         "memory_governance",
-        None,
     )
     .await?;
-    let objects = state.list_semantic_objects().await?;
-    let candidates = state.list_memory_writeback_candidates(None).await?;
+    let (objects, candidates) = memory_governance_inputs_for_principal(&state, &principal).await?;
     Ok(Json(build_memory_governance_summary(
         &objects,
         &candidates,
         Utc::now(),
     )))
+}
+
+async fn get_memory_governance_partition_detail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MemoryGovernancePartitionQuery>,
+) -> Result<Json<MemoryGovernancePartitionDetail>, AppError> {
+    let principal = authorize_collection_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "memory_governance",
+    )
+    .await?;
+    let partition_key = require_non_empty(query.partition_key, "memory partition key")?;
+    let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let generated_at = Utc::now();
+    let (objects, candidates) = memory_governance_inputs_for_principal(&state, &principal).await?;
+    let summary = build_memory_governance_summary(&objects, &candidates, generated_at);
+    let Some(partition) = summary
+        .partitions
+        .iter()
+        .find(|partition| partition.partition_key == partition_key)
+        .cloned()
+    else {
+        return Err(AppError::not_found("memory governance partition not found"));
+    };
+    let mut object_refs = objects
+        .iter()
+        .filter(|object| object.object_type == "memory")
+        .filter(|object| memory_governance_object_partition_key(object) == partition_key)
+        .map(memory_governance_object_ref)
+        .collect::<Vec<_>>();
+    let object_count = object_refs.len();
+    object_refs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    object_refs.truncate(limit);
+
+    let mut writeback_candidates = candidates
+        .iter()
+        .filter(|candidate| memory_governance_candidate_partition_key(candidate) == partition_key)
+        .map(memory_governance_writeback_ref)
+        .collect::<Vec<_>>();
+    writeback_candidates.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    writeback_candidates.truncate(limit);
+
+    let risk_items = summary
+        .attention_items
+        .into_iter()
+        .filter(|item| item.partition_key.as_deref() == Some(partition_key.as_str()))
+        .collect::<Vec<_>>();
+    let pending_writeback_count = candidates
+        .iter()
+        .filter(|candidate| candidate.status == "pending")
+        .filter(|candidate| memory_governance_candidate_partition_key(candidate) == partition_key)
+        .count();
+    let access_policy = if partition.shared {
+        "shared_within_declared_scope"
+    } else {
+        "isolated_partition"
+    }
+    .to_string();
+
+    Ok(Json(MemoryGovernancePartitionDetail {
+        generated_at,
+        partition,
+        object_count,
+        pending_writeback_count,
+        access_policy,
+        risk_items,
+        objects: object_refs,
+        writeback_candidates,
+    }))
+}
+
+async fn get_memory_governance_writebacks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MemoryGovernanceWritebackQuery>,
+) -> Result<Json<MemoryGovernanceWritebackQueue>, AppError> {
+    let principal = authorize_collection_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "memory_governance",
+    )
+    .await?;
+    let status_filter = query
+        .status
+        .as_ref()
+        .and_then(|value| normalize_optional_text(value.clone()));
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let generated_at = Utc::now();
+    let (_, candidates) = memory_governance_inputs_for_principal(&state, &principal).await?;
+    let pending_count = candidates
+        .iter()
+        .filter(|candidate| candidate.status == "pending")
+        .count();
+    let mut refs = candidates
+        .iter()
+        .filter(|candidate| {
+            status_filter
+                .as_deref()
+                .map(|status| candidate.status == status)
+                .unwrap_or(true)
+        })
+        .map(memory_governance_writeback_ref)
+        .collect::<Vec<_>>();
+    refs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    refs.truncate(limit);
+    Ok(Json(MemoryGovernanceWritebackQueue {
+        generated_at,
+        status_filter,
+        candidate_count: refs.len(),
+        pending_count,
+        candidates: refs,
+    }))
+}
+
+async fn memory_governance_inputs_for_principal(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<(Vec<SemanticObject>, Vec<MemoryWritebackCandidate>), AppError> {
+    let objects = state.list_semantic_objects().await?;
+    let candidates = state.list_memory_writeback_candidates(None).await?;
+    if principal.roles.contains(&Role::Admin) {
+        return Ok((objects, candidates));
+    }
+
+    let visible_session_ids = visible_session_ids_for_principal(state, principal).await?;
+    let scoped_objects = objects
+        .into_iter()
+        .filter(|object| semantic_object_visible_to_sessions(object, &visible_session_ids))
+        .collect::<Vec<_>>();
+    let scoped_candidates = candidates
+        .into_iter()
+        .filter(|candidate| visible_session_ids.contains(&candidate.session_id))
+        .collect::<Vec<_>>();
+    Ok((scoped_objects, scoped_candidates))
+}
+
+fn semantic_object_visible_to_sessions(
+    object: &SemanticObject,
+    visible_session_ids: &HashSet<Uuid>,
+) -> bool {
+    if visible_session_ids.is_empty() {
+        return false;
+    }
+
+    let mut object_session_ids = HashSet::new();
+    if let Some(source_uri) = object.source_uri.as_deref() {
+        collect_session_ids_from_uri(source_uri, &mut object_session_ids);
+    }
+    collect_session_ids_from_json(&object.content, &mut object_session_ids);
+    collect_session_ids_from_json(&object.provenance, &mut object_session_ids);
+
+    object_session_ids
+        .iter()
+        .any(|session_id| visible_session_ids.contains(session_id))
+}
+
+fn collect_session_ids_from_uri(uri: &str, session_ids: &mut HashSet<Uuid>) {
+    if let Some(rest) = uri.strip_prefix("session://") {
+        let candidate = rest.split('/').next().unwrap_or_default();
+        if let Ok(session_id) = Uuid::parse_str(candidate) {
+            session_ids.insert(session_id);
+        }
+    }
+}
+
+fn collect_session_ids_from_json(value: &Value, session_ids: &mut HashSet<Uuid>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if key == "session_id" || key.ends_with("_session_id") {
+                    if let Some(candidate) = value.as_str() {
+                        if let Ok(session_id) = Uuid::parse_str(candidate) {
+                            session_ids.insert(session_id);
+                        }
+                    }
+                }
+                collect_session_ids_from_json(value, session_ids);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_session_ids_from_json(item, session_ids);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn build_memory_governance_summary(
@@ -7961,6 +8316,7 @@ fn build_memory_governance_summary(
     let mut trust_counts = BTreeMap::new();
     let mut freshness_counts = BTreeMap::new();
     let mut partition_accumulators: BTreeMap<String, MemoryGovernancePartition> = BTreeMap::new();
+    let mut pending_writeback_partitions: BTreeMap<String, usize> = BTreeMap::new();
     let mut attention_items = Vec::new();
 
     for object in objects {
@@ -8011,6 +8367,44 @@ fn build_memory_governance_summary(
         }
     }
 
+    for candidate in candidates
+        .iter()
+        .filter(|candidate| candidate.status == "pending")
+    {
+        let domain_scope =
+            memory_governance_scope_value(&candidate.semantic_scopes, "domain_scope");
+        let workflow_scope =
+            memory_governance_scope_value(&candidate.semantic_scopes, "workflow_scope");
+        let memory_scope =
+            memory_governance_scope_value(&candidate.semantic_scopes, "memory_scope");
+        let partition_key =
+            memory_governance_partition_key(&domain_scope, &workflow_scope, &memory_scope);
+        let shared = candidate
+            .semantic_scopes
+            .get("share_policy")
+            .or_else(|| candidate.semantic_scopes.get("visibility"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| matches!(value, "shared" | "tenant_shared" | "org_shared"));
+        partition_accumulators
+            .entry(partition_key.clone())
+            .or_insert(MemoryGovernancePartition {
+                partition_key: partition_key.clone(),
+                domain_scope,
+                workflow_scope,
+                memory_scope,
+                object_count: 0,
+                memory_object_count: 0,
+                human_verified_count: 0,
+                unverified_count: 0,
+                stale_count: 0,
+                shared,
+            })
+            .shared |= shared;
+        *pending_writeback_partitions
+            .entry(partition_key)
+            .or_insert(0) += 1;
+    }
+
     for partition in partition_accumulators.values() {
         if partition.stale_count > 0 {
             attention_items.push(MemoryGovernanceAttentionItem {
@@ -8036,6 +8430,17 @@ fn build_memory_governance_summary(
         }
     }
 
+    for (partition_key, pending_count) in &pending_writeback_partitions {
+        attention_items.push(MemoryGovernanceAttentionItem {
+            severity: "medium".to_string(),
+            kind: "pending_memory_writeback_review".to_string(),
+            message: format!(
+                "{pending_count} memory writeback candidate(s) need review before becoming reusable memory"
+            ),
+            partition_key: Some(partition_key.clone()),
+        });
+    }
+
     let writeback = MemoryGovernanceWritebackSummary {
         pending_count: candidates
             .iter()
@@ -8050,18 +8455,6 @@ fn build_memory_governance_summary(
             .filter(|candidate| candidate.status == "rejected")
             .count(),
     };
-    if writeback.pending_count > 0 {
-        attention_items.push(MemoryGovernanceAttentionItem {
-            severity: "medium".to_string(),
-            kind: "pending_memory_writeback_review".to_string(),
-            message: format!(
-                "{} memory writeback candidate(s) need review before becoming reusable memory",
-                writeback.pending_count
-            ),
-            partition_key: None,
-        });
-    }
-
     let partitions = partition_accumulators.into_values().collect::<Vec<_>>();
     let status = if attention_items.iter().any(|item| item.severity == "high") {
         "attention_required"
@@ -8105,7 +8498,79 @@ fn memory_governance_partition_key(
     workflow_scope: &str,
     memory_scope: &str,
 ) -> String {
-    format!("domain={domain_scope}|workflow={workflow_scope}|memory={memory_scope}")
+    format!(
+        "domain={}|workflow={}|memory={}",
+        memory_governance_partition_key_component(domain_scope),
+        memory_governance_partition_key_component(workflow_scope),
+        memory_governance_partition_key_component(memory_scope)
+    )
+}
+
+fn memory_governance_partition_key_component(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| match character {
+            '%' => "%25".chars().collect::<Vec<_>>(),
+            '|' => "%7C".chars().collect::<Vec<_>>(),
+            '=' => "%3D".chars().collect::<Vec<_>>(),
+            other => vec![other],
+        })
+        .collect()
+}
+
+fn memory_governance_object_partition_key(object: &SemanticObject) -> String {
+    memory_governance_partition_key(
+        &memory_governance_scope_value(&object.semantic_scopes, "domain_scope"),
+        &memory_governance_scope_value(&object.semantic_scopes, "workflow_scope"),
+        &memory_governance_scope_value(&object.semantic_scopes, "memory_scope"),
+    )
+}
+
+fn memory_governance_candidate_partition_key(candidate: &MemoryWritebackCandidate) -> String {
+    memory_governance_partition_key(
+        &memory_governance_scope_value(&candidate.semantic_scopes, "domain_scope"),
+        &memory_governance_scope_value(&candidate.semantic_scopes, "workflow_scope"),
+        &memory_governance_scope_value(&candidate.semantic_scopes, "memory_scope"),
+    )
+}
+
+fn memory_governance_object_ref(object: &SemanticObject) -> MemoryGovernanceObjectRef {
+    MemoryGovernanceObjectRef {
+        id: object.id,
+        object_key: object.object_key.clone(),
+        title: object.title.clone(),
+        summary: object.summary.clone(),
+        trust_level: object.trust_level.clone(),
+        freshness: object.freshness.clone(),
+        status: object.status.clone(),
+        source_uri: object.source_uri.clone(),
+        semantic_scopes: object.semantic_scopes.clone(),
+        provenance: object.provenance.clone(),
+        created_at: object.created_at,
+        updated_at: object.updated_at,
+    }
+}
+
+fn memory_governance_writeback_ref(
+    candidate: &MemoryWritebackCandidate,
+) -> MemoryGovernanceWritebackRef {
+    MemoryGovernanceWritebackRef {
+        id: candidate.id,
+        session_id: candidate.session_id,
+        candidate_type: candidate.candidate_type.clone(),
+        proposed_object_type: candidate.proposed_object_type.clone(),
+        proposed_object_key: candidate.proposed_object_key.clone(),
+        title: candidate.title.clone(),
+        summary: candidate.summary.clone(),
+        trust_level: candidate.trust_level.clone(),
+        freshness: candidate.freshness.clone(),
+        status: candidate.status.clone(),
+        partition_key: memory_governance_candidate_partition_key(candidate),
+        semantic_object_id: candidate.semantic_object_id,
+        created_at: candidate.created_at,
+        updated_at: candidate.updated_at,
+        decided_at: candidate.decided_at,
+    }
 }
 
 async fn create_semantic_object(
@@ -14070,6 +14535,119 @@ async fn list_workflow_transitions_route(
     Ok(Json(state.list_workflow_transitions(id).await?))
 }
 
+async fn get_workflow_run_graph_console_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<WorkflowRunGraphConsole>, AppError> {
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(build_workflow_run_graph_console(&state, &run).await?))
+}
+
+async fn build_workflow_run_graph_console(
+    state: &AppState,
+    run: &WorkflowRun,
+) -> Result<WorkflowRunGraphConsole, AppError> {
+    let generated_at = Utc::now();
+    let steps = state.list_workflow_step_runs(run.id).await?;
+    let transitions = state.list_workflow_transitions(run.id).await?;
+    let mut status_counts = BTreeMap::new();
+    let due_scheduled_count = steps
+        .iter()
+        .filter(|step| {
+            step.status == "scheduled"
+                && step
+                    .scheduled_at
+                    .is_some_and(|scheduled_at| scheduled_at <= generated_at)
+        })
+        .count();
+    let nodes = steps
+        .iter()
+        .map(|step| {
+            *status_counts.entry(step.status.clone()).or_insert(0) += 1;
+            WorkflowGraphConsoleNode {
+                id: step.id,
+                step_key: step.step_key.clone(),
+                step_type: step.step_type.clone(),
+                status: step.status.clone(),
+                agent_id: step.agent_id,
+                task_grant_id: step.task_grant_id,
+                scheduled_at: step.scheduled_at,
+                due: step.status == "scheduled"
+                    && step
+                        .scheduled_at
+                        .is_some_and(|scheduled_at| scheduled_at <= generated_at),
+                started_at: step.started_at,
+                completed_at: step.completed_at,
+                input_summary: workflow_graph_console_summary(&step.input_payload),
+                output_summary: workflow_graph_console_summary(&step.output_payload),
+            }
+        })
+        .collect::<Vec<_>>();
+    let edges = transitions
+        .iter()
+        .map(|transition| WorkflowGraphConsoleEdge {
+            id: transition.id,
+            from_step_key: transition.from_step_key.clone(),
+            to_step_key: transition.to_step_key.clone(),
+            transition_type: transition.transition_type.clone(),
+            status: transition.status.clone(),
+            condition_summary: workflow_graph_console_summary(&transition.condition_payload),
+            result_summary: workflow_graph_console_summary(&transition.result_payload),
+            created_at: transition.created_at,
+        })
+        .collect::<Vec<_>>();
+    Ok(WorkflowRunGraphConsole {
+        workflow_run_id: run.id,
+        workflow_definition_id: run.workflow_definition_id,
+        pack_installation_id: run.pack_installation_id,
+        generated_at,
+        status: run.status.clone(),
+        node_count: nodes.len(),
+        edge_count: edges.len(),
+        due_scheduled_count,
+        status_counts,
+        nodes,
+        edges,
+    })
+}
+
+fn workflow_graph_console_summary(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut summary = serde_json::Map::new();
+            summary.insert("field_count".to_string(), json!(object.len()));
+            let keys = object.keys().take(8).cloned().collect::<Vec<_>>();
+            summary.insert("keys".to_string(), json!(keys));
+            for key in [
+                "source",
+                "retry",
+                "fan_in",
+                "fan_out",
+                "branch",
+                "skip_reason",
+                "error",
+                "result",
+            ] {
+                if let Some(item) = object.get(key) {
+                    summary.insert(key.to_string(), item.clone());
+                }
+            }
+            Value::Object(summary)
+        }
+        Value::Array(items) => json!({"array_length": items.len()}),
+        other => other.clone(),
+    }
+}
+
 async fn create_workflow_step_run_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -14245,7 +14823,7 @@ async fn run_due_workflow_steps_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
-    Json(input): Json<RunDueWorkflowSteps>,
+    Json(_input): Json<RunDueWorkflowSteps>,
 ) -> Result<Json<WorkflowScheduledStepActivationRun>, AppError> {
     let run = state.get_workflow_run(id).await?;
     authorize_request(
@@ -14256,9 +14834,19 @@ async fn run_due_workflow_steps_route(
         Some(run.primary_session_id),
     )
     .await?;
-    let checked_at = input.now.unwrap_or_else(Utc::now);
+    let checked_at = Utc::now();
+    Ok(Json(
+        activate_due_workflow_steps_for_run(&state, &run, checked_at).await?,
+    ))
+}
+
+async fn activate_due_workflow_steps_for_run(
+    state: &AppState,
+    run: &WorkflowRun,
+    checked_at: DateTime<Utc>,
+) -> Result<WorkflowScheduledStepActivationRun, AppError> {
     let mut scheduled_steps = state
-        .list_workflow_step_runs(id)
+        .list_workflow_step_runs(run.id)
         .await?
         .into_iter()
         .filter(|step| step.status == "scheduled")
@@ -14277,10 +14865,10 @@ async fn run_due_workflow_steps_route(
         step.status = "queued".to_string();
         step.updated_at = checked_at;
         let updated = state.update_workflow_step_run(step).await?;
-        record_workflow_step_run_updated(&state, &run, &updated, &previous_status).await?;
+        record_workflow_step_run_updated(state, run, &updated, &previous_status).await?;
         record_workflow_transition(
-            &state,
-            &run,
+            state,
+            run,
             Some(&updated),
             Some(&updated),
             "schedule",
@@ -14299,21 +14887,84 @@ async fn run_due_workflow_steps_route(
         activated_step_ids.push(updated.id);
     }
     if !activated_step_ids.is_empty() {
-        update_workflow_run_status_and_record(&state, &run, "running").await?;
+        update_workflow_run_status_and_record(state, run, "running").await?;
     }
     let remaining_scheduled_count = state
-        .list_workflow_step_runs(id)
+        .list_workflow_step_runs(run.id)
         .await?
         .into_iter()
         .filter(|step| step.status == "scheduled")
         .count();
-    Ok(Json(WorkflowScheduledStepActivationRun {
-        workflow_run_id: id,
+    Ok(WorkflowScheduledStepActivationRun {
+        workflow_run_id: run.id,
         checked_at,
         activated_count: activated_step_ids.len(),
         activated_step_ids,
         remaining_scheduled_count,
-    }))
+    })
+}
+
+async fn execute_due_workflow_scheduled_steps(
+    state: &AppState,
+    checked_at: DateTime<Utc>,
+) -> Result<WorkflowScheduledStepActivationSweep, AppError> {
+    let runs = state.list_workflow_runs().await?;
+    let mut workflow_run_count = 0usize;
+    let mut scheduled_step_count = 0usize;
+    let mut due_step_count = 0usize;
+    let mut activated_count = 0usize;
+    let mut remaining_scheduled_count = 0usize;
+    let mut activated_step_ids = Vec::new();
+    for run in runs {
+        if workflow_step_status_terminal(&run.status) {
+            continue;
+        }
+        let scheduled_steps = state
+            .list_workflow_step_runs(run.id)
+            .await?
+            .into_iter()
+            .filter(|step| step.status == "scheduled")
+            .collect::<Vec<_>>();
+        if scheduled_steps.is_empty() {
+            continue;
+        }
+        workflow_run_count += 1;
+        scheduled_step_count += scheduled_steps.len();
+        due_step_count += scheduled_steps
+            .iter()
+            .filter(|step| {
+                step.scheduled_at
+                    .is_some_and(|scheduled_at| scheduled_at <= checked_at)
+            })
+            .count();
+        let activation = activate_due_workflow_steps_for_run(state, &run, checked_at).await?;
+        activated_count += activation.activated_count;
+        remaining_scheduled_count += activation.remaining_scheduled_count;
+        activated_step_ids.extend(activation.activated_step_ids);
+    }
+    let mut actions = Vec::new();
+    if activated_count > 0 {
+        actions.push("activate_due_workflow_scheduled_steps".to_string());
+    }
+    let status = if activated_count > 0 {
+        "completed"
+    } else if scheduled_step_count > 0 {
+        "waiting"
+    } else {
+        "noop"
+    }
+    .to_string();
+    Ok(WorkflowScheduledStepActivationSweep {
+        status,
+        checked_at,
+        workflow_run_count,
+        scheduled_step_count,
+        due_step_count,
+        activated_count,
+        activated_step_ids,
+        remaining_scheduled_count,
+        actions,
+    })
 }
 
 async fn record_workflow_step_run_updated(
@@ -34285,6 +34936,53 @@ async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, 
         },
     ));
 
+    let mut workflow_scheduled_total = 0usize;
+    let mut workflow_scheduled_due_count = 0usize;
+    for run in state.list_workflow_runs().await? {
+        if workflow_step_status_terminal(&run.status) {
+            continue;
+        }
+        let scheduled_steps = state
+            .list_workflow_step_runs(run.id)
+            .await?
+            .into_iter()
+            .filter(|step| step.status == "scheduled")
+            .collect::<Vec<_>>();
+        if scheduled_steps.is_empty() {
+            continue;
+        }
+        workflow_scheduled_total += scheduled_steps.len();
+        workflow_scheduled_due_count += scheduled_steps
+            .iter()
+            .filter(|step| {
+                step.scheduled_at
+                    .is_some_and(|scheduled_at| scheduled_at <= generated_at)
+            })
+            .count();
+    }
+    actions.push(scheduler_due_plan_item(
+        "workflows",
+        "workflow_scheduled_step_activation",
+        "auto",
+        workflow_scheduled_due_count,
+        workflow_scheduled_total.saturating_sub(workflow_scheduled_due_count),
+        workflow_scheduled_total,
+        if workflow_scheduled_due_count > 0 {
+            "activate scheduled workflow retry/delay steps whose due time has passed"
+        } else if workflow_scheduled_total > 0 {
+            "scheduled workflow steps exist but none are due yet"
+        } else {
+            "no scheduled workflow steps are pending"
+        },
+    ));
+    if let Some(item) = actions.last_mut() {
+        if workflow_scheduled_due_count == 0 && workflow_scheduled_total > 0 {
+            item.status = "waiting".to_string();
+            item.severity = "info".to_string();
+            item.skipped_count = workflow_scheduled_total;
+        }
+    }
+
     let stale_remote_computer_attachments = state.list_stale_remote_computer_attachments().await?;
     let remote_computer_leases = state.list_remote_computer_leases().await?;
     let expired_remote_computer_leases = remote_computer_leases
@@ -34472,6 +35170,7 @@ async fn execute_scheduler_due_tasks(
         "system",
     )
     .await?;
+    let workflow_scheduled_steps = execute_due_workflow_scheduled_steps(state, checked_at).await?;
     let usage = build_usage_summary(state).await?;
     let cost_alerts = build_cost_alerts(&usage.provider_budgets, checked_at);
     let active_alert_route_count = state
@@ -34539,6 +35238,9 @@ async fn execute_scheduler_due_tasks(
     {
         actions.push("codex_app_server_stale_polls_processed".to_string());
     }
+    if workflow_scheduled_steps.activated_count > 0 {
+        actions.push("workflow_scheduled_steps_activated".to_string());
+    }
     if cost_alert_delivery.is_some() {
         actions.push("usage_cost_alert_delivery_processed".to_string());
     }
@@ -34582,6 +35284,7 @@ async fn execute_scheduler_due_tasks(
         policy_rollout,
         approval_escalations,
         agent_releases,
+        workflow_scheduled_steps: Some(workflow_scheduled_steps),
         mcp_health_runs,
         mcp_rollout_runs,
         codex_app_server_stale_polls,
@@ -34610,6 +35313,8 @@ async fn execute_scheduler_due_tasks(
                 "team_count": run.team_count,
                 "actions": run.actions,
                 "provider_policy_gate_status": run.provider_policy_gate.as_ref().map(|gate| gate.status.clone()),
+                "workflow_scheduled_step_status": run.workflow_scheduled_steps.as_ref().map(|workflow| workflow.status.clone()),
+                "workflow_scheduled_step_activated_count": run.workflow_scheduled_steps.as_ref().map(|workflow| workflow.activated_count).unwrap_or(0),
                 "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
                 "remote_computer_sidecar_supervision_status": run.remote_computer_sidecar_supervision.status,
                 "remote_computer_sidecar_missing_heartbeat_count": run.remote_computer_sidecar_supervision.missing_heartbeat_count,
@@ -44791,7 +45496,7 @@ Stage 2 is not complete.
         assert_eq!(gaps[1], "Second controller-backed blocker.");
 
         let readiness = build_stage2_completion_readiness();
-        assert_eq!(readiness.evidence_requirements.len(), 13);
+        assert_eq!(readiness.evidence_requirements.len(), 14);
         assert_eq!(readiness.evidence_requirements[0].id, "tenant-routing");
         assert!(
             readiness.evidence_requirements[0]
@@ -50294,6 +50999,62 @@ not json
         }));
     }
 
+    #[test]
+    fn memory_governance_summary_includes_pending_partitions_and_escaped_keys() {
+        let now = Utc::now();
+        let visible_session_id = Uuid::new_v4();
+        let pending_candidate = MemoryWritebackCandidate {
+            id: Uuid::new_v4(),
+            session_id: visible_session_id,
+            candidate_type: "session_summary".to_string(),
+            source_event_id: None,
+            source_artifact_id: None,
+            source_approval_id: None,
+            source_handoff_id: None,
+            proposed_object_type: "memory".to_string(),
+            proposed_object_key: "memory:pending-only".to_string(),
+            title: "Pending memory".to_string(),
+            summary: "Pending writeback should still form a governance partition".to_string(),
+            content: empty_json_object(),
+            semantic_scopes: json!({
+                "domain_scope": "legal|shared",
+                "workflow_scope": "contract=review",
+                "memory_scope": "org%memory",
+                "share_policy": "isolated"
+            }),
+            source_refs: empty_json_object(),
+            provenance: empty_json_object(),
+            trust_level: "unverified".to_string(),
+            freshness: "current".to_string(),
+            status: "pending".to_string(),
+            reviewer_subject: None,
+            review_reason: None,
+            semantic_object_id: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+            decided_at: None,
+        };
+
+        let summary = build_memory_governance_summary(&[], &[pending_candidate], now);
+        let expected_partition_key =
+            "domain=legal%7Cshared|workflow=contract%3Dreview|memory=org%25memory";
+
+        assert_eq!(summary.partition_count, 1);
+        assert_eq!(summary.writeback.pending_count, 1);
+        assert!(summary.partitions.iter().any(|partition| {
+            partition.partition_key == expected_partition_key && partition.object_count == 0
+        }));
+        assert!(summary.attention_items.iter().any(|item| {
+            item.kind == "pending_memory_writeback_review"
+                && item.partition_key.as_deref() == Some(expected_partition_key)
+        }));
+        assert_ne!(
+            memory_governance_partition_key("a|workflow=b", "c", "d"),
+            memory_governance_partition_key("a", "b|workflow=c", "d")
+        );
+    }
+
     #[tokio::test]
     async fn memory_governance_summary_partitions_memory_by_scope_and_flags_risks() {
         let app = test_app().await;
@@ -50367,7 +51128,7 @@ not json
         }
 
         let summary: Value = request_json(
-            app,
+            app.clone(),
             Request::builder()
                 .uri("/api/memory-governance/summary")
                 .header("x-mandoforge-roles", "admin")
@@ -50397,6 +51158,289 @@ not json
                     .iter()
                     .any(|item| item["kind"] == json!("unverified_memory_objects"))
         }));
+
+        let detail: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/memory-governance/partitions?partition_key=domain%3Dsocial-media%7Cworkflow%3Dcontent%7Cmemory%3Dbrand-voice")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(detail["partition"]["object_count"], json!(2));
+        assert_eq!(detail["access_policy"], json!("isolated_partition"));
+        assert_eq!(detail["object_count"], json!(2));
+        assert!(detail["risk_items"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["kind"] == json!("stale_memory_objects"))
+        }));
+
+        let writebacks: Value = request_json(
+            app,
+            Request::builder()
+                .uri("/api/memory-governance/writebacks?status=pending")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(writebacks["status_filter"], json!("pending"));
+        assert_eq!(writebacks["candidate_count"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn memory_governance_filters_objects_to_visible_sessions() {
+        let app = test_app().await;
+        let organization: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/organizations",
+                json!({"name": "Memory Governance Org", "slug": "memory-governance-org"}),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let organization_id = organization["id"].as_str().expect("organization id");
+        let team: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/organizations/{organization_id}/teams"),
+                json!({"name": "Governance Team", "slug": "governance-team"}),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let team_id = team["id"].as_str().expect("team id");
+        let project_a: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/teams/{team_id}/projects"),
+                json!({"name": "Visible Legal", "slug": "visible-legal"}),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let project_b: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/teams/{team_id}/projects"),
+                json!({"name": "Hidden Ecommerce", "slug": "hidden-ecommerce"}),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let project_a_id = project_a["id"].as_str().expect("project a id");
+        let project_b_id = project_b["id"].as_str().expect("project b id");
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/organizations/{organization_id}/memberships"),
+                json!({
+                    "user_id": "viewer-a",
+                    "team_id": team_id,
+                    "project_id": project_a_id,
+                    "role": "viewer"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let _: ProviderAccess = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/teams/{team_id}/provider-access"),
+                json!({
+                    "provider_name": "mock",
+                    "model_allowlist": ["mock"]
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        let agent_a: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Visible Legal Agent",
+                    "kind": "managed",
+                    "provider": "mock",
+                    "model": "mock",
+                    "team_id": team_id,
+                    "project_id": project_a_id,
+                    "release_state": "active"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let agent_b: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Hidden Ecommerce Agent",
+                    "kind": "managed",
+                    "provider": "mock",
+                    "model": "mock",
+                    "team_id": team_id,
+                    "project_id": project_b_id,
+                    "release_state": "active"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session_a: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent_a.id, "title": "visible legal memory"}),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let session_b: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent_b.id, "title": "hidden ecommerce memory"}),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "memory",
+                    "source_uri": "memory://visibility-test",
+                    "display_name": "Visibility test memory source"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        for (session_id, object_key, domain_scope) in [
+            (session_a.id, "memory:visible:legal", "legal"),
+            (session_b.id, "memory:hidden:ecommerce", "ecommerce"),
+        ] {
+            let _: SemanticObject = request_json(
+                app.clone(),
+                json_request_with_headers(
+                    "POST",
+                    "/api/semantic-objects",
+                    json!({
+                        "source_id": source.id,
+                        "source_uri": format!("session://{session_id}/memory-writeback-candidates/manual"),
+                        "object_type": "memory",
+                        "object_key": object_key,
+                        "title": object_key,
+                        "summary": "visibility-scoped memory fixture",
+                        "content": {"session_id": session_id},
+                        "semantic_scopes": {
+                            "domain_scope": domain_scope,
+                            "workflow_scope": "visibility",
+                            "memory_scope": "ops",
+                            "share_policy": "isolated"
+                        },
+                        "trust_level": "human_verified",
+                        "freshness": "current"
+                    }),
+                    &[
+                        ("x-mandoforge-subject", "admin-1"),
+                        ("x-mandoforge-roles", "admin"),
+                    ],
+                ),
+            )
+            .await;
+        }
+
+        let summary: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/memory-governance/summary")
+                .header("x-mandoforge-subject", "viewer-a")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(summary["memory_object_count"], json!(1));
+        assert!(summary["partitions"].as_array().is_some_and(|partitions| {
+            partitions.iter().any(|partition| {
+                partition["partition_key"] == json!("domain=legal|workflow=visibility|memory=ops")
+            }) && !partitions.iter().any(|partition| {
+                partition["partition_key"]
+                    == json!("domain=ecommerce|workflow=visibility|memory=ops")
+            })
+        }));
+
+        let (status, hidden_detail): (StatusCode, Value) = request_value(
+            app,
+            Request::builder()
+                .uri("/api/memory-governance/partitions?partition_key=domain%3Decommerce%7Cworkflow%3Dvisibility%7Cmemory%3Dops")
+                .header("x-mandoforge-subject", "viewer-a")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            hidden_detail["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("partition"))
+        );
     }
 
     #[tokio::test]
@@ -51566,7 +52610,7 @@ not json
                                 "key": "enrich",
                                 "type": "agent",
                                 "depends_on": ["intake"],
-                                "retry": {"max_attempts": 2, "delay_seconds": 60}
+                                "retry": {"max_attempts": 2, "delay_seconds": 1}
                             }
                         ]
                     },
@@ -51666,7 +52710,7 @@ not json
         assert_eq!(retry_step["input_payload"]["retry"]["attempt"], json!(2));
         assert_eq!(
             retry_step["input_payload"]["retry"]["delay_seconds"],
-            json!(60)
+            json!(1)
         );
         assert_eq!(
             retry_step["input_payload"]["retry"]["scheduled_at"],
@@ -51687,7 +52731,7 @@ not json
                 && transition["from_step_run_id"] == json!(enrich_step_id)
                 && transition["to_step_run_id"] == json!(retry_step_id)
                 && transition["status"] == json!("scheduled")
-                && transition["condition_payload"]["delay_seconds"] == json!(60)
+                && transition["condition_payload"]["delay_seconds"] == json!(1)
         }));
 
         let before_due: Value = request_json(
@@ -51695,7 +52739,7 @@ not json
             json_request_with_headers(
                 "POST",
                 &format!("/api/workflow-runs/{run_id}/scheduled-steps/run-due"),
-                json!({"now": "2000-01-01T00:00:00Z"}),
+                json!({"now": "2999-01-01T00:00:00Z"}),
                 &[("x-mandoforge-roles", "operator")],
             ),
         )
@@ -51704,14 +52748,19 @@ not json
 
         let due_at = DateTime::parse_from_rfc3339(scheduled_at)
             .expect("valid scheduled timestamp")
-            .with_timezone(&Utc)
-            + chrono::Duration::seconds(1);
+            .with_timezone(&Utc);
+        let sleep_for = due_at
+            .signed_duration_since(Utc::now())
+            .to_std()
+            .unwrap_or_default()
+            + Duration::from_millis(100);
+        tokio::time::sleep(sleep_for).await;
         let after_due: Value = request_json(
             app.clone(),
             json_request_with_headers(
                 "POST",
                 &format!("/api/workflow-runs/{run_id}/scheduled-steps/run-due"),
-                json!({"now": due_at}),
+                json!({}),
                 &[("x-mandoforge-roles", "operator")],
             ),
         )
@@ -51733,6 +52782,187 @@ not json
             .find(|step| step["id"] == json!(retry_step_id))
             .expect("activated retry step");
         assert_eq!(activated["status"], json!("queued"));
+    }
+
+    #[tokio::test]
+    async fn scheduler_due_run_activates_workflow_scheduled_retry_steps() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Scheduler due retry workflow",
+                    "entrypoint": "scheduler-due-retry-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "collect", "type": "agent", "start": true},
+                            {
+                                "key": "normalize",
+                                "type": "agent",
+                                "depends_on": ["collect"],
+                                "retry": {"max_attempts": 2, "delay_seconds": 1}
+                            }
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "scheduler due retry"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let collect_step_id = steps[0]["id"]
+            .as_str()
+            .expect("collect step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{collect_step_id}"),
+                json!({"status": "completed"}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let normalize_step_id = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("normalize"))
+            .and_then(|step| step["id"].as_str())
+            .expect("normalize step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{normalize_step_id}"),
+                json!({
+                    "status": "failed",
+                    "output_payload": {"error": "temporary source outage"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let graph: WorkflowRunGraphConsole = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/graph"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(graph.due_scheduled_count, 1);
+
+        let scheduler_plan: SchedulerDuePlan = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/scheduler/due-plan")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let workflow_plan = scheduler_plan
+            .actions
+            .iter()
+            .find(|item| item.action == "workflow_scheduled_step_activation")
+            .expect("workflow scheduled step plan item");
+        assert_eq!(workflow_plan.area, "workflows");
+        assert_eq!(workflow_plan.status, "due");
+        assert_eq!(workflow_plan.due_count, 1);
+
+        let scheduler_run: SchedulerDueRun = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/scheduler/run-due",
+                json!({"idempotency_key": "workflow-scheduled-step-test"}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let workflow_activation = scheduler_run
+            .workflow_scheduled_steps
+            .as_ref()
+            .expect("workflow scheduled activation sweep");
+        assert_eq!(workflow_activation.status, "completed");
+        assert_eq!(workflow_activation.activated_count, 1);
+        assert!(
+            scheduler_run
+                .actions
+                .iter()
+                .any(|action| action == "workflow_scheduled_steps_activated")
+        );
+
+        let steps_after_scheduler: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let activated_retry = steps_after_scheduler
+            .iter()
+            .find(|step| {
+                step["step_key"] == json!("normalize")
+                    && step["id"] == json!(workflow_activation.activated_step_ids[0])
+            })
+            .expect("activated normalize retry step");
+        assert_eq!(activated_retry["status"], json!("queued"));
     }
 
     #[test]

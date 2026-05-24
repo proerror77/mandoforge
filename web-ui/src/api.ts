@@ -105,6 +105,8 @@ export type WorkflowStepRun = {
   session_id?: string | null;
   task_grant_id?: string | null;
   status: string;
+  input_payload?: Record<string, unknown>;
+  output_payload?: Record<string, unknown>;
   started_at?: string | null;
   completed_at?: string | null;
   scheduled_at?: string | null;
@@ -123,6 +125,46 @@ export type WorkflowTransition = {
   status: string;
   condition_payload: Record<string, unknown>;
   result_payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type WorkflowGraphConsole = {
+  workflow_run_id: string;
+  workflow_definition_id: string;
+  pack_installation_id?: string | null;
+  generated_at: string;
+  status: string;
+  node_count: number;
+  edge_count: number;
+  due_scheduled_count: number;
+  status_counts: Record<string, number>;
+  nodes: WorkflowGraphConsoleNode[];
+  edges: WorkflowGraphConsoleEdge[];
+};
+
+export type WorkflowGraphConsoleNode = {
+  id: string;
+  step_key: string;
+  step_type: string;
+  status: string;
+  agent_id?: string | null;
+  task_grant_id?: string | null;
+  scheduled_at?: string | null;
+  due: boolean;
+  started_at?: string | null;
+  completed_at?: string | null;
+  input_summary: Record<string, unknown>;
+  output_summary: Record<string, unknown>;
+};
+
+export type WorkflowGraphConsoleEdge = {
+  id: string;
+  from_step_key?: string | null;
+  to_step_key?: string | null;
+  transition_type: string;
+  status: string;
+  condition_summary: Record<string, unknown>;
+  result_summary: Record<string, unknown>;
   created_at: string;
 };
 
@@ -180,21 +222,80 @@ export type MemoryGovernanceSummary = {
   semantic_object_count: number;
   memory_object_count: number;
   partition_count: number;
-  partitions: Array<{
-    partition_key: string;
-    object_count: number;
-    memory_object_count: number;
-    human_verified_count: number;
-    unverified_count: number;
-    stale_count: number;
-    shared: boolean;
-  }>;
-  attention_items: Array<{
-    severity: string;
-    kind: string;
-    message: string;
-    partition_key?: string | null;
-  }>;
+  partitions: MemoryGovernancePartition[];
+  attention_items: MemoryGovernanceAttentionItem[];
+};
+
+export type MemoryGovernancePartition = {
+  partition_key: string;
+  domain_scope: string;
+  workflow_scope: string;
+  memory_scope: string;
+  object_count: number;
+  memory_object_count: number;
+  human_verified_count: number;
+  unverified_count: number;
+  stale_count: number;
+  shared: boolean;
+};
+
+export type MemoryGovernanceAttentionItem = {
+  severity: string;
+  kind: string;
+  message: string;
+  partition_key?: string | null;
+};
+
+export type MemoryGovernancePartitionDetail = {
+  generated_at: string;
+  partition: MemoryGovernancePartition;
+  object_count: number;
+  pending_writeback_count: number;
+  access_policy: string;
+  risk_items: MemoryGovernanceAttentionItem[];
+  objects: MemoryGovernanceObjectRef[];
+  writeback_candidates: MemoryGovernanceWritebackRef[];
+};
+
+export type MemoryGovernanceObjectRef = {
+  id: string;
+  object_key: string;
+  title: string;
+  summary: string;
+  trust_level: string;
+  freshness: string;
+  status: string;
+  source_uri?: string | null;
+  semantic_scopes: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MemoryGovernanceWritebackQueue = {
+  generated_at: string;
+  status_filter?: string | null;
+  candidate_count: number;
+  pending_count: number;
+  candidates: MemoryGovernanceWritebackRef[];
+};
+
+export type MemoryGovernanceWritebackRef = {
+  id: string;
+  session_id: string;
+  candidate_type: string;
+  proposed_object_type: string;
+  proposed_object_key: string;
+  title: string;
+  summary: string;
+  trust_level: string;
+  freshness: string;
+  status: string;
+  partition_key: string;
+  semantic_object_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  decided_at?: string | null;
 };
 
 const ADMIN_TOKEN_KEY = "mandoforge.adminToken";

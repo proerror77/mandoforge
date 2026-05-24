@@ -77,6 +77,9 @@ write_summary() {
   local run_status
   local run_action_count
   local recent_run_count
+  local workflow_scheduled_status
+  local workflow_scheduled_due_count
+  local workflow_scheduled_activated_count
 
   status="$(jq -r '.status // "unknown"' "$summary_file")"
   deployment_status="$(jq -r '.deployment_readiness.status // "unknown"' "$summary_file")"
@@ -91,6 +94,9 @@ write_summary() {
   run_status="$(jq -r '.status // "unknown"' "$run_file")"
   run_action_count="$(jq -r '.actions | length // 0' "$run_file")"
   recent_run_count="$(jq -r '.recent_run_count // 0' "$summary_file")"
+  workflow_scheduled_status="$(jq -r '.workflow_scheduled_steps.status // "not_reported"' "$run_file")"
+  workflow_scheduled_due_count="$(jq -r '.workflow_scheduled_steps.due_step_count // 0' "$run_file")"
+  workflow_scheduled_activated_count="$(jq -r '.workflow_scheduled_steps.activated_count // 0' "$run_file")"
 
   {
     echo "scheduler_summary_status=$status"
@@ -105,6 +111,9 @@ write_summary() {
     echo "due_plan_blocked_count=$blocked_count"
     echo "run_due_status=$run_status"
     echo "run_due_action_count=$run_action_count"
+    echo "workflow_scheduled_step_status=$workflow_scheduled_status"
+    echo "workflow_scheduled_step_due_count=$workflow_scheduled_due_count"
+    echo "workflow_scheduled_step_activated_count=$workflow_scheduled_activated_count"
     echo "recent_run_count_before_run=$recent_run_count"
     echo "scheduler_token_supplied=$([[ -n "$SCHEDULER_TOKEN" ]] && echo true || echo false)"
     echo "evidence_dir=$EVIDENCE_DIR"

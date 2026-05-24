@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 set -euo pipefail
 
 if ! command -v kubectl >/dev/null 2>&1; then
@@ -41,6 +42,7 @@ scheduler_script="scripts/scheduler-evidence-gate.sh"
 policy_rollout_script="scripts/policy-rollout-evidence-gate.sh"
 codex_app_server_script="scripts/codex-app-server-evidence-gate.sh"
 managed_session_runtime_script="scripts/managed-session-runtime-evidence-gate.sh"
+managed_workflow_runtime_script="scripts/managed-workflow-runtime-evidence-gate.sh"
 mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
 eval_release_script="scripts/eval-release-evidence-gate.sh"
 finance_script="scripts/finance-evidence-gate.sh"
@@ -130,6 +132,11 @@ if [[ ! -x "$managed_session_runtime_script" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$managed_workflow_runtime_script" ]]; then
+  echo "missing managed-workflow runtime evidence script: $managed_workflow_runtime_script" >&2
+  exit 1
+fi
+
 if [[ ! -x "$mcp_gateway_script" ]]; then
   echo "missing MCP Gateway evidence script: $mcp_gateway_script" >&2
   exit 1
@@ -150,127 +157,132 @@ if [[ ! -x "$completion_audit_script" ]]; then
   exit 1
 fi
 
-kubectl kustomize deploy/stage2-evidence >/tmp/mandoforge-stage2-evidence-kustomize.out
-kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone \
-  >/tmp/mandoforge-stage2-production-evidence-kustomize.out
-kubectl kustomize deploy/k8s >/tmp/mandoforge-deploy-kustomize.out
+stage2_render_file="$(mktemp -t mandoforge-stage2-evidence-kustomize.XXXXXX)"
+stage2_production_render_file="$(mktemp -t mandoforge-stage2-production-evidence-kustomize.XXXXXX)"
+deploy_render_file="$(mktemp -t mandoforge-deploy-kustomize.XXXXXX)"
+trap 'rm -f "$stage2_render_file" "$stage2_production_render_file" "$deploy_render_file"' EXIT
 
-if [[ ! -s /tmp/mandoforge-stage2-evidence-kustomize.out ]]; then
+kubectl kustomize deploy/stage2-evidence >"$stage2_render_file"
+kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone \
+  >"$stage2_production_render_file"
+kubectl kustomize deploy/k8s >"$deploy_render_file"
+
+if [[ ! -s "$stage2_render_file" ]]; then
   echo "Stage 2 evidence kustomize render produced no output" >&2
   exit 1
 fi
 
-if [[ ! -s /tmp/mandoforge-stage2-production-evidence-kustomize.out ]]; then
+if [[ ! -s "$stage2_production_render_file" ]]; then
   echo "Stage 2 production evidence kustomize render produced no output" >&2
   exit 1
 fi
 
-if [[ ! -s /tmp/mandoforge-deploy-kustomize.out ]]; then
+if [[ ! -s "$deploy_render_file" ]]; then
   echo "deploy/k8s kustomize render produced no output" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-worker-isolated" /tmp/mandoforge-deploy-kustomize.out; then
+if ! grep -q "name: mandoforge-worker-isolated" "$deploy_render_file"; then
   echo "deploy/k8s render is missing isolated worker-pool Deployment/NetworkPolicy" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-worker-isolated-queue-depth" /tmp/mandoforge-deploy-kustomize.out; then
+if ! grep -q "name: mandoforge-worker-isolated-queue-depth" "$deploy_render_file"; then
   echo "deploy/k8s render is missing isolated worker-pool KEDA ScaledObject" >&2
   exit 1
 fi
 
-if ! grep -q "MANDOFORGE_TENANT_ID" /tmp/mandoforge-deploy-kustomize.out; then
+if ! grep -q "MANDOFORGE_TENANT_ID" "$deploy_render_file"; then
   echo "deploy/k8s render is missing configurable runtime tenant id" >&2
   exit 1
 fi
 
-if ! grep -q "kind: Job" /tmp/mandoforge-stage2-evidence-kustomize.out; then
+if ! grep -q "kind: Job" "$stage2_render_file"; then
   echo "Stage 2 evidence kustomize render is missing a Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-stage2-production-evidence-gate" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-stage2-production-evidence-gate" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the strict production Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-stage2-completion-audit" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-stage2-completion-audit" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the completion audit Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-observability-collector-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-observability-collector-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the observability collector evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-remote-computer-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-remote-computer-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the Remote Computer evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-worker-remote-computer-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-worker-remote-computer-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the worker/Remote Computer evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-provider-governance-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-provider-governance-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the provider governance evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-tenant-isolation-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-tenant-isolation-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the tenant isolation evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-vault-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-vault-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the Vault evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-approval-notification-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-approval-notification-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the approval notification evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-worker-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-worker-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the worker evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-scheduler-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-scheduler-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the scheduler evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-policy-rollout-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-policy-rollout-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the policy rollout evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-codex-app-server-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-codex-app-server-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the Codex App Server evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-mcp-gateway-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-mcp-gateway-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the MCP Gateway evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-eval-release-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-eval-release-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the eval/release evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-finance-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "name: mandoforge-finance-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the finance evidence Job" >&2
   exit 1
 fi
 
-if ! grep -q "claimName: mandoforge-stage2-production-evidence" /tmp/mandoforge-stage2-production-evidence-kustomize.out; then
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the persistent evidence PVC mount" >&2
   exit 1
 fi
@@ -2377,6 +2389,16 @@ fi
 
 if ! grep -q "RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must know how to run managed-session restart/resume evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "RUN_STAGE2_MANAGED_WORKFLOW_RUNTIME" scripts/stage2-production-evidence-gate.sh; then
+  echo "Stage 2 production evidence gate must know how to run managed-workflow runtime evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "workflow_scheduled_steps_activated" scripts/managed-workflow-runtime-evidence-gate.sh || ! grep -q "/api/workflow-runs/.*/graph" scripts/managed-workflow-runtime-evidence-gate.sh; then
+  echo "Managed-workflow runtime evidence gate must prove scheduler activation and graph console evidence" >&2
   exit 1
 fi
 

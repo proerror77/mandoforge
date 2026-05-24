@@ -580,9 +580,38 @@ h1 {
   gap: 10px;
 }
 
+.graph-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.graph-summary .kv {
+  min-height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 8px;
+}
+
+.status-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.status-count {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 850;
+}
+
 .graph-nodes {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(146px, 1fr));
   gap: 8px;
 }
 
@@ -600,6 +629,7 @@ h1 {
 
 .graph-node strong,
 .graph-node span,
+.graph-node small,
 .graph-edges span {
   display: block;
   overflow: hidden;
@@ -612,9 +642,18 @@ h1 {
 }
 
 .graph-node span,
+.graph-node small,
 .graph-edges {
   color: var(--muted);
   font-size: 11px;
+}
+
+.graph-node small {
+  margin-top: 3px;
+}
+
+.node-due {
+  box-shadow: inset 0 -3px 0 var(--amber);
 }
 
 .node-running {
@@ -642,6 +681,58 @@ h1 {
   gap: 5px;
   border-top: 1px solid var(--line);
   padding-top: 8px;
+}
+
+.partition-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.partition-chip {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--ink);
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.partition-chip span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.partition-chip strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.partition-chip.selected {
+  border-color: var(--black);
+  box-shadow: inset 3px 0 0 var(--black);
+}
+
+.memory-detail,
+.writeback-queue {
+  display: grid;
+  gap: 8px;
+}
+
+.memory-object-row span,
+.writeback-row span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .runtime-row strong,

@@ -79,10 +79,20 @@ local_validation_endpoint_enabled() {
     ./scripts/managed-session-runtime-evidence-gate.sh)
       [[ "${RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME:-0}" == "1" ]]
       ;;
+    ./scripts/managed-workflow-runtime-evidence-gate.sh)
+      [[ "${RUN_STAGE2_MANAGED_WORKFLOW_RUNTIME:-0}" == "1" ]]
+      ;;
     *)
       return 0
       ;;
   esac
+}
+
+local_validations_requested() {
+  [[ "${RUN_STAGE2_UI_ACTIONBOOK:-0}" == "1" ]] ||
+    [[ "${RUN_STAGE2_UI_STATIC_ASSETS:-0}" == "1" ]] ||
+    [[ "${RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME:-0}" == "1" ]] ||
+    [[ "${RUN_STAGE2_MANAGED_WORKFLOW_RUNTIME:-0}" == "1" ]]
 }
 
 enterprise_optional_enabled() {
@@ -330,7 +340,7 @@ run_local_script_validation() {
     printf 'local validation script is missing or not executable: %s\n' "$script_path" >"$stderr_file"
   else
     set +e
-    "$script_path" >"$stdout_file" 2>"$stderr_file"
+    BASE_URL="$BASE_URL" EVIDENCE_DIR="$EVIDENCE_DIR" "$script_path" >"$stdout_file" 2>"$stderr_file"
     exit_code="$?"
     set -e
     if [[ "$exit_code" != "0" ]]; then
@@ -382,6 +392,8 @@ collect_readiness() {
   fetch_json GET /api/observability/collector-readiness >/dev/null
   fetch_json GET /api/scheduler/summary >/dev/null
   fetch_json GET /api/scheduler/due-plan >/dev/null
+  fetch_json GET /api/workflow-runs >/dev/null
+  fetch_json GET /api/memory-governance/summary >/dev/null
   fetch_json GET /api/policy/rollout/orchestration/readiness >/dev/null
   fetch_json GET /api/agents/releases/automation-runs >/dev/null
 
@@ -408,6 +420,12 @@ run_local_validations() {
     run_local_script_validation ./scripts/managed-session-runtime-evidence-gate.sh
   else
     echo "skipping managed-session restart/resume drill; set RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME=1 to include runtime recovery evidence" >&2
+  fi
+
+  if [[ "${RUN_STAGE2_MANAGED_WORKFLOW_RUNTIME:-0}" == "1" ]]; then
+    run_local_script_validation ./scripts/managed-workflow-runtime-evidence-gate.sh
+  else
+    echo "skipping managed-workflow runtime proof; set RUN_STAGE2_MANAGED_WORKFLOW_RUNTIME=1 to include graph/scheduler/memory evidence" >&2
   fi
 }
 
@@ -1305,17 +1323,30 @@ collect_readiness
 verify_readiness_inventory_coverage
 write_endpoint_coverage "validation_endpoints" "validation" "0"
 
+local_validations_were_requested=0
+if local_validations_requested; then
+  local_validations_were_requested=1
+fi
+
 if [[ "$RUN_VALIDATIONS" == "1" ]]; then
   run_controller_validations
+else
+  echo "controller validations skipped; set RUN_STAGE2_PRODUCTION_VALIDATIONS=1 to execute validation endpoints" >&2
+  if [[ "$VERIFY_VALIDATION_COVERAGE" == "1" && "$local_validations_were_requested" != "1" ]]; then
+    write_endpoint_coverage "validation_endpoints" "validation" "1"
+  fi
+fi
+
+if [[ "$local_validations_were_requested" == "1" ]]; then
   run_local_validations
+else
+  echo "local validation scripts skipped; set one of RUN_STAGE2_UI_ACTIONBOOK, RUN_STAGE2_UI_STATIC_ASSETS, RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME, or RUN_STAGE2_MANAGED_WORKFLOW_RUNTIME to include local proof evidence" >&2
+fi
+
+if [[ "$RUN_VALIDATIONS" == "1" || "$local_validations_were_requested" == "1" ]]; then
   collect_readiness
   verify_readiness_inventory_coverage
   write_endpoint_coverage "validation_endpoints" "validation" "$VERIFY_VALIDATION_COVERAGE"
-else
-  echo "controller validations skipped; set RUN_STAGE2_PRODUCTION_VALIDATIONS=1 to execute validation endpoints" >&2
-  if [[ "$VERIFY_VALIDATION_COVERAGE" == "1" ]]; then
-    write_endpoint_coverage "validation_endpoints" "validation" "1"
-  fi
 fi
 
 run_completion_audit

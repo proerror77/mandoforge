@@ -123,7 +123,15 @@ The repository already has the managed runtime kernel:
 - The web console now observes workflow runs, steps, transitions, task grants,
   workers, approvals, tool calls, artifacts, session events, graph nodes,
   transition filters, pack bindings, pack runtime objects, and memory governance
-  summary data from live APIs.
+  summary, partition drilldown, and writeback queue data from live APIs.
+- `/api/scheduler/run-due` now includes due scheduled workflow step activation,
+  so delayed retry/backoff workflow steps can be advanced by the external
+  scheduler path instead of only by a workflow-specific manual endpoint.
+- `scripts/managed-workflow-runtime-evidence-gate.sh` is the production-proof
+  API gate for this slice: it creates a released workflow graph, exercises
+  fan-out, scheduled retry, scheduler due activation, fan-in, completion,
+  artifact sync, graph console readback, and memory governance partition
+  inspection through HTTP APIs.
 
 The main gap is not "can it run a tool". The main gap is "can an installed
 Workflow Pack become an executable, governed, observable workflow graph".
@@ -144,8 +152,8 @@ Remaining first-class execution gaps:
   semantics.
 - Workflow observability is now present in the web console with graph
   visualization, transition filtering, pack-binding inspection, runtime-object
-  inspection, and memory-governance summary. Deeper graph editing remains a
-  follow-up.
+  inspection, memory-governance partition drilldown, and writeback queue
+  inspection. Deeper graph editing remains a follow-up.
 
 Current boundary status:
 
@@ -159,8 +167,9 @@ Current boundary status:
   controls, retry attempt materialization, failure-driven downstream skip,
   compensation step materialization, durable transition recording, pack binding
   materialization, generic pack runtime-object materialization, memory
-  governance summary, and `ApprovalCommitToken` exact binding for MCP and native
-  connector commit writes.
+  governance summary/drilldown/writeback queue, external scheduler activation
+  of scheduled workflow steps, and `ApprovalCommitToken` exact binding for MCP
+  and native connector commit writes.
 - Clear but only partially enforced now: worker/agent class authority,
   numeric/time branch expression policy, production native connector transport
   semantics, provider-specific pack binding deployment, production compensation
@@ -790,7 +799,10 @@ Acceptance:
 
 ### Slice 8: Workflow Observability UI
 
-- Add Workflow Run console.
+- Status: implemented for live workflow run console, durable graph console
+  endpoint, transition filtering, scheduled-step due visibility, pack binding
+  and runtime-object inspection, task grants, approvals, tool calls, artifacts,
+  worker logs, memory partitions, and memory writeback queues.
 - Show Pack, readiness, run status, step graph, agents, threads, grants,
   approvals, tool calls, artifacts, worker logs, and memory candidates.
 - Keep infrastructure panels advanced.
@@ -802,6 +814,11 @@ Acceptance:
 
 ### Slice 9: AI Governance Pack E2E
 
+- Status: WorkflowPack lifecycle proof and managed workflow runtime proof are
+  implemented separately. The runtime proof now validates workflow graph
+  execution through scheduler activation, artifact output, graph readback, and
+  memory governance. Provider-specific connector execution remains adapter
+  owned and deferred by design.
 - Use `packs/ai-governance` as the first full pack.
 - Prove install -> onboarding -> connector quality -> stage -> release ->
   start workflow -> handoff -> draft artifact -> approval -> replay.

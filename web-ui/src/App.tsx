@@ -11,12 +11,15 @@ import {
   type Approval,
   type Artifact,
   type Environment,
+  type MemoryGovernancePartitionDetail,
   type MemoryGovernanceSummary,
+  type MemoryGovernanceWritebackQueue,
   type Session,
   type SessionEvent,
   type TaskGrant,
   type ToolCall,
   type WorkerJob,
+  type WorkflowGraphConsole,
   type WorkflowPackBinding,
   type WorkflowPackRuntimeObject,
   type WorkflowRun,
@@ -50,6 +53,8 @@ export function App() {
   const [task, setTask] = useState(DEFAULT_TASK);
   const [adminTokenInput, setAdminTokenInput] = useState(() => consumeTokenFromHash() || getAdminToken());
   const [transitionFilter, setTransitionFilter] = useState("all");
+  const [memoryPartitionKey, setMemoryPartitionKey] = useState("");
+  const [writebackStatus, setWritebackStatus] = useState("pending");
 
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api<Agent[]>("/api/agents"), refetchInterval: 5000 });
   const environments = useQuery({ queryKey: ["environments"], queryFn: () => api<Environment[]>("/api/environments"), refetchInterval: 5000 });
@@ -108,6 +113,12 @@ export function App() {
     enabled: Boolean(workflowRunId),
     refetchInterval: 1200,
   });
+  const workflowGraph = useQuery({
+    queryKey: ["workflow-graph", workflowRunId],
+    queryFn: () => api<WorkflowGraphConsole>(`/api/workflow-runs/${workflowRunId}/graph`),
+    enabled: Boolean(workflowRunId),
+    refetchInterval: 1200,
+  });
   const workflowTaskGrants = useQuery({
     queryKey: ["workflow-task-grants", workflowRunId],
     queryFn: () => api<TaskGrant[]>(`/api/workflow-runs/${workflowRunId}/task-grants`),
@@ -129,6 +140,18 @@ export function App() {
   const memoryGovernance = useQuery({
     queryKey: ["memory-governance-summary"],
     queryFn: () => api<MemoryGovernanceSummary>("/api/memory-governance/summary"),
+    refetchInterval: 5000,
+  });
+  const selectedMemoryPartitionKey = memoryPartitionKey || memoryGovernance.data?.partitions[0]?.partition_key || "";
+  const memoryPartition = useQuery({
+    queryKey: ["memory-governance-partition", selectedMemoryPartitionKey],
+    queryFn: () => api<MemoryGovernancePartitionDetail>(`/api/memory-governance/partitions?partition_key=${encodeURIComponent(selectedMemoryPartitionKey)}`),
+    enabled: Boolean(selectedMemoryPartitionKey),
+    refetchInterval: 5000,
+  });
+  const memoryWritebacks = useQuery({
+    queryKey: ["memory-governance-writebacks", writebackStatus],
+    queryFn: () => api<MemoryGovernanceWritebackQueue>(`/api/memory-governance/writebacks?status=${encodeURIComponent(writebackStatus)}`),
     refetchInterval: 5000,
   });
   const visibleToolCalls = sessionToolCalls.data?.length
@@ -281,8 +304,8 @@ export function App() {
           </Panel>
 
           <Panel title="Graph console">
-            {(workflowSteps.data ?? []).length ? (
-              <WorkflowGraph steps={workflowSteps.data ?? []} transitions={workflowTransitions.data ?? []} />
+            {workflowGraph.data ? (
+              <WorkflowGraph graph={workflowGraph.data} />
             ) : <p className="muted">No graph nodes observed.</p>}
           </Panel>
 
@@ -331,9 +354,35 @@ export function App() {
                 <KeyValue label="Isolation" value={memoryGovernance.data.isolation_policy} />
                 <KeyValue label="Memory objects" value={String(memoryGovernance.data.memory_object_count)} />
                 <KeyValue label="Partitions" value={String(memoryGovernance.data.partition_count)} />
-                {memoryGovernance.data.attention_items.slice(0, 3).map((item) => (
-                  <Row key={`${item.kind}-${item.partition_key ?? "global"}`} title={item.kind} detail={`${item.severity} · ${item.message}`} />
-                ))}
+                <div className="partition-list">
+                  {memoryGovernance.data.partitions.slice(0, 8).map((partition) => (
+                    <button
+                      key={partition.partition_key}
+                      className={selectedMemoryPartitionKey === partition.partition_key ? "partition-chip selected" : "partition-chip"}
+                      onClick={() => setMemoryPartitionKey(partition.partition_key)}
+                    >
+                      <span>{partition.domain_scope}/{partition.workflow_scope}</span>
+                      <strong>{partition.memory_object_count}</strong>
+                    </button>
+                  ))}
+                </div>
+                {memoryPartition.data ? (
+                  <MemoryPartitionDetail detail={memoryPartition.data} />
+                ) : <p className="muted">No partition detail loaded.</p>}
+                <div className="filter-row">
+                  {["pending", "approved", "rejected"].map((status) => (
+                    <button
+                      key={status}
+                      className={writebackStatus === status ? "filter-chip selected" : "filter-chip"}
+                      onClick={() => setWritebackStatus(status)}
+                    >
+                      {status}
+                    </button>
+                  ))}
+                </div>
+                {memoryWritebacks.data ? (
+                  <MemoryWritebackQueuePanel queue={memoryWritebacks.data} />
+                ) : <p className="muted">Writeback queue not loaded.</p>}
               </>
             ) : <p className="muted">Memory governance summary is not loaded.</p>}
           </Panel>
@@ -495,31 +544,35 @@ function StepRow({ step }: { step: WorkflowStepRun }) {
   );
 }
 
-function WorkflowGraph({ steps, transitions }: { steps: WorkflowStepRun[]; transitions: WorkflowTransition[] }) {
-  const transitionByTarget = new Map<string, WorkflowTransition>();
-  for (const transition of transitions) {
-    if (transition.to_step_key) transitionByTarget.set(transition.to_step_key, transition);
-  }
+function WorkflowGraph({ graph }: { graph: WorkflowGraphConsole }) {
   return (
     <div className="graph-console">
+      <div className="graph-summary">
+        <KeyValue label="Nodes" value={String(graph.node_count)} />
+        <KeyValue label="Edges" value={String(graph.edge_count)} />
+        <KeyValue label="Due scheduled" value={String(graph.due_scheduled_count)} />
+      </div>
+      <div className="status-counts">
+        {Object.entries(graph.status_counts).map(([status, count]) => (
+          <span key={status} className={`status-count node-${statusFromText(status)}`}>{status}: {count}</span>
+        ))}
+      </div>
       <div className="graph-nodes">
-        {steps.map((step) => {
-          const inbound = transitionByTarget.get(step.step_key);
-          return (
-            <div key={step.id} className={`graph-node node-${statusFromText(step.status)}`}>
-              <StatusLogo status={statusFromText(step.status)} />
-              <div>
-                <strong>{step.step_key}</strong>
-                <span>{inbound?.transition_type ?? "start"} · {step.status}</span>
-              </div>
+        {graph.nodes.map((node) => (
+          <div key={node.id} className={`graph-node node-${statusFromText(node.status)} ${node.due ? "node-due" : ""}`}>
+            <StatusLogo status={statusFromText(node.status)} />
+            <div>
+              <strong>{node.step_key}</strong>
+              <span>{node.step_type} · {node.status}{node.scheduled_at ? ` · ${node.due ? "due now" : `due ${relativeAge(node.scheduled_at)}`}` : ""}</span>
+              <small>{summaryLine(node.output_summary) || summaryLine(node.input_summary)}</small>
             </div>
-          );
-        })}
+          </div>
+        ))}
       </div>
       <div className="graph-edges">
-        {transitions.slice(-6).map((transition) => (
-          <span key={transition.id}>
-            {(transition.from_step_key ?? "start")} {"->"} {(transition.to_step_key ?? "run")} · {transition.transition_type}/{transition.status}
+        {graph.edges.slice(-8).map((edge) => (
+          <span key={edge.id}>
+            {(edge.from_step_key ?? "start")} {"->"} {(edge.to_step_key ?? "run")} · {edge.transition_type}/{edge.status}
           </span>
         ))}
       </div>
@@ -563,6 +616,41 @@ function GrantRow({ grant }: { grant: TaskGrant }) {
     <div className="obs-row">
       <strong>{grant.agent_class ?? "grant"} · {grant.status}</strong>
       <span>{grant.risk_level} · {typeof scope === "string" ? scope : "tool scoped"} · {shortId(grant.id)}</span>
+    </div>
+  );
+}
+
+function MemoryPartitionDetail({ detail }: { detail: MemoryGovernancePartitionDetail }) {
+  return (
+    <div className="memory-detail">
+      <div className="graph-summary">
+        <KeyValue label="Access" value={detail.access_policy} />
+        <KeyValue label="Objects" value={String(detail.object_count)} />
+        <KeyValue label="Pending writes" value={String(detail.pending_writeback_count)} />
+      </div>
+      {detail.risk_items.slice(0, 3).map((item) => (
+        <Row key={`${item.kind}-${item.message}`} title={item.kind} detail={`${item.severity} · ${item.message}`} />
+      ))}
+      {detail.objects.slice(0, 4).map((object) => (
+        <div key={object.id} className="obs-row memory-object-row">
+          <strong>{object.title}</strong>
+          <span>{object.trust_level} · {object.freshness} · {object.summary}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MemoryWritebackQueuePanel({ queue }: { queue: MemoryGovernanceWritebackQueue }) {
+  return (
+    <div className="writeback-queue">
+      <KeyValue label="Writeback queue" value={`${queue.candidate_count} shown · ${queue.pending_count} pending`} />
+      {queue.candidates.slice(0, 4).map((candidate) => (
+        <div key={candidate.id} className="obs-row writeback-row">
+          <strong>{candidate.title}</strong>
+          <span>{candidate.status} · {candidate.partition_key} · {candidate.summary}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -641,6 +729,14 @@ function uniqueTransitionTypes(transitions: WorkflowTransition[]): string[] {
 function shortId(value: string): string {
   if (!value || value === "none") return value;
   return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
+}
+
+function summaryLine(value: Record<string, unknown>): string {
+  const error = typeof value.error === "string" ? value.error : "";
+  const result = typeof value.result === "string" ? value.result : "";
+  const skipReason = typeof value.skip_reason === "string" ? value.skip_reason : "";
+  const keys = Array.isArray(value.keys) ? value.keys.filter((item) => typeof item === "string").slice(0, 3).join(", ") : "";
+  return error || result || skipReason || keys;
 }
 
 function eventKind(eventType: string): string {

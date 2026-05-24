@@ -330,6 +330,25 @@ scripts/workflow-pack-evidence-gate.sh
 
 The gate validates the manifest contract, proves onboarding fails closed with placeholder or missing customer input, installs the pack, confirms install bootstraps default onboarding profile assets, stages the installation, confirms release fails unless eval and release gates pass, releases the pack with explicit gate evidence, creates an immutable `0.1.1` update version, confirms the updated installation also boots default profile assets, persists customer onboarding profiles as versioned assets, proves onboarding reaches `ready` when those persisted assets plus connector declarations satisfy the pack contract, then proves connector quality fails closed with stale or incomplete samples and reaches `ready` with fresh attributable samples bound to the real Whiskey `whiskey-docs` MCP server and sourced from authenticated private repository content reads. The current pilot result is a real hit from `proerror77/Goodchance@main`, with `clients/ios-app/README.md` captured as the live connector-quality sample. This is a Whiskey pilot proof for the WorkflowPack install/stage/release lifecycle plus contract-level onboarding readiness, install defaults, profile-asset persistence, connector-quality gating, real MCP server binding, and a credentialed non-pilot enterprise read source; it does not yet prove broader Lark docs/wiki spaces or external SaaS connectors such as Slack, Jira, or Confluence.
 
+## Managed Workflow Runtime Proof
+
+The production proof gate for the managed workflow runtime is:
+
+```bash
+BASE_URL=http://127.0.0.1:18787 \
+EVIDENCE_DIR=/opt/mandoforge-adoption/evidence/managed-workflow-runtime \
+scripts/managed-workflow-runtime-evidence-gate.sh
+```
+
+This gate creates a released workflow definition and run, drives a real
+fan-out branch, forces a delayed retry, lets `/api/scheduler/run-due` activate
+the due scheduled workflow step, completes a fan-in merge, syncs a result
+artifact to the primary session, reads `/api/workflow-runs/{id}/graph`, and
+seeds a scoped memory object before reading memory governance summary,
+partition detail, and writeback queue APIs. It proves the runtime/orchestrator
+and scheduler surfaces without requiring provider-specific ecommerce, payment,
+publishing, or email connector adapters.
+
 Before installing `k3s`, run the host preflight first:
 
 ```bash
