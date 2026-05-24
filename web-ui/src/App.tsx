@@ -11,11 +11,16 @@ import {
   type Agent,
   type Approval,
   type Artifact,
+  type ContextPacket,
   type Environment,
   type MemoryGovernancePartitionDetail,
   type MemoryGovernanceSummary,
   type MemoryGovernanceWritebackQueue,
+  type MemoryWritebackCandidate,
   type RunWorkflowStepRunResponse,
+  type SemanticLink,
+  type SemanticObject,
+  type SemanticRetrievalBackendRegistry,
   type Session,
   type SessionEvent,
   type TaskGrant,
@@ -48,6 +53,12 @@ type SessionRow = {
   updatedAt: string;
 };
 
+type SemanticLinkDraft = {
+  from: string;
+  relation: string;
+  to: string;
+};
+
 export function App() {
   const queryClient = useQueryClient();
   const [selectedSessionId, setSelectedSessionId] = useState(() => localStorage.getItem("mandoforge.activeSessionId") ?? "");
@@ -58,6 +69,13 @@ export function App() {
   const [transitionFilter, setTransitionFilter] = useState("all");
   const [memoryPartitionKey, setMemoryPartitionKey] = useState("");
   const [writebackStatus, setWritebackStatus] = useState("pending");
+  const [selectedContextPacketId, setSelectedContextPacketId] = useState("");
+  const [semanticObjectType, setSemanticObjectType] = useState("all");
+  const [linkDraft, setLinkDraft] = useState({
+    from: "",
+    relation: "supports",
+    to: "",
+  });
 
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api<Agent[]>("/api/agents"), refetchInterval: 5000 });
   const environments = useQuery({ queryKey: ["environments"], queryFn: () => api<Environment[]>("/api/environments"), refetchInterval: 5000 });
@@ -171,6 +189,46 @@ export function App() {
     queryFn: () => api<MemoryGovernanceWritebackQueue>(`/api/memory-governance/writebacks?status=${encodeURIComponent(writebackStatus)}`),
     refetchInterval: 5000,
   });
+  const semanticObjects = useQuery({
+    queryKey: ["semantic-objects"],
+    queryFn: () => api<SemanticObject[]>("/api/semantic-objects"),
+    refetchInterval: 5000,
+  });
+  const semanticLinks = useQuery({
+    queryKey: ["semantic-links"],
+    queryFn: () => api<SemanticLink[]>("/api/semantic-links"),
+    refetchInterval: 5000,
+  });
+  const semanticBackends = useQuery({
+    queryKey: ["semantic-retrieval-backends"],
+    queryFn: () => api<SemanticRetrievalBackendRegistry>("/api/semantic-retrieval/backends"),
+    refetchInterval: 10000,
+  });
+  const contextPackets = useQuery({
+    queryKey: ["context-packets", sessionId],
+    queryFn: () => api<ContextPacket[]>(`/api/sessions/${sessionId}/context-packets`),
+    enabled: Boolean(sessionId),
+    refetchInterval: 3000,
+  });
+  const sessionWritebackCandidates = useQuery({
+    queryKey: ["session-writeback-candidates", sessionId],
+    queryFn: () => api<MemoryWritebackCandidate[]>(`/api/sessions/${sessionId}/memory-writeback-candidates`),
+    enabled: Boolean(sessionId),
+    refetchInterval: 3000,
+  });
+  const visibleSemanticObjects = useMemo(() => {
+    const objects = semanticObjects.data ?? [];
+    return semanticObjectType === "all"
+      ? objects
+      : objects.filter((object) => object.object_type === semanticObjectType);
+  }, [semanticObjectType, semanticObjects.data]);
+  const semanticObjectTypes = useMemo(() => {
+    return ["all", ...Array.from(new Set((semanticObjects.data ?? []).map((object) => object.object_type))).sort()];
+  }, [semanticObjects.data]);
+  const contextPacket = useMemo(() => {
+    const packets = contextPackets.data ?? [];
+    return packets.find((packet) => packet.id === selectedContextPacketId) ?? packets[0];
+  }, [contextPackets.data, selectedContextPacketId]);
   const visibleToolCalls = sessionToolCalls.data?.length
     ? sessionToolCalls.data
     : (allToolCalls.data ?? []).filter((call) => call.session_id === sessionId);
@@ -211,10 +269,79 @@ export function App() {
     }),
     onSuccess: () => invalidateAll(queryClient),
   });
+  const createContextPacket = useMutation({
+    mutationFn: () => api<ContextPacket>(`/api/sessions/${sessionId}/context-packet`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+    onSuccess: (packet) => {
+      setSelectedContextPacketId(packet.id);
+      invalidateAll(queryClient);
+    },
+  });
+  const generateWritebacks = useMutation({
+    mutationFn: () => api<MemoryWritebackCandidate[]>(`/api/sessions/${sessionId}/memory-writeback-candidates`, {
+      method: "POST",
+      body: JSON.stringify({
+        include_session_summary: true,
+        include_artifacts: true,
+        include_handoffs: true,
+        include_approvals: true,
+      }),
+    }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const reviewWriteback = useMutation({
+    mutationFn: ({ id, decision }: { id: string; decision: "approve" | "reject" }) => api<MemoryWritebackCandidate>(`/api/memory-writeback-candidates/${id}/${decision}`, {
+      method: "POST",
+      body: JSON.stringify({ reason: `reviewed from semantic console: ${decision}` }),
+    }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const createSemanticLink = useMutation({
+    mutationFn: () => {
+      if (!linkDraft.from || !linkDraft.to || !linkDraft.relation.trim()) {
+        throw new Error("semantic link requires two objects and a relation");
+      }
+      return api<SemanticLink>("/api/semantic-links", {
+        method: "POST",
+        body: JSON.stringify({
+          from_entity_type: "semantic_object",
+          from_entity_id: linkDraft.from,
+          relation_type: linkDraft.relation.trim(),
+          to_entity_type: "semantic_object",
+          to_entity_id: linkDraft.to,
+          confidence: 0.8,
+          metadata: { source: "semantic-console" },
+          provenance: { created_from: "web-ui" },
+          status: "active",
+        }),
+      });
+    },
+    onSuccess: () => {
+      setLinkDraft((draft) => ({ ...draft, relation: "supports" }));
+      invalidateAll(queryClient);
+    },
+  });
 
   const activeCount = rows.filter((row) => row.status === "running" || row.status === "queued").length;
   const blockedCount = rows.filter((row) => row.status === "needs_input").length;
-  const apiError = firstQueryError([agents.error, environments.error, sessions.error, approvals.error, executionJobs.error, sessionLoopJobs.error, allToolCalls.error, taskBoard.error, agentInbox.error]);
+  const apiError = firstQueryError([
+    agents.error,
+    environments.error,
+    sessions.error,
+    approvals.error,
+    executionJobs.error,
+    sessionLoopJobs.error,
+    allToolCalls.error,
+    taskBoard.error,
+    agentInbox.error,
+    semanticObjects.error,
+    semanticLinks.error,
+    semanticBackends.error,
+    contextPackets.error,
+    sessionWritebackCandidates.error,
+  ]);
 
   return (
     <main className="workbench">
@@ -400,6 +527,16 @@ export function App() {
                 <KeyValue label="Isolation" value={memoryGovernance.data.isolation_policy} />
                 <KeyValue label="Memory objects" value={String(memoryGovernance.data.memory_object_count)} />
                 <KeyValue label="Partitions" value={String(memoryGovernance.data.partition_count)} />
+                <div className="scope-metrics">
+                  <MiniCountMap title="Trust" counts={memoryGovernance.data.trust_counts} />
+                  <MiniCountMap title="Freshness" counts={memoryGovernance.data.freshness_counts} />
+                  <div className="mini-counts">
+                    <strong>Writeback</strong>
+                    <span>{memoryGovernance.data.writeback.pending_count} pending</span>
+                    <span>{memoryGovernance.data.writeback.approved_count} approved</span>
+                    <span>{memoryGovernance.data.writeback.rejected_count} rejected</span>
+                  </div>
+                </div>
                 <div className="partition-list">
                   {memoryGovernance.data.partitions.slice(0, 8).map((partition) => (
                     <button
@@ -415,6 +552,79 @@ export function App() {
                 {memoryPartition.data ? (
                   <MemoryPartitionDetail detail={memoryPartition.data} />
                 ) : <p className="muted">No partition detail loaded.</p>}
+                {memoryGovernance.data.attention_items.slice(0, 4).map((item) => (
+                  <Row key={`${item.kind}-${item.message}`} title={`${item.severity} · ${item.kind}`} detail={item.message} />
+                ))}
+              </>
+            ) : <p className="muted">Memory governance summary is not loaded.</p>}
+          </Panel>
+
+          <Panel title="Semantic retrieval">
+            {semanticBackends.data ? (
+              <SemanticBackendPanel registry={semanticBackends.data} />
+            ) : <p className="muted">Semantic backend registry is loading.</p>}
+          </Panel>
+
+          <Panel title="Context packet trace">
+            <div className="action-row">
+              <button disabled={!sessionId || createContextPacket.isPending} onClick={() => createContextPacket.mutate()}>
+                {createContextPacket.isPending ? "Building..." : "Build packet"}
+              </button>
+              <span>{contextPackets.data?.length ?? 0} packet versions</span>
+            </div>
+            {(contextPackets.data ?? []).length ? (
+              <select value={contextPacket?.id ?? ""} onChange={(event) => setSelectedContextPacketId(event.target.value)}>
+                {(contextPackets.data ?? []).map((packet) => (
+                  <option key={packet.id} value={packet.id}>
+                    v{packet.version} · {shortId(packet.id)} · {relativeAge(packet.generated_at)}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            {createContextPacket.error ? <p className="error-note">{errorMessage(createContextPacket.error)}</p> : null}
+            {contextPacket ? (
+              <ContextPacketTrace packet={contextPacket} />
+            ) : <p className="muted">No context packet has been generated for this session.</p>}
+          </Panel>
+
+          <Panel title="Writeback review">
+            <div className="action-row">
+              <button disabled={!sessionId || generateWritebacks.isPending} onClick={() => generateWritebacks.mutate()}>
+                {generateWritebacks.isPending ? "Generating..." : "Generate candidates"}
+              </button>
+              <span>{sessionWritebackCandidates.data?.filter((candidate) => candidate.status === "pending").length ?? 0} pending in session</span>
+            </div>
+            {generateWritebacks.error ? <p className="error-note">{errorMessage(generateWritebacks.error)}</p> : null}
+            {reviewWriteback.error ? <p className="error-note">{errorMessage(reviewWriteback.error)}</p> : null}
+            <WritebackReviewPanel
+              candidates={sessionWritebackCandidates.data ?? []}
+              queue={memoryWritebacks.data}
+              isReviewing={reviewWriteback.isPending}
+              onReview={(id, decision) => reviewWriteback.mutate({ id, decision })}
+            />
+          </Panel>
+
+          <Panel title="Ontology links">
+            <SemanticObjectBrowser
+              objects={visibleSemanticObjects}
+              objectTypes={semanticObjectTypes}
+              selectedType={semanticObjectType}
+              onTypeChange={setSemanticObjectType}
+            />
+            <SemanticLinkManager
+              objects={semanticObjects.data ?? []}
+              links={semanticLinks.data ?? []}
+              draft={linkDraft}
+              isSaving={createSemanticLink.isPending}
+              error={createSemanticLink.error}
+              onDraftChange={setLinkDraft}
+              onCreate={() => createSemanticLink.mutate()}
+            />
+          </Panel>
+
+          <Panel title="Memory writeback queue">
+            {memoryGovernance.data ? (
+              <>
                 <div className="filter-row">
                   {["pending", "approved", "rejected"].map((status) => (
                     <button
@@ -784,6 +994,195 @@ function MemoryWritebackQueuePanel({ queue }: { queue: MemoryGovernanceWriteback
   );
 }
 
+function MiniCountMap({ title, counts }: { title: string; counts: Record<string, number> }) {
+  const entries = Object.entries(counts);
+  return (
+    <div className="mini-counts">
+      <strong>{title}</strong>
+      {entries.length ? entries.slice(0, 4).map(([key, value]) => (
+        <span key={key}>{key}: {value}</span>
+      )) : <span>none</span>}
+    </div>
+  );
+}
+
+function SemanticBackendPanel({ registry }: { registry: SemanticRetrievalBackendRegistry }) {
+  return (
+    <div className="semantic-backends">
+      <div className="graph-summary">
+        <KeyValue label="Effective" value={registry.effective_backend} />
+        <KeyValue label="Selected" value={registry.selected_backend} />
+        <KeyValue label="Fail closed" value={registry.fail_closed ? "yes" : "no"} />
+      </div>
+      {registry.backends.map((backend) => (
+        <div key={backend.backend} className={backend.effective ? "obs-row backend-row selected" : "obs-row backend-row"}>
+          <strong>{backend.backend} · {backend.status}</strong>
+          <span>
+            {backend.backend_type}
+            {backend.configured ? " · configured" : ""}
+            {backend.missing_env_vars.length ? ` · missing ${backend.missing_env_vars.join(", ")}` : ""}
+          </span>
+          {backend.blocking_reasons.length ? <small>{backend.blocking_reasons.join("; ")}</small> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ContextPacketTrace({ packet }: { packet: ContextPacket }) {
+  return (
+    <div className="context-packet">
+      <div className="graph-summary">
+        <KeyValue label="Packet" value={`v${packet.version} · ${shortId(packet.id)}`} />
+        <KeyValue label="Agent" value={packet.agent.name} />
+        <KeyValue label="Objects" value={String(packet.retrieved_objects.length)} />
+      </div>
+      <div className="scope-line">
+        {scopePairs(packet.semantic_scopes).map(([key, value]) => (
+          <span key={key}>{key}={value}</span>
+        ))}
+        {!scopePairs(packet.semantic_scopes).length ? <span>no semantic scopes</span> : null}
+      </div>
+      {packet.freshness_warnings.length ? (
+        <div className="warning-list">
+          {packet.freshness_warnings.map((warning) => <span key={warning}>{warning}</span>)}
+        </div>
+      ) : null}
+      {packet.retrieved_objects.slice(0, 5).map((object) => (
+        <div key={object.id} className="obs-row semantic-object-row">
+          <strong>{object.title}</strong>
+          <span>{object.object_type} · {object.trust_level} · {object.freshness}</span>
+          <small>{object.summary}</small>
+        </div>
+      ))}
+      <details className="json-details">
+        <summary>Replay summary</summary>
+        <pre>{JSON.stringify(packet.replay_summary, null, 2)}</pre>
+      </details>
+    </div>
+  );
+}
+
+function WritebackReviewPanel({
+  candidates,
+  queue,
+  isReviewing,
+  onReview,
+}: {
+  candidates: MemoryWritebackCandidate[];
+  queue?: MemoryGovernanceWritebackQueue;
+  isReviewing: boolean;
+  onReview: (id: string, decision: "approve" | "reject") => void;
+}) {
+  const visibleCandidates = candidates.length ? candidates : [];
+  return (
+    <div className="writeback-review">
+      {visibleCandidates.length ? visibleCandidates.slice(0, 6).map((candidate) => (
+        <div key={candidate.id} className={candidate.status === "pending" ? "review-row pending" : "review-row"}>
+          <div>
+            <strong>{candidate.title}</strong>
+            <span>{candidate.candidate_type} · {candidate.status} · {candidate.trust_level} · {candidate.freshness}</span>
+            <small>{candidate.summary}</small>
+          </div>
+          <div className="review-actions">
+            <button disabled={candidate.status !== "pending" || isReviewing} onClick={() => onReview(candidate.id, "approve")}>Approve</button>
+            <button disabled={candidate.status !== "pending" || isReviewing} className="ghost danger" onClick={() => onReview(candidate.id, "reject")}>Reject</button>
+          </div>
+        </div>
+      )) : (
+        <p className="muted">No session writeback candidates yet. Generate candidates after the session has evidence to preserve.</p>
+      )}
+      {queue ? (
+        <div className="queue-peek">
+          <strong>Global queue</strong>
+          <span>{queue.candidate_count} shown · {queue.pending_count} pending</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SemanticObjectBrowser({
+  objects,
+  objectTypes,
+  selectedType,
+  onTypeChange,
+}: {
+  objects: SemanticObject[];
+  objectTypes: string[];
+  selectedType: string;
+  onTypeChange: (value: string) => void;
+}) {
+  return (
+    <div className="semantic-objects">
+      <div className="select-row">
+        <select value={selectedType} onChange={(event) => onTypeChange(event.target.value)}>
+          {objectTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+        </select>
+        <span>{objects.length} objects</span>
+      </div>
+      {objects.slice(0, 8).map((object) => (
+        <div key={object.id} className="obs-row semantic-object-row">
+          <strong>{object.title}</strong>
+          <span>{object.object_type} · {object.trust_level} · {object.freshness} · {object.status}</span>
+          <small>{object.summary}</small>
+          <div className="scope-line compact">
+            {scopePairs(object.semantic_scopes).slice(0, 4).map(([key, value]) => (
+              <span key={key}>{key}={value}</span>
+            ))}
+          </div>
+        </div>
+      ))}
+      {!objects.length ? <p className="muted">No semantic objects match this filter.</p> : null}
+    </div>
+  );
+}
+
+function SemanticLinkManager({
+  objects,
+  links,
+  draft,
+  isSaving,
+  error,
+  onDraftChange,
+  onCreate,
+}: {
+  objects: SemanticObject[];
+  links: SemanticLink[];
+  draft: SemanticLinkDraft;
+  isSaving: boolean;
+  error: unknown;
+  onDraftChange: React.Dispatch<React.SetStateAction<SemanticLinkDraft>>;
+  onCreate: () => void;
+}) {
+  const canLink = objects.length >= 2 && draft.from && draft.to && draft.from !== draft.to && draft.relation.trim();
+  return (
+    <div className="semantic-links">
+      <div className="link-editor">
+        <select value={draft.from} onChange={(event) => onDraftChange((value) => ({ ...value, from: event.target.value }))}>
+          <option value="">From object</option>
+          {objects.map((object) => <option key={object.id} value={object.id}>{object.title}</option>)}
+        </select>
+        <input value={draft.relation} onChange={(event) => onDraftChange((value) => ({ ...value, relation: event.target.value }))} placeholder="relation" />
+        <select value={draft.to} onChange={(event) => onDraftChange((value) => ({ ...value, to: event.target.value }))}>
+          <option value="">To object</option>
+          {objects.map((object) => <option key={object.id} value={object.id}>{object.title}</option>)}
+        </select>
+        <button disabled={!canLink || isSaving} onClick={onCreate}>{isSaving ? "Saving..." : "Link"}</button>
+      </div>
+      {draft.from && draft.to && draft.from === draft.to ? <p className="error-note">Choose two different semantic objects.</p> : null}
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+      {links.slice(0, 8).map((link) => (
+        <div key={link.id} className="obs-row semantic-link-row">
+          <strong>{objectTitle(objects, link.from_entity_id)} {"->"} {objectTitle(objects, link.to_entity_id)}</strong>
+          <span>{link.relation_type} · {link.status} · confidence {Math.round(link.confidence * 100)}%</span>
+        </div>
+      ))}
+      {!links.length ? <p className="muted">No semantic links recorded yet.</p> : null}
+    </div>
+  );
+}
+
 function runtimeSummary(events: SessionEvent[], agent?: Agent): { provider: string; client: string; execution: string } {
   const latestModelEvent = [...events]
     .reverse()
@@ -871,6 +1270,22 @@ function summaryLine(value: Record<string, unknown>): string {
   const skipReason = typeof value.skip_reason === "string" ? value.skip_reason : "";
   const keys = Array.isArray(value.keys) ? value.keys.filter((item) => typeof item === "string").slice(0, 3).join(", ") : "";
   return error || result || skipReason || keys;
+}
+
+function scopePairs(scopes: Record<string, unknown>): Array<[string, string]> {
+  return Object.entries(scopes)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .slice(0, 6)
+    .map(([key, value]) => [key, typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : JSON.stringify(value)]);
+}
+
+function objectTitle(objects: SemanticObject[], id: string): string {
+  return objects.find((object) => object.id === id)?.title ?? shortId(id);
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
 
 function eventKind(eventType: string): string {

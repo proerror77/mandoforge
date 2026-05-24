@@ -10,6 +10,142 @@ export type Agent = {
   release_state: string;
 };
 
+export type SemanticObject = {
+  id: string;
+  source_id?: string | null;
+  object_type: string;
+  object_key: string;
+  title: string;
+  summary: string;
+  content: Record<string, unknown>;
+  semantic_scopes: Record<string, unknown>;
+  source_uri?: string | null;
+  provenance: Record<string, unknown>;
+  trust_level: string;
+  freshness: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+};
+
+export type SemanticLink = {
+  id: string;
+  from_entity_type: string;
+  from_entity_id: string;
+  relation_type: string;
+  to_entity_type: string;
+  to_entity_id: string;
+  metadata: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  confidence: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+};
+
+export type ContextPacket = {
+  id: string;
+  session_id: string;
+  agent_id: string;
+  agent_version_id?: string | null;
+  version: number;
+  generated_at: string;
+  task: Record<string, unknown>;
+  agent: {
+    id: string;
+    name: string;
+    kind: string;
+    agent_role: string;
+    release_state: string;
+    tools: string[];
+    mcp_server_ids: string[];
+    skill_ids: string[];
+    workflow_pack_ids: string[];
+    remote_computer_profile: Record<string, unknown>;
+  };
+  runtime_profile?: {
+    id: string;
+    name: string;
+    runtime_type: string;
+    remote_computer_required: boolean;
+    status: string;
+  } | null;
+  semantic_scopes: Record<string, unknown>;
+  tool_policy: Record<string, unknown>;
+  policy_reminders: string[];
+  freshness_warnings: string[];
+  source_refs: Array<{
+    source_type: string;
+    source_id: string;
+    freshness: string;
+  }>;
+  retrieved_objects: Array<{
+    id: string;
+    object_type: string;
+    object_key: string;
+    title: string;
+    summary: string;
+    source_id?: string | null;
+    source_uri?: string | null;
+    trust_level: string;
+    freshness: string;
+    semantic_scopes: Record<string, unknown>;
+    provenance: Record<string, unknown>;
+  }>;
+  replay_summary: Record<string, unknown>;
+  audit_trace_id?: string | null;
+  created_at: string;
+};
+
+export type MemoryWritebackCandidate = {
+  id: string;
+  session_id: string;
+  candidate_type: string;
+  source_event_id?: string | null;
+  source_artifact_id?: string | null;
+  source_approval_id?: string | null;
+  source_handoff_id?: string | null;
+  proposed_object_type: string;
+  proposed_object_key: string;
+  title: string;
+  summary: string;
+  content: Record<string, unknown>;
+  semantic_scopes: Record<string, unknown>;
+  source_refs: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  trust_level: string;
+  freshness: string;
+  status: string;
+  reviewer_subject?: string | null;
+  review_reason?: string | null;
+  semantic_object_id?: string | null;
+  audit_trace_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  decided_at?: string | null;
+};
+
+export type SemanticRetrievalBackendRegistry = {
+  selected_backend: string;
+  effective_backend: string;
+  fail_closed: boolean;
+  object_model_required: boolean;
+  backends: Array<{
+    backend: string;
+    backend_type: string;
+    status: string;
+    selected: boolean;
+    effective: boolean;
+    configured: boolean;
+    required_env_vars: string[];
+    missing_env_vars: string[];
+    object_link_context_packet_required: boolean;
+    blocking_reasons: string[];
+  }>;
+};
+
 export type Environment = {
   id: string;
   name: string;
@@ -314,11 +450,19 @@ export type WorkflowPackRuntimeObject = {
 
 export type MemoryGovernanceSummary = {
   status: string;
+  generated_at: string;
   isolation_policy: string;
   semantic_object_count: number;
   memory_object_count: number;
   partition_count: number;
   partitions: MemoryGovernancePartition[];
+  trust_counts: Record<string, number>;
+  freshness_counts: Record<string, number>;
+  writeback: {
+    pending_count: number;
+    approved_count: number;
+    rejected_count: number;
+  };
   attention_items: MemoryGovernanceAttentionItem[];
 };
 

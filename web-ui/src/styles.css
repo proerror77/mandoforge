@@ -32,6 +32,7 @@ body {
 
 button,
 select,
+input,
 textarea {
   font: inherit;
 }
@@ -788,17 +789,198 @@ h1 {
 }
 
 .memory-detail,
-.writeback-queue {
+.writeback-queue,
+.semantic-backends,
+.context-packet,
+.writeback-review,
+.semantic-objects,
+.semantic-links {
   display: grid;
   gap: 8px;
 }
 
 .memory-object-row span,
-.writeback-row span {
+.writeback-row span,
+.semantic-object-row span,
+.semantic-object-row small,
+.semantic-link-row span,
+.backend-row span,
+.backend-row small,
+.review-row span,
+.review-row small {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.scope-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mini-counts {
+  display: grid;
+  align-content: start;
+  min-height: 74px;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 8px;
+}
+
+.mini-counts strong {
+  font-size: 12px;
+}
+
+.mini-counts span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-row,
+.select-row,
+.queue-peek {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.action-row span,
+.select-row span,
+.queue-peek span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.error-note {
+  border: 1px solid #eba0a7;
+  border-radius: 8px;
+  background: var(--red-soft);
+  padding: 8px;
+  color: var(--red);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.backend-row.selected {
+  border-color: #9ccfc1;
+  background: var(--green-soft);
+}
+
+.backend-row small,
+.semantic-object-row small,
+.review-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.scope-line,
+.warning-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.scope-line span,
+.warning-list span {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  padding: 3px 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-line.compact {
+  margin-top: 6px;
+}
+
+.warning-list span {
+  border-color: #ecc073;
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.json-details {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.json-details summary {
+  cursor: pointer;
+  font-weight: 850;
+}
+
+.json-details pre {
+  overflow: auto;
+  max-height: 180px;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  padding: 8px;
+  color: var(--ink);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.review-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.review-row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.review-row.pending {
+  border-color: #ecc073;
+}
+
+.review-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.review-actions button {
+  min-width: 76px;
+}
+
+.queue-peek {
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.queue-peek strong {
+  font-size: 12px;
+}
+
+.link-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px minmax(0, 1fr) auto;
+  gap: 6px;
 }
 
 .runtime-row strong,
@@ -836,6 +1018,7 @@ h1 {
 }
 
 select,
+input,
 textarea {
   min-height: 40px;
   border: 1px solid var(--line);
@@ -855,7 +1038,9 @@ textarea {
   }
 
   .workbench-grid,
-  .taskbar {
+  .taskbar,
+  .scope-metrics,
+  .link-editor {
     grid-template-columns: 1fr;
   }
 
