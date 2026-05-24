@@ -1237,6 +1237,9 @@ struct WorkflowStepRun {
     artifact_ids: Vec<Uuid>,
     approval_ids: Vec<Uuid>,
     tool_call_ids: Vec<Uuid>,
+    claimed_by_worker: Option<String>,
+    lease_expires_at: Option<DateTime<Utc>>,
+    context_packet_id: Option<Uuid>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
     scheduled_at: Option<DateTime<Utc>>,
@@ -1379,6 +1382,9 @@ struct WorkflowGraphConsoleNode {
     dependencies: Vec<String>,
     agent_id: Option<Uuid>,
     task_grant_id: Option<Uuid>,
+    context_packet_id: Option<Uuid>,
+    claimed_by_worker: Option<String>,
+    lease_expires_at: Option<DateTime<Utc>>,
     scheduled_at: Option<DateTime<Utc>>,
     due: bool,
     started_at: Option<DateTime<Utc>>,
@@ -1399,6 +1405,82 @@ struct WorkflowGraphConsoleEdge {
     condition_summary: Value,
     result_summary: Value,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskBoardSnapshot {
+    generated_at: DateTime<Utc>,
+    work_item_count: usize,
+    workflow_run_count: usize,
+    workflow_step_count: usize,
+    claimable_count: usize,
+    status_counts: BTreeMap<String, usize>,
+    items: Vec<TaskBoardItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskBoardItem {
+    work_item_id: Option<Uuid>,
+    work_item_title: Option<String>,
+    work_item_priority: Option<String>,
+    workflow_run_id: Uuid,
+    workflow_definition_id: Uuid,
+    workflow_step_run_id: Uuid,
+    step_key: String,
+    step_type: String,
+    agent_id: Option<Uuid>,
+    task_grant_id: Option<Uuid>,
+    context_packet_id: Option<Uuid>,
+    status: String,
+    claimable: bool,
+    blockers: Vec<String>,
+    claimed_by_worker: Option<String>,
+    lease_expires_at: Option<DateTime<Utc>>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentInboxSnapshot {
+    agent_id: Uuid,
+    generated_at: DateTime<Utc>,
+    entry_count: usize,
+    claimable_count: usize,
+    entries: Vec<AgentInboxEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentInboxEntry {
+    workflow_run_id: Uuid,
+    workflow_definition_id: Uuid,
+    workflow_step_run_id: Uuid,
+    step_key: String,
+    step_type: String,
+    status: String,
+    task_grant_id: Option<Uuid>,
+    context_packet_id: Option<Uuid>,
+    work_item: Option<WorkItem>,
+    claimable: bool,
+    blockers: Vec<String>,
+    claimed_by_worker: Option<String>,
+    lease_expires_at: Option<DateTime<Utc>>,
+    input_summary: Value,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimWorkflowStepRun {
+    agent_id: Uuid,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    lease_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClaimWorkflowStepRunResponse {
+    step: WorkflowStepRun,
+    task_grant: TaskGrant,
+    context_packet: ContextPacket,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5808,6 +5890,10 @@ fn build_router(state: AppState) -> Router {
             patch(update_workflow_step_run_route),
         )
         .route(
+            "/api/workflow-step-runs/{id}/claim",
+            post(claim_workflow_step_run_route),
+        )
+        .route(
             "/api/workflow-runs/{id}/task-grants",
             get(list_workflow_task_grants_route).post(create_workflow_task_grant_route),
         )
@@ -5876,6 +5962,8 @@ fn build_router(state: AppState) -> Router {
             "/api/work-items",
             get(list_work_items).post(create_work_item),
         )
+        .route("/api/task-board", get(get_task_board_route))
+        .route("/api/agents/{id}/inbox", get(get_agent_inbox_route))
         .route(
             "/api/agent-teammates",
             get(list_agent_teammates).post(create_agent_teammate),
@@ -11958,6 +12046,9 @@ async fn materialize_workflow_handoff_assignment(
             artifact_ids: Vec::new(),
             approval_ids: Vec::new(),
             tool_call_ids: Vec::new(),
+            claimed_by_worker: None,
+            lease_expires_at: None,
+            context_packet_id: None,
             started_at: None,
             completed_at: None,
             scheduled_at: None,
@@ -13234,6 +13325,9 @@ async fn materialize_workflow_graph_step_with_policy_context(
             artifact_ids: Vec::new(),
             approval_ids: Vec::new(),
             tool_call_ids: Vec::new(),
+            claimed_by_worker: None,
+            lease_expires_at: None,
+            context_packet_id: None,
             started_at: terminal.then_some(now),
             completed_at: terminal.then_some(now),
             scheduled_at,
@@ -14842,6 +14936,192 @@ async fn get_workflow_run_graph_console_route(
     Ok(Json(build_workflow_run_graph_console(&state, &run).await?))
 }
 
+async fn get_task_board_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TaskBoardSnapshot>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "task_board",
+        None,
+    )
+    .await?;
+    Ok(Json(build_task_board_snapshot(&state).await?))
+}
+
+async fn get_agent_inbox_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<AgentInboxSnapshot>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "agent_inbox",
+        Some(id),
+    )
+    .await?;
+    state.get_agent(id).await?;
+    Ok(Json(build_agent_inbox_snapshot(&state, id).await?))
+}
+
+async fn build_task_board_snapshot(state: &AppState) -> Result<TaskBoardSnapshot, AppError> {
+    let generated_at = Utc::now();
+    let work_items = state
+        .list_work_items()
+        .await?
+        .into_iter()
+        .map(|item| (item.id, item))
+        .collect::<HashMap<_, _>>();
+    let runs = state.list_workflow_runs().await?;
+    let mut items = Vec::new();
+    let mut status_counts = BTreeMap::new();
+    let mut workflow_step_count = 0usize;
+    let mut claimable_count = 0usize;
+    for run in &runs {
+        let work_item = run
+            .source_work_item_id
+            .and_then(|work_item_id| work_items.get(&work_item_id));
+        for step in state.list_workflow_step_runs(run.id).await? {
+            workflow_step_count += 1;
+            *status_counts.entry(step.status.clone()).or_insert(0) += 1;
+            let blockers = workflow_step_claim_blockers(&step, step.agent_id, generated_at);
+            let claimable = blockers.is_empty();
+            if claimable {
+                claimable_count += 1;
+            }
+            items.push(TaskBoardItem {
+                work_item_id: run.source_work_item_id,
+                work_item_title: work_item.map(|item| item.title.clone()),
+                work_item_priority: work_item.map(|item| item.priority.clone()),
+                workflow_run_id: run.id,
+                workflow_definition_id: run.workflow_definition_id,
+                workflow_step_run_id: step.id,
+                step_key: step.step_key,
+                step_type: step.step_type,
+                agent_id: step.agent_id,
+                task_grant_id: step.task_grant_id,
+                context_packet_id: step.context_packet_id,
+                status: step.status,
+                claimable,
+                blockers,
+                claimed_by_worker: step.claimed_by_worker,
+                lease_expires_at: step.lease_expires_at,
+                updated_at: step.updated_at,
+            });
+        }
+    }
+    items.sort_by_key(|item| item.updated_at);
+    items.reverse();
+    Ok(TaskBoardSnapshot {
+        generated_at,
+        work_item_count: work_items.len(),
+        workflow_run_count: runs.len(),
+        workflow_step_count,
+        claimable_count,
+        status_counts,
+        items,
+    })
+}
+
+async fn build_agent_inbox_snapshot(
+    state: &AppState,
+    agent_id: Uuid,
+) -> Result<AgentInboxSnapshot, AppError> {
+    let generated_at = Utc::now();
+    let work_items = state
+        .list_work_items()
+        .await?
+        .into_iter()
+        .map(|item| (item.id, item))
+        .collect::<HashMap<_, _>>();
+    let mut entries = Vec::new();
+    for run in state.list_workflow_runs().await? {
+        let work_item = run
+            .source_work_item_id
+            .and_then(|work_item_id| work_items.get(&work_item_id))
+            .cloned();
+        for step in state.list_workflow_step_runs(run.id).await? {
+            if step.agent_id != Some(agent_id) || workflow_step_status_terminal(&step.status) {
+                continue;
+            }
+            let blockers = workflow_step_claim_blockers(&step, Some(agent_id), generated_at);
+            entries.push(AgentInboxEntry {
+                workflow_run_id: run.id,
+                workflow_definition_id: run.workflow_definition_id,
+                workflow_step_run_id: step.id,
+                step_key: step.step_key.clone(),
+                step_type: step.step_type.clone(),
+                status: step.status.clone(),
+                task_grant_id: step.task_grant_id,
+                context_packet_id: step.context_packet_id,
+                work_item: work_item.clone(),
+                claimable: blockers.is_empty(),
+                blockers,
+                claimed_by_worker: step.claimed_by_worker.clone(),
+                lease_expires_at: step.lease_expires_at,
+                input_summary: workflow_graph_console_summary(&step.input_payload),
+                updated_at: step.updated_at,
+            });
+        }
+    }
+    entries.sort_by_key(|entry| entry.updated_at);
+    entries.reverse();
+    let claimable_count = entries.iter().filter(|entry| entry.claimable).count();
+    Ok(AgentInboxSnapshot {
+        agent_id,
+        generated_at,
+        entry_count: entries.len(),
+        claimable_count,
+        entries,
+    })
+}
+
+fn workflow_step_claim_blockers(
+    step: &WorkflowStepRun,
+    expected_agent_id: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if workflow_step_status_terminal(&step.status) {
+        blockers.push("terminal_status".to_string());
+    }
+    if step.status == "scheduled" {
+        match step.scheduled_at {
+            Some(scheduled_at) if scheduled_at > now => {
+                blockers.push("scheduled_for_future".to_string())
+            }
+            Some(_) => {}
+            None => blockers.push("scheduled_without_due_time".to_string()),
+        }
+    } else if step.status != "queued" {
+        if step.status == "running" {
+            if !step
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at <= now)
+            {
+                blockers.push("already_claimed".to_string());
+            }
+        } else {
+            blockers.push(format!("status_{}", step.status));
+        }
+    }
+    match (step.agent_id, expected_agent_id) {
+        (None, _) => blockers.push("missing_agent_binding".to_string()),
+        (Some(actual), Some(expected)) if actual != expected => {
+            blockers.push("agent_mismatch".to_string())
+        }
+        _ => {}
+    }
+    if step.task_grant_id.is_none() {
+        blockers.push("missing_task_grant".to_string());
+    }
+    blockers
+}
+
 async fn build_workflow_run_graph_console(
     state: &AppState,
     run: &WorkflowRun,
@@ -14888,6 +15168,9 @@ async fn build_workflow_run_graph_console(
                 dependencies,
                 agent_id: step.agent_id,
                 task_grant_id: step.task_grant_id,
+                context_packet_id: step.context_packet_id,
+                claimed_by_worker: step.claimed_by_worker.clone(),
+                lease_expires_at: step.lease_expires_at,
                 scheduled_at: step.scheduled_at,
                 due: step.status == "scheduled"
                     && step
@@ -14919,6 +15202,9 @@ async fn build_workflow_run_graph_console(
                 dependencies: workflow_graph_step_dependencies(graph_step)?,
                 agent_id: workflow_graph_step_agent_id(&definition, graph_step)?,
                 task_grant_id: None,
+                context_packet_id: None,
+                claimed_by_worker: None,
+                lease_expires_at: None,
                 scheduled_at: None,
                 due: false,
                 started_at: None,
@@ -15118,6 +15404,9 @@ async fn create_workflow_step_run_route(
             artifact_ids: input.artifact_ids,
             approval_ids: input.approval_ids,
             tool_call_ids: input.tool_call_ids,
+            claimed_by_worker: None,
+            lease_expires_at: None,
+            context_packet_id: None,
             started_at: None,
             completed_at: None,
             scheduled_at: None,
@@ -15127,6 +15416,179 @@ async fn create_workflow_step_run_route(
         .await?;
     record_workflow_step_run_created(&state, &run, &step).await?;
     Ok(Json(step))
+}
+
+async fn claim_workflow_step_run_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ClaimWorkflowStepRun>,
+) -> Result<Json<ClaimWorkflowStepRunResponse>, AppError> {
+    let current = state.get_workflow_step_run(id).await?;
+    let run = state.get_workflow_run(current.workflow_run_id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let agent = state.get_agent(input.agent_id).await?;
+    if current.agent_id != Some(agent.id) {
+        return Err(AppError::forbidden(
+            "workflow step is not assigned to the claiming agent",
+        ));
+    }
+    let now = Utc::now();
+    let blockers = workflow_step_claim_blockers(&current, Some(agent.id), now);
+    if !blockers.is_empty() {
+        return Err(AppError::bad_request(format!(
+            "workflow step is not claimable: {}",
+            blockers.join(", ")
+        )));
+    }
+    let task_grant_id = current
+        .task_grant_id
+        .ok_or_else(|| AppError::bad_request("workflow step claim requires task grant"))?;
+    let grant = state.get_task_grant(task_grant_id).await?;
+    if grant.workflow_run_id != run.id {
+        return Err(AppError::bad_request(
+            "workflow step task grant must belong to workflow run",
+        ));
+    }
+    if grant.status != "active" {
+        return Err(AppError::forbidden(
+            "workflow step task grant is not active",
+        ));
+    }
+    if grant
+        .grantee_agent_id
+        .is_some_and(|grantee_agent_id| grantee_agent_id != agent.id)
+    {
+        return Err(AppError::forbidden(
+            "workflow step task grant is not issued to the claiming agent",
+        ));
+    }
+    if grant.expires_at.is_some_and(|expires_at| expires_at <= now) {
+        return Err(AppError::forbidden("workflow step task grant is expired"));
+    }
+    let session_id = current.session_id.unwrap_or(run.primary_session_id);
+    if !task_grant_session_matches(&grant, &run, session_id) {
+        return Err(AppError::forbidden(
+            "workflow step task grant is not valid for the step session",
+        ));
+    }
+    let lease_seconds = input.lease_seconds.unwrap_or(300);
+    if !(1..=86_400).contains(&lease_seconds) {
+        return Err(AppError::bad_request(
+            "workflow step claim lease_seconds must be between 1 and 86400",
+        ));
+    }
+    let worker_id = input
+        .worker_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("agent:{}", agent.id));
+
+    let context_packet = generate_and_persist_context_packet(&state, session_id).await?;
+    let task_grant = state
+        .update_task_grant_context_packet(grant.id, context_packet.id)
+        .await?;
+    record_task_grant_checked(&state, &task_grant, session_id, "agent_inbox.claim").await?;
+
+    let mut next = current;
+    next.status = "running".to_string();
+    next.claimed_by_worker = Some(worker_id.clone());
+    next.lease_expires_at = Some(now + ChronoDuration::seconds(lease_seconds));
+    next.context_packet_id = Some(context_packet.id);
+    next.started_at = next.started_at.or(Some(now));
+    next.updated_at = now;
+    let step = state.update_workflow_step_run(next).await?;
+    record_agent_inbox_claimed(
+        &state,
+        &run,
+        &step,
+        &task_grant,
+        &context_packet,
+        &principal.subject_id,
+        &worker_id,
+    )
+    .await?;
+    if let Some(work_item_id) = run.source_work_item_id {
+        state
+            .append_work_item_activity_entry(
+                work_item_id,
+                "agent_inbox.claimed",
+                Some(principal.subject_id),
+                Some("workflow_step_run"),
+                Some(step.id),
+                format!(
+                    "Agent {} claimed workflow step {}",
+                    agent.name, step.step_key
+                ),
+                json!({
+                    "workflow_run_id": run.id,
+                    "workflow_step_run_id": step.id,
+                    "task_grant_id": task_grant.id,
+                    "context_packet_id": context_packet.id,
+                    "agent_id": agent.id,
+                    "worker_id": worker_id,
+                    "lease_expires_at": step.lease_expires_at
+                }),
+            )
+            .await?;
+    }
+    Ok(Json(ClaimWorkflowStepRunResponse {
+        step,
+        task_grant,
+        context_packet,
+    }))
+}
+
+async fn record_agent_inbox_claimed(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+    task_grant: &TaskGrant,
+    context_packet: &ContextPacket,
+    subject: &str,
+    worker_id: &str,
+) -> Result<(), AppError> {
+    let session_id = step.session_id.unwrap_or(run.primary_session_id);
+    let payload = json!({
+        "workflow_run_id": run.id,
+        "workflow_step_run_id": step.id,
+        "step_key": step.step_key,
+        "agent_id": step.agent_id,
+        "task_grant_id": task_grant.id,
+        "context_packet_id": context_packet.id,
+        "claimed_by_worker": worker_id,
+        "lease_expires_at": step.lease_expires_at,
+        "subject": subject
+    });
+    state
+        .append_event(
+            "system",
+            Some(step.id),
+            session_id,
+            "agent_inbox.claimed",
+            payload.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "system",
+            Some(step.id),
+            "agent_inbox.claimed",
+            "workflow_step_run",
+            Some(step.id),
+            payload,
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn update_workflow_step_run_route(
@@ -54007,6 +54469,9 @@ not json
             artifact_ids: Vec::new(),
             approval_ids: Vec::new(),
             tool_call_ids: Vec::new(),
+            claimed_by_worker: None,
+            lease_expires_at: None,
+            context_packet_id: None,
             started_at: None,
             completed_at: workflow_step_status_terminal(status).then_some(created_at),
             scheduled_at: None,
@@ -76366,6 +76831,250 @@ not json
                 && log.details["work_item_id"] == json!(work_item_id)
                 && log.details["assignee_kind"] == json!("agent")
                 && log.details["assignee_id"] == json!("runtime-specialist")
+        }));
+    }
+
+    #[tokio::test]
+    async fn task_board_agent_inbox_claim_binds_context_packet_and_grant() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let operator_headers = [
+            ("x-mandoforge-subject", "operator-1"),
+            ("x-mandoforge-roles", "operator"),
+        ];
+        let semantic_scopes = json!({
+            "project_scope": "agent-os",
+            "repo_scope": "mandoforge",
+            "service_scope": "mandoforge-api",
+            "workflow_scope": "agent-inbox",
+            "policy_scope": "managed-runtime",
+            "memory_scope": "task-board"
+        });
+
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Inbox Claim Agent",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["agent_cli.exec"],
+                    "semantic_scopes": semantic_scopes,
+                    "release_state": "active"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let work_item: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Prepare observable Agent Inbox demo",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {
+                        "semantic_scopes": semantic_scopes,
+                        "runtime_evidence_required": true
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item_id = work_item["id"].as_str().expect("work item id");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Agent Inbox Claim Workflow",
+                    "entrypoint": "agent-inbox-claim",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "collect_context", "type": "agent", "start": true}
+                        ]
+                    },
+                    "handoff_rules": {
+                        "root_task_grant": {
+                            "semantic_scopes": semantic_scopes,
+                            "memory_scope": {
+                                "mode": "snapshot_only",
+                                "allowed_object_types": ["work_item"],
+                                "allowed_object_ids": [],
+                                "minimum_trust_level": "source_attested",
+                                "max_objects": 5,
+                                "writeback_allowed": true
+                            },
+                            "tool_scope": {
+                                "read": ["file.read"],
+                                "write": ["agent_cli.exec"],
+                                "external_write": []
+                            },
+                            "connector_scope": {
+                                "mode": "read_only",
+                                "allowed_connector_ids": [],
+                                "allowed_tool_names": [],
+                                "tenant_scope": {},
+                                "side_effect_classes": []
+                            }
+                        }
+                    },
+                    "release_state": "released"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "source_work_item_id": work_item_id,
+                    "title": "claim inbox task with context"
+                }),
+                &operator_headers,
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+        let root_task_grant_id = run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id");
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let step_id = steps[0]["id"].as_str().expect("step id");
+
+        let board: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/task-board")
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(board["work_item_count"], json!(1));
+        assert_eq!(board["workflow_run_count"], json!(1));
+        assert_eq!(board["workflow_step_count"], json!(1));
+        assert!(board["items"].as_array().unwrap().iter().any(|item| {
+            item["work_item_id"] == json!(work_item_id)
+                && item["workflow_run_id"] == json!(run_id)
+                && item["workflow_step_run_id"] == json!(step_id)
+                && item["agent_id"] == json!(agent.id)
+                && item["status"] == json!("queued")
+                && item["claimable"] == json!(true)
+        }));
+
+        let inbox: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/agents/{}/inbox", agent.id))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(inbox["agent_id"], json!(agent.id));
+        assert!(inbox["entries"].as_array().unwrap().iter().any(|entry| {
+            entry["workflow_step_run_id"] == json!(step_id)
+                && entry["work_item"]["id"] == json!(work_item_id)
+                && entry["task_grant_id"] == json!(root_task_grant_id)
+                && entry["claimable"] == json!(true)
+        }));
+
+        let claim: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-step-runs/{step_id}/claim"),
+                json!({
+                    "agent_id": agent.id,
+                    "worker_id": "worker-whiskey-1",
+                    "lease_seconds": 600
+                }),
+                &operator_headers,
+            ),
+        )
+        .await;
+        assert_eq!(claim["step"]["status"], json!("running"));
+        assert_eq!(
+            claim["step"]["claimed_by_worker"],
+            json!("worker-whiskey-1")
+        );
+        assert_eq!(claim["step"]["agent_id"], json!(agent.id));
+        assert!(claim["step"]["lease_expires_at"].as_str().is_some());
+        assert_eq!(claim["task_grant"]["id"], json!(root_task_grant_id));
+        assert_eq!(
+            claim["task_grant"]["context_packet_id"],
+            claim["context_packet"]["id"]
+        );
+        assert_eq!(
+            claim["step"]["context_packet_id"],
+            claim["context_packet"]["id"]
+        );
+        assert_eq!(
+            claim["context_packet"]["retrieved_objects"][0]["source_uri"],
+            json!(format!("mandoforge://work-items/{work_item_id}"))
+        );
+
+        let grant: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/task-grants/{root_task_grant_id}"))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(grant["context_packet_id"], claim["context_packet"]["id"]);
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/events",
+                    run["primary_session_id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-subject", "operator-1")
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "agent_inbox.claimed"
+                && event.payload["workflow_step_run_id"] == json!(step_id)
+                && event.payload["context_packet_id"] == claim["context_packet"]["id"]
         }));
     }
 

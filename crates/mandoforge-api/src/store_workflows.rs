@@ -348,9 +348,9 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "INSERT INTO workflow_step_runs
-                        (id, tenant_id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, started_at, completed_at, scheduled_at, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
-                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, started_at, completed_at, scheduled_at, created_at, updated_at",
+                        (id, tenant_id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
                 )
                 .bind(step.id)
                 .bind(self.current_tenant_id())
@@ -370,6 +370,9 @@ impl AppState {
                 .bind(serde_json::to_value(&step.artifact_ids)?)
                 .bind(serde_json::to_value(&step.approval_ids)?)
                 .bind(serde_json::to_value(&step.tool_call_ids)?)
+                .bind(&step.claimed_by_worker)
+                .bind(step.lease_expires_at)
+                .bind(step.context_packet_id)
                 .bind(step.started_at)
                 .bind(step.completed_at)
                 .bind(step.scheduled_at)
@@ -396,7 +399,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("workflow step run not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, started_at, completed_at, scheduled_at, created_at, updated_at
+                    "SELECT id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at
                      FROM workflow_step_runs
                      WHERE tenant_id = $1 AND id = $2",
                 )
@@ -426,9 +429,9 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "UPDATE workflow_step_runs
-                     SET status = $3, output_payload = $4, artifact_ids = $5, approval_ids = $6, tool_call_ids = $7, started_at = $8, completed_at = $9, scheduled_at = $10, updated_at = $11
+                     SET status = $3, output_payload = $4, artifact_ids = $5, approval_ids = $6, tool_call_ids = $7, claimed_by_worker = $8, lease_expires_at = $9, context_packet_id = $10, started_at = $11, completed_at = $12, scheduled_at = $13, updated_at = $14
                      WHERE tenant_id = $1 AND id = $2
-                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, started_at, completed_at, scheduled_at, created_at, updated_at",
+                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(step.id)
@@ -437,6 +440,9 @@ impl AppState {
                 .bind(serde_json::to_value(&step.artifact_ids)?)
                 .bind(serde_json::to_value(&step.approval_ids)?)
                 .bind(serde_json::to_value(&step.tool_call_ids)?)
+                .bind(&step.claimed_by_worker)
+                .bind(step.lease_expires_at)
+                .bind(step.context_packet_id)
                 .bind(step.started_at)
                 .bind(step.completed_at)
                 .bind(step.scheduled_at)
@@ -480,7 +486,7 @@ impl AppState {
                        AND status = 'scheduled'
                        AND scheduled_at IS NOT NULL
                        AND scheduled_at <= $3
-                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, started_at, completed_at, scheduled_at, created_at, updated_at",
+                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(step_id)
@@ -513,7 +519,7 @@ impl AppState {
                     "UPDATE workflow_step_runs
                      SET task_grant_id = $3, updated_at = now()
                      WHERE tenant_id = $1 AND id = $2
-                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, started_at, completed_at, scheduled_at, created_at, updated_at",
+                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(step_id)
@@ -545,7 +551,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, started_at, completed_at, scheduled_at, created_at, updated_at
+                    "SELECT id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at
                      FROM workflow_step_runs
                      WHERE tenant_id = $1 AND workflow_run_id = $2
                      ORDER BY created_at ASC",
@@ -753,6 +759,40 @@ impl AppState {
                 )
                 .bind(self.current_tenant_id())
                 .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("task grant not found"))?;
+                task_grant_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn update_task_grant_context_packet(
+        &self,
+        grant_id: uuid::Uuid,
+        context_packet_id: uuid::Uuid,
+    ) -> Result<TaskGrant, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let grant = store
+                    .task_grants
+                    .get_mut(&grant_id)
+                    .ok_or_else(|| AppError::not_found("task grant not found"))?;
+                grant.context_packet_id = Some(context_packet_id);
+                grant.updated_at = chrono::Utc::now();
+                Ok(grant.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE task_grants
+                     SET context_packet_id = $3, updated_at = now()
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING id, workflow_run_id, workflow_step_run_id, session_id, parent_grant_id, source_event_id, source_handoff_id, issuer_subject, grantee_agent_id, grantee_session_id, agent_class, objective, risk_level, status, expires_at, max_turns, max_tool_calls, max_runtime_seconds, max_cost_usd_micros, semantic_scopes, memory_scope, tool_scope, connector_scope, approval_policy, external_effects, context_packet_id, policy_revision_id, immutable_args_hash, audit_trace_id, created_at, updated_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(grant_id)
+                .bind(context_packet_id)
                 .fetch_optional(pool)
                 .await?
                 .ok_or_else(|| AppError::not_found("task grant not found"))?;

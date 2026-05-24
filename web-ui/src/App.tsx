@@ -7,9 +7,11 @@ import {
   decideApproval,
   getAdminToken,
   setAdminToken,
+  type AgentInboxSnapshot,
   type Agent,
   type Approval,
   type Artifact,
+  type ClaimWorkflowStepRunResponse,
   type Environment,
   type MemoryGovernancePartitionDetail,
   type MemoryGovernanceSummary,
@@ -17,6 +19,7 @@ import {
   type Session,
   type SessionEvent,
   type TaskGrant,
+  type TaskBoardSnapshot,
   type ToolCall,
   type WorkerJob,
   type WorkflowGraphConsole,
@@ -64,6 +67,7 @@ export function App() {
   const sessionLoopJobs = useQuery({ queryKey: ["session-loop-jobs"], queryFn: () => api<WorkerJob[]>("/api/session-loop-jobs"), refetchInterval: 1500 });
   const allToolCalls = useQuery({ queryKey: ["tool-calls"], queryFn: () => api<ToolCall[]>("/api/tool-calls"), refetchInterval: 1800 });
   const workflowRuns = useQuery({ queryKey: ["workflow-runs"], queryFn: () => api<WorkflowRun[]>("/api/workflow-runs"), refetchInterval: 1600 });
+  const taskBoard = useQuery({ queryKey: ["task-board"], queryFn: () => api<TaskBoardSnapshot>("/api/task-board"), refetchInterval: 1500 });
 
   const rows = useMemo(() => buildRows({
     sessions: sessions.data ?? [],
@@ -82,6 +86,13 @@ export function App() {
   const packInstallationId = selectedWorkflowRun?.pack_installation_id ?? "";
   const selectedAgent = agents.data?.find((agent) => agent.id === selectedSession?.agent_id) ?? preferredAgent(agents.data ?? []);
   const selectedEnvironment = environments.data?.find((environment) => environment.id === selectedSession?.environment_id) ?? environments.data?.[0];
+  const inboxAgentId = selectedAgent?.id ?? "";
+  const agentInbox = useQuery({
+    queryKey: ["agent-inbox", inboxAgentId],
+    queryFn: () => api<AgentInboxSnapshot>(`/api/agents/${inboxAgentId}/inbox`),
+    enabled: Boolean(inboxAgentId),
+    refetchInterval: 1500,
+  });
 
   const events = useQuery({
     queryKey: ["session-events", sessionId],
@@ -189,10 +200,21 @@ export function App() {
     mutationFn: ({ id, decision }: { id: string; decision: "approve" | "reject" }) => decideApproval(id, decision),
     onSuccess: () => invalidateAll(queryClient),
   });
+  const claimStep = useMutation({
+    mutationFn: ({ stepId, agentId }: { stepId: string; agentId: string }) => api<ClaimWorkflowStepRunResponse>(`/api/workflow-step-runs/${stepId}/claim`, {
+      method: "POST",
+      body: JSON.stringify({
+        agent_id: agentId,
+        worker_id: "ui-operator",
+        lease_seconds: 600,
+      }),
+    }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
 
   const activeCount = rows.filter((row) => row.status === "running" || row.status === "queued").length;
   const blockedCount = rows.filter((row) => row.status === "needs_input").length;
-  const apiError = firstQueryError([agents.error, environments.error, sessions.error, approvals.error, executionJobs.error, sessionLoopJobs.error, allToolCalls.error]);
+  const apiError = firstQueryError([agents.error, environments.error, sessions.error, approvals.error, executionJobs.error, sessionLoopJobs.error, allToolCalls.error, taskBoard.error, agentInbox.error]);
 
   return (
     <main className="workbench">
@@ -207,6 +229,7 @@ export function App() {
           <Metric label="Needs input" value={String(blockedCount)} tone={blockedCount ? "warn" : undefined} />
           <Metric label="Sessions" value={String(rows.length)} />
           <Metric label="Workflows" value={String(workflowRuns.data?.length ?? 0)} />
+          <Metric label="Claimable" value={String(taskBoard.data?.claimable_count ?? 0)} tone={(taskBoard.data?.claimable_count ?? 0) ? "live" : undefined} />
         </div>
       </header>
 
@@ -295,6 +318,25 @@ export function App() {
         </section>
 
         <aside className="observer-panel">
+          <Panel title="Task board">
+            {taskBoard.data ? (
+              <TaskBoardPanel board={taskBoard.data} agents={agents.data ?? []} />
+            ) : <p className="muted">Task board is loading.</p>}
+          </Panel>
+
+          <Panel title="Agent inbox">
+            {agentInbox.data ? (
+              <AgentInboxPanel
+                inbox={agentInbox.data}
+                agent={selectedAgent}
+                isClaiming={claimStep.isPending}
+                onClaim={(stepId) => {
+                  if (selectedAgent) claimStep.mutate({ stepId, agentId: selectedAgent.id });
+                }}
+              />
+            ) : <p className="muted">No agent inbox loaded.</p>}
+          </Panel>
+
           <Panel title="Workflow">
             {selectedWorkflowRun ? (
               <>
@@ -542,8 +584,85 @@ function StepRow({ step }: { step: WorkflowStepRun }) {
       <StatusLogo status={statusFromText(step.status)} />
       <div>
         <strong>{step.step_key}</strong>
-        <span>{step.step_type} · {step.status}{step.scheduled_at ? ` · due ${relativeAge(step.scheduled_at)}` : ""}</span>
+        <span>
+          {step.step_type} · {step.status}
+          {step.claimed_by_worker ? ` · ${step.claimed_by_worker}` : ""}
+          {step.context_packet_id ? ` · ctx ${shortId(step.context_packet_id)}` : ""}
+          {step.scheduled_at ? ` · due ${relativeAge(step.scheduled_at)}` : ""}
+        </span>
       </div>
+    </div>
+  );
+}
+
+function TaskBoardPanel({ board, agents }: { board: TaskBoardSnapshot; agents: Agent[] }) {
+  return (
+    <div className="task-board-panel">
+      <div className="graph-summary">
+        <KeyValue label="Work items" value={String(board.work_item_count)} />
+        <KeyValue label="Steps" value={String(board.workflow_step_count)} />
+        <KeyValue label="Claimable" value={String(board.claimable_count)} />
+      </div>
+      <div className="status-counts">
+        {Object.entries(board.status_counts).map(([status, count]) => (
+          <span key={status} className={`status-count node-${statusFromText(status)}`}>{status}: {count}</span>
+        ))}
+      </div>
+      {board.items.slice(0, 6).map((item) => (
+        <div key={item.workflow_step_run_id} className={item.claimable ? "obs-row task-board-row claimable" : "obs-row task-board-row"}>
+          <StatusLogo status={statusFromText(item.status)} />
+          <div>
+            <strong>{item.work_item_title ?? item.step_key}</strong>
+            <span>
+              {item.step_key} · {item.status} · {agentName(agents, item.agent_id)}
+              {item.context_packet_id ? ` · ctx ${shortId(item.context_packet_id)}` : ""}
+            </span>
+            {item.blockers.length ? <small>{item.blockers.join(", ")}</small> : <small>ready for claim</small>}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AgentInboxPanel({
+  inbox,
+  agent,
+  isClaiming,
+  onClaim,
+}: {
+  inbox: AgentInboxSnapshot;
+  agent?: Agent;
+  isClaiming: boolean;
+  onClaim: (stepId: string) => void;
+}) {
+  return (
+    <div className="agent-inbox-panel">
+      <div className="graph-summary">
+        <KeyValue label="Agent" value={agent?.name ?? shortId(inbox.agent_id)} />
+        <KeyValue label="Entries" value={String(inbox.entry_count)} />
+        <KeyValue label="Ready" value={String(inbox.claimable_count)} />
+      </div>
+      {inbox.entries.slice(0, 6).map((entry) => (
+        <div key={entry.workflow_step_run_id} className={entry.claimable ? "inbox-entry claimable" : "inbox-entry"}>
+          <div className="inbox-main">
+            <StatusLogo status={statusFromText(entry.status)} />
+            <div>
+              <strong>{entry.work_item?.title ?? entry.step_key}</strong>
+              <span>
+                {entry.step_type} · {entry.status}
+                {entry.claimed_by_worker ? ` · ${entry.claimed_by_worker}` : ""}
+                {entry.context_packet_id ? ` · ctx ${shortId(entry.context_packet_id)}` : ""}
+              </span>
+              {entry.blockers.length ? <small>{entry.blockers.join(", ")}</small> : <small>grant and context will be bound on claim</small>}
+            </div>
+          </div>
+          <button disabled={!entry.claimable || isClaiming} onClick={() => onClaim(entry.workflow_step_run_id)}>
+            Claim
+          </button>
+        </div>
+      ))}
+      {!inbox.entries.length ? <p className="muted">No open work is routed to this agent.</p> : null}
     </div>
   );
 }
@@ -570,6 +689,8 @@ function WorkflowGraph({ graph }: { graph: WorkflowGraphConsole }) {
               <span>
                 {node.step_type} · {node.declared ? "declared" : node.status}
                 {node.dependencies.length ? ` · after ${node.dependencies.join(", ")}` : ""}
+                {node.claimed_by_worker ? ` · ${node.claimed_by_worker}` : ""}
+                {node.context_packet_id ? ` · ctx ${shortId(node.context_packet_id)}` : ""}
                 {node.scheduled_at ? ` · ${node.due ? "due now" : `due ${relativeAge(node.scheduled_at)}`}` : ""}
               </span>
               <small>{summaryLine(node.output_summary) || summaryLine(node.input_summary) || summaryLine(node.definition_summary)}</small>
@@ -732,6 +853,11 @@ function statusFromText(status: string): RowStatus {
 
 function uniqueTransitionTypes(transitions: Array<{ transition_type: string }>): string[] {
   return [...new Set(transitions.map((transition) => transition.transition_type))].sort();
+}
+
+function agentName(agents: Agent[], agentId?: string | null): string {
+  if (!agentId) return "unassigned";
+  return agents.find((agent) => agent.id === agentId)?.name ?? shortId(agentId);
 }
 
 function shortId(value: string): string {

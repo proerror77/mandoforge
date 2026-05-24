@@ -75,6 +75,9 @@ The repository already has the managed runtime kernel:
 - WorkflowPack manifest validation, install, onboarding, connector quality,
   stage, release, rollback, and archive lifecycle.
 - WorkflowDefinition, WorkflowRun, and WorkflowStepRun persistence and APIs.
+- Managed Task Board and Agent Inbox APIs expose `WorkItem`-backed
+  `WorkflowStepRun` work, including claimability, blockers, assigned agent,
+  worker lease, and ContextPacket binding.
 - WorkflowDefinition creation validates workflow graph shape, duplicate step
   keys, dependencies, failure-source references, retry policy, fan-in/fan-out
   policy, and branch condition references before any run/session side effects.
@@ -102,6 +105,9 @@ The repository already has the managed runtime kernel:
   MemoryWritebackCandidate.
 - Workflow primary-session tool execution and context-packet generation consume
   active TaskGrants before policy, tool, connector, or memory access.
+- Workflow step claim now binds the execution lease to `claimed_by_worker`,
+  `lease_expires_at`, a generated `ContextPacket`, and the active `TaskGrant`
+  before a Worker can run the step.
 - MemoryScope now gates context object type/id/max count, trust threshold, and
   writeback permission.
 - ApprovalCommitToken is implemented for `mcp.call`, `native.connector.call`,
@@ -128,8 +134,10 @@ The repository already has the managed runtime kernel:
 - The web console now observes workflow runs, steps, transitions, task grants,
   workers, approvals, tool calls, artifacts, session events, graph nodes,
   declared-but-not-yet-materialized graph nodes, server-backed transition
-  filters, pack bindings, pack runtime objects, and memory governance summary,
-  partition drilldown, and writeback queue data from live APIs.
+  filters, pack bindings, pack runtime objects, task board entries, agent
+  inbox entries, claimable blockers, context-packet claim binding, and memory
+  governance summary, partition drilldown, and writeback queue data from live
+  APIs.
 - `/api/scheduler/run-due` now includes due scheduled workflow step activation,
   so delayed retry/backoff workflow steps can be advanced by the external
   scheduler path instead of only by a workflow-specific manual endpoint. Due
@@ -263,6 +271,8 @@ It should include:
 - `status`
 - `input_payload`, `output_payload`
 - `artifact_ids`, `approval_ids`, `tool_call_ids`
+- `claimed_by_worker`, `lease_expires_at`
+- `context_packet_id`
 - `started_at`, `completed_at`
 
 Step runs may be sequential or parallel. The orchestrator decides the graph
@@ -334,6 +344,37 @@ Rules:
 - Worker must revalidate the grant before execution.
 - Tool results, artifacts, and memory candidates must not exceed grant scope.
 - A grant expires or is consumed; it is not a standing agent permission.
+
+### Managed Task Board And Agent Inbox
+
+The task board is the operator view over `WorkItem`, `WorkflowRun`, and
+`WorkflowStepRun`. The Agent Inbox is the per-agent view over claimable
+`WorkflowStepRun` records.
+
+This is intentionally not an ungoverned queue where agents can take arbitrary
+work. A step becomes claimable only when:
+
+- the step is non-terminal and effectively queued
+- the step has an assigned `agent_id`
+- the step has an active `task_grant_id`
+- the existing lease is absent or expired
+- the claiming agent matches the step and the grant
+
+Claiming a step performs the runtime boundary handoff:
+
+```text
+POST /api/workflow-step-runs/{id}/claim
+  -> validate agent and grant
+  -> generate ContextPacket for the step session
+  -> bind ContextPacket to TaskGrant
+  -> mark WorkflowStepRun running
+  -> set claimed_by_worker and lease_expires_at
+  -> emit agent_inbox.claimed event and audit record
+```
+
+The Worker still performs the actual agent loop. Runtime / Orchestrator only
+materializes the work, chooses eligibility, and binds authority/context before
+the Worker executes.
 
 ### MemoryScope
 

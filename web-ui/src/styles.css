@@ -537,6 +537,72 @@ h1 {
   min-width: 0;
 }
 
+.task-board-panel,
+.agent-inbox-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.task-board-row {
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+}
+
+.task-board-row div,
+.inbox-entry div {
+  min-width: 0;
+}
+
+.task-board-row strong,
+.task-board-row span,
+.task-board-row small,
+.inbox-entry strong,
+.inbox-entry span,
+.inbox-entry small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-board-row.claimable,
+.inbox-entry.claimable {
+  border-color: #9ccfc1;
+  background: var(--green-soft);
+}
+
+.task-board-row small,
+.inbox-entry small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.inbox-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.inbox-entry:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.inbox-entry button {
+  min-width: 72px;
+}
+
+.inbox-main {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
 .step-row strong,
 .step-row span,
 .transition-row strong,

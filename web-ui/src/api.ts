@@ -107,6 +107,9 @@ export type WorkflowStepRun = {
   status: string;
   input_payload?: Record<string, unknown>;
   output_payload?: Record<string, unknown>;
+  claimed_by_worker?: string | null;
+  lease_expires_at?: string | null;
+  context_packet_id?: string | null;
   started_at?: string | null;
   completed_at?: string | null;
   scheduled_at?: string | null;
@@ -152,6 +155,9 @@ export type WorkflowGraphConsoleNode = {
   dependencies: string[];
   agent_id?: string | null;
   task_grant_id?: string | null;
+  context_packet_id?: string | null;
+  claimed_by_worker?: string | null;
+  lease_expires_at?: string | null;
   scheduled_at?: string | null;
   due: boolean;
   started_at?: string | null;
@@ -186,8 +192,88 @@ export type TaskGrant = {
   tool_scope: Record<string, unknown>;
   connector_scope: Record<string, unknown>;
   external_effects: Record<string, unknown>;
+  context_packet_id?: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type WorkItem = {
+  id: string;
+  title: string;
+  description?: string | null;
+  source: string;
+  status: string;
+  priority: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TaskBoardSnapshot = {
+  generated_at: string;
+  work_item_count: number;
+  workflow_run_count: number;
+  workflow_step_count: number;
+  claimable_count: number;
+  status_counts: Record<string, number>;
+  items: TaskBoardItem[];
+};
+
+export type TaskBoardItem = {
+  work_item_id?: string | null;
+  work_item_title?: string | null;
+  work_item_priority?: string | null;
+  workflow_run_id: string;
+  workflow_definition_id: string;
+  workflow_step_run_id: string;
+  step_key: string;
+  step_type: string;
+  agent_id?: string | null;
+  task_grant_id?: string | null;
+  context_packet_id?: string | null;
+  status: string;
+  claimable: boolean;
+  blockers: string[];
+  claimed_by_worker?: string | null;
+  lease_expires_at?: string | null;
+  updated_at: string;
+};
+
+export type AgentInboxSnapshot = {
+  agent_id: string;
+  generated_at: string;
+  entry_count: number;
+  claimable_count: number;
+  entries: AgentInboxEntry[];
+};
+
+export type AgentInboxEntry = {
+  workflow_run_id: string;
+  workflow_definition_id: string;
+  workflow_step_run_id: string;
+  step_key: string;
+  step_type: string;
+  status: string;
+  task_grant_id?: string | null;
+  context_packet_id?: string | null;
+  work_item?: WorkItem | null;
+  claimable: boolean;
+  blockers: string[];
+  claimed_by_worker?: string | null;
+  lease_expires_at?: string | null;
+  input_summary: Record<string, unknown>;
+  updated_at: string;
+};
+
+export type ClaimWorkflowStepRunResponse = {
+  step: WorkflowStepRun;
+  task_grant: TaskGrant;
+  context_packet: {
+    id: string;
+    version: number;
+    retrieved_objects: Array<Record<string, unknown>>;
+    source_refs: Array<Record<string, unknown>>;
+  };
 };
 
 export type WorkflowPackBinding = {
