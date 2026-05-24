@@ -75,6 +75,9 @@ The repository already has the managed runtime kernel:
 - WorkflowPack manifest validation, install, onboarding, connector quality,
   stage, release, rollback, and archive lifecycle.
 - WorkflowDefinition, WorkflowRun, and WorkflowStepRun persistence and APIs.
+- WorkflowDefinition creation validates workflow graph shape, duplicate step
+  keys, dependencies, failure-source references, retry policy, fan-in/fan-out
+  policy, and branch condition references before any run/session side effects.
 - WorkflowRun start now materializes the first `step_graph.steps` entry, or all
   entries marked `start: true` / `entrypoint: true`, into queued
   WorkflowStepRun records bound to the root TaskGrant.
@@ -170,11 +173,12 @@ Current boundary status:
   materialization, `step_graph` start-step materialization plus dependency
   advancement, recursive branch condition evaluation, condition-false branch
   skipping, scheduled retry/backoff and due activation, fan-in/fan-out policy
-  controls, retry attempt materialization, failure-driven downstream skip,
-  compensation step materialization, durable transition recording, pack binding
-  materialization, generic pack runtime-object materialization, memory
-  governance summary/drilldown/writeback queue, external scheduler activation
-  of scheduled workflow steps, numeric/time branch expression policy, and
+  controls, definition-time graph validation, retry attempt materialization,
+  failure-driven downstream skip, compensation step materialization, durable
+  transition recording, pack binding materialization, generic pack
+  runtime-object materialization, memory governance summary/drilldown/writeback
+  queue, external scheduler activation of scheduled workflow steps,
+  numeric/time branch expression policy, and
   `ApprovalCommitToken` exact binding for MCP and native connector commit
   writes.
 - Clear but only partially enforced now: worker/agent class authority,

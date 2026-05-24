@@ -12929,6 +12929,7 @@ async fn create_workflow_definition_route(
             "workflow definition step_graph must be a JSON object",
         ));
     }
+    validate_workflow_graph_definition(&input.step_graph)?;
     if !input.handoff_rules.is_object() {
         return Err(AppError::bad_request(
             "workflow definition handoff_rules must be a JSON object",
@@ -13286,6 +13287,115 @@ fn workflow_graph_start_steps(step_graph: &Value) -> Result<Vec<&Value>, AppErro
     Ok(vec![steps.first().ok_or_else(|| {
         AppError::bad_request("workflow graph steps cannot be empty")
     })?])
+}
+
+fn validate_workflow_graph_definition(step_graph: &Value) -> Result<(), AppError> {
+    let Some(steps_value) = step_graph.get("steps") else {
+        workflow_graph_fan_out_max_parallel(step_graph)?;
+        return Ok(());
+    };
+    let Some(steps) = steps_value.as_array() else {
+        return Err(AppError::bad_request(
+            "workflow graph steps must be an array",
+        ));
+    };
+    if steps.is_empty() {
+        return Err(AppError::bad_request(
+            "workflow graph steps must not be empty when provided",
+        ));
+    }
+    let mut keys = BTreeSet::new();
+    for step in steps {
+        if !step.is_object() {
+            return Err(AppError::bad_request(
+                "workflow graph steps must be JSON objects",
+            ));
+        }
+        let key = workflow_graph_step_key(step)?;
+        if !keys.insert(key.clone()) {
+            return Err(AppError::bad_request(format!(
+                "workflow graph step key {key} is duplicated"
+            )));
+        }
+    }
+    for step in steps {
+        let key = workflow_graph_step_key(step)?;
+        let dependencies = workflow_graph_step_dependencies(step)?;
+        if dependencies.iter().any(|dependency| dependency == &key) {
+            return Err(AppError::bad_request(format!(
+                "workflow graph step {key} cannot depend on itself"
+            )));
+        }
+        for dependency in &dependencies {
+            if !keys.contains(dependency) {
+                return Err(AppError::bad_request(format!(
+                    "workflow graph step {key} depends on unknown step {dependency}"
+                )));
+            }
+        }
+        for source in workflow_graph_step_failure_sources(step)? {
+            if !keys.contains(&source) {
+                return Err(AppError::bad_request(format!(
+                    "workflow graph step {key} references unknown failure source {source}"
+                )));
+            }
+        }
+        workflow_graph_step_retry_policy(step)?;
+        workflow_graph_fan_in_readiness(step, &dependencies, &HashMap::new())?;
+        if let Some(condition) = step.get("condition").or_else(|| step.get("when")) {
+            validate_workflow_graph_condition(condition, &keys)?;
+        }
+    }
+    for start in workflow_graph_start_steps(step_graph)? {
+        workflow_graph_step_key(start)?;
+    }
+    workflow_graph_fan_out_max_parallel(step_graph)?;
+    Ok(())
+}
+
+fn validate_workflow_graph_condition(
+    condition: &Value,
+    step_keys: &BTreeSet<String>,
+) -> Result<(), AppError> {
+    if let Some(items) = condition.get("all") {
+        let children = workflow_graph_condition_array(items, &[], "all")?;
+        for child in children {
+            validate_workflow_graph_condition(&child.condition, step_keys)?;
+        }
+        return Ok(());
+    }
+    if let Some(items) = condition.get("any") {
+        let children = workflow_graph_condition_array(items, &[], "any")?;
+        for child in children {
+            validate_workflow_graph_condition(&child.condition, step_keys)?;
+        }
+        return Ok(());
+    }
+    if let Some(child) = condition.get("not") {
+        return validate_workflow_graph_condition(child, step_keys);
+    }
+    let source_step = condition
+        .get("source_step")
+        .or_else(|| condition.get("step"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("workflow graph step condition requires source_step")
+        })?;
+    if !step_keys.contains(source_step) {
+        return Err(AppError::bad_request(format!(
+            "workflow graph step condition references unknown source_step {source_step}"
+        )));
+    }
+    condition
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("workflow graph step condition requires path"))?;
+    workflow_graph_leaf_condition_result(condition, &Value::Null)?;
+    Ok(())
 }
 
 fn workflow_graph_step_key(step: &Value) -> Result<String, AppError> {
@@ -52486,6 +52596,64 @@ not json
                 && log.resource_id == Some(updated.id)
                 && log.details["details"]["source_installation_id"] == json!(installed.id)
         }));
+    }
+
+    #[tokio::test]
+    async fn workflow_definition_rejects_invalid_graph_before_persisting() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Invalid graph workflow",
+                    "entrypoint": "invalid-graph-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true},
+                            {"key": "draft", "type": "agent", "depends_on": ["missing-step"]}
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("unknown step missing-step"))
+        );
+
+        let definitions: Vec<WorkflowDefinition> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/workflow-definitions")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.entrypoint != "invalid-graph-workflow")
+        );
     }
 
     #[tokio::test]
