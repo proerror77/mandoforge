@@ -7,7 +7,7 @@ use crate::store_rows::{
 };
 use crate::{
     AppError, AppState, TaskGrant, WorkflowDefinition, WorkflowRun, WorkflowStepRun,
-    WorkflowTransition,
+    WorkflowTransition, WorkflowTransitionFilter,
 };
 
 impl AppState {
@@ -602,6 +602,18 @@ impl AppState {
         &self,
         workflow_run_id: uuid::Uuid,
     ) -> Result<Vec<WorkflowTransition>, AppError> {
+        self.list_workflow_transitions_with_filter(
+            workflow_run_id,
+            &WorkflowTransitionFilter::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn list_workflow_transitions_with_filter(
+        &self,
+        workflow_run_id: uuid::Uuid,
+        filter: &WorkflowTransitionFilter,
+    ) -> Result<Vec<WorkflowTransition>, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut transitions: Vec<_> = inner
@@ -609,24 +621,61 @@ impl AppState {
                     .await
                     .workflow_transitions
                     .values()
-                    .filter(|transition| transition.workflow_run_id == workflow_run_id)
+                    .filter(|transition| {
+                        transition.workflow_run_id == workflow_run_id
+                            && filter
+                                .transition_type
+                                .as_ref()
+                                .is_none_or(|value| transition.transition_type == *value)
+                            && filter
+                                .status
+                                .as_ref()
+                                .is_none_or(|value| transition.status == *value)
+                            && filter.from_step_key.as_ref().is_none_or(|value| {
+                                transition.from_step_key.as_ref() == Some(value)
+                            })
+                            && filter
+                                .to_step_key
+                                .as_ref()
+                                .is_none_or(|value| transition.to_step_key.as_ref() == Some(value))
+                    })
                     .cloned()
                     .collect();
                 transitions.sort_by_key(|transition| transition.created_at);
+                if let Some(limit) = filter.limit {
+                    let start = transitions.len().saturating_sub(limit);
+                    transitions = transitions.split_off(start);
+                }
                 Ok(transitions)
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
                     "SELECT id, workflow_run_id, from_step_run_id, from_step_key, to_step_run_id, to_step_key, transition_type, status, condition_payload, result_payload, created_at
                      FROM workflow_transitions
-                     WHERE tenant_id = $1 AND workflow_run_id = $2
-                     ORDER BY created_at ASC",
+                     WHERE tenant_id = $1
+                       AND workflow_run_id = $2
+                       AND ($3::text IS NULL OR transition_type = $3)
+                       AND ($4::text IS NULL OR status = $4)
+                       AND ($5::text IS NULL OR from_step_key = $5)
+                       AND ($6::text IS NULL OR to_step_key = $6)
+                     ORDER BY created_at DESC
+                     LIMIT $7",
                 )
                 .bind(self.current_tenant_id())
                 .bind(workflow_run_id)
+                .bind(&filter.transition_type)
+                .bind(&filter.status)
+                .bind(&filter.from_step_key)
+                .bind(&filter.to_step_key)
+                .bind(filter.limit.map_or(i64::MAX, |limit| limit as i64))
                 .fetch_all(pool)
                 .await?;
-                rows.into_iter().map(workflow_transition_from_row).collect()
+                let mut transitions = rows
+                    .into_iter()
+                    .map(workflow_transition_from_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                transitions.reverse();
+                Ok(transitions)
             }
         }
     }

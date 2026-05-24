@@ -107,9 +107,15 @@ export function App() {
     enabled: Boolean(workflowRunId),
     refetchInterval: 1200,
   });
+  const transitionQuery = useMemo(() => {
+    const params = new URLSearchParams();
+    params.set("limit", "50");
+    if (transitionFilter !== "all") params.set("transition_type", transitionFilter);
+    return params.toString();
+  }, [transitionFilter]);
   const workflowTransitions = useQuery({
-    queryKey: ["workflow-transitions", workflowRunId],
-    queryFn: () => api<WorkflowTransition[]>(`/api/workflow-runs/${workflowRunId}/transitions`),
+    queryKey: ["workflow-transitions", workflowRunId, transitionQuery],
+    queryFn: () => api<WorkflowTransition[]>(`/api/workflow-runs/${workflowRunId}/transitions?${transitionQuery}`),
     enabled: Boolean(workflowRunId),
     refetchInterval: 1200,
   });
@@ -158,10 +164,8 @@ export function App() {
     ? sessionToolCalls.data
     : (allToolCalls.data ?? []).filter((call) => call.session_id === sessionId);
   const runtime = runtimeSummary(events.data ?? [], selectedAgent);
-  const transitionTypes = uniqueTransitionTypes(workflowTransitions.data ?? []);
-  const filteredTransitions = transitionFilter === "all"
-    ? (workflowTransitions.data ?? [])
-    : (workflowTransitions.data ?? []).filter((transition) => transition.transition_type === transitionFilter);
+  const transitionTypes = uniqueTransitionTypes(workflowGraph.data?.edges ?? workflowTransitions.data ?? []);
+  const filteredTransitions = workflowTransitions.data ?? [];
 
   const launch = useMutation({
     mutationFn: async () => {
@@ -316,7 +320,7 @@ export function App() {
           </Panel>
 
           <Panel title="Transitions">
-            {(workflowTransitions.data ?? []).length ? (
+            {transitionTypes.length ? (
               <div className="filter-row">
                 {["all", ...transitionTypes].map((type) => (
                   <button
@@ -722,7 +726,7 @@ function statusFromText(status: string): RowStatus {
   return "idle";
 }
 
-function uniqueTransitionTypes(transitions: WorkflowTransition[]): string[] {
+function uniqueTransitionTypes(transitions: Array<{ transition_type: string }>): string[] {
   return [...new Set(transitions.map((transition) => transition.transition_type))].sort();
 }
 

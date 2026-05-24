@@ -1259,6 +1259,29 @@ struct WorkflowTransition {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct WorkflowTransitionFilter {
+    transition_type: Option<String>,
+    status: Option<String>,
+    from_step_key: Option<String>,
+    to_step_key: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowTransitionQuery {
+    #[serde(default)]
+    transition_type: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    from_step_key: Option<String>,
+    #[serde(default)]
+    to_step_key: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateWorkflowStepRun {
     step_key: String,
@@ -14630,6 +14653,7 @@ async fn list_workflow_step_runs_route(
 async fn list_workflow_transitions_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<WorkflowTransitionQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkflowTransition>>, AppError> {
     let run = state.get_workflow_run(id).await?;
@@ -14641,7 +14665,38 @@ async fn list_workflow_transitions_route(
         Some(run.primary_session_id),
     )
     .await?;
-    Ok(Json(state.list_workflow_transitions(id).await?))
+    let filter = workflow_transition_filter_from_query(query)?;
+    Ok(Json(
+        state
+            .list_workflow_transitions_with_filter(id, &filter)
+            .await?,
+    ))
+}
+
+fn workflow_transition_filter_from_query(
+    query: WorkflowTransitionQuery,
+) -> Result<WorkflowTransitionFilter, AppError> {
+    let limit = match query.limit {
+        Some(limit) if limit == 0 || limit > 500 => {
+            return Err(AppError::bad_request(
+                "workflow transition filter limit must be between 1 and 500",
+            ));
+        }
+        other => other,
+    };
+    Ok(WorkflowTransitionFilter {
+        transition_type: normalize_optional_filter(query.transition_type),
+        status: normalize_optional_filter(query.status),
+        from_step_key: normalize_optional_filter(query.from_step_key),
+        to_step_key: normalize_optional_filter(query.to_step_key),
+        limit,
+    })
+}
+
+fn normalize_optional_filter(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 async fn get_workflow_run_graph_console_route(
@@ -52754,6 +52809,26 @@ not json
                 && transition["to_step_key"] == json!("research")
                 && transition["condition_payload"]["dependencies"] == json!(["intake"])
         }));
+        let filtered_dependency_transitions: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{run_id}/transitions?transition_type=dependency&status=materialized&to_step_key=research&limit=1"
+                ))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(filtered_dependency_transitions.len(), 1);
+        assert_eq!(
+            filtered_dependency_transitions[0]["to_step_run_id"],
+            json!(research_step_id)
+        );
+        assert_eq!(
+            filtered_dependency_transitions[0]["transition_type"],
+            json!("dependency")
+        );
         let _: Value = request_json(
             app.clone(),
             json_request_with_headers(
