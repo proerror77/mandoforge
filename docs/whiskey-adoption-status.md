@@ -1,13 +1,13 @@
 # Whiskey Adoption Status
 
-Snapshot date: 2026-05-24 after managed task board / agent inbox deployment.
+Snapshot date: 2026-05-25 after semantic governance console deployment and workflow-step worker smoke.
 
 This file tracks the current production-like adoption state for `wishky-2-1`. It is a release/status ledger, not a replacement for [Whiskey Adoption Runbook](whiskey-adoption-runbook.md).
 
 ## Current Deployment
 
 - Host: `wishky-2-1`.
-- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:whiskey-20260524-f25eb43`.
+- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:whiskey-20260525-6e08fab`.
 - API: `127.0.0.1:18787`.
 - Postgres: `127.0.0.1:15432`.
 - Compose project: `mandoforge-adoption`.
@@ -16,11 +16,16 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
 - Latest local archive copy: `.mandoforge/remote-adoption/whiskey/mandoforge-whiskey-pilot-20260518T050542Z.tar.gz`.
 - Latest Stage 2 strict archive copy: `.mandoforge/remote-adoption/whiskey/stage2-production-whiskey-20260518T050542Z.tar.gz`.
 - Latest strict archive summary: `stage2_status=ready`, `completion_blocked=false`, `open_gap_count=0`, `validation_missing_endpoint_count=0`, `validation_stale_endpoint_count=0`.
-- Latest managed task board smoke: API and worker containers run image
-  `whiskey-20260524-f25eb43`; `/healthz` returns `{"status":"ok"}`;
-  authenticated `GET /api/task-board` returns HTTP 200; `workflow_step_runs`
-  has `claimed_by_worker`, `lease_expires_at`, and `context_packet_id`; static
-  UI serves `index-B2JJfV3L.js` and `index-CmPpG5Ys.css`.
+- Latest semantic console / worker smoke: API and worker containers run image
+  `whiskey-20260525-6e08fab`; `/healthz` returns `{"status":"ok"}`;
+  static UI serves `index-BCX-AyF_.js` and `index-DeJQG8Pc.css`; authenticated
+  semantic API readback reports `scope_rank` as the effective retrieval backend,
+  memory governance `status=ready`, 3 semantic objects, and 0 semantic links.
+  The fixed workflow-step worker smoke passed with workflow run
+  `2cf0120b-89b6-4d11-bcc6-ad8aa428b34c`, completed step
+  `c81855c4-acd9-4b27-8c89-0d0bf4c66f69`, worker
+  `whiskey-pilot-worker-1`, context packet
+  `cecee29d-3ea6-421b-9c51-939bf897f933`, 4 tool calls, and 2 artifacts.
 
 ## Current Remaining Scope
 
