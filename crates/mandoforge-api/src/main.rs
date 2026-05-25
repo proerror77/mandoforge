@@ -2104,7 +2104,7 @@ struct CreateMemoryWritebackCandidates {
     include_approvals: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct CreateSemanticSynthesisRun {
     synthesis_type: String,
     goal_attempted: String,
@@ -2122,7 +2122,7 @@ struct CreateSemanticSynthesisRun {
     metadata: Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SemanticSynthesisMemoryCandidateInput {
     #[serde(default = "default_memory_object_type")]
     proposed_object_type: String,
@@ -17006,9 +17006,11 @@ async fn build_semantic_synthesis_schedule_due_counts(
             skipped_count += 1;
             continue;
         }
-        match semantic_synthesis_schedule_is_due(&object, &audit_logs, checked_at) {
-            Ok(true) => due_count += 1,
-            Ok(false) | Err(_) => skipped_count += 1,
+        match semantic_synthesis_schedule_due_session_ids(state, &object, &audit_logs, checked_at)
+            .await
+        {
+            Ok(session_ids) if !session_ids.is_empty() => due_count += session_ids.len(),
+            Ok(_) | Err(_) => skipped_count += 1,
         }
     }
     Ok((scheduled_count, due_count, skipped_count))
@@ -17041,8 +17043,15 @@ async fn execute_due_semantic_synthesis_schedules(
             ));
             continue;
         }
-        let is_due = match semantic_synthesis_schedule_is_due(&object, &audit_logs, checked_at) {
-            Ok(is_due) => is_due,
+        let due_session_ids = match semantic_synthesis_schedule_due_session_ids(
+            state,
+            &object,
+            &audit_logs,
+            checked_at,
+        )
+        .await
+        {
+            Ok(session_ids) => session_ids,
             Err(error) => {
                 failed_count += 1;
                 runs.push(semantic_synthesis_scheduled_run_failed(
@@ -17054,18 +17063,18 @@ async fn execute_due_semantic_synthesis_schedules(
                 continue;
             }
         };
-        if !is_due {
+        if due_session_ids.is_empty() {
             skipped_count += 1;
             runs.push(semantic_synthesis_scheduled_run_skipped(
                 &object,
                 None,
                 None,
-                "schedule is not due or was already completed",
+                "schedule is not due or was already completed for all target sessions",
             ));
             continue;
         }
-        due_count += 1;
-        let (session_id, synthesis_type, input) =
+        due_count += due_session_ids.len();
+        let (synthesis_type, input) =
             match semantic_synthesis_schedule_input_from_runtime_object(&object) {
                 Ok(input) => input,
                 Err(error) => {
@@ -17079,73 +17088,76 @@ async fn execute_due_semantic_synthesis_schedules(
                     continue;
                 }
             };
-        match materialize_semantic_synthesis_run_for_actor(
-            state,
-            session_id,
-            "system".to_string(),
-            "system",
-            input,
-        )
-        .await
-        {
-            Ok(result) => {
-                state
-                    .append_audit_log(new_audit_log(
+        for session_id in due_session_ids {
+            let input = semantic_synthesis_schedule_input_for_session(&object, input.clone());
+            match materialize_semantic_synthesis_run_for_actor(
+                state,
+                session_id,
+                "system".to_string(),
+                "system",
+                input,
+            )
+            .await
+            {
+                Ok(result) => {
+                    state
+                        .append_audit_log(new_audit_log(
+                            Some(session_id),
+                            "system",
+                            Some(object.id),
+                            "semantic_synthesis.schedule_run_created",
+                            "workflow_pack_runtime_object",
+                            Some(object.id),
+                            json!({
+                                "runtime_object_id": object.id,
+                                "object_key": object.object_key.clone(),
+                                "session_id": session_id,
+                                "synthesis_type": result.synthesis_type.clone(),
+                                "artifact_id": result.artifact.id,
+                                "candidate_count": result.candidates.len(),
+                                "checked_at": checked_at,
+                            }),
+                        ))
+                        .await?;
+                    created_count += 1;
+                    runs.push(SemanticSynthesisScheduledRun {
+                        runtime_object_id: object.id,
+                        object_key: object.object_key.clone(),
+                        session_id: Some(session_id),
+                        synthesis_type: Some(result.synthesis_type),
+                        status: "created".to_string(),
+                        artifact_id: Some(result.artifact.id),
+                        candidate_count: result.candidates.len(),
+                        reason: None,
+                    });
+                }
+                Err(error) => {
+                    failed_count += 1;
+                    state
+                        .append_audit_log(new_audit_log(
+                            Some(session_id),
+                            "system",
+                            Some(object.id),
+                            "semantic_synthesis.schedule_run_failed",
+                            "workflow_pack_runtime_object",
+                            Some(object.id),
+                            json!({
+                                "runtime_object_id": object.id,
+                                "object_key": object.object_key.clone(),
+                                "session_id": session_id,
+                                "synthesis_type": synthesis_type.clone(),
+                                "error": error.message.clone(),
+                                "checked_at": checked_at,
+                            }),
+                        ))
+                        .await?;
+                    runs.push(semantic_synthesis_scheduled_run_failed(
+                        &object,
                         Some(session_id),
-                        "system",
-                        Some(object.id),
-                        "semantic_synthesis.schedule_run_created",
-                        "workflow_pack_runtime_object",
-                        Some(object.id),
-                        json!({
-                            "runtime_object_id": object.id,
-                            "object_key": object.object_key.clone(),
-                            "session_id": session_id,
-                            "synthesis_type": result.synthesis_type.clone(),
-                            "artifact_id": result.artifact.id,
-                            "candidate_count": result.candidates.len(),
-                            "checked_at": checked_at,
-                        }),
-                    ))
-                    .await?;
-                created_count += 1;
-                runs.push(SemanticSynthesisScheduledRun {
-                    runtime_object_id: object.id,
-                    object_key: object.object_key,
-                    session_id: Some(session_id),
-                    synthesis_type: Some(result.synthesis_type),
-                    status: "created".to_string(),
-                    artifact_id: Some(result.artifact.id),
-                    candidate_count: result.candidates.len(),
-                    reason: None,
-                });
-            }
-            Err(error) => {
-                failed_count += 1;
-                state
-                    .append_audit_log(new_audit_log(
-                        Some(session_id),
-                        "system",
-                        Some(object.id),
-                        "semantic_synthesis.schedule_run_failed",
-                        "workflow_pack_runtime_object",
-                        Some(object.id),
-                        json!({
-                            "runtime_object_id": object.id,
-                            "object_key": object.object_key.clone(),
-                            "session_id": session_id,
-                            "synthesis_type": synthesis_type.clone(),
-                            "error": error.message.clone(),
-                            "checked_at": checked_at,
-                        }),
-                    ))
-                    .await?;
-                runs.push(semantic_synthesis_scheduled_run_failed(
-                    &object,
-                    Some(session_id),
-                    Some(synthesis_type.as_str()),
-                    &error.message,
-                ));
+                        Some(synthesis_type.as_str()),
+                        &error.message,
+                    ));
+                }
             }
         }
     }
@@ -17190,18 +17202,61 @@ fn semantic_synthesis_schedule_is_runnable(object: &WorkflowPackRuntimeObject) -
             .unwrap_or(true)
 }
 
-fn semantic_synthesis_schedule_is_due(
+async fn semantic_synthesis_schedule_due_session_ids(
+    state: &AppState,
     object: &WorkflowPackRuntimeObject,
     audit_logs: &[AuditLog],
     checked_at: DateTime<Utc>,
-) -> Result<bool, AppError> {
+) -> Result<Vec<Uuid>, AppError> {
     let due_at = semantic_synthesis_schedule_due_at(object)?.unwrap_or(object.created_at);
     if due_at > checked_at {
-        return Ok(false);
+        return Ok(Vec::new());
     }
-    let Some(last_run_at) = semantic_synthesis_schedule_last_success_at(audit_logs, object.id)
+    let mut target_session_ids = Vec::new();
+    if let Some(session_id) = semantic_synthesis_schedule_session_id(object)? {
+        target_session_ids.push(session_id);
+    } else if let Some(workflow_definition_id) =
+        semantic_synthesis_schedule_workflow_definition_id(object)?
+    {
+        let mut seen = HashSet::new();
+        for run in state
+            .list_workflow_runs()
+            .await?
+            .into_iter()
+            .filter(|run| run.workflow_definition_id == workflow_definition_id)
+            .filter(|run| run.status == "completed")
+            .filter(|run| {
+                run.completed_at
+                    .is_none_or(|completed_at| completed_at <= checked_at)
+            })
+        {
+            if seen.insert(run.primary_session_id) {
+                target_session_ids.push(run.primary_session_id);
+            }
+        }
+    } else {
+        return Err(AppError::bad_request(
+            "semantic synthesis schedule requires session_id or workflow_definition_id",
+        ));
+    }
+    Ok(target_session_ids
+        .into_iter()
+        .filter(|session_id| {
+            semantic_synthesis_schedule_session_is_due(object, audit_logs, *session_id, checked_at)
+        })
+        .collect())
+}
+
+fn semantic_synthesis_schedule_session_is_due(
+    object: &WorkflowPackRuntimeObject,
+    audit_logs: &[AuditLog],
+    session_id: Uuid,
+    checked_at: DateTime<Utc>,
+) -> bool {
+    let Some(last_run_at) =
+        semantic_synthesis_schedule_last_success_at(audit_logs, object.id, Some(session_id))
     else {
-        return Ok(true);
+        return true;
     };
     let interval_seconds = object
         .spec
@@ -17209,9 +17264,9 @@ fn semantic_synthesis_schedule_is_due(
         .and_then(Value::as_i64)
         .filter(|seconds| *seconds > 0);
     let Some(interval_seconds) = interval_seconds else {
-        return Ok(false);
+        return false;
     };
-    Ok(last_run_at + chrono::Duration::seconds(interval_seconds) <= checked_at)
+    last_run_at + chrono::Duration::seconds(interval_seconds) <= checked_at
 }
 
 fn semantic_synthesis_schedule_due_at(
@@ -17239,6 +17294,7 @@ fn semantic_synthesis_schedule_due_at(
 fn semantic_synthesis_schedule_last_success_at(
     audit_logs: &[AuditLog],
     runtime_object_id: Uuid,
+    session_id: Option<Uuid>,
 ) -> Option<DateTime<Utc>> {
     audit_logs
         .iter()
@@ -17250,15 +17306,22 @@ fn semantic_synthesis_schedule_last_success_at(
                     .and_then(Value::as_str)
                     .and_then(|value| Uuid::parse_str(value).ok())
                     == Some(runtime_object_id)
+                && session_id.is_none_or(|session_id| {
+                    log.details
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .and_then(|value| Uuid::parse_str(value).ok())
+                        == Some(session_id)
+                })
         })
         .map(|log| log.created_at)
         .max()
 }
 
-fn semantic_synthesis_schedule_input_from_runtime_object(
+fn semantic_synthesis_schedule_session_id(
     object: &WorkflowPackRuntimeObject,
-) -> Result<(Uuid, String, CreateSemanticSynthesisRun), AppError> {
-    let session_id = object
+) -> Result<Option<Uuid>, AppError> {
+    object
         .spec
         .get("session_id")
         .and_then(Value::as_str)
@@ -17268,10 +17331,42 @@ fn semantic_synthesis_schedule_input_from_runtime_object(
                 .pointer("/semantic_synthesis/session_id")
                 .and_then(Value::as_str)
         })
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or_else(|| {
-            AppError::bad_request("semantic synthesis schedule session_id must be a UUID string")
-        })?;
+        .map(|value| {
+            Uuid::parse_str(value).map_err(|_| {
+                AppError::bad_request(
+                    "semantic synthesis schedule session_id must be a UUID string",
+                )
+            })
+        })
+        .transpose()
+}
+
+fn semantic_synthesis_schedule_workflow_definition_id(
+    object: &WorkflowPackRuntimeObject,
+) -> Result<Option<Uuid>, AppError> {
+    object
+        .spec
+        .get("workflow_definition_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .spec
+                .pointer("/semantic_synthesis/workflow_definition_id")
+                .and_then(Value::as_str)
+        })
+        .map(|value| {
+            Uuid::parse_str(value).map_err(|_| {
+                AppError::bad_request(
+                    "semantic synthesis schedule workflow_definition_id must be a UUID string",
+                )
+            })
+        })
+        .transpose()
+}
+
+fn semantic_synthesis_schedule_input_from_runtime_object(
+    object: &WorkflowPackRuntimeObject,
+) -> Result<(String, CreateSemanticSynthesisRun), AppError> {
     let synthesis_type = object
         .spec
         .get("synthesis_type")
@@ -17321,7 +17416,6 @@ fn semantic_synthesis_schedule_input_from_runtime_object(
         .cloned()
         .unwrap_or_else(|| json!({}));
     Ok((
-        session_id,
         synthesis_type.clone(),
         CreateSemanticSynthesisRun {
             synthesis_type,
@@ -17340,6 +17434,27 @@ fn semantic_synthesis_schedule_input_from_runtime_object(
             metadata,
         },
     ))
+}
+
+fn semantic_synthesis_schedule_input_for_session(
+    object: &WorkflowPackRuntimeObject,
+    mut input: CreateSemanticSynthesisRun,
+) -> CreateSemanticSynthesisRun {
+    let mut metadata = input.metadata.as_object().cloned().unwrap_or_default();
+    metadata.insert("source".to_string(), json!("semantic_synthesis_schedule"));
+    metadata.insert("schedule_runtime_object_id".to_string(), json!(object.id));
+    metadata.insert("object_key".to_string(), json!(object.object_key.clone()));
+    if let Some(workflow_definition_id) = object.spec.get("workflow_definition_id") {
+        metadata.insert(
+            "workflow_definition_id".to_string(),
+            workflow_definition_id.clone(),
+        );
+    }
+    if let Some(workflow_id) = object.spec.get("workflow_id") {
+        metadata.insert("workflow_id".to_string(), workflow_id.clone());
+    }
+    input.metadata = Value::Object(metadata);
+    input
 }
 
 fn semantic_synthesis_schedule_string_array(spec: &Value, key: &str) -> Vec<String> {
@@ -19146,6 +19261,8 @@ struct WorkflowPackWorkflowFile {
     outputs: Vec<String>,
     #[serde(default)]
     handoff_rules: Value,
+    #[serde(default = "empty_json_object")]
+    semantic_synthesis_schedule: Value,
 }
 
 async fn workflow_pack_materialized_bindings_with_runtime_targets(
@@ -19422,6 +19539,19 @@ fn workflow_pack_materialized_bindings(
     let mut bindings = Vec::new();
 
     for workflow in &manifest.workflows {
+        let workflow_file = workflow_pack_load_workflow_file(&package_dir, workflow)?;
+        let mut materialized_payload = json!({
+            "entry_agent": workflow.entry_agent,
+            "source_digest": workflow_pack_source_digest(&package_dir, &workflow.path)?,
+        });
+        if workflow_file
+            .semantic_synthesis_schedule
+            .as_object()
+            .is_some_and(|schedule| !schedule.is_empty())
+        {
+            materialized_payload["semantic_synthesis_schedule"] =
+                workflow_file.semantic_synthesis_schedule.clone();
+        }
         bindings.push(new_workflow_pack_binding(
             installation,
             "workflow",
@@ -19429,10 +19559,7 @@ fn workflow_pack_materialized_bindings(
             Some(&workflow.path),
             "workflow_definition",
             status,
-            json!({
-                "entry_agent": workflow.entry_agent,
-                "source_digest": workflow_pack_source_digest(&package_dir, &workflow.path)?,
-            }),
+            materialized_payload,
             now,
         ));
     }
@@ -19635,28 +19762,42 @@ fn workflow_pack_runtime_objects_from_bindings(
     let mut objects = Vec::new();
     for binding in bindings {
         match binding.binding_type.as_str() {
-            "workflow" => objects.push(new_workflow_pack_runtime_object(
-                installation,
-                binding,
-                "schedule",
-                &format!("workflow:{}:schedule", binding.binding_key),
-                "workflow_schedule",
-                status,
-                json!({
-                    "binding_id": binding.id,
-                    "workflow_id": binding.binding_key.clone(),
-                    "workflow_definition_id": binding.target_id,
-                    "entry_agent": binding.materialized_payload.get("entry_agent").cloned(),
-                    "source_path": binding.source_path.clone(),
-                    "source_digest": binding.materialized_payload.get("source_digest").cloned(),
-                    "schedule_policy": {
-                        "mode": "manual_or_scheduler",
-                        "source": "workflow_pack_binding"
-                    },
-                    "provider_specific_validation": "not_required"
-                }),
-                now,
-            )),
+            "workflow" => {
+                objects.push(new_workflow_pack_runtime_object(
+                    installation,
+                    binding,
+                    "schedule",
+                    &format!("workflow:{}:schedule", binding.binding_key),
+                    "workflow_schedule",
+                    status,
+                    json!({
+                        "binding_id": binding.id,
+                        "workflow_id": binding.binding_key.clone(),
+                        "workflow_definition_id": binding.target_id,
+                        "entry_agent": binding.materialized_payload.get("entry_agent").cloned(),
+                        "source_path": binding.source_path.clone(),
+                        "source_digest": binding.materialized_payload.get("source_digest").cloned(),
+                        "schedule_policy": {
+                            "mode": "manual_or_scheduler",
+                            "source": "workflow_pack_binding"
+                        },
+                        "provider_specific_validation": "not_required"
+                    }),
+                    now,
+                ));
+                if let Some(spec) = workflow_pack_semantic_synthesis_schedule_spec(binding)? {
+                    objects.push(new_workflow_pack_runtime_object(
+                        installation,
+                        binding,
+                        "schedule",
+                        &format!("workflow:{}:semantic-synthesis", binding.binding_key),
+                        "semantic_synthesis_schedule",
+                        status,
+                        spec,
+                        now,
+                    ));
+                }
+            }
             "connector" => objects.push(new_workflow_pack_runtime_object(
                 installation,
                 binding,
@@ -19708,6 +19849,68 @@ fn workflow_pack_runtime_objects_from_bindings(
             .then(left.object_key.cmp(&right.object_key))
     });
     Ok(objects)
+}
+
+fn workflow_pack_semantic_synthesis_schedule_spec(
+    binding: &WorkflowPackBinding,
+) -> Result<Option<Value>, AppError> {
+    let Some(schedule) = binding
+        .materialized_payload
+        .get("semantic_synthesis_schedule")
+    else {
+        return Ok(None);
+    };
+    if !schedule.is_object() {
+        return Err(AppError::bad_request(
+            "workflow pack semantic_synthesis_schedule must be a JSON object",
+        ));
+    }
+    if schedule
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return Ok(None);
+    }
+    let mut spec = schedule.as_object().cloned().unwrap_or_default();
+    spec.insert("binding_id".to_string(), json!(binding.id));
+    spec.insert(
+        "workflow_id".to_string(),
+        json!(binding.binding_key.clone()),
+    );
+    spec.insert(
+        "workflow_definition_id".to_string(),
+        json!(binding.target_id),
+    );
+    spec.insert(
+        "source_path".to_string(),
+        json!(binding.source_path.clone()),
+    );
+    spec.insert(
+        "source_digest".to_string(),
+        binding
+            .materialized_payload
+            .get("source_digest")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    spec.entry("schedule_policy".to_string())
+        .or_insert_with(|| {
+            json!({
+                "mode": "scheduler",
+                "source": "workflow_pack_binding"
+            })
+        });
+    spec.entry("session_selector".to_string())
+        .or_insert_with(|| {
+            json!({
+                "source": "completed_workflow_runs",
+                "status": "completed"
+            })
+        });
+    spec.entry("metadata".to_string())
+        .or_insert_with(|| json!({}));
+    Ok(Some(Value::Object(spec)))
 }
 
 fn new_workflow_pack_runtime_object(
@@ -55245,6 +55448,17 @@ not json
             .as_str()
             .expect("workflow definition target id")
             .to_string();
+        let policy_monitor_binding = staged_bindings
+            .iter()
+            .find(|binding| {
+                binding["binding_type"] == json!("workflow")
+                    && binding["binding_key"] == json!("policy-monitor")
+            })
+            .expect("policy monitor workflow binding");
+        let policy_monitor_definition_id = policy_monitor_binding["target_id"]
+            .as_str()
+            .expect("policy monitor workflow definition target id")
+            .to_string();
         assert!(staged_bindings.iter().any(|binding| {
             binding["binding_type"] == json!("workflow")
                 && binding["binding_key"] == json!("profile-onboarding")
@@ -55328,6 +55542,19 @@ not json
                 && object["spec"]["workflow_definition_id"]
                     == json!(profile_onboarding_definition_id)
                 && object["spec"]["provider_specific_validation"] == json!("not_required")
+        }));
+        assert!(staged_runtime_objects.iter().any(|object| {
+            object["object_type"] == json!("schedule")
+                && object["runtime_kind"] == json!("semantic_synthesis_schedule")
+                && object["object_key"] == json!("workflow:policy-monitor:semantic-synthesis")
+                && object["status"] == json!("staged")
+                && object["spec"]["workflow_id"] == json!("policy-monitor")
+                && object["spec"]["workflow_definition_id"] == json!(policy_monitor_definition_id)
+                && object["spec"]["synthesis_type"] == json!("dreaming_synthesis")
+                && object["spec"]["session_selector"]["source"] == json!("completed_workflow_runs")
+                && object["spec"]["schedule_policy"]["interval_seconds"] == json!(86400)
+                && object["spec"]["durable_memory_candidates"][0]["proposed_object_key"]
+                    == json!("memory:policy-monitor:scheduled-synthesis")
         }));
         assert!(staged_runtime_objects.iter().any(|object| {
             object["object_type"] == json!("connector_account")
@@ -57092,6 +57319,198 @@ not json
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn scheduler_due_run_materializes_workflow_bound_semantic_synthesis_schedule() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state.clone());
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+        let definition: WorkflowDefinition = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Workflow-bound semantic synthesis",
+                    "entrypoint": "workflow-bound-semantic-synthesis",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "collect", "type": "agent", "start": true}
+                        ]
+                    },
+                    "handoff_rules": {
+                        "root_task_grant": {
+                            "memory_scope": {
+                                "mode": "candidate_writeback",
+                                "allowed_scope_keys": [
+                                    "workflow_definition_id",
+                                    "workflow_id"
+                                ],
+                                "allowed_object_types": ["memory"],
+                                "allowed_source_types": [
+                                    "semantic_synthesis",
+                                    "artifact",
+                                    "session_event"
+                                ],
+                                "allowed_object_ids": [],
+                                "minimum_trust_level": "source_attested",
+                                "max_objects": 5,
+                                "approval_memory_allowed": false,
+                                "handoff_memory_allowed": false,
+                                "writeback_allowed": true
+                            }
+                        }
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let workflow_run: WorkflowRun = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition.id,
+                    "title": "workflow-bound semantic synthesis run"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let steps: Vec<WorkflowStepRun> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{}/steps", workflow_run.id))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let collect = steps.first().expect("collect step");
+        let _: WorkflowStepRun = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{}", collect.id),
+                json!({"status": "completed"}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let completed_run: WorkflowRun = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{}", workflow_run.id))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(completed_run.status, "completed");
+        let runtime_object_id = Uuid::new_v4();
+        let due_at = Utc::now() - chrono::Duration::minutes(5);
+        state
+            .create_workflow_pack_runtime_objects(vec![WorkflowPackRuntimeObject {
+                id: runtime_object_id,
+                installation_id: Uuid::new_v4(),
+                binding_id: Uuid::new_v4(),
+                pack_id: "workflow-bound-semantic-memory-pack".to_string(),
+                pack_version: "0.1.0".to_string(),
+                object_type: "schedule".to_string(),
+                object_key: "workflow:workflow-bound:semantic-synthesis".to_string(),
+                runtime_kind: "semantic_synthesis_schedule".to_string(),
+                status: "released".to_string(),
+                spec: json!({
+                    "workflow_definition_id": definition.id,
+                    "workflow_id": "workflow-bound-semantic-synthesis",
+                    "synthesis_type": "dreaming_synthesis",
+                    "goal_attempted": "Synthesize completed workflow runs into governed memory candidates.",
+                    "context_used": ["workflow_run", "session_events"],
+                    "worked": ["workflow run completed"],
+                    "failed_or_corrected": [],
+                    "unsafe_assumptions": ["do not promote memory directly"],
+                    "durable_memory_candidates": [
+                        {
+                            "proposed_object_key": "memory:workflow-bound:scheduled-synthesis",
+                            "title": "Workflow-bound scheduled synthesis",
+                            "summary": "Workflow-bound semantic synthesis should select completed workflow sessions.",
+                            "content": {"rule": "workflow-definition-selector"},
+                            "trust_level": "source_attested",
+                            "freshness": "current"
+                        }
+                    ],
+                    "schedule_policy": {
+                        "mode": "scheduler",
+                        "due_at": due_at
+                    },
+                    "session_selector": {
+                        "source": "completed_workflow_runs",
+                        "status": "completed"
+                    }
+                }),
+                created_at: due_at,
+                updated_at: due_at,
+            }])
+            .await
+            .expect("runtime object");
+
+        let scheduler_run: SchedulerDueRun = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/scheduler/run-due",
+                json!({
+                    "idempotency_key": "workflow-bound-semantic-synthesis-test",
+                    "owner": "test"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let semantic_synthesis = scheduler_run
+            .semantic_synthesis_schedules
+            .as_ref()
+            .expect("semantic synthesis schedule sweep");
+        assert_eq!(semantic_synthesis.created_count, 1);
+        assert_eq!(semantic_synthesis.failed_count, 0);
+        assert_eq!(
+            semantic_synthesis.runs[0].session_id,
+            Some(workflow_run.primary_session_id)
+        );
+
+        let artifacts: Vec<Artifact> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/artifacts",
+                    workflow_run.primary_session_id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.artifact_type == "semantic_dreaming_report"
+                && artifact.content["metadata"]["workflow_definition_id"] == json!(definition.id)
+                && artifact.content["metadata"]["schedule_runtime_object_id"]
+                    == json!(runtime_object_id)
+        }));
     }
 
     #[test]

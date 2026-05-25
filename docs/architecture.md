@@ -324,6 +324,15 @@ schedule policy is due. The scheduler still only records report artifacts and
 pending writeback candidates; one-shot schedules are de-duplicated by audit
 evidence, and recurring schedules require an explicit interval policy.
 
+Workflow Pack workflows may declare `semantic_synthesis_schedule` directly in
+their workflow YAML. During stage/release materialization MandoForge turns that
+declaration into a schedule runtime object bound to the staged
+`workflow_definition_id`. If the schedule uses `session_selector.source:
+completed_workflow_runs`, the scheduler selects completed workflow runs for that
+definition and runs synthesis against each run's primary session. The selected
+session must still have a TaskGrant whose `memory_scope.writeback_allowed` is
+true, so pack-authored schedules cannot bypass memory governance.
+
 ## Environment And Remote Computer Boundary
 
 Environment is the runtime placement contract. Remote Computer is one

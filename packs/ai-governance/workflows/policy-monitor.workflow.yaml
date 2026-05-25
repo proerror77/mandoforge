@@ -13,3 +13,56 @@ approval:
 output:
   draft_only: true
   provenance_required: true
+handoff_rules:
+  root_task_grant:
+    memory_scope:
+      mode: candidate_writeback
+      allowed_scope_keys:
+        - domain_scope
+        - workflow_scope
+        - memory_scope
+        - share_policy
+      allowed_object_types:
+        - memory
+      allowed_source_types:
+        - semantic_synthesis
+        - artifact
+        - session_event
+      allowed_object_ids: []
+      minimum_trust_level: source_attested
+      max_objects: 10
+      approval_memory_allowed: false
+      handoff_memory_allowed: false
+      writeback_allowed: true
+semantic_synthesis_schedule:
+  enabled: true
+  synthesis_type: dreaming_synthesis
+  schedule_policy:
+    mode: scheduler
+    interval_seconds: 86400
+  session_selector:
+    source: completed_workflow_runs
+    status: completed
+  goal_attempted: Synthesize completed policy-monitor runs into review-gated durable lessons.
+  context_used:
+    - workflow_run
+    - session_events
+    - artifacts
+  worked:
+    - Policy monitor workflow produced auditable evidence.
+  failed_or_corrected: []
+  unsafe_assumptions:
+    - Scheduled synthesis must not promote memory without review.
+  durable_memory_candidates:
+    - proposed_object_key: memory:policy-monitor:scheduled-synthesis
+      title: Policy monitor scheduled synthesis
+      summary: Scheduled policy-monitor synthesis remains candidate-first and review-gated.
+      content:
+        rule: scheduled-policy-monitor-candidate-first
+      semantic_scopes:
+        domain_scope: ai-governance
+        workflow_scope: policy-monitor
+        memory_scope: policy
+        share_policy: isolated
+      trust_level: source_attested
+      freshness: current

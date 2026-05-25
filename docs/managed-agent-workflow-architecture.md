@@ -621,6 +621,15 @@ directly; it can only produce an artifact plus review-gated writeback
 candidates, with audit evidence preventing one-shot schedules from being run
 twice.
 
+Workflow Pack materialization can create those schedule objects from a
+workflow-level `semantic_synthesis_schedule` YAML block. The materialized spec
+records the source binding, workflow id, source digest, and staged
+`workflow_definition_id`. For `completed_workflow_runs` selectors, scheduler
+execution expands the schedule into the completed runs for that definition and
+de-duplicates by runtime object plus session audit evidence. The selected
+session still has to satisfy TaskGrant memory governance, including an explicit
+`memory_scope.writeback_allowed: true` on the workflow root task grant.
+
 ## Agent Role Permission Matrix
 
 | Role | Default allowed | Default denied |
