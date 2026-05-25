@@ -1181,6 +1181,34 @@ struct CreateWorkflowDefinition {
     release_state: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateWorkflowDefinition {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    entrypoint: Option<String>,
+    #[serde(default)]
+    trigger_type: Option<String>,
+    #[serde(default)]
+    default_agent_id: Option<Uuid>,
+    #[serde(default)]
+    default_environment_id: Option<Option<Uuid>>,
+    #[serde(default)]
+    input_schema_ref: Option<Option<String>>,
+    #[serde(default)]
+    output_schema_ref: Option<Option<String>>,
+    #[serde(default)]
+    step_graph: Option<Value>,
+    #[serde(default)]
+    handoff_rules: Option<Value>,
+    #[serde(default)]
+    approval_policy_ref: Option<Option<String>>,
+    #[serde(default)]
+    eval_gate_refs: Option<Vec<String>>,
+    #[serde(default)]
+    release_state: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowRun {
     id: Uuid,
@@ -6062,7 +6090,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/workflow-definitions/{id}",
-            get(get_workflow_definition_route),
+            get(get_workflow_definition_route).patch(update_workflow_definition_route),
         )
         .route(
             "/api/workflow-runs",
@@ -13806,6 +13834,121 @@ async fn create_workflow_definition_route(
     Ok(Json(definition))
 }
 
+async fn update_workflow_definition_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateWorkflowDefinition>,
+) -> Result<Json<WorkflowDefinition>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_definition",
+        Some(id),
+    )
+    .await?;
+    let mut definition = state.get_workflow_definition(id).await?;
+    let mut changed_fields = Vec::new();
+
+    if let Some(name) = input.name {
+        definition.name = require_non_empty(name, "workflow definition name")?;
+        changed_fields.push("name");
+    }
+    if let Some(entrypoint) = input.entrypoint {
+        definition.entrypoint = require_non_empty(entrypoint, "workflow definition entrypoint")?;
+        changed_fields.push("entrypoint");
+    }
+    if let Some(trigger_type) = input.trigger_type {
+        definition.trigger_type = normalize_workflow_trigger_type(&trigger_type)?;
+        changed_fields.push("trigger_type");
+    }
+    if let Some(default_agent_id) = input.default_agent_id {
+        state.get_agent(default_agent_id).await?;
+        definition.default_agent_id = default_agent_id;
+        changed_fields.push("default_agent_id");
+    }
+    if let Some(default_environment_id) = input.default_environment_id {
+        if let Some(environment_id) = default_environment_id {
+            state.get_environment(environment_id).await?;
+        }
+        definition.default_environment_id = default_environment_id;
+        changed_fields.push("default_environment_id");
+    }
+    if let Some(input_schema_ref) = input.input_schema_ref {
+        definition.input_schema_ref = input_schema_ref.and_then(normalize_optional_text);
+        changed_fields.push("input_schema_ref");
+    }
+    if let Some(output_schema_ref) = input.output_schema_ref {
+        definition.output_schema_ref = output_schema_ref.and_then(normalize_optional_text);
+        changed_fields.push("output_schema_ref");
+    }
+    if let Some(step_graph) = input.step_graph {
+        if !step_graph.is_object() {
+            return Err(AppError::bad_request(
+                "workflow definition step_graph must be a JSON object",
+            ));
+        }
+        validate_workflow_graph_definition(&step_graph)?;
+        definition.step_graph = step_graph;
+        changed_fields.push("step_graph");
+    }
+    if let Some(handoff_rules) = input.handoff_rules {
+        if !handoff_rules.is_object() {
+            return Err(AppError::bad_request(
+                "workflow definition handoff_rules must be a JSON object",
+            ));
+        }
+        definition.handoff_rules = handoff_rules;
+        changed_fields.push("handoff_rules");
+    }
+    if let Some(approval_policy_ref) = input.approval_policy_ref {
+        definition.approval_policy_ref = approval_policy_ref.and_then(normalize_optional_text);
+        changed_fields.push("approval_policy_ref");
+    }
+    if let Some(eval_gate_refs) = input.eval_gate_refs {
+        definition.eval_gate_refs = eval_gate_refs
+            .into_iter()
+            .filter_map(normalize_optional_text)
+            .collect();
+        changed_fields.push("eval_gate_refs");
+    }
+    if let Some(release_state) = input.release_state {
+        definition.release_state = normalize_workflow_release_state(&release_state)?;
+        changed_fields.push("release_state");
+    }
+
+    if changed_fields.is_empty() {
+        return Ok(Json(definition));
+    }
+
+    let now = Utc::now();
+    definition.updated_at = now;
+    if definition.release_state == "archived" {
+        definition.archived_at = Some(now);
+    }
+    let updated = state.update_workflow_definition(definition).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "workflow_definition.updated",
+            "workflow_definition",
+            Some(updated.id),
+            json!({
+                "changed_fields": changed_fields,
+                "name": updated.name,
+                "entrypoint": updated.entrypoint,
+                "default_agent_id": updated.default_agent_id,
+                "pack_installation_id": updated.pack_installation_id,
+                "release_state": updated.release_state
+            }),
+        ))
+        .await?;
+    Ok(Json(updated))
+}
+
 async fn list_workflow_runs_route(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -14232,10 +14375,49 @@ fn workflow_graph_step_type(graph_step: &Value) -> String {
         .to_string()
 }
 
+fn workflow_graph_step_is_adapter_owned_compensation(graph_step: &Value) -> bool {
+    let step_type = workflow_graph_step_type(graph_step).to_ascii_lowercase();
+    let type_is_adapter = matches!(
+        step_type.as_str(),
+        "rollback_adapter" | "compensation_adapter"
+    );
+    let adapter_kind = graph_step
+        .get("adapter")
+        .and_then(|adapter| {
+            adapter
+                .get("kind")
+                .or_else(|| adapter.get("type"))
+                .and_then(Value::as_str)
+                .or_else(|| adapter.as_str())
+        })
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    let adapter_is_compensation = adapter_kind.as_deref().is_some_and(|kind| {
+        matches!(
+            kind,
+            "internal_compensation" | "rollback" | "rollback_adapter" | "compensation"
+        )
+    });
+    let explicit_flag = graph_step
+        .get("rollback_adapter")
+        .or_else(|| graph_step.get("adapter_owned"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let has_failure_source = graph_step
+        .get("on_failure_of")
+        .or_else(|| graph_step.get("compensates"))
+        .or_else(|| graph_step.get("compensation_for"))
+        .is_some();
+    has_failure_source && (type_is_adapter || adapter_is_compensation || explicit_flag)
+}
+
 fn workflow_graph_step_agent_id(
     definition: &WorkflowDefinition,
     graph_step: &Value,
 ) -> Result<Option<Uuid>, AppError> {
+    if workflow_graph_step_is_adapter_owned_compensation(graph_step) {
+        return Ok(None);
+    }
     workflow_graph_step_uuid(graph_step, "agent_id")
         .map(|agent_id| agent_id.or(Some(definition.default_agent_id)))
 }
@@ -16300,6 +16482,9 @@ async fn run_workflow_step_run_route(
     enforce_worker_environment_binding(&state, &headers, session_id, current.environment_id)
         .await?;
     enforce_worker_pool_binding(&state, &headers, session_id, current.environment_id).await?;
+    if workflow_step_is_adapter_owned_compensation(&current) {
+        return run_workflow_compensation_adapter_step(&state, &headers, current, run, input).await;
+    }
     let agent_id = input
         .agent_id
         .or(current.agent_id)
@@ -16467,6 +16652,270 @@ async fn run_workflow_step_run_route(
             }))
         }
     }
+}
+
+fn workflow_step_is_adapter_owned_compensation(step: &WorkflowStepRun) -> bool {
+    step.input_payload
+        .get("graph_step")
+        .is_some_and(workflow_graph_step_is_adapter_owned_compensation)
+}
+
+fn workflow_compensation_adapter_kind(step: &WorkflowStepRun) -> String {
+    step.input_payload
+        .get("graph_step")
+        .and_then(|graph_step| graph_step.get("adapter"))
+        .and_then(|adapter| {
+            adapter
+                .get("kind")
+                .or_else(|| adapter.get("type"))
+                .and_then(Value::as_str)
+                .or_else(|| adapter.as_str())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(step.step_type.as_str())
+        .to_string()
+}
+
+fn workflow_compensation_adapter_blockers(
+    step: &WorkflowStepRun,
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if workflow_step_status_terminal(&step.status) {
+        blockers.push("terminal_status".to_string());
+    }
+    if step.status == "scheduled" {
+        match step.scheduled_at {
+            Some(scheduled_at) if scheduled_at > now => {
+                blockers.push("scheduled_for_future".to_string())
+            }
+            Some(_) => {}
+            None => blockers.push("scheduled_without_due_time".to_string()),
+        }
+    } else if step.status != "queued" {
+        if step.status == "running" {
+            if !step
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at <= now)
+            {
+                blockers.push("already_claimed".to_string());
+            }
+        } else {
+            blockers.push(format!("status_{}", step.status));
+        }
+    }
+    if step.task_grant_id.is_none() {
+        blockers.push("missing_task_grant".to_string());
+    }
+    blockers
+}
+
+async fn run_workflow_compensation_adapter_step(
+    state: &AppState,
+    headers: &HeaderMap,
+    current: WorkflowStepRun,
+    run: WorkflowRun,
+    input: RunWorkflowStepRun,
+) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
+    authorize_request(
+        state,
+        headers,
+        Permission::SessionsRun,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    let session_id = current.session_id.unwrap_or(run.primary_session_id);
+    let session = state.get_session(session_id).await?;
+    let now = Utc::now();
+    let blockers = workflow_compensation_adapter_blockers(&current, now);
+    if !blockers.is_empty() {
+        return Err(AppError::bad_request(format!(
+            "workflow compensation adapter step is not runnable: {}",
+            blockers.join(", ")
+        )));
+    }
+    let task_grant_id = current.task_grant_id.ok_or_else(|| {
+        AppError::bad_request("workflow compensation adapter requires task grant")
+    })?;
+    let grant = state.get_task_grant(task_grant_id).await?;
+    if grant.workflow_run_id != run.id {
+        return Err(AppError::bad_request(
+            "workflow compensation adapter task grant must belong to workflow run",
+        ));
+    }
+    if grant.status != "active" {
+        return Err(AppError::forbidden(
+            "workflow compensation adapter task grant is not active",
+        ));
+    }
+    if grant.expires_at.is_some_and(|expires_at| expires_at <= now) {
+        return Err(AppError::forbidden(
+            "workflow compensation adapter task grant is expired",
+        ));
+    }
+
+    let worker_id = input
+        .worker_id
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            headers
+                .get("x-mandoforge-worker-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("rollback-adapter:{}", current.id))
+        });
+    let lease_seconds = input.lease_seconds.unwrap_or(300);
+    if !(1..=86_400).contains(&lease_seconds) {
+        return Err(AppError::bad_request(
+            "workflow step claim lease_seconds must be between 1 and 86400",
+        ));
+    }
+    let context_packet = generate_and_persist_context_packet(state, session_id).await?;
+    let task_grant = state
+        .update_task_grant_context_packet(grant.id, context_packet.id)
+        .await?;
+    record_task_grant_checked(
+        state,
+        &task_grant,
+        session_id,
+        "workflow.compensation_adapter",
+    )
+    .await?;
+
+    let mut running_step = current.clone();
+    let previous_status = running_step.status.clone();
+    running_step.status = "running".to_string();
+    running_step.claimed_by_worker = Some(worker_id.clone());
+    running_step.lease_expires_at = Some(now + ChronoDuration::seconds(lease_seconds));
+    running_step.context_packet_id = Some(context_packet.id);
+    running_step.started_at = running_step.started_at.or(Some(now));
+    running_step.updated_at = now;
+    let running_step = state.update_workflow_step_run(running_step).await?;
+    record_workflow_step_run_updated(state, &run, &running_step, &previous_status).await?;
+    record_workflow_step_worker_started(state, &run, &running_step, &worker_id, context_packet.id)
+        .await?;
+    record_workflow_transition(
+        state,
+        &run,
+        Some(&running_step),
+        Some(&running_step),
+        "compensation",
+        "running",
+        json!({
+            "source": "workflow_compensation_adapter",
+            "adapter_kind": workflow_compensation_adapter_kind(&running_step),
+            "failure_trigger": running_step.input_payload.get("failure_trigger").cloned().unwrap_or(Value::Null),
+            "graph_step": running_step.input_payload.get("graph_step").cloned().unwrap_or(Value::Null)
+        }),
+        json!({
+            "workflow_step_run_id": running_step.id,
+            "worker_id": worker_id
+        }),
+    )
+    .await?;
+
+    let queued =
+        enqueue_session_loop(state, session_id, None, "workflow.compensation_adapter").await?;
+    let loop_running = state.start_session_loop_job(queued.id, &worker_id).await?;
+    state
+        .append_event(
+            "worker",
+            Some(loop_running.id),
+            loop_running.session_id,
+            "session.loop.started",
+            json!({
+                "session_loop_job_id": loop_running.id,
+                "environment_id": loop_running.environment_id,
+                "worker_id": worker_id,
+                "attempt_count": loop_running.attempt_count,
+                "workflow_step_run_id": running_step.id,
+                "adapter_owned": true
+            }),
+        )
+        .await?;
+    let completed_job = state
+        .complete_session_loop_job(loop_running.id, &worker_id)
+        .await?;
+    state
+        .append_event(
+            "worker",
+            Some(completed_job.id),
+            completed_job.session_id,
+            "session.loop.completed",
+            json!({
+                "session_loop_job_id": completed_job.id,
+                "status": completed_job.status,
+                "session_status": session.status,
+                "worker_id": worker_id,
+                "workflow_step_run_id": running_step.id,
+                "adapter_owned": true
+            }),
+        )
+        .await?;
+
+    let mut completed_step = running_step.clone();
+    let previous_status = completed_step.status.clone();
+    let completed_at = Utc::now();
+    completed_step.status = "completed".to_string();
+    completed_step.output_payload = json!({
+        "rollback_adapter": {
+            "status": "completed",
+            "adapter_kind": workflow_compensation_adapter_kind(&running_step),
+            "worker_id": worker_id,
+            "session_id": session_id,
+            "context_packet_id": context_packet.id,
+            "session_loop_job_id": completed_job.id,
+            "failure_trigger": running_step.input_payload.get("failure_trigger").cloned().unwrap_or(Value::Null),
+            "graph_step": workflow_graph_console_summary(
+                running_step
+                    .input_payload
+                    .get("graph_step")
+                    .unwrap_or(&Value::Null)
+            )
+        }
+    });
+    completed_step.completed_at = Some(completed_at);
+    completed_step.lease_expires_at = None;
+    completed_step.updated_at = completed_at;
+    let completed_step = state.update_workflow_step_run(completed_step).await?;
+    record_workflow_step_run_updated(state, &run, &completed_step, &previous_status).await?;
+    record_workflow_step_worker_completed(state, &run, &completed_step, &worker_id, &completed_job)
+        .await?;
+    record_workflow_transition(
+        state,
+        &run,
+        Some(&completed_step),
+        Some(&completed_step),
+        "compensation",
+        "completed",
+        json!({
+            "source": "workflow_compensation_adapter",
+            "adapter_kind": workflow_compensation_adapter_kind(&completed_step),
+            "failure_trigger": completed_step.output_payload["rollback_adapter"]["failure_trigger"].clone()
+        }),
+        json!({
+            "workflow_step_run_id": completed_step.id,
+            "worker_id": worker_id,
+            "session_loop_job_id": completed_job.id,
+            "adapter_owned": true
+        }),
+    )
+    .await?;
+    advance_workflow_graph_after_step_update(state, &run, &completed_step).await?;
+
+    Ok(Json(RunWorkflowStepRunResponse {
+        step: completed_step,
+        task_grant,
+        context_packet,
+        session,
+        session_loop_job: completed_job,
+    }))
 }
 
 async fn record_workflow_step_worker_started(
@@ -45815,8 +46264,15 @@ async fn build_remote_computer_readiness(
     } else if !state_filesystem.distributed_filesystem_configured {
         attention_items.push(remote_computer_attention(
             "distributed_state_filesystem_missing",
-            "warning",
-            "state mount has a PVC/RWX placeholder and optional JuiceFS production profile; set a real JuiceFS/CephFS/Longhorn or equivalent provider before multi-Pod state sync",
+            "critical",
+            "state mount has only a PVC/RWX placeholder and optional production profile; set a real JuiceFS/CephFS/Longhorn or equivalent provider before multi-Pod state sync",
+        ));
+    }
+    if !state_filesystem.lock_manager_configured {
+        attention_items.push(remote_computer_attention(
+            "state_lock_manager_missing",
+            "critical",
+            "shared Memory/Notes/Skills writes require a lock-aware state sync manager before Remote Computer can claim distributed production state",
         ));
     }
     if production_state_sync.production_blocked {
@@ -55979,6 +56435,172 @@ not json
     }
 
     #[tokio::test]
+    async fn workflow_definition_patch_rejects_invalid_graph_without_updating() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Editable graph workflow",
+                    "entrypoint": "editable-graph-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true}
+                        ]
+                    },
+                    "release_state": "draft"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let definition_id = definition["id"].as_str().expect("definition id");
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-definitions/{definition_id}"),
+                json!({
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true},
+                            {"key": "draft", "type": "agent", "depends_on": ["missing-step"]}
+                        ]
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("unknown step missing-step"))
+        );
+
+        let unchanged: Value = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-definitions/{definition_id}"))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(unchanged["name"], json!("Editable graph workflow"));
+        assert_eq!(
+            unchanged["step_graph"]["steps"]
+                .as_array()
+                .expect("steps")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_definition_patch_updates_graph_and_records_audit() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Patchable graph workflow",
+                    "entrypoint": "patchable-graph-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true}
+                        ]
+                    },
+                    "handoff_rules": {"mode": "initial"},
+                    "release_state": "draft"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let definition_id = definition["id"].as_str().expect("definition id");
+        let created_at = definition["created_at"].clone();
+
+        let updated: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-definitions/{definition_id}"),
+                json!({
+                    "name": "Patched graph workflow",
+                    "step_graph": {
+                        "steps": [
+                            {"key": "intake", "type": "agent", "start": true},
+                            {"key": "draft", "type": "agent", "depends_on": ["intake"]}
+                        ]
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(updated["name"], json!("Patched graph workflow"));
+        assert_eq!(updated["entrypoint"], json!("patchable-graph-workflow"));
+        assert_eq!(updated["handoff_rules"], json!({"mode": "initial"}));
+        assert_eq!(
+            updated["step_graph"]["steps"]
+                .as_array()
+                .expect("steps")
+                .len(),
+            2
+        );
+        assert_eq!(updated["created_at"], created_at);
+        assert_ne!(updated["updated_at"], definition["updated_at"]);
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "workflow_definition.updated"
+                && log.resource_id.map(|id| id.to_string()).as_deref() == Some(definition_id)
+                && log.details["changed_fields"]
+                    .as_array()
+                    .is_some_and(|fields| fields.contains(&json!("step_graph")))
+        }));
+    }
+
+    #[tokio::test]
     async fn workflow_runs_create_primary_session_and_step_runs() {
         let app = test_app().await;
         let agents: Vec<Agent> = request_json(
@@ -56480,7 +57102,12 @@ not json
                             {"key": "enrich", "type": "agent", "depends_on": ["intake"], "retry": {"max_attempts": 2}},
                             {"key": "publish", "type": "agent", "depends_on": ["enrich"]},
                             {"key": "notify", "type": "agent", "depends_on": ["publish"]},
-                            {"key": "cleanup", "type": "agent", "on_failure_of": ["enrich"]}
+                            {
+                                "key": "cleanup",
+                                "type": "rollback_adapter",
+                                "on_failure_of": ["enrich"],
+                                "adapter": {"kind": "internal_compensation"}
+                            }
                         ]
                     },
                     "release_state": "released"
@@ -56658,6 +57285,8 @@ not json
             .find(|step| step["step_key"] == json!("cleanup"))
             .expect("cleanup should be materialized as compensation");
         assert_eq!(cleanup_step["status"], json!("queued"));
+        assert_eq!(cleanup_step["step_type"], json!("rollback_adapter"));
+        assert_eq!(cleanup_step["agent_id"], Value::Null);
         assert_eq!(
             cleanup_step["input_payload"]["failure_trigger"]["failed_step_key"],
             json!("enrich")
@@ -56700,19 +57329,27 @@ not json
         .await;
         assert_eq!(run_after_failure["status"], json!("running"));
 
-        let _: Value = request_json(
+        let compensation_result: Value = request_json(
             app.clone(),
             json_request_with_headers(
-                "PATCH",
-                &format!("/api/workflow-step-runs/{cleanup_step_id}"),
+                "POST",
+                &format!("/api/workflow-step-runs/{cleanup_step_id}/run"),
                 json!({
-                    "status": "completed",
-                    "output_payload": {"summary": "cleanup complete"}
+                    "worker_id": "rollback-adapter-worker"
                 }),
                 &[("x-mandoforge-roles", "operator")],
             ),
         )
         .await;
+        assert_eq!(compensation_result["step"]["status"], json!("completed"));
+        assert_eq!(
+            compensation_result["step"]["output_payload"]["rollback_adapter"]["status"],
+            json!("completed")
+        );
+        assert_eq!(
+            compensation_result["step"]["output_payload"]["rollback_adapter"]["adapter_kind"],
+            json!("internal_compensation")
+        );
         let final_run: Value = request_json(
             app.clone(),
             Request::builder()
@@ -56734,6 +57371,12 @@ not json
                 .expect("valid request"),
         )
         .await;
+        assert!(final_transitions.iter().any(|transition| {
+            transition["transition_type"] == json!("compensation")
+                && transition["from_step_run_id"] == json!(cleanup_step_id)
+                && transition["to_step_run_id"] == json!(cleanup_step_id)
+                && transition["status"] == json!("completed")
+        }));
         assert!(final_transitions.iter().any(|transition| {
             transition["transition_type"] == json!("fail")
                 && transition["from_step_run_id"] == json!(cleanup_step_id)
@@ -84996,7 +85639,18 @@ not json
             remote_computer_readiness
                 .attention_items
                 .iter()
-                .any(|item| item.kind == "distributed_state_filesystem_missing")
+                .any(|item| {
+                    item.kind == "distributed_state_filesystem_missing"
+                        && item.severity == "critical"
+                })
+        );
+        assert!(
+            remote_computer_readiness
+                .attention_items
+                .iter()
+                .any(
+                    |item| item.kind == "state_lock_manager_missing" && item.severity == "critical"
+                )
         );
         assert!(
             remote_computer_readiness

@@ -119,6 +119,67 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn update_workflow_definition(
+        &self,
+        definition: WorkflowDefinition,
+    ) -> Result<WorkflowDefinition, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let existing = store
+                    .workflow_definitions
+                    .get_mut(&definition.id)
+                    .filter(|existing| existing.archived_at.is_none())
+                    .ok_or_else(|| AppError::not_found("workflow definition not found"))?;
+                *existing = definition.clone();
+                Ok(definition)
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE workflow_definitions
+                     SET name = $3,
+                         entrypoint = $4,
+                         trigger_type = $5,
+                         default_agent_id = $6,
+                         default_environment_id = $7,
+                         input_schema_ref = $8,
+                         output_schema_ref = $9,
+                         step_graph = $10,
+                         handoff_rules = $11,
+                         approval_policy_ref = $12,
+                         eval_gate_refs = $13,
+                         release_state = $14,
+                         updated_at = $15,
+                         archived_at = $16
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND archived_at IS NULL
+                     RETURNING id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(definition.id)
+                .bind(&definition.name)
+                .bind(&definition.entrypoint)
+                .bind(&definition.trigger_type)
+                .bind(definition.default_agent_id)
+                .bind(definition.default_environment_id)
+                .bind(&definition.input_schema_ref)
+                .bind(&definition.output_schema_ref)
+                .bind(&definition.step_graph)
+                .bind(&definition.handoff_rules)
+                .bind(&definition.approval_policy_ref)
+                .bind(serde_json::to_value(&definition.eval_gate_refs)?)
+                .bind(&definition.release_state)
+                .bind(definition.updated_at)
+                .bind(definition.archived_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("workflow definition not found"))?;
+                workflow_definition_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn update_workflow_definition_release_states_for_pack_installation(
         &self,
         installation_id: uuid::Uuid,
