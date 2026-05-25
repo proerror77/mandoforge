@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
 SUBJECT="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_SUBJECT:-managed-workflow-runtime-evidence-gate}"
 ROLES="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_ROLES:-admin}"
+AUTH_TOKEN="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_TOKEN:-${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-}}}"
 SCHEDULER_TOKEN="${MANDOFORGE_SCHEDULER_TOKEN:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/managed-workflow-runtime-evidence}"
 RUN_ID="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}}"
@@ -14,10 +15,15 @@ RUN_ID="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$
 # api-workflow-runtime-proof-transitions.json
 # api-workflow-runtime-proof-memory-governance-partition.json
 
-auth_headers=(
-  -H "x-mandoforge-subject: $SUBJECT"
-  -H "x-mandoforge-roles: $ROLES"
-)
+auth_headers=()
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 if [[ -n "$SCHEDULER_TOKEN" ]]; then
   auth_headers+=(-H "x-mandoforge-scheduler-token: $SCHEDULER_TOKEN")

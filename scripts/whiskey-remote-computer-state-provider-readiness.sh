@@ -52,7 +52,9 @@ json_file="$OUTPUT_DIR/remote-computer-state-provider-readiness-$stamp.json"
 text_file="$OUTPUT_DIR/remote-computer-state-provider-readiness-$stamp.txt"
 
 k3s_verify_output="$(scripts/whiskey-remote-computer-k3s-verify.sh --host "$REMOTE_HOST" --output-dir "$OUTPUT_DIR")"
-printf '%s\n' "$k3s_verify_output"
+if [[ "$OUTPUT_MODE" != "json" ]]; then
+  printf '%s\n' "$k3s_verify_output"
+fi
 k3s_verify_json="$(printf '%s\n' "$k3s_verify_output" | sed -n 's/^json=//p' | tail -1)"
 
 remote_payload="$(ssh "$REMOTE_HOST" "REMOTE_ROOT='$REMOTE_ROOT' NAMESPACE='$NAMESPACE' bash -s" <<'REMOTE'
@@ -74,10 +76,21 @@ if [[ -z "$api_port" ]]; then
   api_port="18787"
 fi
 
-auth_headers=(
-  -H "x-mandoforge-subject: whiskey-adoption-admin"
-  -H "x-mandoforge-roles: admin"
-)
+api_token="$(read_env MANDOFORGE_DEV_ADMIN_TOKEN)"
+if [[ -z "$api_token" ]]; then
+  api_token="$(read_env MANDOFORGE_WORKER_TOKEN)"
+fi
+if [[ -z "$api_token" ]]; then
+  api_token="$(docker inspect mandoforge-adoption-api-1 --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^MANDOFORGE_DEV_ADMIN_TOKEN=//p' | head -n 1 || true)"
+fi
+if [[ -n "$api_token" ]]; then
+  auth_headers=(-H "authorization: Bearer $api_token")
+else
+  auth_headers=(
+    -H "x-mandoforge-subject: whiskey-adoption-admin"
+    -H "x-mandoforge-roles: admin"
+  )
+fi
 
 readiness_json="$(curl -fsS "${auth_headers[@]}" "http://127.0.0.1:${api_port}/api/remote-computers/readiness")"
 runner_json="$(curl -fsS "${auth_headers[@]}" "http://127.0.0.1:${api_port}/api/remote-computers/runner/readiness")"

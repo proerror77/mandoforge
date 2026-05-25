@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
 SUBJECT="${MANDOFORGE_STAGE2_GATE_SUBJECT:-stage2-production-evidence-gate}"
 ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
+AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-}}"
 SCHEDULER_TOKEN="${MANDOFORGE_SCHEDULER_TOKEN:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/stage2-production-evidence}"
 RUN_VALIDATIONS="${RUN_STAGE2_PRODUCTION_VALIDATIONS:-0}"
@@ -35,10 +36,15 @@ require_cmd() {
   fi
 }
 
-auth_headers=(
-  -H "x-mandoforge-subject: $SUBJECT"
-  -H "x-mandoforge-roles: $ROLES"
-)
+auth_headers=()
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 if [[ -n "$SCHEDULER_TOKEN" ]]; then
   auth_headers+=(-H "x-mandoforge-scheduler-token: $SCHEDULER_TOKEN")
