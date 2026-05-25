@@ -1,13 +1,13 @@
 # Whiskey Adoption Status
 
-Snapshot date: 2026-05-25 after scheduled semantic synthesis deployment and Whiskey smoke.
+Snapshot date: 2026-05-25 after workflow-pack semantic synthesis schedule deployment and Whiskey smoke.
 
 This file tracks the current production-like adoption state for `wishky-2-1`. It is a release/status ledger, not a replacement for [Whiskey Adoption Runbook](whiskey-adoption-runbook.md).
 
 ## Current Deployment
 
 - Host: `wishky-2-1`.
-- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:whiskey-20260525-2aa1064`.
+- Image: `ghcr.io/proerror77/mandoforge/mandoforge-api:whiskey-20260525-ca1f7fd`.
 - API: `127.0.0.1:18787`.
 - Postgres: `127.0.0.1:15432`.
 - Compose project: `mandoforge-adoption`.
@@ -29,6 +29,14 @@ This file tracks the current production-like adoption state for `wishky-2-1`. It
   `semantic_synthesis_schedule_run` action with `status=idle`, `due_count=0`,
   `skipped_count=0`, and `target_count=0` when no semantic synthesis schedule
   runtime object is registered.
+- Latest workflow-pack semantic synthesis schedule materialization smoke:
+  GitHub Actions run `26377186117` deployed
+  `whiskey-20260525-ca1f7fd`; Whiskey reports API container image
+  `ghcr.io/proerror77/mandoforge/mandoforge-api:whiskey-20260525-ca1f7fd`
+  `Up`, `/healthz` returns `{"status":"ok"}`, static UI serves
+  `index-BQFbRjbG.js` and `index-Bbll30WL.css`, and authenticated
+  `/api/scheduler/due-plan` includes the memory-area
+  `semantic_synthesis_schedule_run` action.
 - Latest workflow-step worker smoke: the fixed workflow-step worker smoke passed with workflow run
   `2cf0120b-89b6-4d11-bcc6-ad8aa428b34c`, completed step
   `c81855c4-acd9-4b27-8c89-0d0bf4c66f69`, worker
