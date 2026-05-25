@@ -71,6 +71,7 @@ Covered today:
 - A JuiceFS CSI example manifest documents the target shared `/agent-state` provider shape, but it is not included in the default kustomization and must be configured explicitly before use.
 - A warm-pool Deployment example documents the cold-start mitigation shape, but it is not included in the default kustomization and does not yet assign sessions to prestarted Pods. It now keeps the same fail-closed artifact discovery sidecar shape as the regular Remote Computer Pod template so prewarmed Pods do not diverge from the eventual session Pod contract.
 - A KEDA ScaledObject example documents the queue-pressure scaling shape for the warm pool, but it is not included in the default kustomization and depends on production metrics work.
+- The production-state gate is currently green only for the single-node local-hostpath Whiskey pilot; multi-node distributed Memory/Notes/Skills promotion still needs a shared filesystem and a live state-sync runner proof.
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness, dry-run, and explicit mutate endpoints.

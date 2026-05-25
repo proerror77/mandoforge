@@ -158,7 +158,9 @@ Remaining first-class execution gaps:
   compensation policy slice, recursive branch-expression evaluator, delayed
   retry/backoff scheduling, due activation, fan-in policy, and fan-out
   max-parallel controls, plus numeric and RFC3339 time branch comparisons. It
-  still needs production rollback/compensation adapters.
+  now has an internal rollback-adapter lifecycle for adapter-owned
+  compensation steps. Provider-specific side-effect rollback remains deferred to
+  Connector adapters.
 - Pack bindings are materialized as durable binding records; workflow bindings
   resolve to concrete `WorkflowDefinition` rows, and generic runtime objects
   cover schedules, connector accounts, and provider deployment handles.
@@ -170,8 +172,8 @@ Remaining first-class execution gaps:
 - Workflow observability is now present in the web console with graph
   visualization, declared future-node visibility, transition filtering,
   pack-binding inspection, runtime-object inspection, memory-governance
-  partition drilldown, and writeback queue inspection. Deeper graph editing
-  remains a follow-up.
+  partition drilldown, writeback queue inspection, and API-backed
+  `step_graph` editing.
 
 Current boundary status:
 
@@ -185,15 +187,17 @@ Current boundary status:
   controls, definition-time graph validation, retry attempt materialization,
   failure-driven downstream skip, compensation step materialization, durable
   transition recording, pack binding materialization, generic pack
-  runtime-object materialization, memory governance summary/drilldown/writeback
-  queue, external scheduler activation of scheduled workflow steps,
-  numeric/time branch expression policy, and
+  runtime-object materialization, memory/semantic-governance summary,
+  drilldown, and writeback queue, external scheduler activation of scheduled
+  workflow steps, numeric/time branch expression policy, and
+  API-backed workflow-definition graph updates with audit records,
+  adapter-owned internal compensation execution, and
   `ApprovalCommitToken` exact binding for MCP and native connector commit
   writes.
 - Clear but only partially enforced now: worker/agent class authority,
   production native connector transport semantics, provider-specific pack
-  binding deployment, production compensation adapters, and graph
-  authoring/editing UI.
+  binding deployment (deferred), and provider-specific side-effect
+  compensation adapters.
 
 ## Product Object Model
 
@@ -745,10 +749,13 @@ Hourly metrics trigger
 
 The runtime can support these. The first governed slice now exists: workflow
 run objects, task-level grants, connector scopes, approval token binding, and
-workflow UI are in the runtime path. The remaining work is richer
-domain-specific branch operators beyond numeric/RFC3339 comparisons, production
-connector adapters, provider-specific pack deployment, and production-grade
-compensation/rollback adapters.
+workflow UI are in the runtime path. Non-Connector completion is mostly done:
+retry/backoff, fan-in/fan-out, durable workflow transitions, pack binding
+materialization, and semantic-governance controls are implemented. The remaining
+work is richer domain-specific branch operators beyond numeric/RFC3339
+comparisons, provider-specific side-effect compensation/rollback adapters, and
+provider-specific pack deployment. Provider-specific connector execution stays
+deferred by design.
 
 ## Implementation Plan
 
@@ -798,8 +805,8 @@ Acceptance:
   workflow YAML files into `WorkflowDefinition` rows, writes the definition id
   into the workflow binding `target_id`, and creates durable
   `workflow_pack_runtime_objects` for workflow schedules, connector account
-  handles, and provider deployment handles. Provider-specific adapters remain
-  pending by design.
+  handles, and provider deployment handles. Provider-specific adapters are
+  deferred by design.
 - Stage pack into draft AgentVersion, WorkflowDefinition, ConnectorBinding,
   PolicyRevision, EvalSuite, and ScheduleBinding objects.
 - Release activates those bindings.
@@ -882,8 +889,8 @@ Acceptance:
 - Status: implemented for live workflow run console, durable graph console
   endpoint, declared future graph nodes/edges, server-backed transition
   filtering, scheduled-step due visibility, pack binding and runtime-object
-  inspection, task grants, approvals, tool calls, artifacts, worker logs, memory
-  partitions, and memory writeback queues.
+  inspection, API-backed graph authoring, task grants, approvals, tool calls,
+  artifacts, worker logs, memory partitions, and memory writeback queues.
 - Show Pack, readiness, run status, step graph, agents, threads, grants,
   approvals, tool calls, artifacts, worker logs, and memory candidates.
 - Keep infrastructure panels advanced.
