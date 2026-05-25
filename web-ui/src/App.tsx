@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   appendUserMessage,
@@ -6,7 +6,9 @@ import {
   createSession,
   decideApproval,
   getAdminToken,
+  reviewMemoryWritebackCandidate,
   setAdminToken,
+  updateWorkflowDefinition,
   type AgentInboxSnapshot,
   type Agent,
   type Approval,
@@ -32,6 +34,7 @@ import {
   type ToolCall,
   type WorkerJob,
   type WorkflowGraphConsole,
+  type WorkflowDefinition,
   type WorkflowPackBinding,
   type WorkflowPackRuntimeObject,
   type WorkflowRun,
@@ -121,12 +124,18 @@ export function App() {
   const [task, setTask] = useState(DEFAULT_TASK);
   const [adminTokenInput, setAdminTokenInput] = useState(() => consumeTokenFromHash() || getAdminToken());
   const [transitionFilter, setTransitionFilter] = useState("all");
+  const [transitionLimit, setTransitionLimit] = useState(50);
   const [memoryPartitionKey, setMemoryPartitionKey] = useState("");
   const [writebackStatus, setWritebackStatus] = useState("pending");
+  const [writebackLimit, setWritebackLimit] = useState(50);
+  const [selectedQueueWritebackId, setSelectedQueueWritebackId] = useState("");
+  const [writebackReviewReason, setWritebackReviewReason] = useState("");
   const [selectedContextPacketId, setSelectedContextPacketId] = useState("");
   const [semanticObjectType, setSemanticObjectType] = useState("all");
   const [semanticIngestionDraft, setSemanticIngestionDraft] = useState(DEFAULT_INGESTION_BATCH);
   const [semanticSynthesisDraft, setSemanticSynthesisDraft] = useState(DEFAULT_SYNTHESIS_RUN);
+  const [graphEditorDraft, setGraphEditorDraft] = useState("");
+  const [graphEditorStatus, setGraphEditorStatus] = useState("");
   const [linkDraft, setLinkDraft] = useState({
     from: "",
     relation: "supports",
@@ -141,6 +150,7 @@ export function App() {
   const sessionLoopJobs = useQuery({ queryKey: ["session-loop-jobs"], queryFn: () => api<WorkerJob[]>("/api/session-loop-jobs"), refetchInterval: 1500 });
   const allToolCalls = useQuery({ queryKey: ["tool-calls"], queryFn: () => api<ToolCall[]>("/api/tool-calls"), refetchInterval: 1800 });
   const workflowRuns = useQuery({ queryKey: ["workflow-runs"], queryFn: () => api<WorkflowRun[]>("/api/workflow-runs"), refetchInterval: 1600 });
+  const workflowDefinitions = useQuery({ queryKey: ["workflow-definitions"], queryFn: () => api<WorkflowDefinition[]>("/api/workflow-definitions"), refetchInterval: 3000 });
   const taskBoard = useQuery({ queryKey: ["task-board"], queryFn: () => api<TaskBoardSnapshot>("/api/task-board"), refetchInterval: 1500 });
 
   const rows = useMemo(() => buildRows({
@@ -157,6 +167,7 @@ export function App() {
   const selectedRow = rows.find((row) => row.session.id === sessionId);
   const selectedWorkflowRun = selectedRow?.workflowRun;
   const workflowRunId = selectedWorkflowRun?.id ?? "";
+  const selectedWorkflowDefinition = workflowDefinitions.data?.find((definition) => definition.id === selectedWorkflowRun?.workflow_definition_id);
   const packInstallationId = selectedWorkflowRun?.pack_installation_id ?? "";
   const selectedAgent = agents.data?.find((agent) => agent.id === selectedSession?.agent_id) ?? preferredAgent(agents.data ?? []);
   const selectedEnvironment = environments.data?.find((environment) => environment.id === selectedSession?.environment_id) ?? environments.data?.[0];
@@ -194,10 +205,10 @@ export function App() {
   });
   const transitionQuery = useMemo(() => {
     const params = new URLSearchParams();
-    params.set("limit", "50");
+    params.set("limit", String(transitionLimit));
     if (transitionFilter !== "all") params.set("transition_type", transitionFilter);
     return params.toString();
-  }, [transitionFilter]);
+  }, [transitionFilter, transitionLimit]);
   const workflowTransitions = useQuery({
     queryKey: ["workflow-transitions", workflowRunId, transitionQuery],
     queryFn: () => api<WorkflowTransition[]>(`/api/workflow-runs/${workflowRunId}/transitions?${transitionQuery}`),
@@ -216,6 +227,15 @@ export function App() {
     enabled: Boolean(workflowRunId),
     refetchInterval: 1500,
   });
+  useEffect(() => {
+    if (!selectedWorkflowDefinition) {
+      setGraphEditorDraft("");
+      setGraphEditorStatus("");
+      return;
+    }
+    setGraphEditorDraft(JSON.stringify(selectedWorkflowDefinition.step_graph, null, 2));
+    setGraphEditorStatus("");
+  }, [selectedWorkflowDefinition?.id, selectedWorkflowDefinition?.updated_at]);
   const workflowPackBindings = useQuery({
     queryKey: ["workflow-pack-bindings", packInstallationId],
     queryFn: () => api<WorkflowPackBinding[]>(`/api/workflow-packs/installations/${packInstallationId}/bindings`),
@@ -240,9 +260,20 @@ export function App() {
     enabled: Boolean(selectedMemoryPartitionKey),
     refetchInterval: 5000,
   });
+  const writebackQuery = useMemo(() => {
+    const params = new URLSearchParams();
+    params.set("limit", String(writebackLimit));
+    if (writebackStatus !== "all") params.set("status", writebackStatus);
+    return params.toString();
+  }, [writebackLimit, writebackStatus]);
   const memoryWritebacks = useQuery({
-    queryKey: ["memory-governance-writebacks", writebackStatus],
-    queryFn: () => api<MemoryGovernanceWritebackQueue>(`/api/memory-governance/writebacks?status=${encodeURIComponent(writebackStatus)}`),
+    queryKey: ["memory-governance-writebacks", writebackQuery],
+    queryFn: () => api<MemoryGovernanceWritebackQueue>(`/api/memory-governance/writebacks?${writebackQuery}`),
+    refetchInterval: 5000,
+  });
+  const allWritebackCandidates = useQuery({
+    queryKey: ["memory-writeback-candidates"],
+    queryFn: () => api<MemoryWritebackCandidate[]>("/api/memory-writeback-candidates"),
     refetchInterval: 5000,
   });
   const schedulerSummary = useQuery({
@@ -358,11 +389,27 @@ export function App() {
     onSuccess: () => invalidateAll(queryClient),
   });
   const reviewWriteback = useMutation({
-    mutationFn: ({ id, decision }: { id: string; decision: "approve" | "reject" }) => api<MemoryWritebackCandidate>(`/api/memory-writeback-candidates/${id}/${decision}`, {
-      method: "POST",
-      body: JSON.stringify({ reason: `reviewed from semantic console: ${decision}` }),
-    }),
-    onSuccess: () => invalidateAll(queryClient),
+    mutationFn: ({ id, decision, reason }: { id: string; decision: "approve" | "reject"; reason?: string }) => (
+      reviewMemoryWritebackCandidate(id, decision, reason)
+    ),
+    onSuccess: () => {
+      setWritebackReviewReason("");
+      invalidateAll(queryClient);
+    },
+  });
+  const updateWorkflowGraph = useMutation({
+    mutationFn: () => {
+      if (!selectedWorkflowDefinition) throw new Error("No workflow definition selected");
+      const parsed = JSON.parse(graphEditorDraft) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("step_graph must be a JSON object");
+      }
+      return updateWorkflowDefinition(selectedWorkflowDefinition.id, { step_graph: parsed as Record<string, unknown> });
+    },
+    onSuccess: (definition) => {
+      setGraphEditorStatus(`Saved ${definition.updated_at}`);
+      invalidateAll(queryClient);
+    },
   });
   const createSemanticLink = useMutation({
     mutationFn: () => {
@@ -435,6 +482,13 @@ export function App() {
     allToolCalls.error,
     taskBoard.error,
     agentInbox.error,
+    workflowTransitions.error,
+    workflowDefinitions.error,
+    workflowPackBindings.error,
+    workflowPackRuntimeObjects.error,
+    memoryGovernance.error,
+    memoryWritebacks.error,
+    allWritebackCandidates.error,
     semanticObjects.error,
     semanticLinks.error,
     ontologyRegistry.error,
@@ -583,6 +637,27 @@ export function App() {
             ) : <p className="muted">No graph nodes observed.</p>}
           </Panel>
 
+          <Panel title="Graph authoring">
+            <WorkflowDefinitionEditor
+              definition={selectedWorkflowDefinition}
+              draft={graphEditorDraft}
+              statusMessage={graphEditorStatus}
+              isSaving={updateWorkflowGraph.isPending}
+              error={updateWorkflowGraph.error}
+              onDraftChange={(value) => {
+                setGraphEditorDraft(value);
+                setGraphEditorStatus("");
+              }}
+              onApply={() => updateWorkflowGraph.mutate()}
+              onReset={() => {
+                if (selectedWorkflowDefinition) {
+                  setGraphEditorDraft(JSON.stringify(selectedWorkflowDefinition.step_graph, null, 2));
+                  setGraphEditorStatus("");
+                }
+              }}
+            />
+          </Panel>
+
           <Panel title="Steps">
             {(workflowSteps.data ?? []).length ? (workflowSteps.data ?? []).map((step) => (
               <StepRow key={step.id} step={step} />
@@ -590,19 +665,32 @@ export function App() {
           </Panel>
 
           <Panel title="Transitions">
-            {transitionTypes.length ? (
-              <div className="filter-row">
-                {["all", ...transitionTypes].map((type) => (
-                  <button
-                    key={type}
-                    className={transitionFilter === type ? "filter-chip selected" : "filter-chip"}
-                    onClick={() => setTransitionFilter(type)}
-                  >
-                    {type}
-                  </button>
-                ))}
+            {selectedWorkflowRun ? (
+              <div className="control-grid">
+                <label>
+                  <span>transition_type</span>
+                  <select value={transitionFilter} onChange={(event) => setTransitionFilter(event.target.value)}>
+                    {["all", ...transitionTypes].map((type) => (
+                      <option key={type} value={type}>{type}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>limit</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={500}
+                    value={transitionLimit}
+                    onChange={(event) => setTransitionLimit(clampNumber(event.target.valueAsNumber, 1, 500, 50))}
+                  />
+                </label>
+                <span className="status-hint">
+                  {workflowTransitions.isFetching ? "Refreshing" : `${filteredTransitions.length} records`} · limit {transitionLimit}
+                </span>
               </div>
             ) : null}
+            {workflowTransitions.error ? <p className="error-note">{errorMessage(workflowTransitions.error)}</p> : null}
             {filteredTransitions.length ? filteredTransitions.slice(-10).reverse().map((transition) => (
               <TransitionRow key={transition.id} transition={transition} />
             )) : <p className="muted">No durable transition records yet.</p>}
@@ -610,14 +698,13 @@ export function App() {
 
           <Panel title="Pack runtime">
             {packInstallationId ? (
-              <>
-                {(workflowPackRuntimeObjects.data ?? []).length ? (workflowPackRuntimeObjects.data ?? []).map((object) => (
-                  <RuntimeObjectRow key={object.id} object={object} />
-                )) : <p className="muted">No runtime objects materialized.</p>}
-                {(workflowPackBindings.data ?? []).slice(0, 5).map((binding) => (
-                  <BindingRow key={binding.id} binding={binding} />
-                ))}
-              </>
+              <PackRuntimePanel
+                packInstallationId={packInstallationId}
+                runtimeObjects={workflowPackRuntimeObjects.data ?? []}
+                bindings={workflowPackBindings.data ?? []}
+                isLoading={workflowPackRuntimeObjects.isLoading || workflowPackBindings.isLoading}
+                error={workflowPackRuntimeObjects.error ?? workflowPackBindings.error}
+              />
             ) : <p className="muted">This workflow is not bound to a pack installation.</p>}
           </Panel>
 
@@ -754,19 +841,26 @@ export function App() {
           <Panel title="Memory writeback queue">
             {memoryGovernance.data ? (
               <>
-                <div className="filter-row">
-                  {["pending", "approved", "rejected"].map((status) => (
-                    <button
-                      key={status}
-                      className={writebackStatus === status ? "filter-chip selected" : "filter-chip"}
-                      onClick={() => setWritebackStatus(status)}
-                    >
-                      {status}
-                    </button>
-                  ))}
-                </div>
                 {memoryWritebacks.data ? (
-                  <MemoryWritebackQueuePanel queue={memoryWritebacks.data} />
+                  <MemoryWritebackQueuePanel
+                    queue={memoryWritebacks.data}
+                    fullCandidates={allWritebackCandidates.data ?? []}
+                    status={writebackStatus}
+                    limit={writebackLimit}
+                    selectedId={selectedQueueWritebackId}
+                    reviewReason={writebackReviewReason}
+                    isLoadingDetail={allWritebackCandidates.isLoading}
+                    isReviewing={reviewWriteback.isPending}
+                    error={reviewWriteback.error ?? allWritebackCandidates.error}
+                    onStatusChange={(status) => {
+                      setWritebackStatus(status);
+                      setSelectedQueueWritebackId("");
+                    }}
+                    onLimitChange={setWritebackLimit}
+                    onSelect={setSelectedQueueWritebackId}
+                    onReasonChange={setWritebackReviewReason}
+                    onReview={(id, decision, reason) => reviewWriteback.mutate({ id, decision, reason })}
+                  />
                 ) : <p className="muted">Writeback queue not loaded.</p>}
               </>
             ) : <p className="muted">Memory governance summary is not loaded.</p>}
@@ -1006,6 +1100,51 @@ function AgentInboxPanel({
   );
 }
 
+function WorkflowDefinitionEditor({
+  definition,
+  draft,
+  statusMessage,
+  isSaving,
+  error,
+  onDraftChange,
+  onApply,
+  onReset,
+}: {
+  definition?: WorkflowDefinition;
+  draft: string;
+  statusMessage: string;
+  isSaving: boolean;
+  error: unknown;
+  onDraftChange: (value: string) => void;
+  onApply: () => void;
+  onReset: () => void;
+}) {
+  if (!definition) return <p className="muted">No workflow definition selected.</p>;
+  return (
+    <div className="graph-editor">
+      <div className="graph-summary">
+        <KeyValue label="Definition" value={shortId(definition.id)} />
+        <KeyValue label="Release" value={definition.release_state} />
+        <KeyValue label="Updated" value={relativeAge(definition.updated_at)} />
+      </div>
+      <label className="graph-editor-field">
+        <span>step_graph JSON</span>
+        <textarea value={draft} onChange={(event) => onDraftChange(event.target.value)} spellCheck={false} />
+      </label>
+      <div className="action-row">
+        <button disabled={isSaving} onClick={onApply}>{isSaving ? "Saving" : "Apply"}</button>
+        <button className="secondary" disabled={isSaving} onClick={onReset}>Reset</button>
+      </div>
+      {statusMessage ? <p className="status-hint">{statusMessage}</p> : null}
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+      <details className="json-details">
+        <summary>handoff_rules</summary>
+        <pre>{formatJson(definition.handoff_rules)}</pre>
+      </details>
+    </div>
+  );
+}
+
 function WorkflowGraph({ graph }: { graph: WorkflowGraphConsole }) {
   return (
     <div className="graph-console">
@@ -1059,21 +1198,86 @@ function TransitionRow({ transition }: { transition: WorkflowTransition }) {
   );
 }
 
-function RuntimeObjectRow({ object }: { object: WorkflowPackRuntimeObject }) {
-  const providerValidation = object.spec?.provider_specific_validation;
+function PackRuntimePanel({
+  packInstallationId,
+  runtimeObjects,
+  bindings,
+  isLoading,
+  error,
+}: {
+  packInstallationId: string;
+  runtimeObjects: WorkflowPackRuntimeObject[];
+  bindings: WorkflowPackBinding[];
+  isLoading: boolean;
+  error: unknown;
+}) {
   return (
-    <div className="obs-row runtime-row">
-      <strong>{object.object_type} · {object.status}</strong>
-      <span>{object.object_key} · {typeof providerValidation === "string" ? providerValidation : object.runtime_kind}</span>
+    <div className="pack-runtime">
+      <div className="graph-summary">
+        <KeyValue label="Installation" value={shortId(packInstallationId)} />
+        <KeyValue label="Runtime objects" value={String(runtimeObjects.length)} />
+        <KeyValue label="Bindings" value={String(bindings.length)} />
+      </div>
+      {isLoading ? <p className="muted">Loading pack binding and runtime object state.</p> : null}
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+      <div className="inspection-section">
+        <strong>Runtime objects</strong>
+        {runtimeObjects.length ? runtimeObjects.map((object) => (
+          <RuntimeObjectRow key={object.id} object={object} />
+        )) : <p className="muted">No runtime objects materialized by this pack installation.</p>}
+      </div>
+      <div className="inspection-section">
+        <strong>Bindings</strong>
+        {bindings.length ? bindings.map((binding) => (
+          <BindingRow key={binding.id} binding={binding} />
+        )) : <p className="muted">No workflow pack bindings returned for this installation.</p>}
+      </div>
+    </div>
+  );
+}
+
+function RuntimeObjectRow({ object }: { object: WorkflowPackRuntimeObject }) {
+  return (
+    <div className="inspection-row runtime-row">
+      <div className="inspection-title">
+        <strong>{object.object_type} · {object.status}</strong>
+        <span>{object.object_key}</span>
+      </div>
+      <div className="field-grid">
+        <KeyValue label="Object ID" value={shortId(object.id)} />
+        <KeyValue label="Binding ID" value={shortId(object.binding_id)} />
+        <KeyValue label="Runtime kind" value={object.runtime_kind} />
+        <KeyValue label="Pack" value={`${object.pack_id}@${object.pack_version}`} />
+        <KeyValue label="Created" value={object.created_at} />
+        <KeyValue label="Updated" value={object.updated_at} />
+      </div>
+      <details className="json-details">
+        <summary>Spec</summary>
+        <pre>{formatJson(object.spec)}</pre>
+      </details>
     </div>
   );
 }
 
 function BindingRow({ binding }: { binding: WorkflowPackBinding }) {
   return (
-    <div className="obs-row binding-row">
-      <strong>{binding.binding_type} · {binding.binding_key}</strong>
-      <span>{binding.target_kind} · {binding.status}</span>
+    <div className="inspection-row binding-row">
+      <div className="inspection-title">
+        <strong>{binding.binding_type} · {binding.binding_key}</strong>
+        <span>{binding.target_kind} · {binding.status}</span>
+      </div>
+      <div className="field-grid">
+        <KeyValue label="Binding ID" value={shortId(binding.id)} />
+        <KeyValue label="Target ID" value={shortId(binding.target_id ?? "none")} />
+        <KeyValue label="Source path" value={binding.source_path ?? "none"} />
+        <KeyValue label="Pack" value={`${binding.pack_id}@${binding.pack_version}`} />
+        <KeyValue label="Created" value={binding.created_at} />
+        <KeyValue label="Updated" value={binding.updated_at} />
+      </div>
+      <details className="json-details">
+        <summary>Materialized payload</summary>
+        <pre>{formatJson(binding.materialized_payload)}</pre>
+      </details>
     </div>
   );
 }
@@ -1143,16 +1347,149 @@ function MemoryPartitionDetail({ detail }: { detail: MemoryGovernancePartitionDe
   );
 }
 
-function MemoryWritebackQueuePanel({ queue }: { queue: MemoryGovernanceWritebackQueue }) {
+function MemoryWritebackQueuePanel({
+  queue,
+  fullCandidates,
+  status,
+  limit,
+  selectedId,
+  reviewReason,
+  isLoadingDetail,
+  isReviewing,
+  error,
+  onStatusChange,
+  onLimitChange,
+  onSelect,
+  onReasonChange,
+  onReview,
+}: {
+  queue: MemoryGovernanceWritebackQueue;
+  fullCandidates: MemoryWritebackCandidate[];
+  status: string;
+  limit: number;
+  selectedId: string;
+  reviewReason: string;
+  isLoadingDetail: boolean;
+  isReviewing: boolean;
+  error: unknown;
+  onStatusChange: (status: string) => void;
+  onLimitChange: (limit: number) => void;
+  onSelect: (id: string) => void;
+  onReasonChange: (reason: string) => void;
+  onReview: (id: string, decision: "approve" | "reject", reason?: string) => void;
+}) {
+  const activeRef = queue.candidates.find((candidate) => candidate.id === selectedId) ?? queue.candidates[0];
+  const activeCandidate = activeRef ? fullCandidates.find((candidate) => candidate.id === activeRef.id) : undefined;
+  const source = activeCandidate ? sourceLabel(activeCandidate) : "full candidate detail not loaded";
   return (
     <div className="writeback-queue">
-      <KeyValue label="Writeback queue" value={`${queue.candidate_count} shown · ${queue.pending_count} pending`} />
-      {queue.candidates.slice(0, 4).map((candidate) => (
-        <div key={candidate.id} className="obs-row writeback-row">
-          <strong>{candidate.title}</strong>
-          <span>{candidate.status} · {candidate.partition_key} · {candidate.summary}</span>
+      <div className="control-grid">
+        <label>
+          <span>Status</span>
+          <select value={status} onChange={(event) => onStatusChange(event.target.value)}>
+            {["pending", "approved", "rejected", "all"].map((value) => (
+              <option key={value} value={value}>{value}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Limit</span>
+          <input
+            type="number"
+            min={1}
+            max={200}
+            value={limit}
+            onChange={(event) => onLimitChange(clampNumber(event.target.valueAsNumber, 1, 200, 50))}
+          />
+        </label>
+        <span className="status-hint">
+          {queue.candidate_count} shown · {queue.pending_count} pending · {relativeAge(queue.generated_at)}
+        </span>
+      </div>
+      <div className="writeback-workspace">
+        <div className="writeback-list">
+          {queue.candidates.length ? queue.candidates.map((candidate) => (
+            <button
+              key={candidate.id}
+              className={activeRef?.id === candidate.id ? "writeback-select selected" : "writeback-select"}
+              onClick={() => onSelect(candidate.id)}
+            >
+              <strong>{candidate.title}</strong>
+              <span>{candidate.status} · {candidate.partition_key}</span>
+              <small>{candidate.summary}</small>
+            </button>
+          )) : <p className="muted">No writeback candidates match this queue filter.</p>}
         </div>
-      ))}
+        {activeRef ? (
+          <div className="writeback-inspector">
+            <div className="inspection-title">
+              <strong>{activeRef.title}</strong>
+              <span>{activeRef.status} · {activeRef.candidate_type}</span>
+            </div>
+            <div className="field-grid">
+              <KeyValue label="Source" value={source} />
+              <KeyValue label="Partition" value={activeRef.partition_key} />
+              <KeyValue label="Session" value={shortId(activeRef.session_id)} />
+              <KeyValue label="Proposed key" value={activeRef.proposed_object_key} />
+              <KeyValue label="Object type" value={activeRef.proposed_object_type} />
+              <KeyValue label="Object ID" value={shortId(activeRef.semantic_object_id ?? "not materialized")} />
+              <KeyValue label="Trust" value={activeRef.trust_level} />
+              <KeyValue label="Freshness" value={activeRef.freshness} />
+              <KeyValue label="Created" value={activeRef.created_at} />
+              <KeyValue label="Updated" value={activeRef.updated_at} />
+              <KeyValue label="Decided" value={activeRef.decided_at ?? "pending"} />
+              <KeyValue label="Candidate ID" value={shortId(activeRef.id)} />
+            </div>
+            <p className="detail-copy">{activeRef.summary}</p>
+            {activeCandidate ? (
+              <>
+                <div className="field-grid">
+                  <KeyValue label="Reviewer" value={activeCandidate.reviewer_subject ?? "none"} />
+                  <KeyValue label="Review reason" value={activeCandidate.review_reason ?? "none"} />
+                  <KeyValue label="Audit trace" value={shortId(activeCandidate.audit_trace_id ?? "none")} />
+                </div>
+                <details className="json-details">
+                  <summary>Candidate detail</summary>
+                  <pre>{formatJson({
+                    content: activeCandidate.content,
+                    semantic_scopes: activeCandidate.semantic_scopes,
+                    source_refs: activeCandidate.source_refs,
+                    provenance: activeCandidate.provenance,
+                  })}</pre>
+                </details>
+              </>
+            ) : (
+              <p className="muted">{isLoadingDetail ? "Loading full candidate detail." : "Full candidate detail was not returned by the global candidate endpoint."}</p>
+            )}
+            <label className="review-reason">
+              <span>Review reason</span>
+              <textarea
+                rows={3}
+                value={reviewReason}
+                spellCheck={false}
+                onChange={(event) => onReasonChange(event.target.value)}
+                placeholder="Optional reason recorded with approve/reject"
+              />
+            </label>
+            <div className="review-actions">
+              <button
+                disabled={activeRef.status !== "pending" || isReviewing}
+                onClick={() => onReview(activeRef.id, "approve", reviewReason)}
+              >
+                Approve
+              </button>
+              <button
+                disabled={activeRef.status !== "pending" || isReviewing}
+                className="ghost danger"
+                onClick={() => onReview(activeRef.id, "reject", reviewReason)}
+              >
+                Reject
+              </button>
+            </div>
+            {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -1555,6 +1892,29 @@ function agentName(agents: Agent[], agentId?: string | null): string {
 function shortId(value: string): string {
   if (!value || value === "none") return value;
   return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
+}
+
+function clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function sourceLabel(candidate: MemoryWritebackCandidate): string {
+  const sources = [
+    candidate.source_event_id ? `event ${shortId(candidate.source_event_id)}` : "",
+    candidate.source_artifact_id ? `artifact ${shortId(candidate.source_artifact_id)}` : "",
+    candidate.source_approval_id ? `approval ${shortId(candidate.source_approval_id)}` : "",
+    candidate.source_handoff_id ? `handoff ${shortId(candidate.source_handoff_id)}` : "",
+  ].filter(Boolean);
+  return sources.length ? sources.join(" · ") : candidate.candidate_type;
+}
+
+function formatJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? "";
+  } catch {
+    return String(value);
+  }
 }
 
 function summaryLine(value: Record<string, unknown>): string {

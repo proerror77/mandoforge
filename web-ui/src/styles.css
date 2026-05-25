@@ -54,6 +54,12 @@ button.ghost {
   color: var(--ink);
 }
 
+button.secondary {
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--ink);
+}
+
 button.danger {
   color: var(--red);
 }
@@ -642,9 +648,63 @@ h1 {
   color: white;
 }
 
+.control-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  gap: 8px;
+}
+
+.control-grid label,
+.review-reason {
+  display: grid;
+  gap: 4px;
+}
+
+.control-grid label > span,
+.review-reason > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.control-grid input,
+.control-grid select {
+  width: 100%;
+  min-width: 0;
+}
+
+.status-hint {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .graph-console {
   display: grid;
   gap: 10px;
+}
+
+.graph-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.graph-editor-field {
+  display: grid;
+  gap: 5px;
+}
+
+.graph-editor-field span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.graph-editor textarea {
+  min-height: 220px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .graph-summary {
@@ -793,6 +853,7 @@ h1 {
 .semantic-backends,
 .context-packet,
 .writeback-review,
+.pack-runtime,
 .ontology-registry,
 .semantic-ingestion,
 .semantic-synthesis,
@@ -1008,6 +1069,100 @@ h1 {
   font-size: 12px;
 }
 
+.inspection-section,
+.writeback-workspace,
+.writeback-list,
+.writeback-inspector {
+  display: grid;
+  gap: 8px;
+}
+
+.inspection-section > strong {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.inspection-row,
+.writeback-inspector {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 9px;
+}
+
+.inspection-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.inspection-title strong,
+.inspection-title span,
+.detail-copy {
+  overflow-wrap: anywhere;
+}
+
+.inspection-title span,
+.detail-copy {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.field-grid .kv {
+  min-height: 52px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  padding: 7px;
+}
+
+.field-grid .kv strong {
+  font-size: 12px;
+}
+
+.writeback-select {
+  display: grid;
+  min-height: 72px;
+  gap: 4px;
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--ink);
+  padding: 9px;
+  text-align: left;
+}
+
+.writeback-select.selected {
+  border-color: var(--black);
+  box-shadow: inset 3px 0 0 var(--black);
+}
+
+.writeback-select strong,
+.writeback-select span,
+.writeback-select small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.writeback-select span,
+.writeback-select small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.writeback-inspector textarea {
+  min-height: 92px;
+}
+
 .approval-card {
   border: 1px solid #ecc073;
   border-radius: 8px;
@@ -1060,7 +1215,9 @@ textarea {
   .workbench-grid,
   .taskbar,
   .scope-metrics,
-  .link-editor {
+  .link-editor,
+  .control-grid,
+  .field-grid {
     grid-template-columns: 1fr;
   }
 

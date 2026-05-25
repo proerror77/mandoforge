@@ -295,6 +295,43 @@ export type WorkflowRun = {
   updated_at: string;
 };
 
+export type WorkflowDefinition = {
+  id: string;
+  pack_installation_id?: string | null;
+  pack_id?: string | null;
+  pack_version?: string | null;
+  name: string;
+  entrypoint: string;
+  trigger_type: string;
+  default_agent_id: string;
+  default_environment_id?: string | null;
+  input_schema_ref?: string | null;
+  output_schema_ref?: string | null;
+  step_graph: Record<string, unknown>;
+  handoff_rules: Record<string, unknown>;
+  approval_policy_ref?: string | null;
+  eval_gate_refs: string[];
+  release_state: string;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+};
+
+export type UpdateWorkflowDefinitionRequest = {
+  name?: string;
+  entrypoint?: string;
+  trigger_type?: string;
+  default_agent_id?: string;
+  default_environment_id?: string | null;
+  input_schema_ref?: string | null;
+  output_schema_ref?: string | null;
+  step_graph?: Record<string, unknown>;
+  handoff_rules?: Record<string, unknown>;
+  approval_policy_ref?: string | null;
+  eval_gate_refs?: string[];
+  release_state?: string;
+};
+
 export type WorkflowStepRun = {
   id: string;
   workflow_run_id: string;
@@ -744,5 +781,29 @@ export async function decideApproval(id: string, decision: "approve" | "reject")
   return api<Approval>(`/api/approvals/${id}/${decision}`, {
     method: "POST",
     headers: approvalHeaders(),
+  });
+}
+
+export async function reviewMemoryWritebackCandidate(
+  id: string,
+  decision: "approve" | "reject",
+  reason?: string,
+): Promise<MemoryWritebackCandidate> {
+  const normalizedReason = reason?.trim();
+  return api<MemoryWritebackCandidate>(`/api/memory-writeback-candidates/${id}/${decision}`, {
+    method: "POST",
+    headers: approvalHeaders(),
+    body: JSON.stringify(normalizedReason ? { reason: normalizedReason } : {}),
+  });
+}
+
+export async function updateWorkflowDefinition(
+  id: string,
+  input: UpdateWorkflowDefinitionRequest,
+): Promise<WorkflowDefinition> {
+  return api<WorkflowDefinition>(`/api/workflow-definitions/${id}`, {
+    method: "PATCH",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
   });
 }
