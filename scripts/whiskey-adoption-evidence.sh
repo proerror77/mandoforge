@@ -307,11 +307,18 @@ if [[ -z "\$dataset_id" || "\$dataset_id" == "null" ]]; then
 fi
 
 curl -fsS "\${auth_headers[@]}" "\$base_url/api/agents" >"\$agents_file"
-agent_id="\$(jq -r '.[0].id // empty' "\$agents_file")"
+agent_id="\$(jq -r '
+  map(select(
+    ((.tools // []) | index("file.read"))
+    and ((.tools // []) | index("file.write"))
+    and ((.tools // []) | index("sql.query"))
+    and ((.tools // []) | index("artifact.create"))
+  )) | .[0].id // empty
+' "\$agents_file")"
 if [[ -z "\$agent_id" ]]; then
   curl -fsS -X POST "\${auth_headers[@]}" \
     -H "content-type: application/json" \
-    -d '{"name":"Whiskey Eval Release Pilot","kind":"assistant","provider":"openai","model":"gpt-5.4-mini","system_prompt":"Whiskey eval release adoption pilot","tools":[]}' \
+    -d '{"name":"Whiskey Eval Release Pilot","kind":"assistant","provider":"openai-compatible","model":"gpt-5.4-mini","system_prompt":"Whiskey eval release adoption pilot with the required Stage 2 regression tool surface.","tools":["file.read","file.write","sql.query","artifact.create"]}' \
     "\$base_url/api/agents" >"\$agent_file"
   agent_id="\$(jq -r '.id' "\$agent_file")"
 fi
