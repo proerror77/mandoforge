@@ -5,6 +5,7 @@ const listenHost = process.env.TENANT_ROUTING_CONTROLLER_HOST || "127.0.0.1";
 const listenPort = Number(process.env.TENANT_ROUTING_CONTROLLER_PORT || "18790");
 const controllerToken = process.env.TENANT_ROUTING_CONTROLLER_TOKEN || "";
 const apiBaseUrl = (process.env.TENANT_ROUTING_CONTROLLER_API_URL || "http://127.0.0.1:18787").replace(/\/$/, "");
+const apiToken = process.env.TENANT_ROUTING_CONTROLLER_API_TOKEN || "";
 const apiSubject = process.env.TENANT_ROUTING_CONTROLLER_API_SUBJECT || "whiskey-tenant-routing-controller";
 const apiRoles = process.env.TENANT_ROUTING_CONTROLLER_API_ROLES || "admin";
 const timeoutMs = Number(process.env.TENANT_ROUTING_CONTROLLER_TIMEOUT_MS || "5000");
@@ -38,13 +39,16 @@ async function readJson(request) {
 async function apiFetch(path) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const headers = apiToken
+    ? { authorization: `Bearer ${apiToken}` }
+    : {
+        "x-mandoforge-subject": apiSubject,
+        "x-mandoforge-roles": apiRoles,
+      };
   try {
     const response = await fetch(`${apiBaseUrl}${path}`, {
       signal: controller.signal,
-      headers: {
-        "x-mandoforge-subject": apiSubject,
-        "x-mandoforge-roles": apiRoles,
-      },
+      headers,
     });
     const text = await response.text();
     if (!response.ok) {

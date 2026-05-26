@@ -9,6 +9,7 @@ const listenHost = process.env.WORKER_LOAD_CONTROLLER_HOST || "127.0.0.1";
 const listenPort = Number(process.env.WORKER_LOAD_CONTROLLER_PORT || "18791");
 const controllerToken = process.env.WORKER_LOAD_CONTROLLER_TOKEN || "";
 const apiBaseUrl = (process.env.WORKER_LOAD_CONTROLLER_API_URL || "http://127.0.0.1:18787").replace(/\/$/, "");
+const apiToken = process.env.WORKER_LOAD_CONTROLLER_API_TOKEN || "";
 const apiSubject = process.env.WORKER_LOAD_CONTROLLER_API_SUBJECT || "whiskey-worker-load-controller";
 const apiRoles = process.env.WORKER_LOAD_CONTROLLER_API_ROLES || "admin";
 const composeFile = process.env.WORKER_LOAD_CONTROLLER_COMPOSE_FILE || "/opt/mandoforge-adoption/docker-compose.yml";
@@ -44,13 +45,16 @@ async function readJson(request) {
 async function apiFetch(path) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const headers = apiToken
+    ? { authorization: `Bearer ${apiToken}` }
+    : {
+        "x-mandoforge-subject": apiSubject,
+        "x-mandoforge-roles": apiRoles,
+      };
   try {
     const response = await fetch(`${apiBaseUrl}${path}`, {
       signal: controller.signal,
-      headers: {
-        "x-mandoforge-subject": apiSubject,
-        "x-mandoforge-roles": apiRoles,
-      },
+      headers,
     });
     const text = await response.text();
     if (!response.ok) {
