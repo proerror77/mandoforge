@@ -295,6 +295,9 @@ ensure_env MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL http://host.docker.i
 ensure_env MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_TOKEN $FINANCE_RECONCILIATION_CONTROLLER_TOKEN"
 
 ssh "$REMOTE_HOST" "set -euo pipefail
+set -a
+source '$REMOTE_ENV'
+set +a
 docker_gateway_ip=\$(ip -4 addr show docker0 2>/dev/null | awk '/inet /{print \$2}' | cut -d/ -f1 | head -1)
 if [[ -z \"\$docker_gateway_ip\" ]]; then
   echo 'docker0 gateway IP is required for container-to-host Codex App Server wiring' >&2
@@ -347,7 +350,7 @@ if command -v lsof >/dev/null 2>&1; then
   fi
 fi
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey tenant routing controller' >&2; exit 1; }
-nohup env TENANT_ROUTING_CONTROLLER_API_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} TENANT_ROUTING_CONTROLLER_API_TOKEN=\"\${MANDOFORGE_WORKER_TOKEN:-}\" TENANT_ROUTING_CONTROLLER_HOST=\$docker_gateway_ip TENANT_ROUTING_CONTROLLER_PORT=$TENANT_CONTROLLER_PORT TENANT_ROUTING_CONTROLLER_TOKEN='$TENANT_CONTROLLER_TOKEN' node '$REMOTE_TENANT_CONTROLLER' > '$REMOTE_ROOT/tenant-routing-controller.log' 2>&1 &
+nohup env TENANT_ROUTING_CONTROLLER_API_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} TENANT_ROUTING_CONTROLLER_API_TOKEN=\"\${MANDOFORGE_WORKER_TOKEN:-whiskey-stage2-worker-token}\" TENANT_ROUTING_CONTROLLER_HOST=\$docker_gateway_ip TENANT_ROUTING_CONTROLLER_PORT=$TENANT_CONTROLLER_PORT TENANT_ROUTING_CONTROLLER_TOKEN='$TENANT_CONTROLLER_TOKEN' node '$REMOTE_TENANT_CONTROLLER' > '$REMOTE_ROOT/tenant-routing-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/tenant-routing-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$TENANT_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/tenant-routing-controller.log' >&2; exit 1; }
@@ -364,7 +367,7 @@ if command -v lsof >/dev/null 2>&1; then
   fi
 fi
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey worker load controller' >&2; exit 1; }
-nohup env WORKER_LOAD_CONTROLLER_API_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} WORKER_LOAD_CONTROLLER_API_TOKEN=\"\${MANDOFORGE_WORKER_TOKEN:-}\" WORKER_LOAD_CONTROLLER_HOST=\$docker_gateway_ip WORKER_LOAD_CONTROLLER_PORT=$WORKER_CONTROLLER_PORT WORKER_LOAD_CONTROLLER_TOKEN='$WORKER_CONTROLLER_TOKEN' WORKER_LOAD_CONTROLLER_COMPOSE_FILE='$REMOTE_COMPOSE' WORKER_LOAD_CONTROLLER_COMPOSE_PROJECT='$COMPOSE_PROJECT' node '$REMOTE_WORKER_CONTROLLER' > '$REMOTE_ROOT/worker-load-controller.log' 2>&1 &
+nohup env WORKER_LOAD_CONTROLLER_API_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} WORKER_LOAD_CONTROLLER_API_TOKEN=\"\${MANDOFORGE_WORKER_TOKEN:-whiskey-stage2-worker-token}\" WORKER_LOAD_CONTROLLER_HOST=\$docker_gateway_ip WORKER_LOAD_CONTROLLER_PORT=$WORKER_CONTROLLER_PORT WORKER_LOAD_CONTROLLER_TOKEN='$WORKER_CONTROLLER_TOKEN' WORKER_LOAD_CONTROLLER_COMPOSE_FILE='$REMOTE_COMPOSE' WORKER_LOAD_CONTROLLER_COMPOSE_PROJECT='$COMPOSE_PROJECT' node '$REMOTE_WORKER_CONTROLLER' > '$REMOTE_ROOT/worker-load-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/worker-load-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$WORKER_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/worker-load-controller.log' >&2; exit 1; }
