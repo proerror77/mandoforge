@@ -1018,11 +1018,11 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
   docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' exec -T api bash -lc '
     set -euo pipefail
     curl() {
-      local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
-      if [[ -n "\$token" ]]; then
-        command curl -H "authorization: Bearer \$token" "\$@"
+      local token=\"\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}\"
+      if [[ -n \"\$token\" ]]; then
+        command curl -H \"authorization: Bearer \$token\" \"\$@\"
       else
-        command curl "\$@"
+        command curl \"\$@\"
       fi
     }
     mkdir -p /evidence
