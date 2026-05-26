@@ -47,6 +47,7 @@ jobs:
           while IFS= read -r -d '' script; do
             bash -n "$script"
           done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print0 | sort -z)
+      - run: scripts/verify-whiskey-evidence-auth-fallbacks.sh
       - run: scripts/verify-whiskey-eval-release-seed.sh
       - run: scripts/verify-observability-k8s-manifests.sh
       - run: scripts/verify-remote-computer-k8s-manifests.sh
