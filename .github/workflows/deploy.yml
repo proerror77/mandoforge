@@ -65,7 +65,16 @@ jobs:
           npm run build --prefix web-ui
           scripts/verify-static-ui-assets.sh
       - name: Build image
-        run: docker build --platform linux/amd64 -t "$IMAGE_NAME:${{ inputs.image_tag }}" .
+        run: |
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "MANDOFORGE_BUILD_TIME=$build_time" >> "$GITHUB_ENV"
+          docker build \
+            --platform linux/amd64 \
+            --build-arg MANDOFORGE_IMAGE_TAG="${{ inputs.image_tag }}" \
+            --build-arg MANDOFORGE_GIT_SHA="${{ github.sha }}" \
+            --build-arg MANDOFORGE_BUILD_TIME="$build_time" \
+            -t "$IMAGE_NAME:${{ inputs.image_tag }}" \
+            .
       - name: Login to GHCR
         if: inputs.publish_image == 'true' || inputs.deploy_whiskey == 'true'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -114,4 +123,15 @@ jobs:
           WHISKEY_REMOTE_HOST=whiskey-ci \
             WHISKEY_REMOTE_ROOT="$remote_root" \
             MANDOFORGE_IMAGE_TAG="${{ inputs.image_tag }}" \
+            MANDOFORGE_GIT_SHA="${{ github.sha }}" \
+            MANDOFORGE_BUILD_TIME="${MANDOFORGE_BUILD_TIME:-}" \
             scripts/whiskey-adoption-deploy.sh
+
+          version_json="$(ssh whiskey-ci "cd '$remote_root' && set -a && source whiskey.env && set +a && curl -fsS http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/deployment/version")"
+          actual_tag="$(jq -r '.image_tag // empty' <<<"$version_json")"
+          if [[ "$actual_tag" != "${{ inputs.image_tag }}" ]]; then
+            echo "Whiskey is not running the requested image tag: expected ${{ inputs.image_tag }}, got ${actual_tag:-missing}" >&2
+            echo "$version_json" >&2
+            exit 1
+          fi
+          echo "$version_json"

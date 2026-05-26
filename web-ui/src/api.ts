@@ -435,12 +435,77 @@ export type TaskGrant = {
 
 export type WorkItem = {
   id: string;
+  organization_id?: string | null;
+  team_id?: string | null;
+  project_id?: string | null;
   title: string;
   description?: string | null;
   source: string;
+  source_url?: string | null;
   status: string;
   priority: string;
+  assignee?: string | null;
   metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+};
+
+export type ManagerAgentPlan = {
+  id: string;
+  session_id: string;
+  manager_agent_id: string;
+  work_item_id?: string | null;
+  specialist_agent_id?: string | null;
+  task_intake: Record<string, unknown>;
+  decomposition: Record<string, unknown>;
+  specialist_selection: Record<string, unknown>;
+  risk_classification: string;
+  review: Record<string, unknown>;
+  status: string;
+  audit_trace_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentHandoffEvent = {
+  id: string;
+  source_session_id: string;
+  source_agent_id: string;
+  target_agent_id: string;
+  manager_plan_id?: string | null;
+  intent: string;
+  payload: Record<string, unknown>;
+  schema_version: string;
+  risk_level: string;
+  approval_required: boolean;
+  semantic_scopes: Record<string, unknown>;
+  runtime_profile_id?: string | null;
+  remote_computer_required: boolean;
+  review_status: string;
+  human_escalation_status: string;
+  status: string;
+  audit_trace_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentHandoffAssignment = {
+  id: string;
+  agent_handoff_event_id: string;
+  manager_plan_id: string;
+  source_session_id: string;
+  specialist_session_id: string;
+  source_agent_id: string;
+  target_agent_id: string;
+  semantic_scopes: Record<string, unknown>;
+  runtime_profile_id?: string | null;
+  remote_computer_required: boolean;
+  remote_computer_job_assignment_id?: string | null;
+  status: string;
+  assigned_by?: string | null;
+  metadata: Record<string, unknown>;
+  audit_trace_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -546,6 +611,85 @@ export type WorkflowPackRuntimeObject = {
   spec: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+};
+
+export type WorkflowPackInstallation = {
+  id: string;
+  pack_id: string;
+  kind: string;
+  version: string;
+  manifest_path: string;
+  manifest: Record<string, unknown>;
+  validation_report: Record<string, unknown>;
+  status: string;
+  eval_gate_status: string;
+  release_gate_status: string;
+  gate_evidence: Record<string, unknown>;
+  staged_at?: string | null;
+  released_at?: string | null;
+  archived_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkflowPackProfileAsset = {
+  id: string;
+  installation_id: string;
+  profile_id: string;
+  content: string;
+  version: number;
+  status: string;
+  created_at: string;
+  archived_at?: string | null;
+};
+
+export type WorkflowPackOnboardingAssessment = {
+  installation_id: string;
+  pack_id: string;
+  version: string;
+  status: string;
+  onboarding_workflow: string;
+  onboarding_eval: string;
+  required_profile_count: number;
+  profile_schema_count: number;
+  inline_profile_count: number;
+  persisted_profile_count: number;
+  provided_profile_count: number;
+  placeholder_profile_count: number;
+  connector_requirement_count: number;
+  ready_connector_count: number;
+  missing_profiles: string[];
+  placeholder_profiles: string[];
+  connector_blockers: Array<{
+    id: string;
+    status: string;
+    blockers: string[];
+  }>;
+  blockers: string[];
+  checked_at: string;
+};
+
+export type WorkflowPackConnectorQualityAssessment = {
+  installation_id: string;
+  pack_id: string;
+  version: string;
+  status: string;
+  connector_requirement_count: number;
+  ready_connector_count: number;
+  connector_results: Array<{
+    id: string;
+    status: string;
+    sample_count: number;
+    passing_sample_count: number;
+    bound_team_id?: string | null;
+    bound_server_id?: string | null;
+    bound_server_name?: string | null;
+    bound_server_health_status?: string | null;
+    bound_tool_name?: string | null;
+    blockers: string[];
+  }>;
+  blockers: string[];
+  checked_at: string;
 };
 
 export type MemoryGovernanceSummary = {
@@ -688,6 +832,24 @@ export type SchedulerOrchestrationSummary = {
   }>;
 };
 
+export type Stage2Readiness = {
+  status: string;
+  generated_at?: string;
+  tracks?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+};
+
+export type ObservabilitySummary = Record<string, unknown>;
+
+export type DeploymentVersion = {
+  service: string;
+  cargo_package_version: string;
+  image_tag?: string | null;
+  git_sha?: string | null;
+  build_time?: string | null;
+  source: string;
+};
+
 const ADMIN_TOKEN_KEY = "mandoforge.adminToken";
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -803,6 +965,62 @@ export async function updateWorkflowDefinition(
 ): Promise<WorkflowDefinition> {
   return api<WorkflowDefinition>(`/api/workflow-definitions/${id}`, {
     method: "PATCH",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function createManagerAgentPlan(
+  sessionId: string,
+  input: {
+    work_item_id?: string | null;
+    specialist_agent_id?: string | null;
+    task_intake: Record<string, unknown>;
+    decomposition: Record<string, unknown>;
+    specialist_selection: Record<string, unknown>;
+    risk_classification: string;
+    review?: Record<string, unknown>;
+  },
+): Promise<ManagerAgentPlan> {
+  return api<ManagerAgentPlan>(`/api/sessions/${sessionId}/manager-plans`, {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function reviewManagerAgentPlan(
+  id: string,
+  input: {
+    status?: string;
+    review: Record<string, unknown>;
+  },
+): Promise<ManagerAgentPlan> {
+  return api<ManagerAgentPlan>(`/api/manager-plans/${id}/review`, {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function transitionAgentHandoff(
+  id: string,
+  action: "accept" | "reject" | "fail" | "complete" | "escalate",
+  input: Record<string, unknown> = {},
+): Promise<AgentHandoffEvent> {
+  return api<AgentHandoffEvent>(`/api/agent-handoffs/${id}/${action}`, {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function workflowPackAction<T>(
+  path: string,
+  input: Record<string, unknown> = {},
+): Promise<T> {
+  return api<T>(path, {
+    method: "POST",
     headers: adminHeaders(),
     body: JSON.stringify(input),
   });

@@ -192,6 +192,54 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn update_agent_handoff_event_escalation(
+        &self,
+        id: Uuid,
+        human_escalation_status: &str,
+        audit_trace_id: Option<Uuid>,
+    ) -> Result<AgentHandoffEvent, AppError> {
+        let updated_at = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let event = store
+                    .agent_handoff_events
+                    .get_mut(&id)
+                    .ok_or_else(|| AppError::not_found("agent handoff event not found"))?;
+                event.human_escalation_status = human_escalation_status.to_string();
+                if human_escalation_status == "requested" {
+                    event.review_status = "human_review_required".to_string();
+                }
+                event.audit_trace_id = audit_trace_id;
+                event.updated_at = updated_at;
+                Ok(event.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE agent_handoff_events
+                     SET human_escalation_status = $3,
+                         review_status = CASE
+                            WHEN $3 = 'requested' THEN 'human_review_required'
+                            ELSE review_status
+                         END,
+                         audit_trace_id = $4,
+                         updated_at = $5
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING id, source_session_id, source_agent_id, target_agent_id, manager_plan_id, intent, payload, schema_version, risk_level, approval_required, semantic_scopes, runtime_profile_id, remote_computer_required, review_status, human_escalation_status, status, audit_trace_id, created_at, updated_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(human_escalation_status)
+                .bind(audit_trace_id)
+                .bind(updated_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent handoff event not found"))?;
+                agent_handoff_event_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn list_agent_handoff_assignments(
         &self,
         session_id: Option<Uuid>,

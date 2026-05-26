@@ -9,6 +9,16 @@ RUN if [ -n "$CARGO_BUILD_JOBS" ]; then \
     fi
 
 FROM debian:trixie-slim
+ARG MANDOFORGE_IMAGE_TAG=local
+ARG MANDOFORGE_GIT_SHA=unknown
+ARG MANDOFORGE_BUILD_TIME=unknown
+ENV MANDOFORGE_IMAGE_TAG=${MANDOFORGE_IMAGE_TAG}
+ENV MANDOFORGE_GIT_SHA=${MANDOFORGE_GIT_SHA}
+ENV MANDOFORGE_BUILD_TIME=${MANDOFORGE_BUILD_TIME}
+LABEL org.opencontainers.image.title="mandoforge-api" \
+      org.opencontainers.image.revision="${MANDOFORGE_GIT_SHA}" \
+      org.opencontainers.image.version="${MANDOFORGE_IMAGE_TAG}" \
+      org.opencontainers.image.created="${MANDOFORGE_BUILD_TIME}"
 WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl jq \

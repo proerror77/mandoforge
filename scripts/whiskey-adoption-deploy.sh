@@ -31,6 +31,9 @@ REMOTE_VAULT_KMS_CONTROLLER="$REMOTE_ROOT/vault-kms-controller.mjs"
 REMOTE_FINANCE_CONTROLLER="$REMOTE_ROOT/finance-controller.mjs"
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
 IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-latest}"
+GIT_SHA="${MANDOFORGE_GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || printf unknown)}"
+GIT_SHA="${GIT_SHA:-unknown}"
+BUILD_TIME="${MANDOFORGE_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 PULL_IMAGE="${WHISKEY_PULL_IMAGE:-1}"
 CODEX_WS_PORT="${WHISKEY_CODEX_APP_SERVER_WS_PORT:-18788}"
 CODEX_CONTROLLER_PORT="${WHISKEY_CODEX_APP_SERVER_CONTROLLER_PORT:-18789}"
@@ -159,6 +162,8 @@ rsync -az "$LOCAL_WEB_DIR/" "$REMOTE_HOST:$REMOTE_ROOT/web/"
 
 ssh "$REMOTE_HOST" "if [[ ! -f '$REMOTE_ENV' ]]; then cat > '$REMOTE_ENV' <<'ENV'
 MANDOFORGE_IMAGE_TAG=$IMAGE_TAG
+MANDOFORGE_GIT_SHA=$GIT_SHA
+MANDOFORGE_BUILD_TIME=$BUILD_TIME
 MANDOFORGE_API_HOST_PORT=18787
 MANDOFORGE_POSTGRES_HOST_PORT=15432
 MANDOFORGE_SCHEDULER_TOKEN=whiskey-stage2-scheduler-token
@@ -196,6 +201,9 @@ unset_env() {
     sed -i \"/^\${key}=.*/d\" '$REMOTE_ENV'
   fi
 }
+set_env MANDOFORGE_IMAGE_TAG $IMAGE_TAG
+set_env MANDOFORGE_GIT_SHA $GIT_SHA
+set_env MANDOFORGE_BUILD_TIME $BUILD_TIME
 set_env MANDOFORGE_CODEX_APP_SERVER_URL http://host.docker.internal:$CODEX_CONTROLLER_PORT
 ensure_env MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_REQUIRED true
 ensure_env MANDOFORGE_CODEX_APP_SERVER_DEPLOYMENT_CONTROLLER_URL http://host.docker.internal:$CODEX_CONTROLLER_PORT/deployment/validate
@@ -458,5 +466,49 @@ fi
 remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d postgres otel-collector && docker volume create '${COMPOSE_PROJECT}_workspace-data' >/dev/null && docker run --rm -u 0 -v '${COMPOSE_PROJECT}_workspace-data:/data' debian:trixie-slim sh -c 'chown -R 1000:1000 /data' && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' up -d --force-recreate api worker && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' ps"
 
 ssh "$REMOTE_HOST" "bash -lc $(printf '%q' "$remote_cmd")"
+
+ssh "$REMOTE_HOST" "IMAGE_TAG=$(printf '%q' "$IMAGE_TAG") GIT_SHA=$(printf '%q' "$GIT_SHA") REMOTE_ROOT=$(printf '%q' "$REMOTE_ROOT") bash -s" <<'REMOTE'
+set -euo pipefail
+
+REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
+cd "$REMOTE_ROOT"
+set -a
+source "$REMOTE_ENV"
+set +a
+
+version_json=""
+for _attempt in {1..30}; do
+  if version_json="$(curl -fsS "http://127.0.0.1:${MANDOFORGE_API_HOST_PORT:-18787}/api/deployment/version" 2>/dev/null)"; then
+    break
+  fi
+  sleep 2
+done
+if [[ -z "$version_json" ]]; then
+  echo "failed to query MandoForge deployment version" >&2
+  exit 1
+fi
+
+printf '%s\n' "$version_json" > "$REMOTE_ROOT/evidence/deployment-version.json"
+if command -v jq >/dev/null 2>&1; then
+  actual_tag="$(printf '%s\n' "$version_json" | jq -r '.image_tag // empty')"
+  actual_sha="$(printf '%s\n' "$version_json" | jq -r '.git_sha // empty')"
+else
+  actual_tag="$(printf '%s\n' "$version_json" | sed -n 's/.*"image_tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  actual_sha="$(printf '%s\n' "$version_json" | sed -n 's/.*"git_sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+fi
+
+if [[ "$actual_tag" != "$IMAGE_TAG" ]]; then
+  echo "Whiskey API image tag mismatch: expected $IMAGE_TAG, got ${actual_tag:-missing}" >&2
+  cat "$REMOTE_ROOT/evidence/deployment-version.json" >&2
+  exit 1
+fi
+if [[ "$GIT_SHA" != "unknown" && -n "$actual_sha" && "$actual_sha" != "$GIT_SHA" ]]; then
+  echo "Whiskey API git SHA mismatch: expected $GIT_SHA, got $actual_sha" >&2
+  cat "$REMOTE_ROOT/evidence/deployment-version.json" >&2
+  exit 1
+fi
+
+printf 'Whiskey deployment version verified: tag=%s sha=%s\n' "$actual_tag" "${actual_sha:-unknown}"
+REMOTE
 
 echo "Whiskey MandoForge pilot is deployed on $REMOTE_HOST at http://127.0.0.1:18787"

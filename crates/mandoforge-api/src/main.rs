@@ -1044,6 +1044,14 @@ struct TransitionAgentHandoffEvent {
 }
 
 #[derive(Debug, Deserialize)]
+struct EscalateAgentHandoffEvent {
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateAgentHandoffAssignment {
     #[serde(default)]
     specialist_session_id: Option<Uuid>,
@@ -5889,6 +5897,7 @@ fn build_router(state: AppState) -> Router {
     let tenant_context_state = state.clone();
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/api/deployment/version", get(get_deployment_version))
         .route("/api/stage2/readiness", get(get_stage2_readiness))
         .route("/api/agents", get(list_agents).post(create_agent))
         .route(
@@ -6762,6 +6771,10 @@ fn build_router(state: AppState) -> Router {
             post(fail_agent_handoff_event),
         )
         .route(
+            "/api/agent-handoffs/{id}/escalate",
+            post(escalate_agent_handoff_event),
+        )
+        .route(
             "/api/agent-handoffs/{id}/complete",
             post(complete_agent_handoff_event),
         )
@@ -6932,6 +6945,56 @@ fn approval_email_relay_url_from_env() -> Option<String> {
 
 async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DeploymentVersion {
+    service: String,
+    cargo_package_version: String,
+    image_tag: Option<String>,
+    git_sha: Option<String>,
+    build_time: Option<String>,
+    source: String,
+}
+
+async fn get_deployment_version() -> Json<DeploymentVersion> {
+    Json(deployment_version_from_env())
+}
+
+fn deployment_version_from_env() -> DeploymentVersion {
+    deployment_version_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn deployment_version_from_lookup<F>(lookup: F) -> DeploymentVersion
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let image_tag = trimmed_lookup(&lookup, "MANDOFORGE_IMAGE_TAG");
+    let git_sha = trimmed_lookup(&lookup, "MANDOFORGE_GIT_SHA")
+        .or_else(|| trimmed_lookup(&lookup, "GITHUB_SHA"));
+    let build_time = trimmed_lookup(&lookup, "MANDOFORGE_BUILD_TIME");
+    let source = if image_tag.is_some() || git_sha.is_some() || build_time.is_some() {
+        "runtime_env".to_string()
+    } else {
+        "local_cargo_run".to_string()
+    };
+    DeploymentVersion {
+        service: "mandoforge-api".to_string(),
+        cargo_package_version: env!("CARGO_PKG_VERSION").to_string(),
+        image_tag,
+        git_sha,
+        build_time,
+        source,
+    }
+}
+
+fn trimmed_lookup<F>(lookup: &F, key: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 async fn get_stage2_readiness(
@@ -12507,6 +12570,46 @@ async fn fail_agent_handoff_event(
     Json(input): Json<TransitionAgentHandoffEvent>,
 ) -> Result<Json<AgentHandoffEvent>, AppError> {
     transition_agent_handoff_event(state, id, headers, input, "failed").await
+}
+
+async fn escalate_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<EscalateAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    let current = state.get_agent_handoff_event(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::ApprovalsDecide,
+        "session",
+        Some(current.source_session_id),
+    )
+    .await?;
+    if matches!(current.status.as_str(), "completed" | "rejected") {
+        return Err(AppError::bad_request(
+            "completed or rejected handoffs cannot be escalated",
+        ));
+    }
+    let next_status =
+        normalize_handoff_human_escalation_status(input.status.as_deref().unwrap_or("requested"))?;
+    if next_status == "none" {
+        return Err(AppError::bad_request(
+            "handoff escalation status must be required, requested, or resolved",
+        ));
+    }
+    let audit = record_agent_handoff_audit_and_event(
+        &state,
+        &current,
+        "agent_handoff.escalated",
+        input.reason,
+    )
+    .await?;
+    let updated = state
+        .update_agent_handoff_event_escalation(current.id, &next_status, Some(audit.id))
+        .await?;
+    Ok(Json(updated))
 }
 
 async fn complete_agent_handoff_event(
@@ -49269,6 +49372,23 @@ mod tests {
     }
 
     #[test]
+    fn deployment_version_prefers_runtime_image_metadata() {
+        let version = deployment_version_from_lookup(|key| match key {
+            "MANDOFORGE_IMAGE_TAG" => Some(" whiskey-20260526-demo ".to_string()),
+            "MANDOFORGE_GIT_SHA" => Some("abc1234".to_string()),
+            "MANDOFORGE_BUILD_TIME" => Some("2026-05-26T00:00:00Z".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(version.service, "mandoforge-api");
+        assert_eq!(version.cargo_package_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(version.image_tag.as_deref(), Some("whiskey-20260526-demo"));
+        assert_eq!(version.git_sha.as_deref(), Some("abc1234"));
+        assert_eq!(version.build_time.as_deref(), Some("2026-05-26T00:00:00Z"));
+        assert_eq!(version.source, "runtime_env");
+    }
+
+    #[test]
     fn runtime_tenant_id_defaults_and_parses_env_override() {
         let default_tenant = runtime_tenant_id_from_lookup(|_| None).expect("default tenant id");
         assert_eq!(
@@ -53142,6 +53262,124 @@ not json
                 "missing audit action {expected}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn agent_handoff_escalation_records_review_status_event_and_audit() {
+        let app = test_app().await;
+        let target: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Escalation Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let source: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Escalation Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": target.id,
+                                "intents": ["review_risk"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["medium"],
+                                "approval_required": false
+                            }]
+                        }
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": source.id, "title": "handoff escalation"}),
+            ),
+        )
+        .await;
+        let handoff: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/sessions/{}/agent-handoffs", session.id),
+                json!({
+                    "target_agent_id": target.id,
+                    "intent": "review_risk",
+                    "payload": {"risk_id": "risk-1"},
+                    "schema_version": "handoff.v1",
+                    "risk_level": "medium",
+                    "human_escalation_status": "required"
+                }),
+            ),
+        )
+        .await;
+
+        let escalated: AgentHandoffEvent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/agent-handoffs/{}/escalate", handoff.id),
+                json!({"reason": "human decision required"}),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(escalated.human_escalation_status, "requested");
+        assert_eq!(escalated.review_status, "human_review_required");
+        assert_eq!(escalated.status, "requested");
+        assert!(escalated.audit_trace_id.is_some());
+
+        let events: Vec<SessionEvent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{}/events", session.id))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "agent_handoff.escalated"
+                && event.payload["agent_handoff_event_id"] == json!(handoff.id)
+                && event.payload["reason"] == json!("human decision required")
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "agent_handoff.escalated" && log.resource_id == Some(handoff.id)
+        }));
     }
 
     #[tokio::test]

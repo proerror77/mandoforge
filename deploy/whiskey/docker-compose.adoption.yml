@@ -34,6 +34,9 @@ services:
     image: ${MANDOFORGE_IMAGE:-ghcr.io/proerror77/mandoforge/mandoforge-api:${MANDOFORGE_IMAGE_TAG:-latest}}
     environment:
       MANDOFORGE_ADDR: 0.0.0.0:8787
+      MANDOFORGE_IMAGE_TAG: ${MANDOFORGE_IMAGE_TAG:-latest}
+      MANDOFORGE_GIT_SHA: ${MANDOFORGE_GIT_SHA:-}
+      MANDOFORGE_BUILD_TIME: ${MANDOFORGE_BUILD_TIME:-}
       MANDOFORGE_WORKSPACE_ROOT: /var/lib/mandoforge/workspaces
       MANDOFORGE_MIGRATIONS_DIR: /app/db/migrations
       DATABASE_URL: postgres://mandoforge:${MANDOFORGE_POSTGRES_PASSWORD:-mandoforge}@postgres:5432/mandoforge
@@ -178,6 +181,9 @@ services:
     command: ["mandoforge-worker"]
     environment:
       BASE_URL: http://api:8787
+      MANDOFORGE_IMAGE_TAG: ${MANDOFORGE_IMAGE_TAG:-latest}
+      MANDOFORGE_GIT_SHA: ${MANDOFORGE_GIT_SHA:-}
+      MANDOFORGE_BUILD_TIME: ${MANDOFORGE_BUILD_TIME:-}
       WORKER_ID: ${MANDOFORGE_WORKER_ID:-whiskey-pilot-worker-1}
       WORKER_SUBJECT: ${MANDOFORGE_WORKER_SUBJECT:-whiskey-pilot-worker}
       MANDOFORGE_WORKER_TOKEN: ${MANDOFORGE_WORKER_TOKEN:-whiskey-stage2-worker-token}

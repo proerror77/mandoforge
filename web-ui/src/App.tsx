@@ -3,23 +3,32 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   appendUserMessage,
   api,
+  createManagerAgentPlan,
   createSession,
   decideApproval,
   getAdminToken,
   reviewMemoryWritebackCandidate,
+  reviewManagerAgentPlan,
   setAdminToken,
+  transitionAgentHandoff,
   updateWorkflowDefinition,
+  workflowPackAction,
+  type AgentHandoffAssignment,
+  type AgentHandoffEvent,
   type AgentInboxSnapshot,
   type Agent,
   type Approval,
   type Artifact,
   type ContextPacket,
+  type DeploymentVersion,
   type Environment,
+  type ManagerAgentPlan,
   type MemoryGovernancePartitionDetail,
   type MemoryGovernanceSummary,
   type MemoryGovernanceWritebackQueue,
   type MemoryWritebackCandidate,
   type OntologyRegistry,
+  type ObservabilitySummary,
   type RunWorkflowStepRunResponse,
   type SchedulerOrchestrationSummary,
   type SemanticIngestionBatchResult,
@@ -29,6 +38,7 @@ import {
   type SemanticSynthesisRunResult,
   type Session,
   type SessionEvent,
+  type Stage2Readiness,
   type TaskGrant,
   type TaskBoardSnapshot,
   type ToolCall,
@@ -36,10 +46,15 @@ import {
   type WorkflowGraphConsole,
   type WorkflowDefinition,
   type WorkflowPackBinding,
+  type WorkflowPackConnectorQualityAssessment,
+  type WorkflowPackInstallation,
+  type WorkflowPackOnboardingAssessment,
+  type WorkflowPackProfileAsset,
   type WorkflowPackRuntimeObject,
   type WorkflowRun,
   type WorkflowStepRun,
   type WorkflowTransition,
+  type WorkItem,
 } from "./api";
 
 const DEFAULT_TASK =
@@ -95,6 +110,16 @@ const DEFAULT_SYNTHESIS_RUN = JSON.stringify({
   ],
 }, null, 2);
 
+const DEFAULT_PACK_PROFILE_ASSETS = JSON.stringify({
+  profiles: [
+    {
+      id: "company",
+      content: "# Company profile\n\nReplace this with tenant-specific company context before saving.",
+    },
+  ],
+  reason: "operator configured onboarding profile assets from the pack console",
+}, null, 2);
+
 type RowStatus = "needs_input" | "running" | "queued" | "completed" | "failed" | "idle";
 
 type SessionRow = {
@@ -116,6 +141,23 @@ type SemanticLinkDraft = {
   to: string;
 };
 
+type TaskBoardItemView = TaskBoardSnapshot["items"][number];
+type TaskBoardColumnId = "ready" | "running" | "review" | "blocked" | "backlog" | "done";
+type WorkbenchView = "agents" | "board" | "manager" | "semantic" | "packs" | "deploy";
+
+const TASK_BOARD_COLUMNS: Array<{
+  id: TaskBoardColumnId;
+  title: string;
+  hint: string;
+}> = [
+  { id: "ready", title: "Ready", hint: "Claimable work" },
+  { id: "running", title: "Running", hint: "Leased or active" },
+  { id: "review", title: "Review", hint: "Approval / action needed" },
+  { id: "blocked", title: "Blocked", hint: "Dependency or grant missing" },
+  { id: "backlog", title: "Backlog", hint: "Waiting for scheduler" },
+  { id: "done", title: "Done", hint: "Terminal states" },
+];
+
 export function App() {
   const queryClient = useQueryClient();
   const [selectedSessionId, setSelectedSessionId] = useState(() => localStorage.getItem("mandoforge.activeSessionId") ?? "");
@@ -123,6 +165,10 @@ export function App() {
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState("");
   const [task, setTask] = useState(DEFAULT_TASK);
   const [adminTokenInput, setAdminTokenInput] = useState(() => consumeTokenFromHash() || getAdminToken());
+  const [activeView, setActiveView] = useState<WorkbenchView>(() => {
+    const value = localStorage.getItem("mandoforge.activeView");
+    return isWorkbenchView(value) ? value : "agents";
+  });
   const [transitionFilter, setTransitionFilter] = useState("all");
   const [transitionLimit, setTransitionLimit] = useState(50);
   const [memoryPartitionKey, setMemoryPartitionKey] = useState("");
@@ -136,6 +182,19 @@ export function App() {
   const [semanticSynthesisDraft, setSemanticSynthesisDraft] = useState(DEFAULT_SYNTHESIS_RUN);
   const [graphEditorDraft, setGraphEditorDraft] = useState("");
   const [graphEditorStatus, setGraphEditorStatus] = useState("");
+  const [managerGoal, setManagerGoal] = useState("Review this work item, decompose it, route it to a specialist, and preserve review evidence.");
+  const [managerRisk, setManagerRisk] = useState("medium");
+  const [managerWorkItemId, setManagerWorkItemId] = useState("");
+  const [managerSpecialistAgentId, setManagerSpecialistAgentId] = useState("");
+  const [managerSteps, setManagerSteps] = useState("intake\nanalyze\nspecialist handoff\nreview result");
+  const [packManifestPath, setPackManifestPath] = useState("packs/ai-governance/package.yaml");
+  const [selectedPackInstallationId, setSelectedPackInstallationId] = useState("");
+  const [packProfileDraft, setPackProfileDraft] = useState(DEFAULT_PACK_PROFILE_ASSETS);
+  const [packReleaseEvidence, setPackReleaseEvidence] = useState(JSON.stringify({
+    source: "pack-console",
+    eval_gate: "operator-confirmed",
+    release_gate: "operator-confirmed",
+  }, null, 2));
   const [linkDraft, setLinkDraft] = useState({
     from: "",
     relation: "supports",
@@ -152,6 +211,34 @@ export function App() {
   const workflowRuns = useQuery({ queryKey: ["workflow-runs"], queryFn: () => api<WorkflowRun[]>("/api/workflow-runs"), refetchInterval: 1600 });
   const workflowDefinitions = useQuery({ queryKey: ["workflow-definitions"], queryFn: () => api<WorkflowDefinition[]>("/api/workflow-definitions"), refetchInterval: 3000 });
   const taskBoard = useQuery({ queryKey: ["task-board"], queryFn: () => api<TaskBoardSnapshot>("/api/task-board"), refetchInterval: 1500 });
+  const workItems = useQuery({ queryKey: ["work-items"], queryFn: () => api<WorkItem[]>("/api/work-items"), refetchInterval: 3000 });
+  const managerPlans = useQuery({ queryKey: ["manager-plans"], queryFn: () => api<ManagerAgentPlan[]>("/api/manager-plans"), refetchInterval: 3000 });
+  const agentHandoffs = useQuery({ queryKey: ["agent-handoffs"], queryFn: () => api<AgentHandoffEvent[]>("/api/agent-handoffs"), refetchInterval: 3000 });
+  const agentHandoffAssignments = useQuery({
+    queryKey: ["agent-handoff-assignments"],
+    queryFn: () => api<AgentHandoffAssignment[]>("/api/agent-handoff-assignments"),
+    refetchInterval: 3000,
+  });
+  const workflowPackInstallations = useQuery({
+    queryKey: ["workflow-pack-installations"],
+    queryFn: () => api<WorkflowPackInstallation[]>("/api/workflow-packs/installations"),
+    refetchInterval: 5000,
+  });
+  const stage2Readiness = useQuery({
+    queryKey: ["stage2-readiness"],
+    queryFn: () => api<Stage2Readiness>("/api/stage2/readiness"),
+    refetchInterval: 10000,
+  });
+  const codexDeploymentReadiness = useQuery({
+    queryKey: ["codex-app-server-deployment"],
+    queryFn: () => api<Record<string, unknown>>("/api/codex-app-server/deployment/validate", { method: "POST" }),
+    refetchInterval: 15000,
+  });
+  const observabilitySummary = useQuery({
+    queryKey: ["observability-summary"],
+    queryFn: () => api<ObservabilitySummary>("/api/observability"),
+    refetchInterval: 10000,
+  });
 
   const rows = useMemo(() => buildRows({
     sessions: sessions.data ?? [],
@@ -169,9 +256,15 @@ export function App() {
   const workflowRunId = selectedWorkflowRun?.id ?? "";
   const selectedWorkflowDefinition = workflowDefinitions.data?.find((definition) => definition.id === selectedWorkflowRun?.workflow_definition_id);
   const packInstallationId = selectedWorkflowRun?.pack_installation_id ?? "";
+  const selectedPackInstallation = workflowPackInstallations.data?.find((installation) => installation.id === selectedPackInstallationId)
+    ?? workflowPackInstallations.data?.[0];
+  const packConsoleInstallationId = selectedPackInstallation?.id ?? "";
   const selectedAgent = agents.data?.find((agent) => agent.id === selectedSession?.agent_id) ?? preferredAgent(agents.data ?? []);
+  const operatorAgent = agents.data?.find((agent) => agent.id === (selectedAgentId || selectedAgent?.id)) ?? selectedAgent;
   const selectedEnvironment = environments.data?.find((environment) => environment.id === selectedSession?.environment_id) ?? environments.data?.[0];
-  const inboxAgentId = selectedAgent?.id ?? "";
+  const specialistAgents = useMemo(() => (agents.data ?? []).filter((agent) => agent.agent_role === "specialist"), [agents.data]);
+  const managerSessions = useMemo(() => rows.filter((row) => row.agent?.agent_role === "manager"), [rows]);
+  const inboxAgentId = operatorAgent?.id ?? "";
   const agentInbox = useQuery({
     queryKey: ["agent-inbox", inboxAgentId],
     queryFn: () => api<AgentInboxSnapshot>(`/api/agents/${inboxAgentId}/inbox`),
@@ -236,6 +329,21 @@ export function App() {
     setGraphEditorDraft(JSON.stringify(selectedWorkflowDefinition.step_graph, null, 2));
     setGraphEditorStatus("");
   }, [selectedWorkflowDefinition?.id, selectedWorkflowDefinition?.updated_at]);
+  useEffect(() => {
+    if (!managerWorkItemId && workItems.data?.[0]) {
+      setManagerWorkItemId(workItems.data[0].id);
+    }
+  }, [managerWorkItemId, workItems.data]);
+  useEffect(() => {
+    if (!managerSpecialistAgentId && specialistAgents[0]) {
+      setManagerSpecialistAgentId(specialistAgents[0].id);
+    }
+  }, [managerSpecialistAgentId, specialistAgents]);
+  useEffect(() => {
+    if (!selectedPackInstallationId && workflowPackInstallations.data?.[0]) {
+      setSelectedPackInstallationId(workflowPackInstallations.data[0].id);
+    }
+  }, [selectedPackInstallationId, workflowPackInstallations.data]);
   const workflowPackBindings = useQuery({
     queryKey: ["workflow-pack-bindings", packInstallationId],
     queryFn: () => api<WorkflowPackBinding[]>(`/api/workflow-packs/installations/${packInstallationId}/bindings`),
@@ -247,6 +355,24 @@ export function App() {
     queryFn: () => api<WorkflowPackRuntimeObject[]>(`/api/workflow-packs/installations/${packInstallationId}/runtime-objects`),
     enabled: Boolean(packInstallationId),
     refetchInterval: 3000,
+  });
+  const packConsoleBindings = useQuery({
+    queryKey: ["pack-console-bindings", packConsoleInstallationId],
+    queryFn: () => api<WorkflowPackBinding[]>(`/api/workflow-packs/installations/${packConsoleInstallationId}/bindings`),
+    enabled: Boolean(packConsoleInstallationId),
+    refetchInterval: 3000,
+  });
+  const packConsoleRuntimeObjects = useQuery({
+    queryKey: ["pack-console-runtime-objects", packConsoleInstallationId],
+    queryFn: () => api<WorkflowPackRuntimeObject[]>(`/api/workflow-packs/installations/${packConsoleInstallationId}/runtime-objects`),
+    enabled: Boolean(packConsoleInstallationId),
+    refetchInterval: 3000,
+  });
+  const packProfileAssets = useQuery({
+    queryKey: ["pack-profile-assets", packConsoleInstallationId],
+    queryFn: () => api<WorkflowPackProfileAsset[]>(`/api/workflow-packs/installations/${packConsoleInstallationId}/onboarding/profiles`),
+    enabled: Boolean(packConsoleInstallationId),
+    refetchInterval: 5000,
   });
   const memoryGovernance = useQuery({
     queryKey: ["memory-governance-summary"],
@@ -280,6 +406,11 @@ export function App() {
     queryKey: ["scheduler-summary"],
     queryFn: () => api<SchedulerOrchestrationSummary>("/api/scheduler/summary"),
     refetchInterval: 5000,
+  });
+  const deploymentVersion = useQuery({
+    queryKey: ["deployment-version"],
+    queryFn: () => api<DeploymentVersion>("/api/deployment/version"),
+    refetchInterval: 30000,
   });
   const semanticObjects = useQuery({
     queryKey: ["semantic-objects"],
@@ -469,6 +600,170 @@ export function App() {
     },
     onSuccess: () => invalidateAll(queryClient),
   });
+  const createManagerPlanMutation = useMutation({
+    mutationFn: () => {
+      const managerSession = selectedSession?.agent_id && selectedAgent?.agent_role === "manager"
+        ? selectedSession
+        : managerSessions[0]?.session;
+      if (!managerSession) {
+        throw new Error("create or select a manager-agent session before creating a manager plan");
+      }
+      const steps = managerSteps
+        .split("\n")
+        .map((step) => step.trim())
+        .filter(Boolean);
+      return createManagerAgentPlan(managerSession.id, {
+        work_item_id: managerWorkItemId || null,
+        specialist_agent_id: managerSpecialistAgentId || null,
+        task_intake: {
+          goal: managerGoal.trim(),
+          source: "manager-console",
+          work_item_id: managerWorkItemId || null,
+        },
+        decomposition: {
+          strategy: "operator_seeded",
+          steps,
+        },
+        specialist_selection: {
+          specialist_agent_id: managerSpecialistAgentId || null,
+          reason: "selected from manager console",
+        },
+        risk_classification: managerRisk,
+        review: {},
+      });
+    },
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const reviewManagerPlanMutation = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: string }) => reviewManagerAgentPlan(id, {
+      status,
+      review: {
+        reviewed_by: "web-ui",
+        decision: status,
+        reviewed_at: new Date().toISOString(),
+      },
+    }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const packValidate = useMutation({
+    mutationFn: () => workflowPackAction<Record<string, unknown>>("/api/workflow-packs/validate", { manifest_path: packManifestPath }),
+  });
+  const packInstall = useMutation({
+    mutationFn: () => workflowPackAction<WorkflowPackInstallation>("/api/workflow-packs/install", { manifest_path: packManifestPath }),
+    onSuccess: (installation) => {
+      setSelectedPackInstallationId(installation.id);
+      invalidateAll(queryClient);
+    },
+  });
+  const packOnboardingAssess = useMutation({
+    mutationFn: () => workflowPackAction<WorkflowPackOnboardingAssessment>(
+      `/api/workflow-packs/installations/${packConsoleInstallationId}/onboarding/assess`,
+      { reason: "operator assessed onboarding readiness from the pack console" },
+    ),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const packProfilesSave = useMutation({
+    mutationFn: () => {
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(packProfileDraft) as Record<string, unknown>;
+      } catch (error) {
+        throw new Error(`invalid profile JSON: ${errorMessage(error)}`);
+      }
+      return workflowPackAction<WorkflowPackProfileAsset[]>(
+        `/api/workflow-packs/installations/${packConsoleInstallationId}/onboarding/profiles`,
+        payload,
+      );
+    },
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const packConnectorQualityAssess = useMutation({
+    mutationFn: () => workflowPackAction<WorkflowPackConnectorQualityAssessment>(
+      `/api/workflow-packs/installations/${packConsoleInstallationId}/connectors/quality/assess`,
+      {
+        connectors: [],
+        reason: "operator assessed connector quality from the pack console",
+      },
+    ),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const packUpdate = useMutation({
+    mutationFn: () => workflowPackAction<WorkflowPackInstallation>(
+      `/api/workflow-packs/installations/${packConsoleInstallationId}/update`,
+      {
+        manifest_path: packManifestPath,
+        reason: "operator created a new workflow pack version from the pack console",
+      },
+    ),
+    onSuccess: (installation) => {
+      setSelectedPackInstallationId(installation.id);
+      invalidateAll(queryClient);
+    },
+  });
+  const packArchive = useMutation({
+    mutationFn: () => workflowPackAction<WorkflowPackInstallation>(
+      `/api/workflow-packs/installations/${packConsoleInstallationId}/archive`,
+      { reason: "operator archived workflow pack installation from the pack console" },
+    ),
+    onSuccess: () => {
+      setSelectedPackInstallationId("");
+      invalidateAll(queryClient);
+    },
+  });
+  const handoffTransition = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: "accept" | "reject" | "fail" | "complete" | "escalate" }) => transitionAgentHandoff(
+      id,
+      action,
+      action === "escalate"
+        ? { reason: "operator escalated from manager desk", status: "requested" }
+        : { reason: `operator ${action} from manager desk` },
+    ),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const packStage = useMutation({
+    mutationFn: () => workflowPackAction<WorkflowPackInstallation>(
+      `/api/workflow-packs/installations/${packConsoleInstallationId}/stage`,
+      { reason: "operator staged pack from the pack console" },
+    ),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const packRelease = useMutation({
+    mutationFn: () => {
+      let evidence: Record<string, unknown>;
+      try {
+        evidence = JSON.parse(packReleaseEvidence) as Record<string, unknown>;
+      } catch (error) {
+        throw new Error(`invalid release evidence JSON: ${errorMessage(error)}`);
+      }
+      return workflowPackAction<WorkflowPackInstallation>(
+        `/api/workflow-packs/installations/${packConsoleInstallationId}/release`,
+        {
+          eval_gate_status: "passed",
+          release_gate_status: "passed",
+          gate_evidence: evidence,
+          reason: "operator released pack from the pack console",
+        },
+      );
+    },
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const packRollback = useMutation({
+    mutationFn: () => workflowPackAction<WorkflowPackInstallation>(
+      `/api/workflow-packs/installations/${packConsoleInstallationId}/rollback`,
+      {
+        gate_evidence: { source: "pack-console", requested_at: new Date().toISOString() },
+        reason: "operator rolled back pack from the pack console",
+      },
+    ),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const schedulerRunDue = useMutation({
+    mutationFn: () => api<Record<string, unknown>>("/api/scheduler/run-due", {
+      method: "POST",
+      body: JSON.stringify({ owner: "web-ui", idempotency_key: `ui-${Date.now()}` }),
+    }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
 
   const activeCount = rows.filter((row) => row.status === "running" || row.status === "queued").length;
   const blockedCount = rows.filter((row) => row.status === "needs_input").length;
@@ -481,9 +776,14 @@ export function App() {
     sessionLoopJobs.error,
     allToolCalls.error,
     taskBoard.error,
+    workItems.error,
+    managerPlans.error,
+    agentHandoffs.error,
+    agentHandoffAssignments.error,
     agentInbox.error,
     workflowTransitions.error,
     workflowDefinitions.error,
+    workflowPackInstallations.error,
     workflowPackBindings.error,
     workflowPackRuntimeObjects.error,
     memoryGovernance.error,
@@ -503,7 +803,7 @@ export function App() {
       <header className="workbench-top">
         <div>
           <p className="eyebrow">MandoForge Co-Work</p>
-          <h1>Managed agent observability</h1>
+          <h1>{viewTitle(activeView)}</h1>
         </div>
         <div className="top-metrics">
           <Metric label="Agents" value={String(agents.data?.length ?? 0)} />
@@ -537,6 +837,30 @@ export function App() {
         </form>
       </section>
 
+      <nav className="workspace-tabs" aria-label="Workspace views">
+        {[
+          { id: "agents" as const, label: "Agents", detail: "runtime, logs, approvals" },
+          { id: "board" as const, label: "Board", detail: "work items and inbox" },
+          { id: "manager" as const, label: "Manager", detail: "plans, routing, review" },
+          { id: "semantic" as const, label: "Semantic", detail: "memory and ontology" },
+          { id: "packs" as const, label: "Packs", detail: "install, configure, release" },
+          { id: "deploy" as const, label: "Deploy", detail: "latest and readiness" },
+        ].map((view) => (
+          <button
+            key={view.id}
+            className={activeView === view.id ? "workspace-tab active" : "workspace-tab"}
+            onClick={() => {
+              setActiveView(view.id);
+              localStorage.setItem("mandoforge.activeView", view.id);
+            }}
+          >
+            <strong>{view.label}</strong>
+            <span>{view.detail}</span>
+          </button>
+        ))}
+      </nav>
+
+      {activeView === "agents" ? (
       <section className="workbench-grid">
         <aside className="agent-lane">
           <div className="lane-title">
@@ -600,25 +924,6 @@ export function App() {
         </section>
 
         <aside className="observer-panel">
-          <Panel title="Task board">
-            {taskBoard.data ? (
-              <TaskBoardPanel board={taskBoard.data} agents={agents.data ?? []} />
-            ) : <p className="muted">Task board is loading.</p>}
-          </Panel>
-
-          <Panel title="Agent inbox">
-            {agentInbox.data ? (
-              <AgentInboxPanel
-                inbox={agentInbox.data}
-                agent={selectedAgent}
-                isRunning={runStep.isPending}
-                onRun={(stepId) => {
-                  if (selectedAgent) runStep.mutate({ stepId, agentId: selectedAgent.id });
-                }}
-              />
-            ) : <p className="muted">No agent inbox loaded.</p>}
-          </Panel>
-
           <Panel title="Workflow">
             {selectedWorkflowRun ? (
               <>
@@ -912,6 +1217,302 @@ export function App() {
           </Panel>
         </aside>
       </section>
+      ) : activeView === "board" ? (
+        <section className="board-workspace-page">
+          <div className="board-page-main">
+            <Panel title="Task board">
+              {taskBoard.error ? (
+                <p className="error-note">Task board failed: {errorMessage(taskBoard.error)}</p>
+              ) : taskBoard.data ? (
+                <TaskBoardPanel
+                  board={taskBoard.data}
+                  agents={agents.data ?? []}
+                  selectedAgent={operatorAgent}
+                  isRunning={runStep.isPending}
+                  runError={runStep.error}
+                  onRun={(stepId) => {
+                    if (operatorAgent) runStep.mutate({ stepId, agentId: operatorAgent.id });
+                  }}
+                />
+              ) : <p className="muted">Task board is loading.</p>}
+            </Panel>
+          </div>
+          <aside className="board-page-side">
+            <Panel title="Agent inbox">
+              {agentInbox.error ? (
+                <p className="error-note">Agent inbox failed: {errorMessage(agentInbox.error)}</p>
+              ) : agentInbox.data ? (
+                <AgentInboxPanel
+                  inbox={agentInbox.data}
+                  agent={operatorAgent}
+                  isRunning={runStep.isPending}
+                  onRun={(stepId) => {
+                    if (operatorAgent) runStep.mutate({ stepId, agentId: operatorAgent.id });
+                  }}
+                />
+              ) : <p className="muted">No agent inbox loaded.</p>}
+            </Panel>
+
+            <Panel title="Selected workflow">
+              {selectedWorkflowRun ? (
+                <>
+                  <KeyValue label="Run status" value={selectedWorkflowRun.status} />
+                  <KeyValue label="Run ID" value={shortId(selectedWorkflowRun.id)} />
+                  <KeyValue label="Definition" value={shortId(selectedWorkflowRun.workflow_definition_id)} />
+                  <KeyValue label="Root grant" value={shortId(selectedWorkflowRun.root_task_grant_id ?? "none")} />
+                </>
+              ) : <p className="muted">No workflow run is linked to this session.</p>}
+            </Panel>
+
+            <Panel title="Graph console">
+              {workflowGraph.data ? (
+                <WorkflowGraph graph={workflowGraph.data} />
+              ) : <p className="muted">No graph nodes observed.</p>}
+            </Panel>
+
+            <Panel title="Runtime">
+              <KeyValue label="Provider" value={runtime.provider} />
+              <KeyValue label="Provider client" value={runtime.client} />
+              <KeyValue label="Execution" value={runtime.execution} />
+            </Panel>
+          </aside>
+        </section>
+      ) : activeView === "manager" ? (
+        <section className="product-page manager-page">
+          <div className="product-main">
+            <Panel title="Manager desk">
+              <ManagerPlanComposer
+                sessions={managerSessions}
+                workItems={workItems.data ?? []}
+                specialists={specialistAgents}
+                goal={managerGoal}
+                risk={managerRisk}
+                workItemId={managerWorkItemId}
+                specialistAgentId={managerSpecialistAgentId}
+                steps={managerSteps}
+                isSaving={createManagerPlanMutation.isPending}
+                error={createManagerPlanMutation.error}
+                onGoalChange={setManagerGoal}
+                onRiskChange={setManagerRisk}
+                onWorkItemChange={setManagerWorkItemId}
+                onSpecialistChange={setManagerSpecialistAgentId}
+                onStepsChange={setManagerSteps}
+                onCreate={() => createManagerPlanMutation.mutate()}
+              />
+            </Panel>
+
+            <Panel title="Manager plan lifecycle">
+              <ManagerPlanConsole
+                plans={managerPlans.data ?? []}
+                agents={agents.data ?? []}
+                workItems={workItems.data ?? []}
+                handoffs={agentHandoffs.data ?? []}
+                assignments={agentHandoffAssignments.data ?? []}
+                isReviewing={reviewManagerPlanMutation.isPending}
+                error={reviewManagerPlanMutation.error}
+                onReview={(id, status) => reviewManagerPlanMutation.mutate({ id, status })}
+              />
+            </Panel>
+          </div>
+          <aside className="product-side">
+            <Panel title="Work intake">
+              <WorkItemIntakePanel workItems={workItems.data ?? []} />
+            </Panel>
+            <Panel title="Routing evidence">
+              <HandoffEvidencePanel
+                handoffs={agentHandoffs.data ?? []}
+                assignments={agentHandoffAssignments.data ?? []}
+                agents={agents.data ?? []}
+                isMutating={handoffTransition.isPending}
+                error={handoffTransition.error}
+                onTransition={(id, action) => handoffTransition.mutate({ id, action })}
+              />
+            </Panel>
+          </aside>
+        </section>
+      ) : activeView === "semantic" ? (
+        <section className="product-page semantic-page">
+          <div className="product-main">
+            <Panel title="Memory governance console">
+              {memoryGovernance.data ? (
+                <MemoryGovernanceConsole
+                  summary={memoryGovernance.data}
+                  detail={memoryPartition.data}
+                  selectedPartitionKey={selectedMemoryPartitionKey}
+                  onSelectPartition={setMemoryPartitionKey}
+                />
+              ) : <p className="muted">Memory governance summary is not loaded.</p>}
+            </Panel>
+            <Panel title="Semantic graph">
+              <OntologyRegistryPanel registry={ontologyRegistry.data} />
+              <SemanticObjectBrowser
+                objects={visibleSemanticObjects}
+                objectTypes={semanticObjectTypes}
+                selectedType={semanticObjectType}
+                onTypeChange={setSemanticObjectType}
+              />
+              <SemanticLinkManager
+                objects={semanticObjects.data ?? []}
+                links={semanticLinks.data ?? []}
+                draft={linkDraft}
+                registry={ontologyRegistry.data}
+                isSaving={createSemanticLink.isPending}
+                error={createSemanticLink.error}
+                onDraftChange={setLinkDraft}
+                onCreate={() => createSemanticLink.mutate()}
+              />
+            </Panel>
+          </div>
+          <aside className="product-side">
+            <Panel title="Ingestion">
+              <SemanticIngestionPanel
+                draft={semanticIngestionDraft}
+                result={createSemanticIngestionBatch.data}
+                isSaving={createSemanticIngestionBatch.isPending}
+                error={createSemanticIngestionBatch.error}
+                onDraftChange={setSemanticIngestionDraft}
+                onCreate={() => createSemanticIngestionBatch.mutate()}
+              />
+            </Panel>
+            <Panel title="Reflection / dreaming">
+              <SemanticSynthesisPanel
+                sessionId={sessionId}
+                draft={semanticSynthesisDraft}
+                result={createSemanticSynthesisRun.data}
+                isSaving={createSemanticSynthesisRun.isPending}
+                error={createSemanticSynthesisRun.error}
+                onDraftChange={setSemanticSynthesisDraft}
+                onCreate={() => createSemanticSynthesisRun.mutate()}
+              />
+              <SchedulerPanel summary={schedulerSummary.data ?? emptySchedulerSummary()} />
+              <div className="action-row">
+                <button disabled={schedulerRunDue.isPending} onClick={() => schedulerRunDue.mutate()}>
+                  {schedulerRunDue.isPending ? "Running..." : "Run due jobs"}
+                </button>
+                <span>scheduler-backed synthesis</span>
+              </div>
+              {schedulerRunDue.error ? <p className="error-note">{errorMessage(schedulerRunDue.error)}</p> : null}
+            </Panel>
+            <Panel title="Writeback queue">
+              {memoryWritebacks.data ? (
+                <MemoryWritebackQueuePanel
+                  queue={memoryWritebacks.data}
+                  fullCandidates={allWritebackCandidates.data ?? []}
+                  status={writebackStatus}
+                  limit={writebackLimit}
+                  selectedId={selectedQueueWritebackId}
+                  reviewReason={writebackReviewReason}
+                  isLoadingDetail={allWritebackCandidates.isLoading}
+                  isReviewing={reviewWriteback.isPending}
+                  error={reviewWriteback.error ?? allWritebackCandidates.error}
+                  onStatusChange={(status) => {
+                    setWritebackStatus(status);
+                    setSelectedQueueWritebackId("");
+                  }}
+                  onLimitChange={setWritebackLimit}
+                  onSelect={setSelectedQueueWritebackId}
+                  onReasonChange={setWritebackReviewReason}
+                  onReview={(id, decision, reason) => reviewWriteback.mutate({ id, decision, reason })}
+                />
+              ) : <p className="muted">Writeback queue not loaded.</p>}
+            </Panel>
+          </aside>
+        </section>
+      ) : activeView === "packs" ? (
+        <section className="product-page packs-page">
+          <div className="product-main">
+            <Panel title="Pack marketplace">
+              <WorkflowPackMarketplace
+                manifestPath={packManifestPath}
+                installations={workflowPackInstallations.data ?? []}
+                selectedInstallationId={packConsoleInstallationId}
+                validateResult={packValidate.data}
+                installResult={packInstall.data}
+                validateError={packValidate.error}
+                installError={packInstall.error}
+                isValidating={packValidate.isPending}
+                isInstalling={packInstall.isPending}
+                onManifestPathChange={setPackManifestPath}
+                onSelectInstallation={setSelectedPackInstallationId}
+                onValidate={() => packValidate.mutate()}
+                onInstall={() => packInstall.mutate()}
+              />
+            </Panel>
+            <Panel title="Release console">
+              <WorkflowPackReleaseConsole
+                installation={selectedPackInstallation}
+                onboardingAssessment={packOnboardingAssess.data}
+                connectorQuality={packConnectorQualityAssess.data}
+                profileAssets={packProfileAssets.data ?? []}
+                profileDraft={packProfileDraft}
+                releaseEvidence={packReleaseEvidence}
+                bindings={packConsoleBindings.data ?? []}
+                runtimeObjects={packConsoleRuntimeObjects.data ?? []}
+                isAssessing={packOnboardingAssess.isPending}
+                isAssessingConnectorQuality={packConnectorQualityAssess.isPending}
+                isSavingProfiles={packProfilesSave.isPending}
+                isStaging={packStage.isPending}
+                isReleasing={packRelease.isPending}
+                isRollingBack={packRollback.isPending}
+                isUpdating={packUpdate.isPending}
+                isArchiving={packArchive.isPending}
+                canUpdate={Boolean(packManifestPath.trim())}
+                error={packOnboardingAssess.error ?? packConnectorQualityAssess.error ?? packProfilesSave.error ?? packStage.error ?? packRelease.error ?? packRollback.error ?? packUpdate.error ?? packArchive.error}
+                onProfileDraftChange={setPackProfileDraft}
+                onReleaseEvidenceChange={setPackReleaseEvidence}
+                onAssess={() => packOnboardingAssess.mutate()}
+                onAssessConnectorQuality={() => packConnectorQualityAssess.mutate()}
+                onSaveProfiles={() => packProfilesSave.mutate()}
+                onStage={() => packStage.mutate()}
+                onRelease={() => packRelease.mutate()}
+                onRollback={() => packRollback.mutate()}
+                onUpdate={() => packUpdate.mutate()}
+                onArchive={() => packArchive.mutate()}
+              />
+            </Panel>
+          </div>
+          <aside className="product-side">
+            <Panel title="Runtime objects">
+              <PackRuntimePanel
+                packInstallationId={packConsoleInstallationId || "none"}
+                runtimeObjects={packConsoleRuntimeObjects.data ?? []}
+                bindings={packConsoleBindings.data ?? []}
+                isLoading={packConsoleRuntimeObjects.isLoading || packConsoleBindings.isLoading}
+                error={packConsoleRuntimeObjects.error ?? packConsoleBindings.error}
+              />
+            </Panel>
+          </aside>
+        </section>
+      ) : (
+        <section className="product-page deploy-page">
+          <div className="product-main">
+            <Panel title="Production readiness">
+              <DeployReadinessPanel
+                stage2={stage2Readiness.data}
+                codexDeployment={codexDeploymentReadiness.data}
+                observability={observabilitySummary.data}
+                errors={[stage2Readiness.error, codexDeploymentReadiness.error, observabilitySummary.error]}
+              />
+            </Panel>
+            <Panel title="Latest version path">
+              <LatestDeploymentPanel version={deploymentVersion.data} error={deploymentVersion.error} />
+            </Panel>
+          </div>
+          <aside className="product-side">
+            <Panel title="Worker and runtime">
+              <KeyValue label="Worker jobs" value={String((sessionLoopJobs.data ?? []).length + (executionJobs.data ?? []).length)} />
+              <KeyValue label="Latest job" value={selectedRow?.latestJob?.reason ?? selectedRow?.latestJob?.tool_name ?? "none"} />
+              <KeyValue label="Worker" value={selectedRow?.latestJob?.worker_id ?? "waiting"} />
+              <KeyValue label="Runtime" value={runtime.execution} />
+            </Panel>
+            <Panel title="Scheduler">
+              {schedulerSummary.data ? (
+                <SchedulerPanel summary={schedulerSummary.data} />
+              ) : <p className="muted">Scheduler summary is loading.</p>}
+            </Panel>
+          </aside>
+        </section>
+      )}
 
       <footer className="taskbar">
         <select value={selectedAgentId || selectedAgent?.id || ""} onChange={(event) => setSelectedAgentId(event.target.value)}>
@@ -924,6 +1525,488 @@ export function App() {
         <button disabled={!task.trim() || launch.isPending} onClick={() => launch.mutate()}>{launch.isPending ? "Starting..." : "Start task"}</button>
       </footer>
     </main>
+  );
+}
+
+function ManagerPlanComposer({
+  sessions,
+  workItems,
+  specialists,
+  goal,
+  risk,
+  workItemId,
+  specialistAgentId,
+  steps,
+  isSaving,
+  error,
+  onGoalChange,
+  onRiskChange,
+  onWorkItemChange,
+  onSpecialistChange,
+  onStepsChange,
+  onCreate,
+}: {
+  sessions: SessionRow[];
+  workItems: WorkItem[];
+  specialists: Agent[];
+  goal: string;
+  risk: string;
+  workItemId: string;
+  specialistAgentId: string;
+  steps: string;
+  isSaving: boolean;
+  error: unknown;
+  onGoalChange: (value: string) => void;
+  onRiskChange: (value: string) => void;
+  onWorkItemChange: (value: string) => void;
+  onSpecialistChange: (value: string) => void;
+  onStepsChange: (value: string) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <div className="manager-composer">
+      <div className="graph-summary">
+        <KeyValue label="Manager sessions" value={String(sessions.length)} />
+        <KeyValue label="Work items" value={String(workItems.length)} />
+        <KeyValue label="Specialists" value={String(specialists.length)} />
+      </div>
+      <div className="control-grid manager-grid">
+        <label className="wide-filter">
+          <span>Goal</span>
+          <textarea rows={3} value={goal} onChange={(event) => onGoalChange(event.target.value)} />
+        </label>
+        <label>
+          <span>Work item</span>
+          <select value={workItemId} onChange={(event) => onWorkItemChange(event.target.value)}>
+            <option value="">No work item</option>
+            {workItems.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>Specialist</span>
+          <select value={specialistAgentId} onChange={(event) => onSpecialistChange(event.target.value)}>
+            <option value="">Unassigned</option>
+            {specialists.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>Risk</span>
+          <select value={risk} onChange={(event) => onRiskChange(event.target.value)}>
+            {["low", "medium", "high"].map((value) => <option key={value} value={value}>{value}</option>)}
+          </select>
+        </label>
+        <label className="wide-filter">
+          <span>Decomposition</span>
+          <textarea rows={5} value={steps} onChange={(event) => onStepsChange(event.target.value)} />
+        </label>
+      </div>
+      <div className="action-row">
+        <button disabled={isSaving || !goal.trim() || !sessions.length} onClick={onCreate}>
+          {isSaving ? "Creating..." : "Create manager plan"}
+        </button>
+        <span>{sessions.length ? "records manager_plan.created into audit" : "create or select a manager session first"}</span>
+      </div>
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+    </div>
+  );
+}
+
+function ManagerPlanConsole({
+  plans,
+  agents,
+  workItems,
+  handoffs,
+  assignments,
+  isReviewing,
+  error,
+  onReview,
+}: {
+  plans: ManagerAgentPlan[];
+  agents: Agent[];
+  workItems: WorkItem[];
+  handoffs: AgentHandoffEvent[];
+  assignments: AgentHandoffAssignment[];
+  isReviewing: boolean;
+  error: unknown;
+  onReview: (id: string, status: string) => void;
+}) {
+  const sorted = [...plans].sort((left, right) => right.created_at.localeCompare(left.created_at));
+  return (
+    <div className="manager-console">
+      <div className="graph-summary">
+        <KeyValue label="Plans" value={String(plans.length)} />
+        <KeyValue label="Handoffs" value={String(handoffs.length)} />
+        <KeyValue label="Assignments" value={String(assignments.length)} />
+      </div>
+      {sorted.length ? sorted.map((plan) => {
+        const planHandoffs = handoffs.filter((handoff) => handoff.manager_plan_id === plan.id);
+        return (
+          <article key={plan.id} className="manager-plan-card">
+            <div className="inspection-title">
+              <strong>{planGoal(plan)}</strong>
+              <span>{plan.status} · {plan.risk_classification}</span>
+            </div>
+            <div className="field-grid">
+              <KeyValue label="Manager" value={agentName(agents, plan.manager_agent_id)} />
+              <KeyValue label="Specialist" value={agentName(agents, plan.specialist_agent_id)} />
+              <KeyValue label="Work item" value={workItemTitle(workItems, plan.work_item_id)} />
+              <KeyValue label="Plan ID" value={shortId(plan.id)} />
+              <KeyValue label="Updated" value={relativeAge(plan.updated_at)} />
+              <KeyValue label="Handoffs" value={String(planHandoffs.length)} />
+            </div>
+            <div className="scope-line compact">
+              {planSteps(plan).slice(0, 6).map((step) => <span key={step}>{step}</span>)}
+              {!planSteps(plan).length ? <span>no decomposition steps</span> : null}
+            </div>
+            <div className="review-actions">
+              <button disabled={isReviewing || plan.status === "approved"} onClick={() => onReview(plan.id, "approved")}>Approve</button>
+              <button disabled={isReviewing} className="ghost" onClick={() => onReview(plan.id, "needs_changes")}>Needs changes</button>
+              <button disabled={isReviewing} className="ghost danger" onClick={() => onReview(plan.id, "blocked")}>Block</button>
+            </div>
+            {planHandoffs.length ? (
+              <div className="handoff-strip">
+                {planHandoffs.map((handoff) => (
+                  <span key={handoff.id}>{handoff.intent} · {handoff.status} · {handoff.review_status}</span>
+                ))}
+              </div>
+            ) : null}
+          </article>
+        );
+      }) : <p className="muted">No manager plans yet.</p>}
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+    </div>
+  );
+}
+
+function WorkItemIntakePanel({ workItems }: { workItems: WorkItem[] }) {
+  const sorted = [...workItems].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  return (
+    <div className="work-item-list">
+      {sorted.slice(0, 12).map((item) => (
+        <div key={item.id} className="obs-row">
+          <strong>{item.title}</strong>
+          <span>{item.status} · {item.priority} · {item.source}</span>
+          <small>{item.description ?? shortId(item.id)}</small>
+        </div>
+      ))}
+      {!sorted.length ? <p className="muted">No WorkItems are available yet.</p> : null}
+    </div>
+  );
+}
+
+function HandoffEvidencePanel({
+  handoffs,
+  assignments,
+  agents,
+  isMutating,
+  error,
+  onTransition,
+}: {
+  handoffs: AgentHandoffEvent[];
+  assignments: AgentHandoffAssignment[];
+  agents: Agent[];
+  isMutating: boolean;
+  error: unknown;
+  onTransition: (id: string, action: "accept" | "reject" | "fail" | "complete" | "escalate") => void;
+}) {
+  return (
+    <div className="handoff-evidence">
+      {handoffs.slice(-10).reverse().map((handoff) => {
+        const assignment = assignments.find((item) => item.agent_handoff_event_id === handoff.id);
+        return (
+          <div key={handoff.id} className="obs-row">
+            <strong>{handoff.intent} · {handoff.status}</strong>
+            <span>{agentName(agents, handoff.source_agent_id)} to {agentName(agents, handoff.target_agent_id)}</span>
+            <small>{handoff.review_status} · escalation {handoff.human_escalation_status} · assignment {assignment?.status ?? "none"}</small>
+            <div className="review-actions compact-actions">
+              <button disabled={isMutating || handoff.status !== "requested"} onClick={() => onTransition(handoff.id, "accept")}>Accept</button>
+              <button disabled={isMutating || handoff.status !== "accepted"} onClick={() => onTransition(handoff.id, "complete")}>Complete</button>
+              <button disabled={isMutating || handoff.status === "completed" || handoff.status === "rejected"} className="ghost" onClick={() => onTransition(handoff.id, "escalate")}>Escalate</button>
+              <button disabled={isMutating || handoff.status === "completed" || handoff.status === "rejected"} className="ghost danger" onClick={() => onTransition(handoff.id, "fail")}>Fail</button>
+            </div>
+          </div>
+        );
+      })}
+      {!handoffs.length ? <p className="muted">No handoff events recorded yet.</p> : null}
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+    </div>
+  );
+}
+
+function MemoryGovernanceConsole({
+  summary,
+  detail,
+  selectedPartitionKey,
+  onSelectPartition,
+}: {
+  summary: MemoryGovernanceSummary;
+  detail?: MemoryGovernancePartitionDetail;
+  selectedPartitionKey: string;
+  onSelectPartition: (key: string) => void;
+}) {
+  return (
+    <div className="memory-console">
+      <div className="graph-summary">
+        <KeyValue label="Status" value={summary.status} />
+        <KeyValue label="Isolation" value={summary.isolation_policy} />
+        <KeyValue label="Partitions" value={String(summary.partition_count)} />
+        <KeyValue label="Pending writebacks" value={String(summary.writeback.pending_count)} />
+      </div>
+      <div className="partition-list">
+        {summary.partitions.map((partition) => (
+          <button
+            key={partition.partition_key}
+            className={selectedPartitionKey === partition.partition_key ? "partition-chip selected" : "partition-chip"}
+            onClick={() => onSelectPartition(partition.partition_key)}
+          >
+            <span>{partition.domain_scope}/{partition.workflow_scope}</span>
+            <strong>{partition.memory_object_count}</strong>
+          </button>
+        ))}
+      </div>
+      {detail ? <MemoryPartitionDetail detail={detail} /> : <p className="muted">Choose a partition to inspect governance detail.</p>}
+      {summary.attention_items.map((item) => (
+        <Row key={`${item.kind}-${item.message}`} title={`${item.severity} · ${item.kind}`} detail={item.message} />
+      ))}
+    </div>
+  );
+}
+
+function WorkflowPackMarketplace({
+  manifestPath,
+  installations,
+  selectedInstallationId,
+  validateResult,
+  installResult,
+  validateError,
+  installError,
+  isValidating,
+  isInstalling,
+  onManifestPathChange,
+  onSelectInstallation,
+  onValidate,
+  onInstall,
+}: {
+  manifestPath: string;
+  installations: WorkflowPackInstallation[];
+  selectedInstallationId: string;
+  validateResult?: Record<string, unknown>;
+  installResult?: WorkflowPackInstallation;
+  validateError: unknown;
+  installError: unknown;
+  isValidating: boolean;
+  isInstalling: boolean;
+  onManifestPathChange: (value: string) => void;
+  onSelectInstallation: (id: string) => void;
+  onValidate: () => void;
+  onInstall: () => void;
+}) {
+  return (
+    <div className="pack-marketplace">
+      <div className="control-grid">
+        <label className="wide-filter">
+          <span>Manifest path</span>
+          <input value={manifestPath} onChange={(event) => onManifestPathChange(event.target.value)} />
+        </label>
+        <button disabled={isValidating || !manifestPath.trim()} onClick={onValidate}>{isValidating ? "Validating..." : "Validate"}</button>
+        <button disabled={isInstalling || !manifestPath.trim()} onClick={onInstall}>{isInstalling ? "Installing..." : "Install"}</button>
+      </div>
+      <div className="graph-summary">
+        <KeyValue label="Installed packs" value={String(installations.length)} />
+        <KeyValue label="Selected" value={shortId(selectedInstallationId || "none")} />
+        <KeyValue label="Last install" value={installResult ? `${installResult.pack_id}@${installResult.version}` : "none"} />
+      </div>
+      {validateResult ? (
+        <details className="json-details" open>
+          <summary>Validation report</summary>
+          <pre>{formatJson(validateResult)}</pre>
+        </details>
+      ) : null}
+      <div className="installation-list">
+        {installations.map((installation) => (
+          <button
+            key={installation.id}
+            className={installation.id === selectedInstallationId ? "installation-row selected" : "installation-row"}
+            onClick={() => onSelectInstallation(installation.id)}
+          >
+            <strong>{installation.pack_id}@{installation.version}</strong>
+            <span>{installation.kind} · {installation.status} · {relativeAge(installation.updated_at)}</span>
+          </button>
+        ))}
+      </div>
+      {validateError ? <p className="error-note">{errorMessage(validateError)}</p> : null}
+      {installError ? <p className="error-note">{errorMessage(installError)}</p> : null}
+    </div>
+  );
+}
+
+function WorkflowPackReleaseConsole({
+  installation,
+  onboardingAssessment,
+  connectorQuality,
+  profileAssets,
+  profileDraft,
+  releaseEvidence,
+  bindings,
+  runtimeObjects,
+  isAssessing,
+  isAssessingConnectorQuality,
+  isSavingProfiles,
+  isStaging,
+  isReleasing,
+  isRollingBack,
+  isUpdating,
+  isArchiving,
+  canUpdate,
+  error,
+  onProfileDraftChange,
+  onReleaseEvidenceChange,
+  onAssess,
+  onAssessConnectorQuality,
+  onSaveProfiles,
+  onStage,
+  onRelease,
+  onRollback,
+  onUpdate,
+  onArchive,
+}: {
+  installation?: WorkflowPackInstallation;
+  onboardingAssessment?: WorkflowPackOnboardingAssessment;
+  connectorQuality?: WorkflowPackConnectorQualityAssessment;
+  profileAssets: WorkflowPackProfileAsset[];
+  profileDraft: string;
+  releaseEvidence: string;
+  bindings: WorkflowPackBinding[];
+  runtimeObjects: WorkflowPackRuntimeObject[];
+  isAssessing: boolean;
+  isAssessingConnectorQuality: boolean;
+  isSavingProfiles: boolean;
+  isStaging: boolean;
+  isReleasing: boolean;
+  isRollingBack: boolean;
+  isUpdating: boolean;
+  isArchiving: boolean;
+  canUpdate: boolean;
+  error: unknown;
+  onProfileDraftChange: (value: string) => void;
+  onReleaseEvidenceChange: (value: string) => void;
+  onAssess: () => void;
+  onAssessConnectorQuality: () => void;
+  onSaveProfiles: () => void;
+  onStage: () => void;
+  onRelease: () => void;
+  onRollback: () => void;
+  onUpdate: () => void;
+  onArchive: () => void;
+}) {
+  if (!installation) {
+    return <p className="muted">Install or select a workflow pack first.</p>;
+  }
+  return (
+    <div className="pack-release-console">
+      <div className="graph-summary">
+        <KeyValue label="Pack" value={`${installation.pack_id}@${installation.version}`} />
+        <KeyValue label="Status" value={installation.status} />
+        <KeyValue label="Profiles" value={String(profileAssets.length)} />
+        <KeyValue label="Bindings" value={String(bindings.length)} />
+        <KeyValue label="Runtime objects" value={String(runtimeObjects.length)} />
+      </div>
+      <textarea rows={7} value={profileDraft} spellCheck={false} onChange={(event) => onProfileDraftChange(event.target.value)} />
+      <div className="action-row">
+        <button disabled={isSavingProfiles} onClick={onSaveProfiles}>{isSavingProfiles ? "Saving..." : "Save profiles"}</button>
+        <button disabled={isAssessing} onClick={onAssess}>{isAssessing ? "Assessing..." : "Assess onboarding"}</button>
+        <button disabled={isAssessingConnectorQuality} onClick={onAssessConnectorQuality}>{isAssessingConnectorQuality ? "Checking..." : "Assess connectors"}</button>
+        <span>{onboardingAssessment ? `${onboardingAssessment.status} · ${onboardingAssessment.blockers.length} blockers` : "assessment pending"}</span>
+      </div>
+      {onboardingAssessment ? (
+        <div className={onboardingAssessment.status === "ready" ? "readiness-card ready" : "readiness-card blocked"}>
+          <strong>{onboardingAssessment.status}</strong>
+          <span>{onboardingAssessment.ready_connector_count}/{onboardingAssessment.connector_requirement_count} connectors ready · {onboardingAssessment.placeholder_profile_count} placeholder profiles</span>
+          {onboardingAssessment.blockers.slice(0, 6).map((blocker) => <small key={blocker}>{blocker}</small>)}
+        </div>
+      ) : null}
+      {connectorQuality ? (
+        <div className={connectorQuality.status === "ready" ? "readiness-card ready" : "readiness-card blocked"}>
+          <strong>Connector quality · {connectorQuality.status}</strong>
+          <span>{connectorQuality.ready_connector_count}/{connectorQuality.connector_requirement_count} connectors ready</span>
+          {connectorQuality.blockers.slice(0, 6).map((blocker) => <small key={blocker}>{blocker}</small>)}
+        </div>
+      ) : null}
+      <textarea rows={5} value={releaseEvidence} spellCheck={false} onChange={(event) => onReleaseEvidenceChange(event.target.value)} />
+      <div className="review-actions">
+        <button disabled={isStaging || installation.status !== "installed"} onClick={onStage}>{isStaging ? "Staging..." : "Stage"}</button>
+        <button disabled={isReleasing || installation.status !== "staged"} onClick={onRelease}>{isReleasing ? "Releasing..." : "Release"}</button>
+        <button disabled={isRollingBack || installation.status !== "released"} className="ghost danger" onClick={onRollback}>{isRollingBack ? "Rolling back..." : "Rollback"}</button>
+        <button disabled={isUpdating || !canUpdate || !["released", "rolled_back"].includes(installation.status)} className="ghost" onClick={onUpdate}>{isUpdating ? "Updating..." : "Create update"}</button>
+        <button disabled={isArchiving} className="ghost danger" onClick={onArchive}>{isArchiving ? "Archiving..." : "Archive"}</button>
+      </div>
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+    </div>
+  );
+}
+
+function DeployReadinessPanel({
+  stage2,
+  codexDeployment,
+  observability,
+  errors,
+}: {
+  stage2?: Stage2Readiness;
+  codexDeployment?: Record<string, unknown>;
+  observability?: ObservabilitySummary;
+  errors: unknown[];
+}) {
+  return (
+    <div className="deploy-readiness">
+      <div className="graph-summary">
+        <KeyValue label="Stage 2" value={readinessStatus(stage2)} />
+        <KeyValue label="Codex deploy" value={recordStatus(codexDeployment)} />
+        <KeyValue label="Observability" value={recordStatus(observability)} />
+      </div>
+      {stage2 ? <ReadinessRecord title="Stage 2 readiness" record={stage2} /> : <p className="muted">Stage 2 readiness is loading.</p>}
+      {codexDeployment ? <ReadinessRecord title="Codex App Server deployment" record={codexDeployment} /> : null}
+      {observability ? <ReadinessRecord title="Observability" record={observability} /> : null}
+      {errors.filter(Boolean).map((error, index) => <p key={index} className="error-note">{errorMessage(error)}</p>)}
+    </div>
+  );
+}
+
+function ReadinessRecord({ title, record }: { title: string; record: Record<string, unknown> }) {
+  return (
+    <details className="json-details">
+      <summary>{title}</summary>
+      <pre>{formatJson(record)}</pre>
+    </details>
+  );
+}
+
+function LatestDeploymentPanel({ version, error }: { version?: DeploymentVersion; error?: unknown }) {
+  const imageTag = version?.image_tag || "not reported";
+  const gitSha = version?.git_sha || "not reported";
+  const buildTime = version?.build_time || "not reported";
+  return (
+    <div className="latest-deploy-panel">
+      <div className={`readiness-card ${version?.image_tag ? "ready" : "blocked"}`}>
+        <strong>{version ? "Running API version" : "Running API version unavailable"}</strong>
+        <span>{version ? `${version.service} · ${version.source}` : "Waiting for /api/deployment/version."}</span>
+        {error ? <small>{errorMessage(error)}</small> : null}
+      </div>
+      <div className="deploy-version-grid">
+        <KeyValue label="Image tag" value={imageTag} />
+        <KeyValue label="Git SHA" value={shortId(gitSha)} />
+        <KeyValue label="Build time" value={buildTime} />
+        <KeyValue label="Cargo version" value={version?.cargo_package_version ?? "not reported"} />
+      </div>
+      <pre>{[
+        "curl -fsS http://127.0.0.1:8787/api/deployment/version",
+        "npm run build --prefix web-ui",
+        "scripts/verify-static-ui-assets.sh",
+        "git diff --check",
+        "gh workflow run Deploy -f image_tag=whiskey-$(git rev-parse --short HEAD) -f publish_image=true -f deploy_whiskey=true",
+        "ssh wishky-2-1 'cat /opt/mandoforge-adoption/evidence/deployment-version.json'",
+        "scripts/whiskey-adoption-evidence.sh",
+      ].join("\n")}</pre>
+    </div>
   );
 }
 
@@ -1028,33 +2111,254 @@ function StepRow({ step }: { step: WorkflowStepRun }) {
   );
 }
 
-function TaskBoardPanel({ board, agents }: { board: TaskBoardSnapshot; agents: Agent[] }) {
+function TaskBoardPanel({
+  board,
+  agents,
+  selectedAgent,
+  isRunning,
+  runError,
+  onRun,
+}: {
+  board: TaskBoardSnapshot;
+  agents: Agent[];
+  selectedAgent?: Agent;
+  isRunning: boolean;
+  runError: unknown;
+  onRun: (stepId: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [columnFilter, setColumnFilter] = useState<TaskBoardColumnId | "all">("all");
+  const [agentFilter, setAgentFilter] = useState("all");
+  const [onlyClaimable, setOnlyClaimable] = useState(false);
+  const [selectedItemId, setSelectedItemId] = useState("");
+
+  const agentOptions = useMemo(() => {
+    const ids = new Set(board.items.map((item) => item.agent_id).filter((id): id is string => Boolean(id)));
+    return agents.filter((agent) => ids.has(agent.id));
+  }, [agents, board.items]);
+
+  const filteredItems = useMemo(() => {
+    return [...board.items]
+      .filter((item) => columnFilter === "all" || taskBoardColumnFor(item) === columnFilter)
+      .filter((item) => agentFilter === "all" || (agentFilter === "unassigned" ? !item.agent_id : item.agent_id === agentFilter))
+      .filter((item) => !onlyClaimable || item.claimable)
+      .filter((item) => matchesTaskBoardQuery(item, agents, query))
+      .sort(compareTaskBoardItems);
+  }, [agents, agentFilter, board.items, columnFilter, onlyClaimable, query]);
+
+  const columns = useMemo(() => {
+    return TASK_BOARD_COLUMNS.map((column) => ({
+      ...column,
+      items: filteredItems.filter((item) => taskBoardColumnFor(item) === column.id),
+    }));
+  }, [filteredItems]);
+
+  const activeItem = filteredItems.find((item) => item.workflow_step_run_id === selectedItemId) ?? filteredItems[0] ?? null;
+  const activeItemId = activeItem?.workflow_step_run_id ?? "";
+  const generatedAge = relativeAge(board.generated_at);
+
   return (
-    <div className="task-board-panel">
-      <div className="graph-summary">
+    <div className="task-board-panel task-board-workbench">
+      <div className="task-board-toolbar">
+        <div>
+          <strong>Collaboration kanban</strong>
+          <span>{board.items.length} live cards · refreshed {generatedAge ? `${generatedAge} ago` : "now"}</span>
+        </div>
+        <span className="operator-pill">Run as {selectedAgent?.name ?? "no agent"}</span>
+      </div>
+
+      <div className="graph-summary board-summary">
         <KeyValue label="Work items" value={String(board.work_item_count)} />
+        <KeyValue label="Workflows" value={String(board.workflow_run_count)} />
         <KeyValue label="Steps" value={String(board.workflow_step_count)} />
         <KeyValue label="Claimable" value={String(board.claimable_count)} />
+        <KeyValue label="Visible" value={String(filteredItems.length)} />
+        <KeyValue label="Updated" value={generatedAge ? `${generatedAge} ago` : "now"} />
       </div>
+
+      <div className="task-board-filters">
+        <label className="wide-filter">
+          <span>Search</span>
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="work item, step, agent, status, id" />
+        </label>
+        <label>
+          <span>Column</span>
+          <select value={columnFilter} onChange={(event) => setColumnFilter(event.target.value as TaskBoardColumnId | "all")}>
+            <option value="all">All columns</option>
+            {TASK_BOARD_COLUMNS.map((column) => <option key={column.id} value={column.id}>{column.title}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>Agent</span>
+          <select value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}>
+            <option value="all">All agents</option>
+            <option value="unassigned">Unassigned</option>
+            {agentOptions.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+          </select>
+        </label>
+        <label className="checkbox-control">
+          <input type="checkbox" checked={onlyClaimable} onChange={(event) => setOnlyClaimable(event.target.checked)} />
+          <span>Claimable only</span>
+        </label>
+      </div>
+
       <div className="status-counts">
         {Object.entries(board.status_counts).map(([status, count]) => (
           <span key={status} className={`status-count node-${statusFromText(status)}`}>{status}: {count}</span>
         ))}
       </div>
-      {board.items.slice(0, 6).map((item) => (
-        <div key={item.workflow_step_run_id} className={item.claimable ? "obs-row task-board-row claimable" : "obs-row task-board-row"}>
-          <StatusLogo status={statusFromText(item.status)} />
-          <div>
-            <strong>{item.work_item_title ?? item.step_key}</strong>
-            <span>
-              {item.step_key} · {item.status} · {agentName(agents, item.agent_id)}
-              {item.context_packet_id ? ` · ctx ${shortId(item.context_packet_id)}` : ""}
-            </span>
-            {item.blockers.length ? <small>{item.blockers.join(", ")}</small> : <small>ready for worker run</small>}
-          </div>
-        </div>
-      ))}
+
+      {runError ? <p className="error-note">Run failed: {errorMessage(runError)}</p> : null}
+
+      <div className="task-kanban" aria-label="Collaboration task board">
+        {columns.map((column) => (
+          <section key={column.id} className={`task-column task-column-${column.id}`}>
+            <div className="task-column-head">
+              <div>
+                <strong>{column.title}</strong>
+                <span>{column.hint}</span>
+              </div>
+              <b>{column.items.length}</b>
+            </div>
+            <div className="task-card-stack">
+              {column.items.length ? column.items.map((item) => (
+                <TaskBoardCard
+                  key={item.workflow_step_run_id}
+                  item={item}
+                  agents={agents}
+                  selected={item.workflow_step_run_id === activeItemId}
+                  selectedAgent={selectedAgent}
+                  isRunning={isRunning}
+                  onSelect={() => setSelectedItemId(item.workflow_step_run_id)}
+                  onRun={() => onRun(item.workflow_step_run_id)}
+                />
+              )) : <p className="empty-column">No cards</p>}
+            </div>
+          </section>
+        ))}
+      </div>
+
+      {activeItem ? (
+        <TaskBoardInspector
+          item={activeItem}
+          agents={agents}
+          selectedAgent={selectedAgent}
+          isRunning={isRunning}
+          onRun={() => onRun(activeItem.workflow_step_run_id)}
+        />
+      ) : <p className="muted">No board item matches the current filters.</p>}
     </div>
+  );
+}
+
+function TaskBoardCard({
+  item,
+  agents,
+  selected,
+  selectedAgent,
+  isRunning,
+  onSelect,
+  onRun,
+}: {
+  item: TaskBoardItemView;
+  agents: Agent[];
+  selected: boolean;
+  selectedAgent?: Agent;
+  isRunning: boolean;
+  onSelect: () => void;
+  onRun: () => void;
+}) {
+  const column = taskBoardColumnFor(item);
+  const statusTone = statusFromText(item.status);
+  const runBlocker = taskBoardRunBlocker(item, selectedAgent, agents);
+  return (
+    <article
+      className={selected ? `task-card task-card-${column} task-status-${statusTone} selected` : `task-card task-card-${column} task-status-${statusTone}`}
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") onSelect();
+      }}
+    >
+      <div className="task-card-top">
+        <StatusLogo status={statusFromText(item.status)} />
+        <div>
+          <strong>{item.work_item_title ?? item.step_key}</strong>
+          <span>{item.step_key} · {item.step_type}</span>
+        </div>
+      </div>
+      <div className="task-card-meta">
+        <span>{item.status}</span>
+        <span>{item.work_item_priority ?? "normal"}</span>
+        <span>{agentName(agents, item.agent_id)}</span>
+      </div>
+      <div className="chip-row">
+        {item.context_packet_id ? <span className="board-chip">ctx {shortId(item.context_packet_id)}</span> : null}
+        {item.task_grant_id ? <span className="board-chip">grant {shortId(item.task_grant_id)}</span> : null}
+        {item.claimed_by_worker ? <span className="board-chip">worker {item.claimed_by_worker}</span> : null}
+      </div>
+      {item.blockers.length ? (
+        <small className="task-card-blocker">{item.blockers.slice(0, 2).join(" · ")}{item.blockers.length > 2 ? ` · +${item.blockers.length - 2}` : ""}</small>
+      ) : <small className="task-ready-note">No blocker reported</small>}
+      <div className="task-card-actions">
+        <span>{relativeAge(item.updated_at) || "now"} ago</span>
+        <button disabled={Boolean(runBlocker) || isRunning} onClick={(event) => {
+          event.stopPropagation();
+          onRun();
+        }}>
+          {isRunning ? "Running..." : "Run"}
+        </button>
+      </div>
+      {runBlocker ? <small className="run-blocker">{runBlocker}</small> : null}
+    </article>
+  );
+}
+
+function TaskBoardInspector({
+  item,
+  agents,
+  selectedAgent,
+  isRunning,
+  onRun,
+}: {
+  item: TaskBoardItemView;
+  agents: Agent[];
+  selectedAgent?: Agent;
+  isRunning: boolean;
+  onRun: () => void;
+}) {
+  const runBlocker = taskBoardRunBlocker(item, selectedAgent, agents);
+  return (
+    <section className="task-inspector">
+      <div className="task-inspector-head">
+        <div>
+          <span>Selected card</span>
+          <strong>{item.work_item_title ?? item.step_key}</strong>
+        </div>
+        <button disabled={Boolean(runBlocker) || isRunning} onClick={onRun}>
+          {isRunning ? "Running..." : "Run step"}
+        </button>
+      </div>
+      <div className="task-detail-grid">
+        <KeyValue label="Status" value={item.status} />
+        <KeyValue label="Column" value={taskBoardColumnFor(item)} />
+        <KeyValue label="Agent" value={agentName(agents, item.agent_id)} />
+        <KeyValue label="Priority" value={item.work_item_priority ?? "normal"} />
+        <KeyValue label="Workflow" value={shortId(item.workflow_run_id)} />
+        <KeyValue label="Definition" value={shortId(item.workflow_definition_id)} />
+        <KeyValue label="Step run" value={shortId(item.workflow_step_run_id)} />
+        <KeyValue label="Task grant" value={shortId(item.task_grant_id ?? "none")} />
+        <KeyValue label="Context packet" value={shortId(item.context_packet_id ?? "none")} />
+        <KeyValue label="Claimed worker" value={item.claimed_by_worker ?? "none"} />
+        <KeyValue label="Lease" value={item.lease_expires_at ? relativeMoment(item.lease_expires_at) : "none"} />
+        <KeyValue label="Updated" value={relativeAge(item.updated_at) || "now"} />
+      </div>
+      {runBlocker ? <p className="status-hint">Run blocked: {runBlocker}</p> : <p className="status-hint">This card can be claimed by the selected agent.</p>}
+      <div className="blocker-list">
+        {item.blockers.length ? item.blockers.map((blocker) => <span key={blocker}>{blocker}</span>) : <span>No blockers</span>}
+      </div>
+    </section>
   );
 }
 
@@ -1076,7 +2380,7 @@ function AgentInboxPanel({
         <KeyValue label="Entries" value={String(inbox.entry_count)} />
         <KeyValue label="Ready" value={String(inbox.claimable_count)} />
       </div>
-      {inbox.entries.slice(0, 6).map((entry) => (
+      {inbox.entries.map((entry) => (
         <div key={entry.workflow_step_run_id} className={entry.claimable ? "inbox-entry claimable" : "inbox-entry"}>
           <div className="inbox-main">
             <StatusLogo status={statusFromText(entry.status)} />
@@ -1842,6 +3146,92 @@ function preferredAgent(agents: Agent[]): Agent | undefined {
   );
 }
 
+function isWorkbenchView(value: string | null): value is WorkbenchView {
+  return value === "agents" || value === "board" || value === "manager" || value === "semantic" || value === "packs" || value === "deploy";
+}
+
+function viewTitle(view: WorkbenchView): string {
+  return {
+    agents: "Managed agent observability",
+    board: "Collaboration board",
+    manager: "Manager agent desk",
+    semantic: "Semantic memory governance",
+    packs: "Workflow pack console",
+    deploy: "Production deployment control",
+  }[view];
+}
+
+function planGoal(plan: ManagerAgentPlan): string {
+  const goal = plan.task_intake.goal;
+  if (typeof goal === "string" && goal.trim()) return goal;
+  const title = plan.task_intake.title;
+  if (typeof title === "string" && title.trim()) return title;
+  return `Manager plan ${shortId(plan.id)}`;
+}
+
+function planSteps(plan: ManagerAgentPlan): string[] {
+  const steps = plan.decomposition.steps;
+  if (Array.isArray(steps)) {
+    return steps.filter((step): step is string => typeof step === "string" && step.trim().length > 0);
+  }
+  const tasks = plan.decomposition.tasks;
+  if (Array.isArray(tasks)) {
+    return tasks
+      .map((task) => {
+        if (typeof task === "string") return task;
+        if (task && typeof task === "object" && "title" in task && typeof task.title === "string") return task.title;
+        return "";
+      })
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function workItemTitle(items: WorkItem[], itemId?: string | null): string {
+  if (!itemId) return "none";
+  return items.find((item) => item.id === itemId)?.title ?? shortId(itemId);
+}
+
+function readinessStatus(record?: Record<string, unknown>): string {
+  if (!record) return "loading";
+  return recordStatus(record);
+}
+
+function recordStatus(record?: Record<string, unknown>): string {
+  if (!record) return "loading";
+  for (const key of ["status", "state", "readiness", "health"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  const nested = record.deployment_readiness;
+  if (nested && typeof nested === "object" && "status" in nested && typeof nested.status === "string") {
+    return nested.status;
+  }
+  return "observed";
+}
+
+function emptySchedulerSummary(): SchedulerOrchestrationSummary {
+  return {
+    generated_at: new Date().toISOString(),
+    status: "loading",
+    plan: {
+      status: "loading",
+      generated_at: new Date().toISOString(),
+      team_count: 0,
+      item_count: 0,
+      actionable_count: 0,
+      actions: [],
+    },
+    deployment_readiness: {},
+    recent_run_count: 0,
+    last_run_at: null,
+    last_run_status: null,
+    last_run_action_count: 0,
+    recent_runs: [],
+    attention_items: [],
+  };
+}
+
 function titleFromTask(task: string): string {
   const firstLine = task.trim().split(/\n/)[0] || "Managed agent task";
   return firstLine.length > 64 ? `${firstLine.slice(0, 61)}...` : firstLine;
@@ -1863,6 +3253,20 @@ function relativeAge(value: string): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
+function relativeMoment(value: string): string {
+  const date = Date.parse(value);
+  if (Number.isNaN(date)) return "";
+  const deltaSeconds = Math.floor((date - Date.now()) / 1000);
+  const absoluteSeconds = Math.abs(deltaSeconds);
+  const suffix = deltaSeconds >= 0 ? "from now" : "ago";
+  if (absoluteSeconds < 60) return `${absoluteSeconds}s ${suffix}`;
+  const minutes = Math.floor(absoluteSeconds / 60);
+  if (minutes < 60) return `${minutes}m ${suffix}`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${suffix}`;
+  return `${Math.floor(hours / 24)}d ${suffix}`;
+}
+
 function hasPhase(events: SessionEvent[], transitions: WorkflowTransition[], phase: string): boolean {
   if (phase === "workflow") return transitions.length > 0 || hasEvent(events, "workflow");
   return hasEvent(events, phase);
@@ -1875,9 +3279,72 @@ function hasEvent(events: SessionEvent[], phase: string): boolean {
 function statusFromText(status: string): RowStatus {
   if (status === "completed" || status === "skipped" || status === "consumed") return "completed";
   if (status === "running" || status === "active") return "running";
-  if (status === "queued" || status === "scheduled" || status === "issued" || status === "materialized" || status === "deferred") return "queued";
+  if (status === "queued" || status === "scheduled" || status === "issued" || status === "materialized" || status === "deferred" || status === "pending" || status === "planned" || status === "ready") return "queued";
+  if (status === "requires_action" || status === "requires_review" || status === "pending_approval" || status === "blocked" || status === "waiting_for_approval") return "needs_input";
   if (status === "failed" || status === "canceled" || status === "denied") return "failed";
   return "idle";
+}
+
+function taskBoardColumnFor(item: TaskBoardItemView): TaskBoardColumnId {
+  const status = item.status.toLowerCase();
+  if (isTerminalTaskStatus(status)) return "done";
+  if (item.claimable) return "ready";
+  if (isReviewTaskStatus(status)) return "review";
+  if (status === "running" || status === "active" || status === "in_progress" || Boolean(item.claimed_by_worker)) return "running";
+  if (item.blockers.length || status === "blocked") return "blocked";
+  return "backlog";
+}
+
+function isTerminalTaskStatus(status: string): boolean {
+  return ["completed", "failed", "canceled", "cancelled", "skipped", "denied"].includes(status);
+}
+
+function isReviewTaskStatus(status: string): boolean {
+  return ["requires_action", "requires_review", "pending_approval", "waiting_for_approval", "review"].includes(status);
+}
+
+function compareTaskBoardItems(left: TaskBoardItemView, right: TaskBoardItemView): number {
+  if (left.claimable !== right.claimable) return left.claimable ? -1 : 1;
+  const priorityDelta = priorityRank(left.work_item_priority) - priorityRank(right.work_item_priority);
+  if (priorityDelta !== 0) return priorityDelta;
+  return right.updated_at.localeCompare(left.updated_at);
+}
+
+function priorityRank(priority?: string | null): number {
+  const normalized = (priority ?? "").toLowerCase();
+  if (normalized === "urgent" || normalized === "critical" || normalized === "p0") return 0;
+  if (normalized === "high" || normalized === "p1") return 1;
+  if (normalized === "normal" || normalized === "medium" || normalized === "p2") return 2;
+  if (normalized === "low" || normalized === "p3") return 3;
+  return 4;
+}
+
+function matchesTaskBoardQuery(item: TaskBoardItemView, agents: Agent[], query: string): boolean {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return true;
+  const haystack = [
+    item.work_item_title,
+    item.work_item_priority,
+    item.workflow_run_id,
+    item.workflow_definition_id,
+    item.workflow_step_run_id,
+    item.step_key,
+    item.step_type,
+    item.status,
+    item.task_grant_id,
+    item.context_packet_id,
+    item.claimed_by_worker,
+    agentName(agents, item.agent_id),
+    ...item.blockers,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return haystack.includes(normalized);
+}
+
+function taskBoardRunBlocker(item: TaskBoardItemView, selectedAgent: Agent | undefined, agents: Agent[]): string {
+  if (!item.claimable) return item.blockers[0] ?? "step is not claimable";
+  if (!selectedAgent) return "select an agent";
+  if (item.agent_id && item.agent_id !== selectedAgent.id) return `select assigned agent ${agentName(agents, item.agent_id)}`;
+  return "";
 }
 
 function uniqueTransitionTypes(transitions: Array<{ transition_type: string }>): string[] {
@@ -1964,6 +3431,10 @@ function firstQueryError(errors: Array<unknown>): string | undefined {
 function consumeTokenFromHash(): string {
   const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
   const params = new URLSearchParams(hash);
+  const view = params.get("view");
+  if (isWorkbenchView(view)) {
+    localStorage.setItem("mandoforge.activeView", view);
+  }
   const token = params.get("admin_token") ?? params.get("token") ?? "";
   if (!token.trim()) return "";
   setAdminToken(token);
