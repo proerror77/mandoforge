@@ -16,6 +16,17 @@ REQUIRE_CONNECTOR_BINDING="${WORKFLOW_PACK_REQUIRE_CONNECTOR_BINDING:-0}"
 WORKFLOW_PACK_MCP_CALL_URL="${WORKFLOW_PACK_MCP_CALL_URL:-}"
 WORKFLOW_PACK_MCP_QUERY="${WORKFLOW_PACK_MCP_QUERY:-OpenAI}"
 WORKFLOW_PACK_REQUIRE_LIVE_CONNECTOR_AUTH="${WORKFLOW_PACK_REQUIRE_LIVE_CONNECTOR_AUTH:-0}"
+AUTH_TOKEN="${MANDOFORGE_WORKFLOW_PACK_GATE_TOKEN:-${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-${MANDOFORGE_WORKER_TOKEN:-}}}}"
+
+auth_headers=()
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -57,13 +68,11 @@ fetch_json() {
 
   if [[ "$method" == "GET" ]]; then
     http_status="$(curl -sS -o "$response_body" -w "%{http_code}" \
-      -H "x-mandoforge-subject: $SUBJECT" \
-      -H "x-mandoforge-roles: $ROLES" \
+      "${auth_headers[@]}" \
       "$BASE_URL$path")"
   else
     http_status="$(curl -sS -o "$response_body" -w "%{http_code}" -X "$method" \
-      -H "x-mandoforge-subject: $SUBJECT" \
-      -H "x-mandoforge-roles: $ROLES" \
+      "${auth_headers[@]}" \
       -H "content-type: application/json" \
       -d "$payload" \
       "$BASE_URL$path")"

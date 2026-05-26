@@ -263,6 +263,15 @@ set -a
 source '$REMOTE_ENV'
 set +a
 
+curl() {
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
+  if [[ -n "\$token" ]]; then
+    command curl -H "authorization: Bearer \$token" "\$@"
+  else
+    command curl "\$@"
+  fi
+}
+
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
 evidence_dir='$evidence_dir'
 reason='$reason'
@@ -390,6 +399,15 @@ set -a
 source '$REMOTE_ENV'
 set +a
 
+curl() {
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
+  if [[ -n "\$token" ]]; then
+    command curl -H "authorization: Bearer \$token" "\$@"
+  else
+    command curl "\$@"
+  fi
+}
+
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
 evidence_dir='$evidence_dir'
 reason='$reason'
@@ -479,6 +497,15 @@ cd '$REMOTE_ROOT'
 set -a
 source '$REMOTE_ENV'
 set +a
+
+curl() {
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
+  if [[ -n "\$token" ]]; then
+    command curl -H "authorization: Bearer \$token" "\$@"
+  else
+    command curl "\$@"
+  fi
+}
 
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
 evidence_dir='$evidence_dir'
@@ -627,6 +654,15 @@ set -a
 source '$REMOTE_ENV'
 set +a
 
+curl() {
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
+  if [[ -n "\$token" ]]; then
+    command curl -H "authorization: Bearer \$token" "\$@"
+  else
+    command curl "\$@"
+  fi
+}
+
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
 evidence_dir='$evidence_dir'
 reason='$reason'
@@ -717,6 +753,15 @@ cd '$REMOTE_ROOT'
 set -a
 source '$REMOTE_ENV'
 set +a
+
+curl() {
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
+  if [[ -n "\$token" ]]; then
+    command curl -H "authorization: Bearer \$token" "\$@"
+  else
+    command curl "\$@"
+  fi
+}
 
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
 evidence_dir='$evidence_dir'
@@ -872,6 +917,15 @@ set -a
 source '$REMOTE_ENV'
 set +a
 
+curl() {
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
+  if [[ -n "\$token" ]]; then
+    command curl -H "authorization: Bearer \$token" "\$@"
+  else
+    command curl "\$@"
+  fi
+}
+
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
 evidence_dir='$evidence_dir'
 reason='$reason'
@@ -963,6 +1017,14 @@ rsync -az deploy/stage2-production-evidence/ "$REMOTE_HOST:$REMOTE_ROOT/deploy/s
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
   docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' exec -T api bash -lc '
     set -euo pipefail
+    curl() {
+      local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
+      if [[ -n "\$token" ]]; then
+        command curl -H "authorization: Bearer \$token" "\$@"
+      else
+        command curl "\$@"
+      fi
+    }
     mkdir -p /evidence
     curl -fsS http://127.0.0.1:8787/healthz >/dev/null
 
@@ -1070,6 +1132,7 @@ seed_vault_kms_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey stric
 seed_provider_rollout_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict provider rollout refresh after Vault lifecycle evidence"
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+  curl() { token=\"\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}\"; if [[ -n \"\$token\" ]]; then command curl -H \"authorization: Bearer \$token\" \"\$@\"; else command curl \"\$@\"; fi; }; \
   org_id=\$(curl -fsS -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/organizations | jq -r '.[0].id // empty') && \
   team_id=\$(curl -fsS -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/organizations/\$org_id/teams | jq -r 'map(select(.slug == \"whiskey-pilot\")) | .[0].id // empty') && \
   server_json=\$(curl -fsS -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/teams/\$team_id/mcp-servers | jq 'map(select(.name == \"whiskey-docs\")) | .[0]') && \

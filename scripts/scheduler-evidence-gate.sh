@@ -7,11 +7,17 @@ ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 SCHEDULER_TOKEN="${MANDOFORGE_SCHEDULER_TOKEN:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/scheduler-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
+AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-${MANDOFORGE_WORKER_TOKEN:-}}}"
 
-auth_headers=(
-  -H "x-mandoforge-subject: $SUBJECT"
-  -H "x-mandoforge-roles: $ROLES"
-)
+auth_headers=()
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 if [[ -n "$SCHEDULER_TOKEN" ]]; then
   auth_headers+=(-H "x-mandoforge-scheduler-token: $SCHEDULER_TOKEN")

@@ -7,11 +7,17 @@ ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/provider-governance-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_PROVIDER_ROLLOUT="${RUN_STAGE2_PROVIDER_ROLLOUT:-0}"
+AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-${MANDOFORGE_WORKER_TOKEN:-}}}"
 
-auth_headers=(
-  -H "x-mandoforge-subject: $SUBJECT"
-  -H "x-mandoforge-roles: $ROLES"
-)
+auth_headers=()
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then

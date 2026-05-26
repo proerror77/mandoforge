@@ -9,11 +9,17 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/mcp-gateway-evidence}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 RUN_MCP_DUE_RUN="${RUN_STAGE2_MCP_DUE_RUN:-0}"
 RUN_MCP_ROLLBACK="${RUN_STAGE2_MCP_ROLLBACK:-0}"
+AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-${MANDOFORGE_WORKER_TOKEN:-}}}"
 
-auth_headers=(
-  -H "x-mandoforge-subject: $SUBJECT"
-  -H "x-mandoforge-roles: $ROLES"
-)
+auth_headers=()
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
