@@ -108,6 +108,91 @@ export type SemanticSynthesisRunResult = {
   created_at: string;
 };
 
+export type SemanticSearchResponse = {
+  query: string;
+  generated_at: string;
+  result_count: number;
+  results: SemanticSearchResult[];
+};
+
+export type SemanticSearchResult = {
+  object: SemanticObject;
+  score: number;
+  matched_fields: string[];
+  partition_key: string;
+  provenance: Record<string, unknown>;
+};
+
+export type SemanticGraphSnapshot = {
+  generated_at: string;
+  node_count: number;
+  edge_count: number;
+  partition_count: number;
+  nodes: SemanticGraphNode[];
+  edges: SemanticGraphEdge[];
+  partitions: SemanticGraphPartition[];
+  conflicts: SemanticGraphConflict[];
+  stale_nodes: SemanticGraphNode[];
+};
+
+export type SemanticGraphNode = {
+  id: string;
+  object_type: string;
+  object_key: string;
+  title: string;
+  summary: string;
+  trust_level: string;
+  freshness: string;
+  status: string;
+  partition_key: string;
+  semantic_scopes: Record<string, unknown>;
+  source_uri?: string | null;
+  updated_at: string;
+};
+
+export type SemanticGraphEdge = {
+  id: string;
+  from: string;
+  to: string;
+  relation_type: string;
+  confidence: number;
+  status: string;
+};
+
+export type SemanticGraphPartition = {
+  partition_key: string;
+  domain_scope: string;
+  workflow_scope: string;
+  memory_scope: string;
+  node_count: number;
+  stale_count: number;
+  unverified_count: number;
+  conflict_count: number;
+};
+
+export type SemanticGraphConflict = {
+  kind: string;
+  object_key?: string | null;
+  relation_id?: string | null;
+  object_ids: string[];
+  partition_key: string;
+  message: string;
+};
+
+export type SemanticGovernanceRunResult = {
+  status: string;
+  generated_at: string;
+  dry_run: boolean;
+  archive_stale: boolean;
+  conflict_strategy: string;
+  archived_count: number;
+  conflict_count: number;
+  stale_count: number;
+  archived_object_ids: string[];
+  conflicts: SemanticGraphConflict[];
+  graph: SemanticGraphSnapshot;
+};
+
 export type ContextPacket = {
   id: string;
   session_id: string;
@@ -508,6 +593,48 @@ export type AgentHandoffAssignment = {
   audit_trace_id?: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type WorkItemAssignment = {
+  id: string;
+  work_item_id: string;
+  assignee_kind: string;
+  assignee_id: string;
+  role: string;
+  status: string;
+  assigned_by?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+};
+
+export type WorkItemReview = {
+  id: string;
+  work_item_id: string;
+  reviewer_kind: string;
+  reviewer_id: string;
+  status: string;
+  decision?: string | null;
+  summary?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+};
+
+export type ManagerAgentRunResponse = {
+  status: string;
+  work_item: WorkItem;
+  manager_session: Session;
+  plan: ManagerAgentPlan;
+  handoff: AgentHandoffEvent;
+  assignment?: AgentHandoffAssignment | null;
+  work_item_assignment?: WorkItemAssignment | null;
+  work_item_review?: WorkItemReview | null;
+  sla: Record<string, unknown>;
+  activity_count: number;
+  completed_at: string;
 };
 
 export type TaskBoardSnapshot = {
@@ -997,6 +1124,39 @@ export async function reviewManagerAgentPlan(
   },
 ): Promise<ManagerAgentPlan> {
   return api<ManagerAgentPlan>(`/api/manager-plans/${id}/review`, {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function runManagerAgent(input: {
+  work_item_id: string;
+  manager_agent_id?: string | null;
+  specialist_agent_id?: string | null;
+  intent?: string;
+  risk_classification?: string;
+  approval_required?: boolean;
+  auto_assign?: boolean;
+  sla_minutes?: number | null;
+  metadata?: Record<string, unknown>;
+}): Promise<ManagerAgentRunResponse> {
+  return api<ManagerAgentRunResponse>("/api/manager-agent/runs", {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function runSemanticGovernance(input: {
+  domain_scope?: string | null;
+  workflow_scope?: string | null;
+  memory_scope?: string | null;
+  archive_stale?: boolean;
+  dry_run?: boolean;
+  conflict_strategy?: string;
+}): Promise<SemanticGovernanceRunResult> {
+  return api<SemanticGovernanceRunResult>("/api/semantic-governance/run", {
     method: "POST",
     headers: adminHeaders(),
     body: JSON.stringify(input),

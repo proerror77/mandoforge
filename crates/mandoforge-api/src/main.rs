@@ -1068,6 +1068,44 @@ struct CreateAgentHandoffAssignment {
 }
 
 #[derive(Debug, Deserialize)]
+struct RunManagerAgentRequest {
+    work_item_id: Uuid,
+    #[serde(default)]
+    manager_agent_id: Option<Uuid>,
+    #[serde(default)]
+    specialist_agent_id: Option<Uuid>,
+    #[serde(default = "default_manager_agent_run_intent")]
+    intent: String,
+    #[serde(default = "default_manager_agent_run_schema_version")]
+    schema_version: String,
+    #[serde(default = "default_manager_agent_run_risk")]
+    risk_classification: String,
+    #[serde(default)]
+    approval_required: bool,
+    #[serde(default)]
+    auto_assign: bool,
+    #[serde(default)]
+    sla_minutes: Option<i64>,
+    #[serde(default = "empty_json_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ManagerAgentRunResponse {
+    status: String,
+    work_item: WorkItem,
+    manager_session: Session,
+    plan: ManagerAgentPlan,
+    handoff: AgentHandoffEvent,
+    assignment: Option<AgentHandoffAssignment>,
+    work_item_assignment: Option<WorkItemAssignment>,
+    work_item_review: Option<WorkItemReview>,
+    sla: Value,
+    activity_count: usize,
+    completed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AttachAgentHandoffRemoteComputerAssignment {
     remote_computer_job_assignment_id: Uuid,
     #[serde(default = "empty_json_object")]
@@ -1892,6 +1930,137 @@ struct SemanticIngestionObjectRef {
     semantic_object_id: Uuid,
     object_key: String,
     title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticProductQuery {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    object_type: Option<String>,
+    #[serde(default)]
+    domain_scope: Option<String>,
+    #[serde(default)]
+    workflow_scope: Option<String>,
+    #[serde(default)]
+    memory_scope: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    trust_level: Option<String>,
+    #[serde(default)]
+    freshness: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SemanticSearchResponse {
+    query: String,
+    generated_at: DateTime<Utc>,
+    result_count: usize,
+    results: Vec<SemanticSearchResult>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SemanticSearchResult {
+    object: SemanticObject,
+    score: i32,
+    matched_fields: Vec<String>,
+    partition_key: String,
+    provenance: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SemanticGraphSnapshot {
+    generated_at: DateTime<Utc>,
+    node_count: usize,
+    edge_count: usize,
+    partition_count: usize,
+    nodes: Vec<SemanticGraphNode>,
+    edges: Vec<SemanticGraphEdge>,
+    partitions: Vec<SemanticGraphPartition>,
+    conflicts: Vec<SemanticGraphConflict>,
+    stale_nodes: Vec<SemanticGraphNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticGraphNode {
+    id: Uuid,
+    object_type: String,
+    object_key: String,
+    title: String,
+    summary: String,
+    trust_level: String,
+    freshness: String,
+    status: String,
+    partition_key: String,
+    semantic_scopes: Value,
+    source_uri: Option<String>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SemanticGraphEdge {
+    id: Uuid,
+    from: String,
+    to: String,
+    relation_type: String,
+    confidence: f64,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticGraphPartition {
+    partition_key: String,
+    domain_scope: String,
+    workflow_scope: String,
+    memory_scope: String,
+    node_count: usize,
+    stale_count: usize,
+    unverified_count: usize,
+    conflict_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticGraphConflict {
+    kind: String,
+    object_key: Option<String>,
+    relation_id: Option<Uuid>,
+    object_ids: Vec<Uuid>,
+    partition_key: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticGovernanceRunRequest {
+    #[serde(default)]
+    domain_scope: Option<String>,
+    #[serde(default)]
+    workflow_scope: Option<String>,
+    #[serde(default)]
+    memory_scope: Option<String>,
+    #[serde(default)]
+    archive_stale: bool,
+    #[serde(default = "default_true")]
+    dry_run: bool,
+    #[serde(default = "default_semantic_conflict_strategy")]
+    conflict_strategy: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SemanticGovernanceRunResult {
+    status: String,
+    generated_at: DateTime<Utc>,
+    dry_run: bool,
+    archive_stale: bool,
+    conflict_strategy: String,
+    archived_count: usize,
+    conflict_count: usize,
+    stale_count: usize,
+    archived_object_ids: Vec<Uuid>,
+    conflicts: Vec<SemanticGraphConflict>,
+    graph: SemanticGraphSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5946,6 +6115,12 @@ fn build_router(state: AppState) -> Router {
             "/api/semantic-objects",
             get(list_semantic_objects).post(create_semantic_object),
         )
+        .route("/api/semantic-search", get(search_semantic_objects))
+        .route("/api/semantic-graph", get(get_semantic_graph))
+        .route(
+            "/api/semantic-governance/run",
+            post(run_semantic_governance),
+        )
         .route(
             "/api/semantic-objects/{id}",
             get(get_semantic_object)
@@ -6230,6 +6405,7 @@ fn build_router(state: AppState) -> Router {
             "/api/work-items/{id}/manager-plans",
             get(list_work_item_manager_agent_plans),
         )
+        .route("/api/manager-agent/runs", post(run_manager_agent))
         .route(
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
@@ -8508,6 +8684,436 @@ async fn list_semantic_objects(
     )
     .await?;
     Ok(Json(state.list_semantic_objects().await?))
+}
+
+async fn search_semantic_objects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SemanticProductQuery>,
+) -> Result<Json<SemanticSearchResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_search",
+        None,
+    )
+    .await?;
+    let query_text = query
+        .q
+        .as_ref()
+        .and_then(|value| normalize_optional_text(value.clone()))
+        .unwrap_or_default();
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let mut results = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| semantic_object_matches_product_query(object, &query))
+        .filter_map(|object| {
+            let matched_fields = semantic_object_matched_fields(&object, &query_text);
+            if !query_text.is_empty() && matched_fields.is_empty() {
+                return None;
+            }
+            let mut score = matched_fields.len() as i32;
+            if object.trust_level == "human_verified" {
+                score += 5;
+            } else if object.trust_level == "source_attested" {
+                score += 2;
+            }
+            if object.freshness == "current" {
+                score += 3;
+            }
+            if object.status == "active" {
+                score += 1;
+            }
+            Some(SemanticSearchResult {
+                partition_key: memory_governance_object_partition_key(&object),
+                provenance: json!({
+                    "source_uri": object.source_uri,
+                    "source_id": object.source_id,
+                    "trust_level": object.trust_level,
+                    "freshness": object.freshness,
+                    "updated_at": object.updated_at,
+                }),
+                object,
+                score,
+                matched_fields,
+            })
+        })
+        .collect::<Vec<_>>();
+    results.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| right.object.updated_at.cmp(&left.object.updated_at))
+    });
+    results.truncate(limit);
+    Ok(Json(SemanticSearchResponse {
+        query: query_text,
+        generated_at: Utc::now(),
+        result_count: results.len(),
+        results,
+    }))
+}
+
+async fn get_semantic_graph(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SemanticProductQuery>,
+) -> Result<Json<SemanticGraphSnapshot>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_graph",
+        None,
+    )
+    .await?;
+    let objects = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| semantic_object_matches_product_query(object, &query))
+        .collect::<Vec<_>>();
+    let links = state.list_semantic_links().await?;
+    Ok(Json(build_semantic_graph_snapshot(
+        objects,
+        links,
+        Utc::now(),
+    )))
+}
+
+async fn run_semantic_governance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SemanticGovernanceRunRequest>,
+) -> Result<Json<SemanticGovernanceRunResult>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_governance",
+        None,
+    )
+    .await?;
+    let conflict_strategy = normalize_semantic_conflict_strategy(&input.conflict_strategy)?;
+    let query = SemanticProductQuery {
+        q: None,
+        object_type: None,
+        domain_scope: input.domain_scope.clone(),
+        workflow_scope: input.workflow_scope.clone(),
+        memory_scope: input.memory_scope.clone(),
+        status: Some("active".to_string()),
+        trust_level: None,
+        freshness: None,
+        limit: None,
+    };
+    let objects = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| semantic_object_matches_product_query(object, &query))
+        .collect::<Vec<_>>();
+    let links = state.list_semantic_links().await?;
+    let graph = build_semantic_graph_snapshot(objects.clone(), links, Utc::now());
+    let stale_objects = objects
+        .iter()
+        .filter(|object| object.freshness != "current")
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut archived_object_ids = Vec::new();
+    if input.archive_stale && !input.dry_run {
+        for object in stale_objects
+            .iter()
+            .filter(|object| object.status == "active")
+        {
+            let archived = state.archive_semantic_object(object.id).await?;
+            record_semantic_object_audit(&state, &headers, &archived, "semantic_object.archived")
+                .await?;
+            archived_object_ids.push(archived.id);
+        }
+    }
+    let result = SemanticGovernanceRunResult {
+        status: if input.dry_run {
+            "dry_run".to_string()
+        } else {
+            "applied".to_string()
+        },
+        generated_at: Utc::now(),
+        dry_run: input.dry_run,
+        archive_stale: input.archive_stale,
+        conflict_strategy,
+        archived_count: archived_object_ids.len(),
+        conflict_count: graph.conflicts.len(),
+        stale_count: stale_objects.len(),
+        archived_object_ids,
+        conflicts: graph.conflicts.clone(),
+        graph,
+    };
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_governance.run",
+            "semantic_governance",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": result.status,
+                "dry_run": result.dry_run,
+                "archive_stale": result.archive_stale,
+                "conflict_strategy": result.conflict_strategy,
+                "archived_count": result.archived_count,
+                "conflict_count": result.conflict_count,
+                "stale_count": result.stale_count,
+                "archived_object_ids": result.archived_object_ids,
+                "filters": {
+                    "domain_scope": input.domain_scope,
+                    "workflow_scope": input.workflow_scope,
+                    "memory_scope": input.memory_scope,
+                }
+            }),
+        ))
+        .await?;
+    Ok(Json(result))
+}
+
+fn semantic_object_matches_product_query(
+    object: &SemanticObject,
+    query: &SemanticProductQuery,
+) -> bool {
+    text_filter_matches(&query.object_type, &object.object_type)
+        && text_filter_matches(&query.status, &object.status)
+        && text_filter_matches(&query.trust_level, &object.trust_level)
+        && text_filter_matches(&query.freshness, &object.freshness)
+        && semantic_scope_filter_matches(
+            &query.domain_scope,
+            &object.semantic_scopes,
+            "domain_scope",
+        )
+        && semantic_scope_filter_matches(
+            &query.workflow_scope,
+            &object.semantic_scopes,
+            "workflow_scope",
+        )
+        && semantic_scope_filter_matches(
+            &query.memory_scope,
+            &object.semantic_scopes,
+            "memory_scope",
+        )
+}
+
+fn text_filter_matches(filter: &Option<String>, actual: &str) -> bool {
+    filter
+        .as_ref()
+        .and_then(|value| normalize_optional_text(value.clone()))
+        .map(|expected| expected == actual)
+        .unwrap_or(true)
+}
+
+fn semantic_scope_filter_matches(filter: &Option<String>, scopes: &Value, key: &str) -> bool {
+    filter
+        .as_ref()
+        .and_then(|value| normalize_optional_text(value.clone()))
+        .map(|expected| scopes.get(key).and_then(Value::as_str) == Some(expected.as_str()))
+        .unwrap_or(true)
+}
+
+fn semantic_object_matched_fields(object: &SemanticObject, query_text: &str) -> Vec<String> {
+    if query_text.is_empty() {
+        return vec!["all".to_string()];
+    }
+    let needle = query_text.to_ascii_lowercase();
+    let mut fields = Vec::new();
+    for (field, value) in [
+        ("title", object.title.as_str()),
+        ("summary", object.summary.as_str()),
+        ("object_key", object.object_key.as_str()),
+    ] {
+        if value.to_ascii_lowercase().contains(&needle) {
+            fields.push(field.to_string());
+        }
+    }
+    if object
+        .content
+        .to_string()
+        .to_ascii_lowercase()
+        .contains(&needle)
+    {
+        fields.push("content".to_string());
+    }
+    fields
+}
+
+fn build_semantic_graph_snapshot(
+    objects: Vec<SemanticObject>,
+    links: Vec<SemanticLink>,
+    generated_at: DateTime<Utc>,
+) -> SemanticGraphSnapshot {
+    let object_ids = objects
+        .iter()
+        .map(|object| object.id.to_string())
+        .collect::<HashSet<_>>();
+    let nodes = objects
+        .iter()
+        .map(semantic_graph_node_from_object)
+        .collect::<Vec<_>>();
+    let edges = links
+        .iter()
+        .filter(|link| link.status == "active")
+        .filter(|link| {
+            object_ids.contains(&link.from_entity_id) && object_ids.contains(&link.to_entity_id)
+        })
+        .map(|link| SemanticGraphEdge {
+            id: link.id,
+            from: link.from_entity_id.clone(),
+            to: link.to_entity_id.clone(),
+            relation_type: link.relation_type.clone(),
+            confidence: link.confidence,
+            status: link.status.clone(),
+        })
+        .collect::<Vec<_>>();
+    let conflicts = semantic_graph_conflicts(&objects, &links);
+    let partitions = semantic_graph_partitions(&nodes, &conflicts);
+    let stale_nodes = nodes
+        .iter()
+        .filter(|node| node.freshness != "current")
+        .cloned()
+        .collect::<Vec<_>>();
+    SemanticGraphSnapshot {
+        generated_at,
+        node_count: nodes.len(),
+        edge_count: edges.len(),
+        partition_count: partitions.len(),
+        nodes,
+        edges,
+        partitions,
+        conflicts,
+        stale_nodes,
+    }
+}
+
+fn semantic_graph_node_from_object(object: &SemanticObject) -> SemanticGraphNode {
+    SemanticGraphNode {
+        id: object.id,
+        object_type: object.object_type.clone(),
+        object_key: object.object_key.clone(),
+        title: object.title.clone(),
+        summary: object.summary.clone(),
+        trust_level: object.trust_level.clone(),
+        freshness: object.freshness.clone(),
+        status: object.status.clone(),
+        partition_key: memory_governance_object_partition_key(object),
+        semantic_scopes: object.semantic_scopes.clone(),
+        source_uri: object.source_uri.clone(),
+        updated_at: object.updated_at,
+    }
+}
+
+fn semantic_graph_conflicts(
+    objects: &[SemanticObject],
+    links: &[SemanticLink],
+) -> Vec<SemanticGraphConflict> {
+    let mut conflicts = Vec::new();
+    let active_ids = objects
+        .iter()
+        .filter(|object| object.status == "active")
+        .map(|object| (object.id.to_string(), object))
+        .collect::<HashMap<_, _>>();
+    let mut objects_by_key: BTreeMap<String, Vec<&SemanticObject>> = BTreeMap::new();
+    for object in objects.iter().filter(|object| object.status == "active") {
+        objects_by_key
+            .entry(object.object_key.clone())
+            .or_default()
+            .push(object);
+    }
+    for (object_key, grouped) in objects_by_key {
+        if grouped.len() > 1 {
+            let partition_key = memory_governance_object_partition_key(grouped[0]);
+            conflicts.push(SemanticGraphConflict {
+                kind: "duplicate_object_key".to_string(),
+                object_key: Some(object_key.clone()),
+                relation_id: None,
+                object_ids: grouped.iter().map(|object| object.id).collect(),
+                partition_key,
+                message: format!(
+                    "{} active semantic object(s) share object_key {object_key}",
+                    grouped.len()
+                ),
+            });
+        }
+    }
+    for link in links
+        .iter()
+        .filter(|link| link.status == "active" && link.relation_type == "contradicts")
+    {
+        let Some(from) = active_ids.get(&link.from_entity_id) else {
+            continue;
+        };
+        let Some(to) = active_ids.get(&link.to_entity_id) else {
+            continue;
+        };
+        conflicts.push(SemanticGraphConflict {
+            kind: "contradiction_link".to_string(),
+            object_key: None,
+            relation_id: Some(link.id),
+            object_ids: vec![from.id, to.id],
+            partition_key: memory_governance_object_partition_key(from),
+            message: format!("{} contradicts {}", from.object_key, to.object_key),
+        });
+    }
+    conflicts
+}
+
+fn semantic_graph_partitions(
+    nodes: &[SemanticGraphNode],
+    conflicts: &[SemanticGraphConflict],
+) -> Vec<SemanticGraphPartition> {
+    let mut partitions = BTreeMap::<String, SemanticGraphPartition>::new();
+    for node in nodes {
+        let domain_scope = memory_governance_scope_value(&node.semantic_scopes, "domain_scope");
+        let workflow_scope = memory_governance_scope_value(&node.semantic_scopes, "workflow_scope");
+        let memory_scope = memory_governance_scope_value(&node.semantic_scopes, "memory_scope");
+        let partition =
+            partitions
+                .entry(node.partition_key.clone())
+                .or_insert(SemanticGraphPartition {
+                    partition_key: node.partition_key.clone(),
+                    domain_scope,
+                    workflow_scope,
+                    memory_scope,
+                    node_count: 0,
+                    stale_count: 0,
+                    unverified_count: 0,
+                    conflict_count: 0,
+                });
+        partition.node_count += 1;
+        if node.freshness != "current" {
+            partition.stale_count += 1;
+        }
+        if node.trust_level == "unverified" {
+            partition.unverified_count += 1;
+        }
+    }
+    for conflict in conflicts {
+        if let Some(partition) = partitions.get_mut(&conflict.partition_key) {
+            partition.conflict_count += 1;
+        }
+    }
+    partitions.into_values().collect()
+}
+
+fn normalize_semantic_conflict_strategy(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "flag" | "manual_review" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "conflict_strategy must be flag or manual_review",
+        )),
+    }
 }
 
 async fn get_memory_governance_summary(
@@ -12284,6 +12890,443 @@ async fn list_work_item_manager_agent_plans(
     )
     .await?;
     Ok(Json(state.list_work_item_manager_agent_plans(id).await?))
+}
+
+async fn run_manager_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RunManagerAgentRequest>,
+) -> Result<Json<ManagerAgentRunResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "work_item",
+        Some(input.work_item_id),
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let work_item = get_active_work_item_for_manager_run(&state, input.work_item_id).await?;
+    let manager_agent = select_manager_agent_for_run(&state, input.manager_agent_id).await?;
+    let specialist_agent =
+        select_specialist_agent_for_run(&state, input.specialist_agent_id, &work_item).await?;
+    let intent = validate_handoff_token("intent", &input.intent)?;
+    let schema_version = validate_handoff_schema_version(&input.schema_version)?;
+    let risk = normalize_manager_plan_risk(&input.risk_classification)?;
+    let now = Utc::now();
+    let due_at = input
+        .sla_minutes
+        .map(|minutes| now + ChronoDuration::minutes(minutes.max(0)));
+    let manager_session = state
+        .create_session(CreateSession {
+            agent_id: manager_agent.id,
+            environment_id: None,
+            title: format!("Manager loop for {}", work_item.title),
+            message: Some(format!(
+                "Intake WorkItem {} and delegate to {}.",
+                work_item.id, specialist_agent.name
+            )),
+        })
+        .await?;
+    ensure_primary_session_thread(&state, manager_session.id).await?;
+    append_manager_run_activity(
+        &state,
+        &work_item,
+        "manager_agent.auto_intake",
+        &manager_agent,
+        "Manager Agent intake started",
+        json!({
+            "manager_agent_id": manager_agent.id,
+            "specialist_agent_id": specialist_agent.id,
+            "risk_classification": risk,
+            "intent": intent,
+        }),
+    )
+    .await?;
+    let semantic_scopes = work_item
+        .metadata
+        .get("semantic_scopes")
+        .cloned()
+        .unwrap_or_else(|| specialist_agent.semantic_scopes.clone());
+    let decomposition = manager_run_decomposition(&work_item, &specialist_agent);
+    let plan = create_manager_agent_plan(
+        State(state.clone()),
+        Path(manager_session.id),
+        headers.clone(),
+        Json(CreateManagerAgentPlan {
+            work_item_id: Some(work_item.id),
+            specialist_agent_id: Some(specialist_agent.id),
+            task_intake: json!({
+                "goal": work_item.title,
+                "description": work_item.description,
+                "source": work_item.source,
+                "source_url": work_item.source_url,
+                "priority": work_item.priority,
+                "work_item_id": work_item.id,
+                "metadata": work_item.metadata,
+            }),
+            decomposition: decomposition.clone(),
+            specialist_selection: json!({
+                "selected_agent_id": specialist_agent.id,
+                "selected_agent_name": specialist_agent.name,
+                "reason": "specialist agent matched explicit request or work item semantic scopes",
+                "semantic_scopes": specialist_agent.semantic_scopes,
+            }),
+            risk_classification: risk.clone(),
+            review: json!({
+                "status": "pending",
+                "reviewer": "manager-agent",
+                "sla_minutes": input.sla_minutes,
+            }),
+        }),
+    )
+    .await?
+    .0;
+    append_manager_run_activity(
+        &state,
+        &work_item,
+        "manager_agent.decomposed",
+        &manager_agent,
+        "Manager Agent decomposed the WorkItem",
+        json!({
+            "manager_agent_plan_id": plan.id,
+            "decomposition": decomposition,
+        }),
+    )
+    .await?;
+    let reviewed_plan = review_manager_agent_plan(
+        State(state.clone()),
+        Path(plan.id),
+        headers.clone(),
+        Json(ReviewManagerAgentPlan {
+            status: Some("approved".to_string()),
+            review: json!({
+                "status": "approved",
+                "summary": "Auto-manager loop approved assignment after governed intake and decomposition.",
+                "reviewer": "manager-agent",
+                "reviewed_at": Utc::now(),
+            }),
+        }),
+    )
+    .await?
+    .0;
+    let handoff = create_agent_handoff_event(
+        State(state.clone()),
+        Path(manager_session.id),
+        headers.clone(),
+        Json(CreateAgentHandoffEvent {
+            target_agent_id: specialist_agent.id,
+            manager_plan_id: Some(reviewed_plan.id),
+            intent: intent.clone(),
+            payload: json!({
+                "work_item_id": work_item.id,
+                "title": work_item.title,
+                "description": work_item.description,
+                "priority": work_item.priority,
+                "manager_plan_id": reviewed_plan.id,
+                "metadata": input.metadata,
+            }),
+            schema_version,
+            risk_level: risk,
+            approval_required: input.approval_required,
+            semantic_scopes: Some(semantic_scopes.clone()),
+            runtime_profile_id: specialist_agent.runtime_profile_id,
+            remote_computer_required: None,
+            review_status: Some("manager_reviewed".to_string()),
+            human_escalation_status: Some("none".to_string()),
+        }),
+    )
+    .await?
+    .0;
+    let accepted_handoff = accept_agent_handoff_event(
+        State(state.clone()),
+        Path(handoff.id),
+        headers.clone(),
+        Json(TransitionAgentHandoffEvent {
+            reason: Some("manager auto-loop accepted governed handoff".to_string()),
+        }),
+    )
+    .await?
+    .0;
+    let (assignment, work_item_assignment) = if input.auto_assign {
+        let assignment = assign_agent_handoff_event(
+            State(state.clone()),
+            Path(accepted_handoff.id),
+            headers.clone(),
+            Json(CreateAgentHandoffAssignment {
+                specialist_session_id: None,
+                title: Some(format!("WorkItem: {}", work_item.title)),
+                message: Some(format!(
+                    "Execute WorkItem {} under Manager Agent plan {}.",
+                    work_item.id, reviewed_plan.id
+                )),
+                remote_computer_job_assignment_id: None,
+                assigned_by: Some(principal.subject_id.clone()),
+                metadata: json!({
+                    "source": "manager_agent.run",
+                    "work_item_id": work_item.id,
+                    "manager_plan_id": reviewed_plan.id,
+                }),
+            }),
+        )
+        .await?
+        .0;
+        let work_item_assignment = state
+            .create_work_item_assignment(
+                work_item.id,
+                CreateWorkItemAssignment {
+                    assignee_kind: "agent".to_string(),
+                    assignee_id: specialist_agent.id.to_string(),
+                    role: "owner".to_string(),
+                    status: "assigned".to_string(),
+                    metadata: json!({
+                        "source": "manager_agent.run",
+                        "agent_handoff_assignment_id": assignment.id,
+                        "specialist_session_id": assignment.specialist_session_id,
+                    }),
+                },
+                Some(principal.subject_id.clone()),
+            )
+            .await?;
+        append_manager_run_activity(
+            &state,
+            &work_item,
+            "manager_agent.assigned",
+            &manager_agent,
+            "Manager Agent assigned the WorkItem to a Specialist Agent",
+            json!({
+                "agent_handoff_assignment_id": assignment.id,
+                "work_item_assignment_id": work_item_assignment.id,
+                "specialist_agent_id": specialist_agent.id,
+                "specialist_session_id": assignment.specialist_session_id,
+            }),
+        )
+        .await?;
+        (Some(assignment), Some(work_item_assignment))
+    } else {
+        (None, None)
+    };
+    let work_item_review = state
+        .create_work_item_review(
+            work_item.id,
+            CreateWorkItemReview {
+                reviewer_kind: "agent".to_string(),
+                reviewer_id: manager_agent.id.to_string(),
+                status: "completed".to_string(),
+                decision: Some("approved".to_string()),
+                summary: Some(
+                    "Manager Agent reviewed intake, decomposition, and handoff readiness."
+                        .to_string(),
+                ),
+                metadata: json!({
+                    "source": "manager_agent.run",
+                    "manager_plan_id": reviewed_plan.id,
+                    "agent_handoff_event_id": accepted_handoff.id,
+                }),
+            },
+        )
+        .await?;
+    append_manager_run_activity(
+        &state,
+        &work_item,
+        "manager_agent.reviewed",
+        &manager_agent,
+        "Manager Agent recorded review for the WorkItem",
+        json!({
+            "work_item_review_id": work_item_review.id,
+            "decision": work_item_review.decision,
+            "manager_plan_id": reviewed_plan.id,
+        }),
+    )
+    .await?;
+    append_manager_run_activity(
+        &state,
+        &work_item,
+        "manager_agent.sla_tracked",
+        &manager_agent,
+        "Manager Agent created SLA tracking metadata",
+        json!({
+            "sla_minutes": input.sla_minutes,
+            "due_at": due_at,
+            "status": "tracking",
+        }),
+    )
+    .await?;
+    let activity_count = state.list_work_item_activity(work_item.id).await?.len();
+    state
+        .append_audit_log(new_audit_log(
+            Some(manager_session.id),
+            "agent",
+            Some(manager_agent.id),
+            "manager_agent.run_completed",
+            "work_item",
+            Some(work_item.id),
+            json!({
+                "subject": principal.subject_id,
+                "work_item_id": work_item.id,
+                "manager_agent_id": manager_agent.id,
+                "manager_session_id": manager_session.id,
+                "specialist_agent_id": specialist_agent.id,
+                "manager_plan_id": reviewed_plan.id,
+                "agent_handoff_event_id": accepted_handoff.id,
+                "agent_handoff_assignment_id": assignment.as_ref().map(|item| item.id),
+                "work_item_assignment_id": work_item_assignment.as_ref().map(|item| item.id),
+                "work_item_review_id": work_item_review.id,
+                "auto_assign": input.auto_assign,
+                "sla_minutes": input.sla_minutes,
+                "due_at": due_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(ManagerAgentRunResponse {
+        status: assignment
+            .as_ref()
+            .map(|assignment| assignment.status.clone())
+            .unwrap_or_else(|| "handoff_ready".to_string()),
+        work_item,
+        manager_session,
+        plan: reviewed_plan,
+        handoff: accepted_handoff,
+        assignment,
+        work_item_assignment,
+        work_item_review: Some(work_item_review),
+        sla: json!({
+            "sla_minutes": input.sla_minutes,
+            "due_at": due_at,
+            "status": "tracking",
+        }),
+        activity_count,
+        completed_at: Utc::now(),
+    }))
+}
+
+async fn get_active_work_item_for_manager_run(
+    state: &AppState,
+    work_item_id: Uuid,
+) -> Result<WorkItem, AppError> {
+    state
+        .list_work_items()
+        .await?
+        .into_iter()
+        .find(|work_item| work_item.id == work_item_id && work_item.archived_at.is_none())
+        .ok_or_else(|| AppError::not_found("active work item not found"))
+}
+
+async fn select_manager_agent_for_run(
+    state: &AppState,
+    manager_agent_id: Option<Uuid>,
+) -> Result<Agent, AppError> {
+    match manager_agent_id {
+        Some(agent_id) => {
+            let agent = state.get_agent(agent_id).await?;
+            if agent.agent_role != "manager" {
+                return Err(AppError::bad_request(
+                    "manager_agent_id must reference a manager agent",
+                ));
+            }
+            Ok(agent)
+        }
+        None => state
+            .list_agents()
+            .await?
+            .into_iter()
+            .find(|agent| agent.agent_role == "manager")
+            .ok_or_else(|| AppError::not_found("manager agent not found")),
+    }
+}
+
+async fn select_specialist_agent_for_run(
+    state: &AppState,
+    specialist_agent_id: Option<Uuid>,
+    work_item: &WorkItem,
+) -> Result<Agent, AppError> {
+    if let Some(agent_id) = specialist_agent_id {
+        let agent = state.get_agent(agent_id).await?;
+        if agent.agent_role != "specialist" {
+            return Err(AppError::bad_request(
+                "specialist_agent_id must reference a specialist agent",
+            ));
+        }
+        return Ok(agent);
+    }
+    let work_item_scopes = work_item.metadata.get("semantic_scopes");
+    state
+        .list_agents()
+        .await?
+        .into_iter()
+        .find(|agent| {
+            agent.agent_role == "specialist"
+                && work_item_scopes
+                    .map(|scopes| semantic_scopes_cover(&agent.semantic_scopes, scopes))
+                    .unwrap_or(true)
+        })
+        .ok_or_else(|| AppError::not_found("matching specialist agent not found"))
+}
+
+fn semantic_scopes_cover(candidate: &Value, required: &Value) -> bool {
+    let Some(candidate_scopes) = candidate.as_object() else {
+        return false;
+    };
+    let Some(required_scopes) = required.as_object() else {
+        return false;
+    };
+    required_scopes.iter().all(|(key, value)| {
+        let Some(required_value) = value.as_str().map(str::trim) else {
+            return true;
+        };
+        if required_value.is_empty() || key == "share_policy" || key == "visibility" {
+            return true;
+        }
+        candidate_scopes
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|candidate_value| candidate_value.trim() == required_value)
+    })
+}
+
+fn manager_run_decomposition(work_item: &WorkItem, specialist: &Agent) -> Value {
+    json!({
+        "mode": "manager_auto_loop",
+        "steps": [
+            {
+                "key": "intake",
+                "title": "Confirm WorkItem intent, priority, semantic scope, and risk.",
+                "status": "ready_for_specialist"
+            },
+            {
+                "key": "execute",
+                "title": format!("{} handles {}", specialist.name, work_item.title),
+                "status": "ready_for_specialist"
+            },
+            {
+                "key": "review",
+                "title": "Return evidence to Manager Agent for review and escalation if blocked.",
+                "status": "waiting_result"
+            }
+        ]
+    })
+}
+
+async fn append_manager_run_activity(
+    state: &AppState,
+    work_item: &WorkItem,
+    event_type: &str,
+    manager_agent: &Agent,
+    summary: &str,
+    metadata: Value,
+) -> Result<(), AppError> {
+    state
+        .append_work_item_activity_entry(
+            work_item.id,
+            event_type,
+            Some(manager_agent.id.to_string()),
+            Some("agent"),
+            Some(manager_agent.id),
+            summary.to_string(),
+            metadata,
+        )
+        .await?;
+    Ok(())
 }
 
 async fn get_manager_agent_plan(
@@ -49098,6 +50141,26 @@ fn default_semantic_confidence() -> f64 {
     1.0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_manager_agent_run_intent() -> String {
+    "execute_work_item".to_string()
+}
+
+fn default_manager_agent_run_schema_version() -> String {
+    "handoff.v1".to_string()
+}
+
+fn default_manager_agent_run_risk() -> String {
+    "medium".to_string()
+}
+
+fn default_semantic_conflict_strategy() -> String {
+    "flag".to_string()
+}
+
 fn default_mcp_transport() -> String {
     "http".to_string()
 }
@@ -53814,6 +54877,201 @@ not json
     }
 
     #[tokio::test]
+    async fn manager_agent_run_closes_intake_assignment_review_loop() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let specialist: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Auto Loop Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.read"],
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "agent-os",
+                        "domain_scope": "platform",
+                        "workflow_scope": "manager-auto-loop",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering",
+                        "share_policy": "isolated"
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Auto Loop Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": specialist.id,
+                                "intents": ["execute_work_item"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["low"],
+                                "approval_required": false
+                            }]
+                        }
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item: WorkItem = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Refresh the semantic ingestion guide",
+                    "description": "Find the owner, split the task, and assign it to the right specialist.",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {
+                        "semantic_scopes": {
+                            "project_scope": "mandoforge",
+                            "repo_scope": "mandoforge",
+                            "service_scope": "agent-os",
+                            "domain_scope": "platform",
+                            "workflow_scope": "manager-auto-loop",
+                            "policy_scope": "approval-required",
+                            "memory_scope": "engineering",
+                            "share_policy": "isolated"
+                        }
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/manager-agent/runs",
+                json!({
+                    "work_item_id": work_item.id,
+                    "manager_agent_id": manager.id,
+                    "specialist_agent_id": specialist.id,
+                    "intent": "execute_work_item",
+                    "risk_classification": "low",
+                    "sla_minutes": 30,
+                    "auto_assign": true
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        assert_eq!(run["status"], "assigned");
+        assert_eq!(run["plan"]["status"], "approved");
+        assert_eq!(run["handoff"]["status"], "accepted");
+        assert_eq!(run["assignment"]["status"], "assigned");
+        assert_eq!(run["work_item"]["id"], json!(work_item.id));
+        assert_eq!(
+            run["plan"]["decomposition"]["steps"][0]["status"],
+            "ready_for_specialist"
+        );
+        assert_eq!(
+            run["handoff"]["semantic_scopes"]["workflow_scope"],
+            "manager-auto-loop"
+        );
+        assert!(run["sla"]["due_at"].as_str().is_some());
+
+        let activity: Vec<WorkItemActivityEntry> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{}/activity", work_item.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        for expected in [
+            "manager_agent.auto_intake",
+            "manager_agent.decomposed",
+            "manager_agent.assigned",
+            "manager_agent.reviewed",
+            "manager_agent.sla_tracked",
+        ] {
+            assert!(
+                activity.iter().any(|entry| entry.event_type == expected),
+                "missing work item activity {expected}"
+            );
+        }
+
+        let assignments: Vec<WorkItemAssignment> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{}/assignments", work_item.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(assignments.iter().any(|assignment| {
+            assignment.assignee_kind == "agent"
+                && assignment.assignee_id == specialist.id.to_string()
+                && assignment.role == "owner"
+                && assignment.status == "assigned"
+        }));
+
+        let reviews: Vec<WorkItemReview> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{}/reviews", work_item.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(reviews.iter().any(|review| {
+            review.reviewer_kind == "agent"
+                && review.reviewer_id == manager.id.to_string()
+                && review.decision.as_deref() == Some("approved")
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "manager_agent.run_completed"
+                && log.resource_type == "work_item"
+                && log.resource_id == Some(work_item.id)
+        }));
+    }
+
+    #[tokio::test]
     async fn manager_agent_plan_requires_manager_session_and_specialist_target() {
         let app = test_app().await;
         let worker: Agent = request_json(
@@ -55351,6 +56609,197 @@ not json
         )
         .await;
         assert!(objects.is_empty(), "batch should fail before object writes");
+    }
+
+    #[tokio::test]
+    async fn semantic_productization_search_graph_and_governance_run() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "memory",
+                    "source_uri": "memory://semantic-productization-test",
+                    "display_name": "Semantic productization test"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let current: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "memory",
+                    "object_key": "memory:brand:voice",
+                    "title": "Brand voice",
+                    "summary": "Use concise launch copy for platform updates.",
+                    "content": {"rule": "concise launch copy"},
+                    "semantic_scopes": {
+                        "domain_scope": "social-media",
+                        "workflow_scope": "publishing",
+                        "memory_scope": "brand-voice",
+                        "share_policy": "isolated"
+                    },
+                    "trust_level": "human_verified",
+                    "freshness": "current"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let stale_conflict: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "memory",
+                    "object_key": "memory:brand:voice:old",
+                    "title": "Old brand voice",
+                    "summary": "Use long announcement style for platform updates.",
+                    "content": {"rule": "long announcement style"},
+                    "semantic_scopes": {
+                        "domain_scope": "social-media",
+                        "workflow_scope": "publishing",
+                        "memory_scope": "brand-voice",
+                        "share_policy": "isolated"
+                    },
+                    "trust_level": "source_attested",
+                    "freshness": "stale"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let _link: SemanticLink = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-links",
+                json!({
+                    "from_entity_type": "semantic_object",
+                    "from_entity_id": current.id.to_string(),
+                    "relation_type": "contradicts",
+                    "to_entity_type": "semantic_object",
+                    "to_entity_id": stale_conflict.id.to_string(),
+                    "metadata": {"reason": "fresh memory replaces stale memory"},
+                    "confidence": 0.92
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let search: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-search?q=platform%20updates&memory_scope=brand-voice")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(search["query"], "platform updates");
+        assert_eq!(search["results"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            search["results"][0]["object"]["trust_level"],
+            "human_verified"
+        );
+        assert!(
+            search["results"][0]["matched_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "summary")
+        );
+
+        let graph: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-graph?memory_scope=brand-voice")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(graph["node_count"], 2);
+        assert_eq!(graph["edge_count"], 1);
+        assert_eq!(graph["conflicts"].as_array().unwrap().len(), 1);
+        assert_eq!(graph["stale_nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            graph["partitions"][0]["partition_key"],
+            "domain=social-media|workflow=publishing|memory=brand-voice"
+        );
+
+        let governance: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-governance/run",
+                json!({
+                    "memory_scope": "brand-voice",
+                    "archive_stale": true,
+                    "dry_run": false,
+                    "conflict_strategy": "flag"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(governance["status"], "applied");
+        assert_eq!(governance["archived_count"], 1);
+        assert_eq!(governance["conflict_count"], 1);
+        assert!(
+            governance["archived_object_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id == &json!(stale_conflict.id))
+        );
+        let remaining: Vec<SemanticObject> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-objects")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            !remaining
+                .iter()
+                .any(|object| object.id == stale_conflict.id)
+        );
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "semantic_governance.run"
+                && log.details["archived_count"] == json!(1)
+                && log.details["conflict_count"] == json!(1)
+        }));
     }
 
     #[tokio::test]

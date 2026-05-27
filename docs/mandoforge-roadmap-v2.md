@@ -246,7 +246,8 @@ Current repo slice:
 - `manager_agent_plans` stores Manager Agent planning records for task intake, decomposition, specialist selection, risk classification, review status, and audit trace.
 - `POST /api/sessions/{id}/manager-plans` creates a governed plan only when the session is bound to a manager agent; `specialist_agent_id` must point to a specialist agent.
 - `POST /api/manager-plans/{id}/review` records Manager Agent result review and writes `manager_plan.reviewed` timeline/audit evidence.
-- Stage 4.5 still owns execution-grade assignment and handoff propagation from a plan into specialist runtime work.
+- `POST /api/manager-agent/runs` is now the first automated Manager Agent closed loop: it intakes a WorkItem, selects or accepts a Manager Agent and Specialist Agent, creates the Manager session, decomposes the task, approves the Manager plan, creates and accepts the handoff, optionally creates the Specialist assignment, records WorkItem assignment/review records, starts SLA tracking metadata, and writes WorkItem activity plus `manager_agent.run_completed` audit evidence.
+- The Manager console exposes this closed loop as an API-backed `Run manager loop` action alongside the lower-level manual plan composer.
 
 ### Stage 4.5 Agent Handoff / Assignment
 
@@ -331,6 +332,10 @@ Current repo slice:
 - Approved candidates create `semantic_objects` with `object_type=memory`, `trust_level=human_verified`, source URI back to the candidate, and timeline/audit evidence; rejected candidates remain reviewed records without durable memory objects.
 - High-risk tool execution now evaluates active semantic objects that match the Managed Agent's semantic scopes before approval or execution. Matching objects must be `freshness=current` and must not be `trust_level=unverified`; otherwise MandoForge records `semantic_context.gate_failed`, denies the tool call, and avoids creating an approval request from stale or untrusted context.
 - `/api/semantic-retrieval/backends` exposes `scope_rank` as the executable default and reports `pgvector`, `qdrant`, and `weaviate` as optional reserved backends. Vector-style backends can be configuration-visible without becoming the first semantic layer dependency or replacing the object/link/context packet model.
+- `/api/semantic-search` provides an operator-facing semantic memory search surface over object title, summary, key, and content, with trust/freshness-aware scoring and partition keys.
+- `/api/semantic-graph` returns a product graph snapshot with semantic object nodes, ontology-governed edges, partition counts, stale nodes, and conflict findings from duplicate active keys or `contradicts` links.
+- `POST /api/semantic-governance/run` performs the first productized memory governance run. It supports dry-run review, conflict flagging, scoped filtering, and optional stale-object archival with audit evidence.
+- The Semantic UI now exposes search, graph metrics, conflicts/stale findings, and dry-run/apply governance controls instead of requiring operators to inspect raw object lists only.
 
 The target object model:
 

@@ -1323,6 +1323,7 @@ h1 {
 .semantic-ingestion,
 .semantic-synthesis,
 .semantic-objects,
+.semantic-product-console,
 .semantic-links {
   display: grid;
   gap: 8px;
@@ -1678,9 +1679,11 @@ h1 {
 
 .manager-composer,
 .manager-console,
+.manager-run-result,
 .work-item-list,
 .handoff-evidence,
 .memory-console,
+.semantic-product-console,
 .pack-marketplace,
 .pack-release-console,
 .deploy-readiness,
@@ -1708,9 +1711,20 @@ h1 {
 }
 
 .handoff-strip,
+.semantic-product-columns,
 .installation-list {
   display: grid;
   gap: 6px;
+}
+
+.semantic-product-columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.semantic-product-columns h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
 }
 
 .handoff-strip span {

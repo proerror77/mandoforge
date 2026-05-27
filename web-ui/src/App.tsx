@@ -9,6 +9,8 @@ import {
   getAdminToken,
   reviewMemoryWritebackCandidate,
   reviewManagerAgentPlan,
+  runManagerAgent,
+  runSemanticGovernance,
   setAdminToken,
   transitionAgentHandoff,
   updateWorkflowDefinition,
@@ -23,6 +25,7 @@ import {
   type DeploymentVersion,
   type Environment,
   type ManagerAgentPlan,
+  type ManagerAgentRunResponse,
   type MemoryGovernancePartitionDetail,
   type MemoryGovernanceSummary,
   type MemoryGovernanceWritebackQueue,
@@ -32,9 +35,12 @@ import {
   type RunWorkflowStepRunResponse,
   type SchedulerOrchestrationSummary,
   type SemanticIngestionBatchResult,
+  type SemanticGovernanceRunResult,
+  type SemanticGraphSnapshot,
   type SemanticLink,
   type SemanticObject,
   type SemanticRetrievalBackendRegistry,
+  type SemanticSearchResponse,
   type SemanticSynthesisRunResult,
   type Session,
   type SessionEvent,
@@ -178,6 +184,8 @@ export function App() {
   const [writebackReviewReason, setWritebackReviewReason] = useState("");
   const [selectedContextPacketId, setSelectedContextPacketId] = useState("");
   const [semanticObjectType, setSemanticObjectType] = useState("all");
+  const [semanticSearchText, setSemanticSearchText] = useState("");
+  const [semanticMemoryScope, setSemanticMemoryScope] = useState("");
   const [semanticIngestionDraft, setSemanticIngestionDraft] = useState(DEFAULT_INGESTION_BATCH);
   const [semanticSynthesisDraft, setSemanticSynthesisDraft] = useState(DEFAULT_SYNTHESIS_RUN);
   const [graphEditorDraft, setGraphEditorDraft] = useState("");
@@ -186,6 +194,7 @@ export function App() {
   const [managerRisk, setManagerRisk] = useState("medium");
   const [managerWorkItemId, setManagerWorkItemId] = useState("");
   const [managerSpecialistAgentId, setManagerSpecialistAgentId] = useState("");
+  const [managerSlaMinutes, setManagerSlaMinutes] = useState(30);
   const [managerSteps, setManagerSteps] = useState("intake\nanalyze\nspecialist handoff\nreview result");
   const [packManifestPath, setPackManifestPath] = useState("packs/ai-governance/package.yaml");
   const [selectedPackInstallationId, setSelectedPackInstallationId] = useState("");
@@ -422,6 +431,21 @@ export function App() {
     queryFn: () => api<SemanticLink[]>("/api/semantic-links"),
     refetchInterval: 5000,
   });
+  const semanticSearch = useQuery({
+    queryKey: ["semantic-search", semanticSearchText, semanticMemoryScope],
+    queryFn: () => api<SemanticSearchResponse>(semanticProductPath("/api/semantic-search", {
+      q: semanticSearchText,
+      memory_scope: semanticMemoryScope,
+    })),
+    refetchInterval: 5000,
+  });
+  const semanticGraph = useQuery({
+    queryKey: ["semantic-graph", semanticMemoryScope],
+    queryFn: () => api<SemanticGraphSnapshot>(semanticProductPath("/api/semantic-graph", {
+      memory_scope: semanticMemoryScope,
+    })),
+    refetchInterval: 5000,
+  });
   const ontologyRegistry = useQuery({
     queryKey: ["ontology-registry"],
     queryFn: () => api<OntologyRegistry>("/api/ontology/registry"),
@@ -600,6 +624,15 @@ export function App() {
     },
     onSuccess: () => invalidateAll(queryClient),
   });
+  const runSemanticGovernanceMutation = useMutation({
+    mutationFn: (dryRun: boolean) => runSemanticGovernance({
+      memory_scope: semanticMemoryScope || null,
+      archive_stale: true,
+      dry_run: dryRun,
+      conflict_strategy: "flag",
+    }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
   const createManagerPlanMutation = useMutation({
     mutationFn: () => {
       const managerSession = selectedSession?.agent_id && selectedAgent?.agent_role === "manager"
@@ -630,6 +663,27 @@ export function App() {
         },
         risk_classification: managerRisk,
         review: {},
+      });
+    },
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const runManagerAgentMutation = useMutation({
+    mutationFn: () => {
+      if (!managerWorkItemId) {
+        throw new Error("select a work item before running the manager loop");
+      }
+      const managerSession = selectedSession?.agent_id && selectedAgent?.agent_role === "manager"
+        ? selectedSession
+        : managerSessions[0]?.session;
+      return runManagerAgent({
+        work_item_id: managerWorkItemId,
+        manager_agent_id: managerSession?.agent_id ?? null,
+        specialist_agent_id: managerSpecialistAgentId || null,
+        intent: "execute_work_item",
+        risk_classification: managerRisk,
+        auto_assign: true,
+        sla_minutes: managerSlaMinutes,
+        metadata: { source: "manager-console" },
       });
     },
     onSuccess: () => invalidateAll(queryClient),
@@ -1289,15 +1343,21 @@ export function App() {
                 risk={managerRisk}
                 workItemId={managerWorkItemId}
                 specialistAgentId={managerSpecialistAgentId}
+                slaMinutes={managerSlaMinutes}
                 steps={managerSteps}
                 isSaving={createManagerPlanMutation.isPending}
+                isRunning={runManagerAgentMutation.isPending}
                 error={createManagerPlanMutation.error}
+                runError={runManagerAgentMutation.error}
+                runResult={runManagerAgentMutation.data}
                 onGoalChange={setManagerGoal}
                 onRiskChange={setManagerRisk}
                 onWorkItemChange={setManagerWorkItemId}
                 onSpecialistChange={setManagerSpecialistAgentId}
+                onSlaMinutesChange={setManagerSlaMinutes}
                 onStepsChange={setManagerSteps}
                 onCreate={() => createManagerPlanMutation.mutate()}
+                onRunAuto={() => runManagerAgentMutation.mutate()}
               />
             </Panel>
 
@@ -1345,6 +1405,18 @@ export function App() {
             </Panel>
             <Panel title="Semantic graph">
               <OntologyRegistryPanel registry={ontologyRegistry.data} />
+              <SemanticProductConsole
+                searchText={semanticSearchText}
+                memoryScope={semanticMemoryScope}
+                search={semanticSearch.data}
+                graph={semanticGraph.data}
+                governanceResult={runSemanticGovernanceMutation.data}
+                isRunningGovernance={runSemanticGovernanceMutation.isPending}
+                error={semanticSearch.error ?? semanticGraph.error ?? runSemanticGovernanceMutation.error}
+                onSearchTextChange={setSemanticSearchText}
+                onMemoryScopeChange={setSemanticMemoryScope}
+                onGovernanceRun={(dryRun) => runSemanticGovernanceMutation.mutate(dryRun)}
+              />
               <SemanticObjectBrowser
                 objects={visibleSemanticObjects}
                 objectTypes={semanticObjectTypes}
@@ -1536,15 +1608,21 @@ function ManagerPlanComposer({
   risk,
   workItemId,
   specialistAgentId,
+  slaMinutes,
   steps,
   isSaving,
+  isRunning,
   error,
+  runError,
+  runResult,
   onGoalChange,
   onRiskChange,
   onWorkItemChange,
   onSpecialistChange,
+  onSlaMinutesChange,
   onStepsChange,
   onCreate,
+  onRunAuto,
 }: {
   sessions: SessionRow[];
   workItems: WorkItem[];
@@ -1553,15 +1631,21 @@ function ManagerPlanComposer({
   risk: string;
   workItemId: string;
   specialistAgentId: string;
+  slaMinutes: number;
   steps: string;
   isSaving: boolean;
+  isRunning: boolean;
   error: unknown;
+  runError: unknown;
+  runResult?: ManagerAgentRunResponse;
   onGoalChange: (value: string) => void;
   onRiskChange: (value: string) => void;
   onWorkItemChange: (value: string) => void;
   onSpecialistChange: (value: string) => void;
+  onSlaMinutesChange: (value: number) => void;
   onStepsChange: (value: string) => void;
   onCreate: () => void;
+  onRunAuto: () => void;
 }) {
   return (
     <div className="manager-composer">
@@ -1595,6 +1679,15 @@ function ManagerPlanComposer({
             {["low", "medium", "high"].map((value) => <option key={value} value={value}>{value}</option>)}
           </select>
         </label>
+        <label>
+          <span>SLA minutes</span>
+          <input
+            type="number"
+            min={0}
+            value={slaMinutes}
+            onChange={(event) => onSlaMinutesChange(Number(event.target.value))}
+          />
+        </label>
         <label className="wide-filter">
           <span>Decomposition</span>
           <textarea rows={5} value={steps} onChange={(event) => onStepsChange(event.target.value)} />
@@ -1604,9 +1697,30 @@ function ManagerPlanComposer({
         <button disabled={isSaving || !goal.trim() || !sessions.length} onClick={onCreate}>
           {isSaving ? "Creating..." : "Create manager plan"}
         </button>
+        <button disabled={isRunning || !workItemId} onClick={onRunAuto}>
+          {isRunning ? "Running..." : "Run manager loop"}
+        </button>
         <span>{sessions.length ? "records manager_plan.created into audit" : "create or select a manager session first"}</span>
       </div>
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+      {runError ? <p className="error-note">{errorMessage(runError)}</p> : null}
+      {runResult ? <ManagerRunResult result={runResult} /> : null}
+    </div>
+  );
+}
+
+function ManagerRunResult({ result }: { result: ManagerAgentRunResponse }) {
+  return (
+    <div className="manager-run-result">
+      <div className="graph-summary">
+        <KeyValue label="Run" value={result.status} />
+        <KeyValue label="Plan" value={shortId(result.plan.id)} />
+        <KeyValue label="Handoff" value={`${result.handoff.intent} · ${result.handoff.status}`} />
+        <KeyValue label="Assignment" value={result.assignment ? `${shortId(result.assignment.id)} · ${result.assignment.status}` : "not assigned"} />
+        <KeyValue label="Activities" value={String(result.activity_count)} />
+        <KeyValue label="SLA" value={String(result.sla.due_at ?? "not set")} />
+      </div>
+      <Row title={result.work_item.title} detail={`specialist session ${shortId(result.assignment?.specialist_session_id ?? "none")}`} />
     </div>
   );
 }
@@ -3050,6 +3164,89 @@ function SemanticObjectBrowser({
   );
 }
 
+function SemanticProductConsole({
+  searchText,
+  memoryScope,
+  search,
+  graph,
+  governanceResult,
+  isRunningGovernance,
+  error,
+  onSearchTextChange,
+  onMemoryScopeChange,
+  onGovernanceRun,
+}: {
+  searchText: string;
+  memoryScope: string;
+  search?: SemanticSearchResponse;
+  graph?: SemanticGraphSnapshot;
+  governanceResult?: SemanticGovernanceRunResult;
+  isRunningGovernance: boolean;
+  error: unknown;
+  onSearchTextChange: (value: string) => void;
+  onMemoryScopeChange: (value: string) => void;
+  onGovernanceRun: (dryRun: boolean) => void;
+}) {
+  return (
+    <div className="semantic-product-console">
+      <div className="control-grid">
+        <label>
+          <span>Search</span>
+          <input value={searchText} onChange={(event) => onSearchTextChange(event.target.value)} placeholder="policy, decision, memory..." />
+        </label>
+        <label>
+          <span>Memory scope</span>
+          <input value={memoryScope} onChange={(event) => onMemoryScopeChange(event.target.value)} placeholder="brand-voice" />
+        </label>
+        <button disabled={isRunningGovernance} onClick={() => onGovernanceRun(true)}>
+          {isRunningGovernance ? "Running..." : "Dry-run governance"}
+        </button>
+        <button className="ghost danger" disabled={isRunningGovernance} onClick={() => onGovernanceRun(false)}>
+          Apply stale archive
+        </button>
+      </div>
+      <div className="graph-summary">
+        <KeyValue label="Nodes" value={String(graph?.node_count ?? 0)} />
+        <KeyValue label="Edges" value={String(graph?.edge_count ?? 0)} />
+        <KeyValue label="Partitions" value={String(graph?.partition_count ?? 0)} />
+        <KeyValue label="Conflicts" value={String(graph?.conflicts.length ?? 0)} />
+        <KeyValue label="Stale" value={String(graph?.stale_nodes.length ?? 0)} />
+        <KeyValue label="Search hits" value={String(search?.result_count ?? 0)} />
+      </div>
+      <div className="semantic-product-columns">
+        <div>
+          <h4>Search hits</h4>
+          {(search?.results ?? []).slice(0, 5).map((result) => (
+            <div key={result.object.id} className="obs-row semantic-object-row">
+              <strong>{result.object.title}</strong>
+              <span>{result.object.object_type} · score {result.score} · {result.object.trust_level} · {result.object.freshness}</span>
+              <small>{result.object.summary}</small>
+            </div>
+          ))}
+          {!search?.results.length ? <p className="muted">No semantic search hits.</p> : null}
+        </div>
+        <div>
+          <h4>Governance findings</h4>
+          {(graph?.conflicts ?? []).slice(0, 4).map((conflict) => (
+            <Row key={`${conflict.kind}-${conflict.relation_id ?? conflict.object_key ?? conflict.message}`} title={conflict.kind} detail={conflict.message} />
+          ))}
+          {(graph?.stale_nodes ?? []).slice(0, 4).map((node) => (
+            <Row key={node.id} title={`stale · ${node.title}`} detail={node.partition_key} />
+          ))}
+          {governanceResult ? (
+            <Row
+              title={`last governance run · ${governanceResult.status}`}
+              detail={`${governanceResult.archived_count} archived · ${governanceResult.conflict_count} conflicts`}
+            />
+          ) : null}
+          {!graph?.conflicts.length && !graph?.stale_nodes.length ? <p className="muted">No conflicts or stale memory in this graph.</p> : null}
+        </div>
+      </div>
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+    </div>
+  );
+}
+
 function SemanticLinkManager({
   objects,
   links,
@@ -3401,6 +3598,16 @@ function scopePairs(scopes: Record<string, unknown>): Array<[string, string]> {
 
 function objectTitle(objects: SemanticObject[], id: string): string {
   return objects.find((object) => object.id === id)?.title ?? shortId(id);
+}
+
+function semanticProductPath(path: string, params: Record<string, string>): string {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    const normalized = value.trim();
+    if (normalized) search.set(key, normalized);
+  });
+  const query = search.toString();
+  return query ? `${path}?${query}` : path;
 }
 
 function errorMessage(error: unknown): string {
