@@ -369,6 +369,7 @@ gateway_live_snippet="Grounded source with retained provenance."
 gateway_live_source_id="page-fresh-1"
 gateway_live_reference="KB-2026-05"
 gateway_live_retrieval_actor="connector-pilot"
+gateway_live_retrieved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if [[ -n "$WORKFLOW_PACK_MCP_CALL_URL" ]]; then
   gateway_call_file="$(fetch_gateway_call)"
   gateway_live_title="$(jq -r '.result.items[0].title // "Vendor AI policy"' "$gateway_call_file")"
@@ -388,7 +389,7 @@ ready_connector_quality_payload="$(jq -nc '{
       samples: [
         {
           object_id: "kb-fresh-1",
-          retrieved_at: "2026-05-17T00:00:00Z",
+          retrieved_at: $retrieved_at,
           citation_url: $citation_url,
           metadata: {
             source_id: $source_id,
@@ -414,16 +415,16 @@ ready_connector_quality_payload="$(jq -nc '{
       samples: [
         {
           object_id: "kb-fresh-1",
-          retrieved_at: "2026-05-17T00:00:00Z",
-          citation_url: "https://kb.example/policy/vendor-ai",
+          retrieved_at: $retrieved_at,
+          citation_url: $citation_url,
           metadata: {
-            source_id: "page-fresh-1",
-            reference: "KB-2026-05",
-            retrieval_actor: "connector-pilot"
+            source_id: $source_id,
+            reference: $reference,
+            retrieval_actor: $retrieval_actor
           },
           content: {
-            title: "Vendor AI policy",
-            snippet: "Grounded source with retained provenance."
+            title: $title,
+            snippet: $snippet
           }
         }
       ]
@@ -433,6 +434,7 @@ ready_connector_quality_payload="$(jq -nc '{
   --arg team_id "$CONNECTOR_TEAM_ID" \
   --arg server_id "$CONNECTOR_SERVER_ID" \
   --arg tool_name "$CONNECTOR_TOOL_NAME" \
+  --arg retrieved_at "$gateway_live_retrieved_at" \
   --arg citation_url "$gateway_live_url" \
   --arg source_id "$gateway_live_source_id" \
   --arg reference "$gateway_live_reference" \

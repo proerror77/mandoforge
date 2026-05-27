@@ -49,6 +49,7 @@ jobs:
           done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print0 | sort -z)
       - run: scripts/verify-whiskey-evidence-auth-fallbacks.sh
       - run: scripts/verify-whiskey-eval-release-seed.sh
+      - run: scripts/verify-workflow-pack-connector-quality-seed.sh
       - run: scripts/verify-observability-k8s-manifests.sh
       - run: scripts/verify-remote-computer-k8s-manifests.sh
       - run: kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out
