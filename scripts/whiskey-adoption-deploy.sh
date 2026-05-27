@@ -303,79 +303,62 @@ if [[ -z \"\$docker_gateway_ip\" ]]; then
   echo 'docker0 gateway IP is required for container-to-host Codex App Server wiring' >&2
   exit 1
 fi
-if [[ -f '$REMOTE_ROOT/codex-app-server-ws.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/codex-app-server-ws.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/codex-app-server-ws.pid'
-  sleep 1
-fi
-if command -v lsof >/dev/null 2>&1; then
-  codex_ws_pid=\$(lsof -tiTCP:$CODEX_WS_PORT -sTCP:LISTEN 2>/dev/null || true)
-  if [[ -n \"\$codex_ws_pid\" ]]; then
-    kill \$codex_ws_pid >/dev/null 2>&1 || true
+
+stop_remote_pid_file() {
+  local pid_file=\"\$1\"
+  local pid=\"\"
+  if [[ -f \"\$pid_file\" ]]; then
+    pid=\"\$(cat \"\$pid_file\" 2>/dev/null || true)\"
+    if [[ -n \"\$pid\" ]]; then
+      kill \$pid >/dev/null 2>&1 || true
+    fi
+    rm -f \"\$pid_file\"
     sleep 1
   fi
-fi
+}
+
+stop_remote_listener_by_port() {
+  local port=\"\$1\"
+  local pids=\"\"
+  if command -v lsof >/dev/null 2>&1; then
+    pids=\"\$(lsof -tiTCP:\"\$port\" -sTCP:LISTEN 2>/dev/null || true)\"
+  fi
+  if [[ -n \"\$pids\" ]]; then
+    kill \$pids >/dev/null 2>&1 || true
+    sleep 1
+  fi
+}
+
+stop_remote_pid_file '$REMOTE_ROOT/codex-app-server-ws.pid'
+stop_remote_listener_by_port $CODEX_WS_PORT
 command -v codex >/dev/null 2>&1 || { echo 'codex CLI is required for Whiskey Codex App Server WS target' >&2; exit 1; }
 nohup codex app-server --listen ws://\$docker_gateway_ip:$CODEX_WS_PORT > '$REMOTE_ROOT/codex-app-server-ws.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/codex-app-server-ws.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_WS_PORT$\" || { cat '$REMOTE_ROOT/codex-app-server-ws.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/codex-app-server-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/codex-app-server-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/codex-app-server-controller.pid'
-  sleep 1
-fi
-if command -v lsof >/dev/null 2>&1; then
-  controller_pid=\$(lsof -tiTCP:$CODEX_CONTROLLER_PORT -sTCP:LISTEN 2>/dev/null || true)
-  if [[ -n \"\$controller_pid\" ]]; then
-    kill \$controller_pid >/dev/null 2>&1 || true
-    sleep 1
-  fi
-fi
+stop_remote_pid_file '$REMOTE_ROOT/codex-app-server-controller.pid'
+stop_remote_listener_by_port $CODEX_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey Codex App Server controller' >&2; exit 1; }
 nohup env CODEX_APP_SERVER_WS_URL=ws://\$docker_gateway_ip:$CODEX_WS_PORT CODEX_CONTROLLER_HOST=\$docker_gateway_ip CODEX_CONTROLLER_PORT=$CODEX_CONTROLLER_PORT CODEX_CONTROLLER_TOKEN='$CODEX_CONTROLLER_TOKEN' node '$REMOTE_CODEX_CONTROLLER' > '$REMOTE_ROOT/codex-app-server-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/codex-app-server-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$CODEX_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/codex-app-server-controller.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/tenant-routing-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/tenant-routing-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/tenant-routing-controller.pid'
-  sleep 1
-fi
-if command -v lsof >/dev/null 2>&1; then
-  controller_pid=\$(lsof -tiTCP:$TENANT_CONTROLLER_PORT -sTCP:LISTEN 2>/dev/null || true)
-  if [[ -n \"\$controller_pid\" ]]; then
-    kill \$controller_pid >/dev/null 2>&1 || true
-    sleep 1
-  fi
-fi
+stop_remote_pid_file '$REMOTE_ROOT/tenant-routing-controller.pid'
+stop_remote_listener_by_port $TENANT_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey tenant routing controller' >&2; exit 1; }
 nohup env TENANT_ROUTING_CONTROLLER_API_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} TENANT_ROUTING_CONTROLLER_API_TOKEN=\"\${MANDOFORGE_WORKER_TOKEN:-whiskey-stage2-worker-token}\" TENANT_ROUTING_CONTROLLER_HOST=\$docker_gateway_ip TENANT_ROUTING_CONTROLLER_PORT=$TENANT_CONTROLLER_PORT TENANT_ROUTING_CONTROLLER_TOKEN='$TENANT_CONTROLLER_TOKEN' node '$REMOTE_TENANT_CONTROLLER' > '$REMOTE_ROOT/tenant-routing-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/tenant-routing-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$TENANT_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/tenant-routing-controller.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/worker-load-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/worker-load-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/worker-load-controller.pid'
-  sleep 1
-fi
-if command -v lsof >/dev/null 2>&1; then
-  controller_pid=\$(lsof -tiTCP:$WORKER_CONTROLLER_PORT -sTCP:LISTEN 2>/dev/null || true)
-  if [[ -n \"\$controller_pid\" ]]; then
-    kill \$controller_pid >/dev/null 2>&1 || true
-    sleep 1
-  fi
-fi
+stop_remote_pid_file '$REMOTE_ROOT/worker-load-controller.pid'
+stop_remote_listener_by_port $WORKER_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey worker load controller' >&2; exit 1; }
 nohup env WORKER_LOAD_CONTROLLER_API_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} WORKER_LOAD_CONTROLLER_API_TOKEN=\"\${MANDOFORGE_WORKER_TOKEN:-whiskey-stage2-worker-token}\" WORKER_LOAD_CONTROLLER_HOST=\$docker_gateway_ip WORKER_LOAD_CONTROLLER_PORT=$WORKER_CONTROLLER_PORT WORKER_LOAD_CONTROLLER_TOKEN='$WORKER_CONTROLLER_TOKEN' WORKER_LOAD_CONTROLLER_COMPOSE_FILE='$REMOTE_COMPOSE' WORKER_LOAD_CONTROLLER_COMPOSE_PROJECT='$COMPOSE_PROJECT' node '$REMOTE_WORKER_CONTROLLER' > '$REMOTE_ROOT/worker-load-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/worker-load-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$WORKER_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/worker-load-controller.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/mcp-pilot-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/mcp-pilot-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/mcp-pilot-controller.pid'
-  sleep 1
-fi
+stop_remote_pid_file '$REMOTE_ROOT/mcp-pilot-controller.pid'
+stop_remote_listener_by_port $MCP_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey MCP pilot controller' >&2; exit 1; }
 github_token=""
 if command -v gh >/dev/null 2>&1; then
@@ -400,41 +383,29 @@ nohup env MCP_PILOT_CONTROLLER_HOST=\$docker_gateway_ip MCP_PILOT_CONTROLLER_POR
 echo \$! > '$REMOTE_ROOT/mcp-pilot-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$MCP_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/mcp-pilot-controller.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/eval-release-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/eval-release-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/eval-release-controller.pid'
-  sleep 1
-fi
+stop_remote_pid_file '$REMOTE_ROOT/eval-release-controller.pid'
+stop_remote_listener_by_port $EVAL_RELEASE_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey eval/release controller' >&2; exit 1; }
 nohup env EVAL_RELEASE_CONTROLLER_HOST=\$docker_gateway_ip EVAL_RELEASE_CONTROLLER_PORT=$EVAL_RELEASE_CONTROLLER_PORT EVAL_RELEASE_CONTROLLER_TOKEN='$EVAL_RELEASE_CONTROLLER_TOKEN' EVAL_RELEASE_CONTROLLER_ENVIRONMENT='$EVAL_RELEASE_ENVIRONMENT' node '$REMOTE_EVAL_RELEASE_CONTROLLER' > '$REMOTE_ROOT/eval-release-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/eval-release-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$EVAL_RELEASE_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/eval-release-controller.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/observability-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/observability-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/observability-controller.pid'
-  sleep 1
-fi
+stop_remote_pid_file '$REMOTE_ROOT/observability-controller.pid'
+stop_remote_listener_by_port $OBSERVABILITY_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey observability controller' >&2; exit 1; }
 nohup env OBSERVABILITY_CONTROLLER_HOST=\$docker_gateway_ip OBSERVABILITY_CONTROLLER_PORT=$OBSERVABILITY_CONTROLLER_PORT OBSERVABILITY_CONTROLLER_TOKEN='$OBSERVABILITY_CONTROLLER_TOKEN' OBSERVABILITY_CONTROLLER_SERVICE_NAME='$OBSERVABILITY_SERVICE_NAME' node '$REMOTE_OBSERVABILITY_CONTROLLER' > '$REMOTE_ROOT/observability-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/observability-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$OBSERVABILITY_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/observability-controller.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/provider-rollout-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/provider-rollout-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/provider-rollout-controller.pid'
-  sleep 1
-fi
+stop_remote_pid_file '$REMOTE_ROOT/provider-rollout-controller.pid'
+stop_remote_listener_by_port $PROVIDER_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey provider rollout controller' >&2; exit 1; }
 nohup env PROVIDER_ROLLOUT_CONTROLLER_HOST=\$docker_gateway_ip PROVIDER_ROLLOUT_CONTROLLER_PORT=$PROVIDER_CONTROLLER_PORT PROVIDER_ROLLOUT_CONTROLLER_TOKEN='$PROVIDER_CONTROLLER_TOKEN' PROVIDER_ROLLOUT_CONTROLLER_ENVIRONMENT='$PROVIDER_ROLLOUT_ENVIRONMENT' node '$REMOTE_PROVIDER_CONTROLLER' > '$REMOTE_ROOT/provider-rollout-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/provider-rollout-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$PROVIDER_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/provider-rollout-controller.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/approval-notification-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/approval-notification-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/approval-notification-controller.pid'
-  sleep 1
-fi
+stop_remote_pid_file '$REMOTE_ROOT/approval-notification-controller.pid'
+stop_remote_listener_by_port $APPROVAL_NOTIFICATION_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey approval notification controller' >&2; exit 1; }
 lark_open_id="$APPROVAL_NOTIFICATION_LARK_OPEN_ID"
 if [[ '$APPROVAL_NOTIFICATION_DELIVERY_MODE' == 'lark_im' ]]; then
@@ -452,21 +423,15 @@ nohup env APPROVAL_NOTIFICATION_CONTROLLER_HOST=\$docker_gateway_ip APPROVAL_NOT
 echo \$! > '$REMOTE_ROOT/approval-notification-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$APPROVAL_NOTIFICATION_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/approval-notification-controller.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/vault-kms-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/vault-kms-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/vault-kms-controller.pid'
-  sleep 1
-fi
+stop_remote_pid_file '$REMOTE_ROOT/vault-kms-controller.pid'
+stop_remote_listener_by_port $VAULT_KMS_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey Vault/KMS controller' >&2; exit 1; }
 nohup env VAULT_KMS_CONTROLLER_HOST=\$docker_gateway_ip VAULT_KMS_CONTROLLER_PORT=$VAULT_KMS_CONTROLLER_PORT VAULT_KMS_CONTROLLER_TOKEN='$VAULT_KMS_CONTROLLER_TOKEN' VAULT_KMS_CONTROLLER_VAULT_TOKEN='$VAULT_KMS_VAULT_TOKEN' VAULT_KMS_CONTROLLER_PROVIDER='$VAULT_KMS_PROVIDER' VAULT_KMS_CONTROLLER_KEY_ID='$VAULT_KMS_KEY_ID' VAULT_KMS_CONTROLLER_ROTATION_POLICY='$VAULT_KMS_ROTATION_POLICY' node '$REMOTE_VAULT_KMS_CONTROLLER' > '$REMOTE_ROOT/vault-kms-controller.log' 2>&1 &
 echo \$! > '$REMOTE_ROOT/vault-kms-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$VAULT_KMS_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/vault-kms-controller.log' >&2; exit 1; }
-if [[ -f '$REMOTE_ROOT/finance-controller.pid' ]]; then
-  kill \$(cat '$REMOTE_ROOT/finance-controller.pid') >/dev/null 2>&1 || true
-  rm -f '$REMOTE_ROOT/finance-controller.pid'
-  sleep 1
-fi
+stop_remote_pid_file '$REMOTE_ROOT/finance-controller.pid'
+stop_remote_listener_by_port $FINANCE_CONTROLLER_PORT
 command -v node >/dev/null 2>&1 || { echo 'node is required for Whiskey finance controller' >&2; exit 1; }
 if [[ '$FINANCE_EXPORT_DELIVERY_MODE' == 'lark_drive' ]]; then
   command -v lark-cli >/dev/null 2>&1 || { echo 'lark-cli is required for Whiskey Lark finance export delivery' >&2; exit 1; }

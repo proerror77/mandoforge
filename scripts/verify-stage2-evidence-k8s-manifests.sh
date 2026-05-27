@@ -47,6 +47,7 @@ mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
 eval_release_script="scripts/eval-release-evidence-gate.sh"
 finance_script="scripts/finance-evidence-gate.sh"
 completion_audit_script="scripts/stage2-completion-audit-gate.sh"
+whiskey_deploy_script="scripts/whiskey-adoption-deploy.sh"
 worker_isolated_pool_manifests=(
   deploy/k8s/worker-isolated-pool.yaml
   deploy/k8s/worker-isolated-pool-networkpolicy.yaml
@@ -156,6 +157,34 @@ if [[ ! -x "$completion_audit_script" ]]; then
   echo "missing Stage 2 completion audit script: $completion_audit_script" >&2
   exit 1
 fi
+
+if [[ ! -x "$whiskey_deploy_script" ]]; then
+  echo "missing executable Whiskey adoption deploy script: $whiskey_deploy_script" >&2
+  exit 1
+fi
+
+if ! grep -q "stop_remote_listener_by_port()" "$whiskey_deploy_script"; then
+  echo "Whiskey deploy script must clean stale controller listeners by port before restarting controllers" >&2
+  exit 1
+fi
+
+for controller_port in \
+  CODEX_WS_PORT \
+  CODEX_CONTROLLER_PORT \
+  TENANT_CONTROLLER_PORT \
+  WORKER_CONTROLLER_PORT \
+  MCP_CONTROLLER_PORT \
+  EVAL_RELEASE_CONTROLLER_PORT \
+  OBSERVABILITY_CONTROLLER_PORT \
+  PROVIDER_CONTROLLER_PORT \
+  APPROVAL_NOTIFICATION_CONTROLLER_PORT \
+  VAULT_KMS_CONTROLLER_PORT \
+  FINANCE_CONTROLLER_PORT; do
+  if ! grep -q "stop_remote_listener_by_port \$$controller_port" "$whiskey_deploy_script"; then
+    echo "Whiskey deploy script must clean stale listener for $controller_port before restart" >&2
+    exit 1
+  fi
+done
 
 stage2_render_file="$(mktemp -t mandoforge-stage2-evidence-kustomize.XXXXXX)"
 stage2_production_render_file="$(mktemp -t mandoforge-stage2-production-evidence-kustomize.XXXXXX)"
