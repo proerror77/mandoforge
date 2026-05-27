@@ -332,6 +332,11 @@ if ! grep -q "AUDIT_DIR" deploy/stage2-evidence/stage2-completion-audit-job.exam
   exit 1
 fi
 
+if ! grep -q "MANDOFORGE_STAGE2_GATE_TOKEN" "$completion_audit_script" || ! grep -q "authorization: Bearer" "$completion_audit_script"; then
+  echo "Stage 2 completion audit gate must support shared-token authentication outside trusted ingress" >&2
+  exit 1
+fi
+
 if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/stage2-completion-audit-job.example.yaml; then
   echo "Stage 2 completion audit Job does not persist the checklist to the production evidence PVC" >&2
   exit 1

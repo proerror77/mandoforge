@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
 SUBJECT="${MANDOFORGE_STAGE2_GATE_SUBJECT:-stage2-completion-audit-gate}"
 ROLES="${MANDOFORGE_STAGE2_GATE_ROLES:-admin}"
+AUTH_TOKEN="${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-${MANDOFORGE_WORKER_TOKEN:-}}}"
 SOURCE_EVIDENCE_DIR="${SOURCE_EVIDENCE_DIR:-${STAGE2_EVIDENCE_DIR:-.mandoforge/stage2-production-evidence}}"
 AUDIT_DIR="${AUDIT_DIR:-.mandoforge/stage2-completion-audit}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
@@ -20,10 +21,15 @@ require_cmd() {
   fi
 }
 
-auth_headers=(
-  -H "x-mandoforge-subject: $SUBJECT"
-  -H "x-mandoforge-roles: $ROLES"
-)
+auth_headers=()
+if [[ -n "$AUTH_TOKEN" ]]; then
+  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
+else
+  auth_headers+=(
+    -H "x-mandoforge-subject: $SUBJECT"
+    -H "x-mandoforge-roles: $ROLES"
+  )
+fi
 
 slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
