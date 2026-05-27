@@ -16108,7 +16108,7 @@ fn workflow_step_claim_blockers(
             Some(scheduled_at) if scheduled_at > now => {
                 blockers.push("scheduled_for_future".to_string())
             }
-            Some(_) => {}
+            Some(_) => blockers.push("scheduled_until_scheduler_activation".to_string()),
             None => blockers.push("scheduled_without_due_time".to_string()),
         }
     } else if step.status != "queued" {
@@ -16793,7 +16793,7 @@ fn workflow_compensation_adapter_blockers(
             Some(scheduled_at) if scheduled_at > now => {
                 blockers.push("scheduled_for_future".to_string())
             }
-            Some(_) => {}
+            Some(_) => blockers.push("scheduled_until_scheduler_activation".to_string()),
             None => blockers.push("scheduled_without_due_time".to_string()),
         }
     } else if step.status != "queued" {
@@ -57857,6 +57857,155 @@ not json
                 })
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_workflow_retry_cannot_be_claimed_before_scheduler_activation() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Scheduler owned retry workflow",
+                    "entrypoint": "scheduler-owned-retry-workflow",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "step_graph": {
+                        "steps": [
+                            {"key": "collect", "type": "agent", "start": true},
+                            {
+                                "key": "normalize",
+                                "type": "agent",
+                                "depends_on": ["collect"],
+                                "retry": {"max_attempts": 2, "delay_seconds": 1}
+                            }
+                        ]
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "scheduler owned retry"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let run_id = run["id"].as_str().expect("run id");
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let collect_step_id = steps[0]["id"]
+            .as_str()
+            .expect("collect step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{collect_step_id}"),
+                json!({"status": "completed"}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let normalize_step_id = steps
+            .iter()
+            .find(|step| step["step_key"] == json!("normalize"))
+            .and_then(|step| step["id"].as_str())
+            .expect("normalize step id")
+            .to_string();
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{normalize_step_id}"),
+                json!({
+                    "status": "failed",
+                    "output_payload": {"error": "temporary source outage"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+
+        let steps_after_retry: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let retry_step_id = steps_after_retry
+            .iter()
+            .find(|step| {
+                step["step_key"] == json!("normalize") && step["status"] == json!("scheduled")
+            })
+            .and_then(|step| step["id"].as_str())
+            .expect("scheduled retry step id")
+            .to_string();
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let (status, error) = request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-step-runs/{retry_step_id}/claim"),
+                json!({
+                    "agent_id": agent.id,
+                    "worker_id": "workflow-step-worker"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("scheduled_until_scheduler_activation"))
         );
     }
 
