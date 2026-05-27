@@ -2407,6 +2407,11 @@ if ! grep -q "workflow_scheduled_steps_activated" scripts/managed-workflow-runti
   exit 1
 fi
 
+if ! grep -q "workflow_step_id_by_key" scripts/managed-workflow-runtime-evidence-gate.sh || ! grep -q 'status == "running"' scripts/managed-workflow-runtime-evidence-gate.sh || ! grep -q 'status == "requires_action"' scripts/managed-workflow-runtime-evidence-gate.sh; then
+  echo "Managed-workflow runtime evidence gate must tolerate worker-claimed queued steps" >&2
+  exit 1
+fi
+
 if ! grep -q "MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must write the managed-session target id into the run manifest" >&2
   exit 1

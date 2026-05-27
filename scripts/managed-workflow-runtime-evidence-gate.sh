@@ -103,6 +103,24 @@ fetch_json() {
   printf '%s\n' "$target"
 }
 
+workflow_step_id_by_key() {
+  local steps_file="$1"
+  local step_key="$2"
+  local label="${3:-$step_key}"
+  local step_id
+  step_id="$(jq -r --arg step_key "$step_key" '
+    .response[]
+    | select(.step_key == $step_key and (.status == "queued" or .status == "running" or .status == "requires_action"))
+    | .id
+  ' "$steps_file" | head -n 1)"
+  if [[ -z "$step_id" ]]; then
+    echo "managed workflow runtime evidence gate could not resolve workflow step '$label' in queued/running/requires_action state" >&2
+    jq -r '.response[] | {step_key, status, id, scheduled_at, output_payload}' "$steps_file" >&2
+    exit 1
+  fi
+  printf '%s\n' "$step_id"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -190,12 +208,12 @@ run_id="$(jq -r '.response.id // empty' "$run_file")"
 session_id="$(jq -r '.response.primary_session_id // empty' "$run_file")"
 
 steps_file="$(fetch_json GET "/api/workflow-runs/$run_id/steps" '{}' api-workflow-runtime-proof-steps-initial)"
-intake_step_id="$(jq -r '.response[] | select(.step_key == "intake") | .id' "$steps_file")"
+intake_step_id="$(workflow_step_id_by_key "$steps_file" intake)"
 fetch_json PATCH "/api/workflow-step-runs/$intake_step_id" '{"status":"completed","output_payload":{"accepted":true}}' api-workflow-runtime-proof-step-intake >/dev/null
 
 steps_file="$(fetch_json GET "/api/workflow-runs/$run_id/steps" '{}' api-workflow-runtime-proof-steps-after-intake)"
-collect_a_step_id="$(jq -r '.response[] | select(.step_key == "collect_a" and .status == "queued") | .id' "$steps_file")"
-collect_b_step_id="$(jq -r '.response[] | select(.step_key == "collect_b" and .status == "queued") | .id' "$steps_file")"
+collect_a_step_id="$(workflow_step_id_by_key "$steps_file" collect_a)"
+collect_b_step_id="$(workflow_step_id_by_key "$steps_file" collect_b)"
 
 fetch_json PATCH "/api/workflow-step-runs/$collect_a_step_id" \
   '{"status":"failed","output_payload":{"error":"transient source failure for retry proof"}}' \
@@ -235,7 +253,7 @@ fetch_json PATCH "/api/workflow-step-runs/$collect_b_step_id" \
   api-workflow-runtime-proof-step-collect-b-completed >/dev/null
 
 steps_file="$(fetch_json GET "/api/workflow-runs/$run_id/steps" '{}' api-workflow-runtime-proof-steps-after-collectors)"
-merge_step_id="$(jq -r '.response[] | select(.step_key == "merge" and .status == "queued") | .id' "$steps_file")"
+merge_step_id="$(workflow_step_id_by_key "$steps_file" merge)"
 fetch_json PATCH "/api/workflow-step-runs/$merge_step_id" \
   '{"status":"completed","output_payload":{"ready":true,"merged_records":5}}' \
   api-workflow-runtime-proof-step-merge-completed >/dev/null
@@ -261,7 +279,7 @@ artifact_file="$(fetch_json POST /api/codex-app-server/artifacts/sync "$(jq -nc 
 artifact_id="$(jq -r '.response.artifacts[0].id // empty' "$artifact_file")"
 
 steps_file="$(fetch_json GET "/api/workflow-runs/$run_id/steps" '{}' api-workflow-runtime-proof-steps-before-draft)"
-draft_step_id="$(jq -r '.response[] | select(.step_key == "draft_result" and .status == "queued") | .id' "$steps_file")"
+draft_step_id="$(workflow_step_id_by_key "$steps_file" draft_result)"
 fetch_json PATCH "/api/workflow-step-runs/$draft_step_id" "$(jq -nc --arg artifact_id "$artifact_id" '{
   status: "completed",
   output_payload: {result: "draft artifact generated", artifact_id: $artifact_id},
