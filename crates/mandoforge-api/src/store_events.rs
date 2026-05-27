@@ -94,9 +94,18 @@ impl AppState {
                 event
             }
             StoreBackend::Postgres(pool) => {
+                let tenant_id = self.current_tenant_id();
                 if self.get_session(session_id).await.is_err() {
                     return Err(AppError::not_found("session not found"));
                 }
+                let mut tx = pool.begin().await?;
+                sqlx::query(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))",
+                )
+                .bind(tenant_id)
+                .bind(session_id)
+                .execute(&mut *tx)
+                .await?;
                 let row = sqlx::query(
                     "WITH next_seq AS (
                         SELECT COALESCE(MAX(seq), 0) + 1 AS seq
@@ -109,7 +118,7 @@ impl AppState {
                      FROM next_seq
                      RETURNING id, session_id, seq, parent_event_id, actor_type, actor_id, event_type, payload, created_at",
                 )
-                .bind(self.current_tenant_id())
+                .bind(tenant_id)
                 .bind(session_id)
                 .bind(Uuid::new_v4())
                 .bind(actor_type)
@@ -117,9 +126,11 @@ impl AppState {
                 .bind(event_type)
                 .bind(payload)
                 .bind(Utc::now())
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
-                event_from_row(row)?
+                let event = event_from_row(row)?;
+                tx.commit().await?;
+                event
             }
         };
         self.emit_telemetry_event(&event).await;
