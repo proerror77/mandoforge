@@ -9,7 +9,11 @@ import {
   getAdminToken,
   reviewMemoryWritebackCandidate,
   reviewManagerAgentPlan,
+  expandSemanticOntology,
+  resolveSemanticConflict,
   runManagerAgent,
+  runManagerControlLoop,
+  runSemanticDreaming,
   runSemanticGovernance,
   setAdminToken,
   transitionAgentHandoff,
@@ -22,9 +26,11 @@ import {
   type Approval,
   type Artifact,
   type ContextPacket,
+  type CapabilityDiscovery,
   type DeploymentVersion,
   type Environment,
   type ManagerAgentPlan,
+  type ManagerControlLoopResult,
   type ManagerAgentRunResponse,
   type MemoryGovernancePartitionDetail,
   type MemoryGovernanceSummary,
@@ -39,9 +45,11 @@ import {
   type SemanticGraphSnapshot,
   type SemanticLink,
   type SemanticObject,
+  type SemanticReflectionQueue,
   type SemanticRetrievalBackendRegistry,
   type SemanticSearchResponse,
   type SemanticSynthesisRunResult,
+  type SemanticWorkbenchSnapshot,
   type Session,
   type SessionEvent,
   type Stage2Readiness,
@@ -185,7 +193,9 @@ export function App() {
   const [selectedContextPacketId, setSelectedContextPacketId] = useState("");
   const [semanticObjectType, setSemanticObjectType] = useState("all");
   const [semanticSearchText, setSemanticSearchText] = useState("");
+  const [semanticDomainScope, setSemanticDomainScope] = useState("legal");
   const [semanticMemoryScope, setSemanticMemoryScope] = useState("");
+  const [semanticWorkflowScope, setSemanticWorkflowScope] = useState("");
   const [semanticIngestionDraft, setSemanticIngestionDraft] = useState(DEFAULT_INGESTION_BATCH);
   const [semanticSynthesisDraft, setSemanticSynthesisDraft] = useState(DEFAULT_SYNTHESIS_RUN);
   const [graphEditorDraft, setGraphEditorDraft] = useState("");
@@ -279,6 +289,11 @@ export function App() {
     queryFn: () => api<AgentInboxSnapshot>(`/api/agents/${inboxAgentId}/inbox`),
     enabled: Boolean(inboxAgentId),
     refetchInterval: 1500,
+  });
+  const capabilityDiscovery = useQuery({
+    queryKey: ["capability-discovery"],
+    queryFn: () => api<CapabilityDiscovery>("/api/capability-discovery"),
+    refetchInterval: 5000,
   });
 
   const events = useQuery({
@@ -444,6 +459,20 @@ export function App() {
     queryFn: () => api<SemanticGraphSnapshot>(semanticProductPath("/api/semantic-graph", {
       memory_scope: semanticMemoryScope,
     })),
+    refetchInterval: 5000,
+  });
+  const semanticWorkbench = useQuery({
+    queryKey: ["semantic-workbench", semanticDomainScope, semanticWorkflowScope, semanticMemoryScope],
+    queryFn: () => api<SemanticWorkbenchSnapshot>(semanticProductPath("/api/semantic-workbench", {
+      domain_scope: semanticDomainScope,
+      workflow_scope: semanticWorkflowScope,
+      memory_scope: semanticMemoryScope,
+    })),
+    refetchInterval: 5000,
+  });
+  const semanticReflectionQueue = useQuery({
+    queryKey: ["semantic-reflection-queue"],
+    queryFn: () => api<SemanticReflectionQueue>("/api/semantic-reflection/queue"),
     refetchInterval: 5000,
   });
   const ontologyRegistry = useQuery({
@@ -626,11 +655,52 @@ export function App() {
   });
   const runSemanticGovernanceMutation = useMutation({
     mutationFn: (dryRun: boolean) => runSemanticGovernance({
+      domain_scope: semanticDomainScope || null,
+      workflow_scope: semanticWorkflowScope || null,
       memory_scope: semanticMemoryScope || null,
       archive_stale: true,
       dry_run: dryRun,
       conflict_strategy: "flag",
     }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const expandOntologyMutation = useMutation({
+    mutationFn: () => {
+      const suggestion = semanticWorkbench.data?.ontology_expansion_suggestions[0];
+      return expandSemanticOntology({
+        domain_scope: semanticDomainScope || suggestion?.domain_scope || "general",
+        object_types: suggestion?.object_types?.length ? suggestion.object_types : ["policy", "memory", "decision"],
+        relation_types: suggestion?.relation_types?.length ? suggestion.relation_types : ["supports", "contradicts", "supersedes"],
+        reason: "operator proposed ontology expansion from semantic workbench",
+      });
+    },
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const resolveConflictMutation = useMutation({
+    mutationFn: () => {
+      const conflict = semanticWorkbench.data?.conflict_queue[0];
+      if (!conflict || conflict.object_ids.length < 2) {
+        throw new Error("no semantic conflict with two objects is available");
+      }
+      return resolveSemanticConflict({
+        preferred_object_id: conflict.object_ids[0],
+        archive_object_ids: conflict.object_ids.slice(1),
+        reason: "operator resolved conflict from semantic workbench",
+      });
+    },
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const runDreamingMutation = useMutation({
+    mutationFn: () => {
+      if (!sessionId) throw new Error("select a session before queueing dreaming");
+      return runSemanticDreaming({
+        session_id: sessionId,
+        domain_scope: semanticDomainScope || "general",
+        workflow_scope: semanticWorkflowScope || "semantic-reflection",
+        memory_scope: semanticMemoryScope || "engineering",
+        goal: "Consolidate semantic conflicts, stale memories, and ontology gaps into reviewable memory candidates.",
+      });
+    },
     onSuccess: () => invalidateAll(queryClient),
   });
   const createManagerPlanMutation = useMutation({
@@ -684,6 +754,19 @@ export function App() {
         auto_assign: true,
         sla_minutes: managerSlaMinutes,
         metadata: { source: "manager-console" },
+      });
+    },
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const runManagerControlLoopMutation = useMutation({
+    mutationFn: () => {
+      const managerSession = selectedSession?.agent_id && selectedAgent?.agent_role === "manager"
+        ? selectedSession
+        : managerSessions[0]?.session;
+      return runManagerControlLoop({
+        manager_agent_id: managerSession?.agent_id ?? null,
+        execute_ready: false,
+        max_assignments: 12,
       });
     },
     onSuccess: () => invalidateAll(queryClient),
@@ -835,6 +918,7 @@ export function App() {
     agentHandoffs.error,
     agentHandoffAssignments.error,
     agentInbox.error,
+    capabilityDiscovery.error,
     workflowTransitions.error,
     workflowDefinitions.error,
     workflowPackInstallations.error,
@@ -845,6 +929,8 @@ export function App() {
     allWritebackCandidates.error,
     semanticObjects.error,
     semanticLinks.error,
+    semanticWorkbench.error,
+    semanticReflectionQueue.error,
     ontologyRegistry.error,
     createSemanticIngestionBatch.error,
     semanticBackends.error,
@@ -978,6 +1064,18 @@ export function App() {
         </section>
 
         <aside className="observer-panel">
+          <Panel title="Capability discovery">
+            <CapabilityDiscoveryPanel
+              discovery={capabilityDiscovery.data}
+              onOpenView={(view) => {
+                if (isWorkbenchView(view)) {
+                  setActiveView(view);
+                  localStorage.setItem("mandoforge.activeView", view);
+                }
+              }}
+            />
+          </Panel>
+
           <Panel title="Workflow">
             {selectedWorkflowRun ? (
               <>
@@ -1347,9 +1445,12 @@ export function App() {
                 steps={managerSteps}
                 isSaving={createManagerPlanMutation.isPending}
                 isRunning={runManagerAgentMutation.isPending}
+                isControlLoopRunning={runManagerControlLoopMutation.isPending}
                 error={createManagerPlanMutation.error}
                 runError={runManagerAgentMutation.error}
                 runResult={runManagerAgentMutation.data}
+                controlLoopError={runManagerControlLoopMutation.error}
+                controlLoopResult={runManagerControlLoopMutation.data}
                 onGoalChange={setManagerGoal}
                 onRiskChange={setManagerRisk}
                 onWorkItemChange={setManagerWorkItemId}
@@ -1358,6 +1459,7 @@ export function App() {
                 onStepsChange={setManagerSteps}
                 onCreate={() => createManagerPlanMutation.mutate()}
                 onRunAuto={() => runManagerAgentMutation.mutate()}
+                onRunControlLoop={() => runManagerControlLoopMutation.mutate()}
               />
             </Panel>
 
@@ -1405,6 +1507,23 @@ export function App() {
             </Panel>
             <Panel title="Semantic graph">
               <OntologyRegistryPanel registry={ontologyRegistry.data} />
+              <SemanticWorkbenchPanel
+                workbench={semanticWorkbench.data}
+                reflectionQueue={semanticReflectionQueue.data}
+                domainScope={semanticDomainScope}
+                workflowScope={semanticWorkflowScope}
+                memoryScope={semanticMemoryScope}
+                isExpanding={expandOntologyMutation.isPending}
+                isResolving={resolveConflictMutation.isPending}
+                isDreaming={runDreamingMutation.isPending}
+                error={semanticWorkbench.error ?? semanticReflectionQueue.error ?? expandOntologyMutation.error ?? resolveConflictMutation.error ?? runDreamingMutation.error}
+                onDomainScopeChange={setSemanticDomainScope}
+                onWorkflowScopeChange={setSemanticWorkflowScope}
+                onMemoryScopeChange={setSemanticMemoryScope}
+                onExpandOntology={() => expandOntologyMutation.mutate()}
+                onResolveConflict={() => resolveConflictMutation.mutate()}
+                onRunDreaming={() => runDreamingMutation.mutate()}
+              />
               <SemanticProductConsole
                 searchText={semanticSearchText}
                 memoryScope={semanticMemoryScope}
@@ -1612,9 +1731,12 @@ function ManagerPlanComposer({
   steps,
   isSaving,
   isRunning,
+  isControlLoopRunning,
   error,
   runError,
   runResult,
+  controlLoopError,
+  controlLoopResult,
   onGoalChange,
   onRiskChange,
   onWorkItemChange,
@@ -1623,6 +1745,7 @@ function ManagerPlanComposer({
   onStepsChange,
   onCreate,
   onRunAuto,
+  onRunControlLoop,
 }: {
   sessions: SessionRow[];
   workItems: WorkItem[];
@@ -1635,9 +1758,12 @@ function ManagerPlanComposer({
   steps: string;
   isSaving: boolean;
   isRunning: boolean;
+  isControlLoopRunning: boolean;
   error: unknown;
   runError: unknown;
   runResult?: ManagerAgentRunResponse;
+  controlLoopError: unknown;
+  controlLoopResult?: ManagerControlLoopResult;
   onGoalChange: (value: string) => void;
   onRiskChange: (value: string) => void;
   onWorkItemChange: (value: string) => void;
@@ -1646,6 +1772,7 @@ function ManagerPlanComposer({
   onStepsChange: (value: string) => void;
   onCreate: () => void;
   onRunAuto: () => void;
+  onRunControlLoop: () => void;
 }) {
   return (
     <div className="manager-composer">
@@ -1700,11 +1827,85 @@ function ManagerPlanComposer({
         <button disabled={isRunning || !workItemId} onClick={onRunAuto}>
           {isRunning ? "Running..." : "Run manager loop"}
         </button>
+        <button className="ghost" disabled={isControlLoopRunning} onClick={onRunControlLoop}>
+          {isControlLoopRunning ? "Inspecting..." : "Inspect queue"}
+        </button>
         <span>{sessions.length ? "records manager_plan.created into audit" : "create or select a manager session first"}</span>
       </div>
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}
       {runError ? <p className="error-note">{errorMessage(runError)}</p> : null}
+      {controlLoopError ? <p className="error-note">{errorMessage(controlLoopError)}</p> : null}
       {runResult ? <ManagerRunResult result={runResult} /> : null}
+      {controlLoopResult ? <ManagerControlLoopResultPanel result={controlLoopResult} workItems={workItems} /> : null}
+    </div>
+  );
+}
+
+function CapabilityDiscoveryPanel({
+  discovery,
+  onOpenView,
+}: {
+  discovery?: CapabilityDiscovery;
+  onOpenView: (view: string) => void;
+}) {
+  if (!discovery) {
+    return <p className="muted">Capability discovery is not loaded.</p>;
+  }
+  return (
+    <div className="capability-discovery">
+      <div className="graph-summary">
+        <KeyValue label="Cards" value={String(discovery.agent_cards.length)} />
+        <KeyValue label="Prompts" value={String(discovery.suggested_prompts.length)} />
+        <KeyValue label="Steps" value={String(discovery.onboarding_steps.length)} />
+      </div>
+      {discovery.agent_cards.slice(0, 4).map((card) => (
+        <div key={card.agent_id} className="obs-row capability-card">
+          <strong>{card.name}</strong>
+          <span>{card.agent_role} · {card.primary_action} · {card.release_state}</span>
+          <small>{card.sample_tasks[0] ?? "No sample task"}</small>
+          <div className="scope-line compact">
+            {card.tools.slice(0, 4).map((tool) => <span key={tool}>{tool}</span>)}
+            {!card.tools.length ? <span>no tools</span> : null}
+          </div>
+        </div>
+      ))}
+      <div className="prompt-stack">
+        {discovery.suggested_prompts.slice(0, 3).map((prompt) => (
+          <button key={`${prompt.target_view}-${prompt.action}`} className="prompt-button" onClick={() => onOpenView(prompt.target_view)}>
+            <strong>{prompt.title}</strong>
+            <span>{prompt.prompt}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ManagerControlLoopResultPanel({ result, workItems }: { result: ManagerControlLoopResult; workItems: WorkItem[] }) {
+  return (
+    <div className="manager-run-result">
+      <div className="graph-summary">
+        <KeyValue label="Overdue" value={String(result.summary.overdue_count)} />
+        <KeyValue label="Retrospectives" value={String(result.summary.retrospective_count)} />
+        <KeyValue label="Load rows" value={String(result.summary.specialist_load.length)} />
+        <KeyValue label="Run ID" value={shortId(result.manager_control_loop_run_id)} />
+      </div>
+      <div className="semantic-product-columns">
+        <div>
+          <h4>SLA escalations</h4>
+          {result.escalations.slice(0, 6).map((item) => (
+            <Row key={`${item.work_item_id}-${String(item.action ?? "escalated")}`} title={workItemTitle(workItems, item.work_item_id)} detail={String(item.action ?? "sla_escalated")} />
+          ))}
+          {!result.escalations.length ? <p className="muted">No overdue SLA escalations.</p> : null}
+        </div>
+        <div>
+          <h4>Agent load</h4>
+          {result.summary.specialist_load.slice(0, 6).map((load) => (
+            <Row key={load.agent_id} title={load.agent_name} detail={`${load.active_assignment_count} active · ${load.recommended_action}`} />
+          ))}
+          {!result.summary.specialist_load.length ? <p className="muted">No active specialist assignments.</p> : null}
+        </div>
+      </div>
     </div>
   );
 }
@@ -3240,6 +3441,89 @@ function SemanticProductConsole({
             />
           ) : null}
           {!graph?.conflicts.length && !graph?.stale_nodes.length ? <p className="muted">No conflicts or stale memory in this graph.</p> : null}
+        </div>
+      </div>
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+    </div>
+  );
+}
+
+function SemanticWorkbenchPanel({
+  workbench,
+  reflectionQueue,
+  domainScope,
+  workflowScope,
+  memoryScope,
+  isExpanding,
+  isResolving,
+  isDreaming,
+  error,
+  onDomainScopeChange,
+  onWorkflowScopeChange,
+  onMemoryScopeChange,
+  onExpandOntology,
+  onResolveConflict,
+  onRunDreaming,
+}: {
+  workbench?: SemanticWorkbenchSnapshot;
+  reflectionQueue?: SemanticReflectionQueue;
+  domainScope: string;
+  workflowScope: string;
+  memoryScope: string;
+  isExpanding: boolean;
+  isResolving: boolean;
+  isDreaming: boolean;
+  error: unknown;
+  onDomainScopeChange: (value: string) => void;
+  onWorkflowScopeChange: (value: string) => void;
+  onMemoryScopeChange: (value: string) => void;
+  onExpandOntology: () => void;
+  onResolveConflict: () => void;
+  onRunDreaming: () => void;
+}) {
+  const firstPilot = workbench?.domain_pilots[0];
+  return (
+    <div className="semantic-product-console semantic-workbench">
+      <div className="control-grid">
+        <label>
+          <span>Domain</span>
+          <input value={domainScope} onChange={(event) => onDomainScopeChange(event.target.value)} placeholder="legal" />
+        </label>
+        <label>
+          <span>Workflow</span>
+          <input value={workflowScope} onChange={(event) => onWorkflowScopeChange(event.target.value)} placeholder="contract-review" />
+        </label>
+        <label>
+          <span>Memory</span>
+          <input value={memoryScope} onChange={(event) => onMemoryScopeChange(event.target.value)} placeholder="legal-policy" />
+        </label>
+        <button disabled={isExpanding} onClick={onExpandOntology}>{isExpanding ? "Proposing..." : "Propose ontology"}</button>
+        <button className="ghost" disabled={isResolving || !(workbench?.conflict_queue.length)} onClick={onResolveConflict}>
+          {isResolving ? "Resolving..." : "Resolve first conflict"}
+        </button>
+        <button className="ghost" disabled={isDreaming} onClick={onRunDreaming}>{isDreaming ? "Queueing..." : "Queue dreaming"}</button>
+      </div>
+      <div className="graph-summary">
+        <KeyValue label="Domain" value={firstPilot?.domain_scope ?? "none"} />
+        <KeyValue label="Objects" value={String(firstPilot?.object_count ?? 0)} />
+        <KeyValue label="Conflicts" value={String(workbench?.conflict_queue.length ?? 0)} />
+        <KeyValue label="Aging" value={String(workbench?.aging_candidates.length ?? 0)} />
+        <KeyValue label="Review queue" value={String(reflectionQueue?.item_count ?? 0)} />
+      </div>
+      <div className="semantic-product-columns">
+        <div>
+          <h4>Conflict queue</h4>
+          {(workbench?.conflict_queue ?? []).slice(0, 4).map((conflict) => (
+            <Row key={`${conflict.kind}-${conflict.relation_id ?? conflict.object_key ?? conflict.message}`} title={conflict.kind} detail={conflict.message} />
+          ))}
+          {!workbench?.conflict_queue.length ? <p className="muted">No conflicts in this scope.</p> : null}
+        </div>
+        <div>
+          <h4>Reflection review</h4>
+          {(reflectionQueue?.items ?? []).slice(0, 4).map((candidate) => (
+            <Row key={candidate.id} title={candidate.candidate_type} detail={`${candidate.status} · ${candidate.title}`} />
+          ))}
+          {!reflectionQueue?.items.length ? <p className="muted">No pending reflection candidates.</p> : null}
         </div>
       </div>
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}

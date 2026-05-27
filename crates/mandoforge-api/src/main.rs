@@ -1106,6 +1106,16 @@ struct ManagerAgentRunResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct RunManagerControlLoopRequest {
+    #[serde(default)]
+    manager_agent_id: Option<Uuid>,
+    #[serde(default)]
+    execute_ready: bool,
+    #[serde(default)]
+    max_assignments: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AttachAgentHandoffRemoteComputerAssignment {
     remote_computer_job_assignment_id: Uuid,
     #[serde(default = "empty_json_object")]
@@ -2061,6 +2071,35 @@ struct SemanticGovernanceRunResult {
     archived_object_ids: Vec<Uuid>,
     conflicts: Vec<SemanticGraphConflict>,
     graph: SemanticGraphSnapshot,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveSemanticConflictRequest {
+    preferred_object_id: Uuid,
+    #[serde(default)]
+    archive_object_ids: Vec<Uuid>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpandSemanticOntologyRequest {
+    domain_scope: String,
+    #[serde(default)]
+    object_types: Vec<String>,
+    #[serde(default)]
+    relation_types: Vec<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunSemanticDreamingRequest {
+    session_id: Uuid,
+    domain_scope: String,
+    workflow_scope: String,
+    memory_scope: String,
+    goal: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6117,9 +6156,26 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/semantic-search", get(search_semantic_objects))
         .route("/api/semantic-graph", get(get_semantic_graph))
+        .route("/api/semantic-workbench", get(get_semantic_workbench))
         .route(
             "/api/semantic-governance/run",
             post(run_semantic_governance),
+        )
+        .route(
+            "/api/semantic-ontology/expand",
+            post(expand_semantic_ontology),
+        )
+        .route(
+            "/api/semantic-conflicts/resolve",
+            post(resolve_semantic_conflict),
+        )
+        .route(
+            "/api/semantic-reflection/dreaming/run",
+            post(run_semantic_dreaming),
+        )
+        .route(
+            "/api/semantic-reflection/queue",
+            get(get_semantic_reflection_queue),
         )
         .route(
             "/api/semantic-objects/{id}",
@@ -6406,6 +6462,11 @@ fn build_router(state: AppState) -> Router {
             get(list_work_item_manager_agent_plans),
         )
         .route("/api/manager-agent/runs", post(run_manager_agent))
+        .route(
+            "/api/manager-agent/control-loop/run",
+            post(run_manager_control_loop),
+        )
+        .route("/api/capability-discovery", get(get_capability_discovery))
         .route(
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
@@ -8784,6 +8845,126 @@ async fn get_semantic_graph(
     )))
 }
 
+async fn get_semantic_workbench(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SemanticProductQuery>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_workbench",
+        None,
+    )
+    .await?;
+    let objects = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| semantic_object_matches_product_query(object, &query))
+        .collect::<Vec<_>>();
+    let graph = build_semantic_graph_snapshot(
+        objects.clone(),
+        state.list_semantic_links().await?,
+        Utc::now(),
+    );
+    let mut domains = BTreeMap::<String, Value>::new();
+    for object in &objects {
+        let domain_scope = memory_governance_scope_value(&object.semantic_scopes, "domain_scope");
+        let entry = domains.entry(domain_scope.clone()).or_insert_with(|| {
+            json!({
+                "domain_scope": domain_scope,
+                "object_count": 0,
+                "memory_count": 0,
+                "stale_count": 0,
+                "conflict_count": 0,
+                "suggested_object_types": [],
+                "suggested_relation_types": ["supports", "contradicts", "supersedes"],
+            })
+        });
+        let count = entry["object_count"].as_u64().unwrap_or(0);
+        entry["object_count"] = json!(count + 1);
+        if object.object_type == "memory" {
+            let count = entry["memory_count"].as_u64().unwrap_or(0);
+            entry["memory_count"] = json!(count + 1);
+        }
+        if object.freshness != "current" {
+            let count = entry["stale_count"].as_u64().unwrap_or(0);
+            entry["stale_count"] = json!(count + 1);
+        }
+    }
+    for conflict in &graph.conflicts {
+        if let Some(partition) = graph
+            .partitions
+            .iter()
+            .find(|partition| partition.partition_key == conflict.partition_key)
+        {
+            if let Some(entry) = domains.get_mut(&partition.domain_scope) {
+                let count = entry["conflict_count"].as_u64().unwrap_or(0);
+                entry["conflict_count"] = json!(count + 1);
+            }
+        }
+    }
+    let domain_pilots = if domains.is_empty() {
+        vec![json!({
+            "domain_scope": query.domain_scope.clone().unwrap_or_else(|| "general".to_string()),
+            "object_count": 0,
+            "memory_count": 0,
+            "stale_count": 0,
+            "conflict_count": 0,
+            "suggested_object_types": ["policy", "memory", "decision"],
+            "suggested_relation_types": ["supports", "contradicts", "supersedes"],
+        })]
+    } else {
+        domains.into_values().collect()
+    };
+    let aging_candidates = objects
+        .iter()
+        .filter(|object| object.freshness != "current")
+        .map(|object| {
+            json!({
+                "object_id": object.id,
+                "object_key": object.object_key,
+                "title": object.title,
+                "freshness": object.freshness,
+                "trust_level": object.trust_level,
+                "partition_key": memory_governance_object_partition_key(object),
+                "recommended_action": "archive_or_refresh",
+            })
+        })
+        .collect::<Vec<_>>();
+    let ontology_expansion_suggestions = domain_pilots
+        .iter()
+        .map(|pilot| {
+            let domain_scope = pilot
+                .get("domain_scope")
+                .and_then(Value::as_str)
+                .unwrap_or("general");
+            json!({
+                "domain_scope": domain_scope,
+                "object_types": domain_ontology_object_type_suggestions(domain_scope),
+                "relation_types": domain_ontology_relation_type_suggestions(domain_scope),
+                "reason": "observed semantic partition needs explicit domain ontology before production rollout",
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "status": "ready",
+        "generated_at": Utc::now(),
+        "filters": {
+            "domain_scope": query.domain_scope,
+            "workflow_scope": query.workflow_scope,
+            "memory_scope": query.memory_scope,
+        },
+        "domain_pilots": domain_pilots,
+        "conflict_queue": graph.conflicts,
+        "aging_candidates": aging_candidates,
+        "ontology_expansion_suggestions": ontology_expansion_suggestions,
+        "graph": graph,
+    })))
+}
+
 async fn run_semantic_governance(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -8881,6 +9062,273 @@ async fn run_semantic_governance(
     Ok(Json(result))
 }
 
+async fn expand_semantic_ontology(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ExpandSemanticOntologyRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_ontology",
+        None,
+    )
+    .await?;
+    let domain_scope = validate_handoff_token("domain_scope", &input.domain_scope)?;
+    let object_types = input
+        .object_types
+        .iter()
+        .map(|value| validate_handoff_token("object_type", value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let relation_types = input
+        .relation_types
+        .iter()
+        .map(|value| validate_handoff_token("relation_type", value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let object = state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: None,
+            object_type: "ontology_expansion".to_string(),
+            object_key: format!("ontology:{domain_scope}:proposal:{}", Uuid::new_v4()),
+            title: format!("Ontology expansion proposal for {domain_scope}"),
+            summary: input
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("Proposed ontology expansion for {domain_scope}.")),
+            content: json!({
+                "domain_scope": domain_scope,
+                "object_types": object_types,
+                "relation_types": relation_types,
+                "reason": input.reason,
+                "status": "proposed",
+            }),
+            semantic_scopes: json!({
+                "domain_scope": domain_scope,
+                "workflow_scope": "ontology-expansion",
+                "memory_scope": "ontology",
+                "share_policy": "review_required",
+            }),
+            source_uri: Some(format!(
+                "mandoforge://semantic-ontology/{domain_scope}/proposals"
+            )),
+            provenance: json!({
+                "source": "semantic_ontology.expand",
+                "proposed_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        })
+        .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_ontology.expansion_proposed",
+            "semantic_object",
+            Some(object.id),
+            json!({
+                "subject": principal.subject_id,
+                "domain_scope": domain_scope,
+                "semantic_object_id": object.id,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": "proposed",
+        "object": object,
+    })))
+}
+
+async fn resolve_semantic_conflict(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ResolveSemanticConflictRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_conflicts",
+        None,
+    )
+    .await?;
+    let preferred = state.get_semantic_object(input.preferred_object_id).await?;
+    let mut archived_object_ids = Vec::new();
+    for object_id in input.archive_object_ids {
+        let archived = state.archive_semantic_object(object_id).await?;
+        let _ = state
+            .create_semantic_link(CreateSemanticLink {
+                from_entity_type: "semantic_object".to_string(),
+                from_entity_id: preferred.id.to_string(),
+                relation_type: "supersedes".to_string(),
+                to_entity_type: "semantic_object".to_string(),
+                to_entity_id: archived.id.to_string(),
+                metadata: json!({
+                    "reason": input.reason,
+                    "resolution": "preferred_object_selected",
+                }),
+                provenance: json!({
+                    "source": "semantic_conflicts.resolve",
+                    "resolved_at": Utc::now(),
+                }),
+                confidence: 1.0,
+                status: "active".to_string(),
+            })
+            .await?;
+        archived_object_ids.push(archived.id);
+    }
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_conflict.resolved",
+            "semantic_object",
+            Some(preferred.id),
+            json!({
+                "subject": principal.subject_id,
+                "preferred_object_id": preferred.id,
+                "archived_object_ids": archived_object_ids,
+                "reason": input.reason,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": "resolved",
+        "preferred_object_id": preferred.id,
+        "archived_object_ids": archived_object_ids,
+    })))
+}
+
+async fn run_semantic_dreaming(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RunSemanticDreamingRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(input.session_id),
+    )
+    .await?;
+    let session = state.get_session(input.session_id).await?;
+    let now = Utc::now();
+    let candidate = state
+        .create_memory_writeback_candidate(MemoryWritebackCandidate {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            candidate_type: "dreaming_synthesis".to_string(),
+            source_event_id: None,
+            source_artifact_id: None,
+            source_approval_id: None,
+            source_handoff_id: None,
+            proposed_object_type: "memory".to_string(),
+            proposed_object_key: format!(
+                "memory:dreaming:{}:{}:{}",
+                input.domain_scope,
+                input.workflow_scope,
+                Uuid::new_v4()
+            ),
+            title: format!("Dreaming synthesis: {}", input.goal),
+            summary: "Queued reflection/dreaming synthesis for human review.".to_string(),
+            content: json!({
+                "goal": input.goal,
+                "session_id": session.id,
+                "domain_scope": input.domain_scope,
+                "workflow_scope": input.workflow_scope,
+                "memory_scope": input.memory_scope,
+                "review_required": true,
+            }),
+            semantic_scopes: json!({
+                "domain_scope": input.domain_scope,
+                "workflow_scope": input.workflow_scope,
+                "memory_scope": input.memory_scope,
+                "share_policy": "review_required",
+            }),
+            source_refs: json!([{
+                "source_type": "session",
+                "source_id": session.id,
+                "freshness": "current",
+            }]),
+            provenance: json!({
+                "source": "semantic_reflection.dreaming.run",
+                "session_id": session.id,
+                "queued_at": now,
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "pending".to_string(),
+            reviewer_subject: None,
+            review_reason: None,
+            semantic_object_id: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+            decided_at: None,
+        })
+        .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session.id),
+            "user",
+            None,
+            "semantic_reflection.dreaming_queued",
+            "memory_writeback_candidate",
+            Some(candidate.id),
+            json!({
+                "subject": principal.subject_id,
+                "candidate_id": candidate.id,
+                "session_id": session.id,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": "queued_for_review",
+        "candidate": candidate,
+    })))
+}
+
+async fn get_semantic_reflection_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let principal = authorize_collection_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "semantic_reflection_queue",
+    )
+    .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    let items = state
+        .list_memory_writeback_candidates(None)
+        .await?
+        .into_iter()
+        .filter(|candidate| visible_session_ids.contains(&candidate.session_id))
+        .filter(|candidate| candidate.status == "pending")
+        .filter(|candidate| {
+            matches!(
+                candidate.candidate_type.as_str(),
+                "session_reflection" | "semantic_synthesis" | "dreaming_synthesis"
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "status": "ready",
+        "generated_at": Utc::now(),
+        "item_count": items.len(),
+        "items": items,
+    })))
+}
+
 fn semantic_object_matches_product_query(
     object: &SemanticObject,
     query: &SemanticProductQuery,
@@ -8920,6 +9368,55 @@ fn semantic_scope_filter_matches(filter: &Option<String>, scopes: &Value, key: &
         .and_then(|value| normalize_optional_text(value.clone()))
         .map(|expected| scopes.get(key).and_then(Value::as_str) == Some(expected.as_str()))
         .unwrap_or(true)
+}
+
+fn domain_ontology_object_type_suggestions(domain_scope: &str) -> Vec<&'static str> {
+    match domain_scope {
+        "legal" => vec![
+            "contract_clause",
+            "legal_position",
+            "obligation",
+            "risk_finding",
+        ],
+        "social-media" | "social_media" => {
+            vec![
+                "content_angle",
+                "audience_segment",
+                "platform_signal",
+                "brand_voice_rule",
+            ]
+        }
+        "ecommerce" | "e-commerce" => vec![
+            "campaign_signal",
+            "product_offer",
+            "pricing_rule",
+            "conversion_observation",
+        ],
+        _ => vec!["policy", "memory", "decision", "evidence"],
+    }
+}
+
+fn domain_ontology_relation_type_suggestions(domain_scope: &str) -> Vec<&'static str> {
+    match domain_scope {
+        "legal" => vec!["cites_clause", "constrains", "supersedes", "contradicts"],
+        "social-media" | "social_media" => {
+            vec![
+                "supports_angle",
+                "targets_segment",
+                "supersedes",
+                "contradicts",
+            ]
+        }
+        "ecommerce" | "e-commerce" => {
+            vec![
+                "drives_metric",
+                "constrains_offer",
+                "supersedes",
+                "contradicts",
+            ]
+        }
+        _ => vec!["supports", "contradicts", "supersedes"],
+    }
 }
 
 fn semantic_object_matched_fields(object: &SemanticObject, query_text: &str) -> Vec<String> {
@@ -9826,6 +10323,13 @@ fn ontology_registry() -> OntologyRegistry {
                 Some("workflow"),
                 None,
                 "workflow graph and task-grant policy",
+            ),
+            ontology_object_type(
+                "ontology_expansion",
+                "Proposed domain ontology addition that must be reviewed before promotion.",
+                Some("semantic_object"),
+                Some("domain"),
+                "semantic ontology governance boundary",
             ),
         ],
         relation_types: vec![
@@ -13200,6 +13704,321 @@ async fn run_manager_agent(
     }))
 }
 
+async fn run_manager_control_loop(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RunManagerControlLoopRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "manager_control_loop",
+        None,
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let manager_agent = select_manager_agent_for_run(&state, input.manager_agent_id).await?;
+    let run_id = Uuid::new_v4();
+    let now = Utc::now();
+    let mut work_items = state.list_work_items().await?;
+    work_items.retain(|work_item| work_item.archived_at.is_none());
+    work_items.sort_by(|left, right| {
+        manager_priority_rank(&right.priority)
+            .cmp(&manager_priority_rank(&left.priority))
+            .then_with(|| left.created_at.cmp(&right.created_at))
+    });
+    let work_items = if let Some(limit) = input.max_assignments {
+        work_items
+            .into_iter()
+            .take(limit.max(1))
+            .collect::<Vec<_>>()
+    } else {
+        work_items
+    };
+    let all_work_items = state.list_work_items().await?;
+    let mut load_by_agent = HashMap::<Uuid, (String, usize)>::new();
+    let agents_by_id = state
+        .list_agents()
+        .await?
+        .into_iter()
+        .map(|agent| (agent.id, agent))
+        .collect::<HashMap<_, _>>();
+    for work_item in &all_work_items {
+        for assignment in state.list_work_item_assignments(work_item.id).await? {
+            if assignment.archived_at.is_some()
+                || assignment.assignee_kind != "agent"
+                || !matches!(
+                    assignment.status.as_str(),
+                    "assigned" | "in_progress" | "blocked" | "review"
+                )
+            {
+                continue;
+            }
+            let Ok(agent_id) = Uuid::parse_str(&assignment.assignee_id) else {
+                continue;
+            };
+            let name = agents_by_id
+                .get(&agent_id)
+                .map(|agent| agent.name.clone())
+                .unwrap_or_else(|| assignment.assignee_id.clone());
+            let entry = load_by_agent.entry(agent_id).or_insert((name, 0));
+            entry.1 += 1;
+        }
+    }
+    let mut escalations = Vec::new();
+    let mut retrospectives = Vec::new();
+    for work_item in &work_items {
+        if !matches!(work_item.status.as_str(), "done" | "canceled") {
+            let activity = state.list_work_item_activity(work_item.id).await?;
+            let already_escalated = activity
+                .iter()
+                .any(|entry| entry.event_type == "manager_agent.sla_escalated");
+            let overdue_due_at = activity
+                .iter()
+                .filter(|entry| entry.event_type == "manager_agent.sla_tracked")
+                .filter_map(|entry| {
+                    entry
+                        .metadata
+                        .get("due_at")
+                        .and_then(parse_rfc3339_value_as_utc)
+                })
+                .min();
+            if let Some(due_at) = overdue_due_at {
+                if due_at <= now && !already_escalated {
+                    append_manager_run_activity(
+                        &state,
+                        work_item,
+                        "manager_agent.sla_escalated",
+                        &manager_agent,
+                        "Manager Agent escalated an overdue SLA",
+                        json!({
+                            "manager_control_loop_run_id": run_id,
+                            "due_at": due_at,
+                            "priority": work_item.priority,
+                            "status": work_item.status,
+                        }),
+                    )
+                    .await?;
+                    escalations.push(json!({
+                        "work_item_id": work_item.id,
+                        "title": work_item.title,
+                        "priority": work_item.priority,
+                        "due_at": due_at,
+                        "action": "sla_escalated",
+                    }));
+                }
+            }
+        }
+        if work_item.status == "blocked" {
+            let review = state
+                .create_work_item_review(
+                    work_item.id,
+                    CreateWorkItemReview {
+                        reviewer_kind: "agent".to_string(),
+                        reviewer_id: manager_agent.id.to_string(),
+                        status: "completed".to_string(),
+                        decision: Some("changes_requested".to_string()),
+                        summary: Some(
+                            "manager retrospective: blocked WorkItem requires replanning, evidence review, and escalation decision."
+                                .to_string(),
+                        ),
+                        metadata: json!({
+                            "source": "manager_agent.control_loop",
+                            "manager_control_loop_run_id": run_id,
+                            "review_policy": "blocked_items_require_retrospective",
+                        }),
+                    },
+                )
+                .await?;
+            append_manager_run_activity(
+                &state,
+                work_item,
+                "manager_agent.retrospective_created",
+                &manager_agent,
+                "Manager Agent created a blocked-work retrospective",
+                json!({
+                    "manager_control_loop_run_id": run_id,
+                    "work_item_review_id": review.id,
+                    "decision": review.decision,
+                }),
+            )
+            .await?;
+            retrospectives.push(json!({
+                "work_item_id": work_item.id,
+                "review_id": review.id,
+                "decision": review.decision,
+                "summary": review.summary,
+            }));
+        }
+    }
+    let mut specialist_load = load_by_agent
+        .into_iter()
+        .map(|(agent_id, (agent_name, active_assignment_count))| {
+            json!({
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "active_assignment_count": active_assignment_count,
+                "recommended_action": if active_assignment_count > 3 {
+                    "rebalance"
+                } else {
+                    "available"
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    specialist_load.sort_by(|left, right| {
+        left["agent_name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["agent_name"].as_str().unwrap_or_default())
+    });
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "agent",
+            Some(manager_agent.id),
+            "manager_agent.control_loop_run",
+            "manager_control_loop",
+            Some(run_id),
+            json!({
+                "subject": principal.subject_id,
+                "manager_agent_id": manager_agent.id,
+                "run_id": run_id,
+                "execute_ready": input.execute_ready,
+                "max_assignments": input.max_assignments,
+                "overdue_count": escalations.len(),
+                "retrospective_count": retrospectives.len(),
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": "completed",
+        "manager_control_loop_run_id": run_id,
+        "generated_at": now,
+        "summary": {
+            "overdue_count": escalations.len(),
+            "retrospective_count": retrospectives.len(),
+            "specialist_load": specialist_load,
+            "execute_ready": input.execute_ready,
+        },
+        "escalations": escalations,
+        "retrospectives": retrospectives,
+    })))
+}
+
+async fn get_capability_discovery(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "capability_discovery",
+        None,
+    )
+    .await?;
+    let agents = state.list_agents().await?;
+    let work_items = state.list_work_items().await?;
+    let pending_memory = state
+        .list_memory_writeback_candidates(None)
+        .await?
+        .into_iter()
+        .filter(|candidate| candidate.status == "pending")
+        .count();
+    let agent_cards = agents
+        .iter()
+        .map(|agent| {
+            json!({
+                "agent_id": agent.id,
+                "name": agent.name,
+                "kind": agent.kind,
+                "agent_role": agent.agent_role,
+                "provider": agent.provider,
+                "model": agent.model,
+                "release_state": agent.release_state,
+                "tools": agent.tools,
+                "skill_ids": agent.skill_ids,
+                "workflow_pack_ids": agent.workflow_pack_ids,
+                "semantic_scopes": agent.semantic_scopes,
+                "primary_action": capability_primary_action(agent),
+                "failure_modes": capability_failure_modes(agent),
+                "sample_tasks": capability_sample_tasks(agent),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "status": "ready",
+        "generated_at": Utc::now(),
+        "summary": {
+            "agent_count": agents.len(),
+            "open_work_item_count": work_items.iter().filter(|item| !matches!(item.status.as_str(), "done" | "canceled")).count(),
+            "pending_memory_review_count": pending_memory,
+        },
+        "agent_cards": agent_cards,
+        "suggested_prompts": [
+            {
+                "target_view": "manager",
+                "title": "拆解并派发一个工作项",
+                "prompt": "请把这个目标拆解成 WorkItem、选择合适 Agent、设置 SLA，并建立复审点。",
+                "action": "create_work_item_then_run_manager_loop"
+            },
+            {
+                "target_view": "semantic",
+                "title": "整理领域记忆",
+                "prompt": "请扫描这个 domain 的冲突、过期记忆与 ontology 缺口，建立需要复审的队列。",
+                "action": "open_semantic_workbench"
+            },
+            {
+                "target_view": "board",
+                "title": "查看队列风险",
+                "prompt": "请找出 blocked、overdue、无人领取的任务，并给出下一步处理建议。",
+                "action": "inspect_task_board"
+            }
+        ],
+        "onboarding_steps": [
+            {
+                "key": "create_work_item",
+                "title": "建立 WorkItem",
+                "description": "先把业务目标变成可审计、可派工、可复审的任务。"
+            },
+            {
+                "key": "run_manager_loop",
+                "title": "运行 Manager Loop",
+                "description": "让 Manager Agent 做 intake、拆解、派工、SLA 检查和复审。"
+            },
+            {
+                "key": "review_memory",
+                "title": "复审 Memory Queue",
+                "description": "批准或拒绝 reflection / dreaming 产生的记忆候选。"
+            },
+            {
+                "key": "install_pack",
+                "title": "安装 Workflow Pack",
+                "description": "把领域流程、Agent 技能和运行对象绑定成可复用模板。"
+            }
+        ],
+        "empty_states": [
+            {
+                "view": "manager",
+                "title": "还没有经理循环结果",
+                "action": "run_manager_control_loop"
+            },
+            {
+                "view": "semantic",
+                "title": "还没有可治理的语义对象",
+                "action": "ingest_semantic_source"
+            },
+            {
+                "view": "board",
+                "title": "还没有 WorkItem",
+                "action": "create_work_item"
+            }
+        ],
+    })))
+}
+
 async fn get_active_work_item_for_manager_run(
     state: &AppState,
     work_item_id: Uuid,
@@ -13282,6 +14101,55 @@ fn semantic_scopes_cover(candidate: &Value, required: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|candidate_value| candidate_value.trim() == required_value)
     })
+}
+
+fn manager_priority_rank(priority: &str) -> i32 {
+    match priority {
+        "urgent" => 4,
+        "high" => 3,
+        "normal" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+fn parse_rfc3339_value_as_utc(value: &Value) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn capability_primary_action(agent: &Agent) -> &'static str {
+    match agent.agent_role.as_str() {
+        "manager" => "run_manager_loop",
+        "specialist" => "claim_specialist_work",
+        _ => "start_session",
+    }
+}
+
+fn capability_failure_modes(agent: &Agent) -> Vec<&'static str> {
+    let mut modes = vec!["missing_context", "approval_required"];
+    if agent.tools.is_empty() {
+        modes.push("no_tools_configured");
+    }
+    if agent.workflow_pack_ids.is_empty() {
+        modes.push("no_workflow_pack_bound");
+    }
+    modes
+}
+
+fn capability_sample_tasks(agent: &Agent) -> Vec<String> {
+    match agent.agent_role.as_str() {
+        "manager" => vec![
+            "拆解新的 WorkItem 并选择 specialist agent".to_string(),
+            "巡检 blocked / overdue 队列并建立复审".to_string(),
+        ],
+        "specialist" => vec![
+            "领取一个已派发的 WorkItem 并产出 evidence".to_string(),
+            "根据 context packet 执行技能包内的步骤".to_string(),
+        ],
+        _ => vec!["启动一个受治理的 managed session".to_string()],
+    }
 }
 
 fn manager_run_decomposition(work_item: &WorkItem, specialist: &Agent) -> Value {
@@ -55072,6 +55940,194 @@ not json
     }
 
     #[tokio::test]
+    async fn manager_control_loop_prioritizes_escalates_and_retrospects_work_items() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let specialist: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Control Loop Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.read"],
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "agent-os",
+                        "workflow_scope": "manager-control-loop",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Control Loop Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": specialist.id,
+                                "intents": ["execute_work_item"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["medium"],
+                                "approval_required": false
+                            }]
+                        }
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let overdue_work_item: WorkItem = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Overdue launch checklist",
+                    "description": "Manager should escalate this SLA.",
+                    "source": "manual",
+                    "priority": "high",
+                    "metadata": {
+                        "semantic_scopes": {
+                            "project_scope": "mandoforge",
+                            "repo_scope": "mandoforge",
+                            "service_scope": "agent-os",
+                            "workflow_scope": "manager-control-loop",
+                            "policy_scope": "approval-required",
+                            "memory_scope": "engineering"
+                        }
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let blocked_work_item: WorkItem = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Blocked handoff review",
+                    "description": "Manager should create a retrospective.",
+                    "source": "manual",
+                    "priority": "normal",
+                    "status": "blocked"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/manager-agent/runs",
+                json!({
+                    "work_item_id": overdue_work_item.id,
+                    "manager_agent_id": manager.id,
+                    "specialist_agent_id": specialist.id,
+                    "risk_classification": "medium",
+                    "auto_assign": true,
+                    "sla_minutes": 0
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let loop_run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/manager-agent/control-loop/run",
+                json!({
+                    "manager_agent_id": manager.id,
+                    "execute_ready": false,
+                    "max_assignments": 3
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        assert_eq!(loop_run["status"], "completed");
+        assert_eq!(loop_run["summary"]["overdue_count"], json!(1));
+        assert_eq!(loop_run["escalations"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            loop_run["escalations"][0]["work_item_id"],
+            json!(overdue_work_item.id)
+        );
+        assert_eq!(loop_run["retrospectives"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            loop_run["retrospectives"][0]["work_item_id"],
+            json!(blocked_work_item.id)
+        );
+        assert!(
+            loop_run["summary"]["specialist_load"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|load| load["agent_id"] == json!(specialist.id)
+                    && load["active_assignment_count"] == json!(1))
+        );
+
+        let activity: Vec<WorkItemActivityEntry> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{}/activity", overdue_work_item.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(activity.iter().any(|entry| {
+            entry.event_type == "manager_agent.sla_escalated"
+                && entry.metadata["manager_control_loop_run_id"].is_string()
+        }));
+        let reviews: Vec<WorkItemReview> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{}/reviews", blocked_work_item.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(reviews.iter().any(|review| {
+            review.decision.as_deref() == Some("changes_requested")
+                && review
+                    .summary
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("retrospective")
+        }));
+    }
+
+    #[tokio::test]
     async fn manager_agent_plan_requires_manager_session_and_specialist_target() {
         let app = test_app().await;
         let worker: Agent = request_json(
@@ -56800,6 +57856,333 @@ not json
                 && log.details["archived_count"] == json!(1)
                 && log.details["conflict_count"] == json!(1)
         }));
+    }
+
+    #[tokio::test]
+    async fn semantic_workbench_resolves_conflicts_expands_ontology_and_queues_dreaming() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "memory",
+                    "source_uri": "memory://semantic-workbench-test",
+                    "display_name": "Semantic workbench test"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let current: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "memory",
+                    "object_key": "memory:legal:review-rule",
+                    "title": "Legal review rule",
+                    "summary": "Legal memories must stay isolated by domain.",
+                    "content": {"rule": "legal isolated"},
+                    "semantic_scopes": {
+                        "domain_scope": "legal",
+                        "workflow_scope": "contract-review",
+                        "memory_scope": "legal-policy",
+                        "share_policy": "isolated"
+                    },
+                    "trust_level": "human_verified",
+                    "freshness": "current"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let stale: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "memory",
+                    "object_key": "memory:legal:review-rule:old",
+                    "title": "Old legal review rule",
+                    "summary": "Legal memories can be shared globally.",
+                    "content": {"rule": "legal shared globally"},
+                    "semantic_scopes": {
+                        "domain_scope": "legal",
+                        "workflow_scope": "contract-review",
+                        "memory_scope": "legal-policy",
+                        "share_policy": "shared"
+                    },
+                    "trust_level": "source_attested",
+                    "freshness": "stale"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let _link: SemanticLink = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-links",
+                json!({
+                    "from_entity_type": "semantic_object",
+                    "from_entity_id": current.id.to_string(),
+                    "relation_type": "contradicts",
+                    "to_entity_type": "semantic_object",
+                    "to_entity_id": stale.id.to_string()
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let workbench: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-workbench?domain_scope=legal&memory_scope=legal-policy")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(workbench["domain_pilots"][0]["domain_scope"], "legal");
+        assert_eq!(workbench["conflict_queue"].as_array().unwrap().len(), 1);
+        assert_eq!(workbench["aging_candidates"].as_array().unwrap().len(), 1);
+        assert!(
+            workbench["ontology_expansion_suggestions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["domain_scope"] == "legal")
+        );
+
+        let expansion: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-ontology/expand",
+                json!({
+                    "domain_scope": "legal",
+                    "object_types": ["contract_clause", "legal_position"],
+                    "relation_types": ["cites_clause"],
+                    "reason": "legal pack pilot ontology"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(expansion["status"], "proposed");
+        assert_eq!(expansion["object"]["object_type"], "ontology_expansion");
+
+        let resolution: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-conflicts/resolve",
+                json!({
+                    "preferred_object_id": current.id,
+                    "archive_object_ids": [stale.id],
+                    "reason": "human selected current legal policy"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(resolution["status"], "resolved");
+        assert_eq!(resolution["archived_object_ids"], json!([stale.id]));
+
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Dreaming Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "semantic_scopes": {
+                        "domain_scope": "legal",
+                        "workflow_scope": "contract-review",
+                        "memory_scope": "legal-policy",
+                        "share_policy": "isolated"
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": agent.id, "title": "dreaming queue session"}),
+            ),
+        )
+        .await;
+        let dreaming: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-reflection/dreaming/run",
+                json!({
+                    "session_id": session.id,
+                    "domain_scope": "legal",
+                    "workflow_scope": "contract-review",
+                    "memory_scope": "legal-policy",
+                    "goal": "Consolidate legal policy memories for review."
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(dreaming["status"], "queued_for_review");
+        assert_eq!(
+            dreaming["candidate"]["candidate_type"],
+            "dreaming_synthesis"
+        );
+
+        let queue: Value = request_json(
+            app,
+            Request::builder()
+                .uri("/api/semantic-reflection/queue")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(queue["items"].as_array().unwrap().iter().any(|item| {
+            item["candidate_type"] == "dreaming_synthesis" && item["status"] == "pending"
+        }));
+    }
+
+    #[tokio::test]
+    async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidance() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Discovery Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["approval.request"],
+                    "skill_ids": ["manager-planning"],
+                    "workflow_pack_ids": ["legal-pack"],
+                    "semantic_scopes": {
+                        "domain_scope": "legal",
+                        "workflow_scope": "contract-review",
+                        "memory_scope": "legal-policy"
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let specialist: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Discovery Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "tools": ["file.read", "artifact.create"],
+                    "skill_ids": ["legal-research"],
+                    "workflow_pack_ids": ["legal-pack"],
+                    "semantic_scopes": {
+                        "domain_scope": "legal",
+                        "workflow_scope": "contract-review",
+                        "memory_scope": "legal-policy"
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let discovery: Value = request_json(
+            app,
+            Request::builder()
+                .uri("/api/capability-discovery")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        assert_eq!(discovery["status"], "ready");
+        assert!(
+            discovery["agent_cards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|card| {
+                    card["agent_id"] == json!(manager.id)
+                        && card["primary_action"] == "run_manager_loop"
+                })
+        );
+        assert!(
+            discovery["agent_cards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|card| {
+                    card["agent_id"] == json!(specialist.id)
+                        && card["primary_action"] == "claim_specialist_work"
+                })
+        );
+        assert!(
+            discovery["suggested_prompts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|prompt| prompt["target_view"] == "manager"
+                    && prompt["prompt"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("拆解"))
+        );
+        assert!(
+            discovery["onboarding_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step["key"] == "create_work_item")
+        );
+        assert!(
+            discovery["empty_states"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|state| state["view"] == "semantic")
+        );
     }
 
     #[tokio::test]

@@ -7,6 +7,9 @@ export type Agent = {
   provider: string;
   runtime_profile_id?: string | null;
   tools: string[];
+  skill_ids: string[];
+  workflow_pack_ids: string[];
+  semantic_scopes: Record<string, unknown>;
   release_state: string;
 };
 
@@ -191,6 +194,43 @@ export type SemanticGovernanceRunResult = {
   archived_object_ids: string[];
   conflicts: SemanticGraphConflict[];
   graph: SemanticGraphSnapshot;
+};
+
+export type SemanticWorkbenchSnapshot = {
+  status: string;
+  generated_at: string;
+  filters: Record<string, string | null>;
+  domain_pilots: Array<Record<string, unknown> & {
+    domain_scope: string;
+    object_count: number;
+    memory_count: number;
+    stale_count: number;
+    conflict_count: number;
+  }>;
+  conflict_queue: SemanticGraphConflict[];
+  aging_candidates: Array<Record<string, unknown> & {
+    object_id: string;
+    object_key: string;
+    title: string;
+    freshness: string;
+    trust_level: string;
+    partition_key: string;
+    recommended_action: string;
+  }>;
+  ontology_expansion_suggestions: Array<{
+    domain_scope: string;
+    object_types: string[];
+    relation_types: string[];
+    reason: string;
+  }>;
+  graph: SemanticGraphSnapshot;
+};
+
+export type SemanticReflectionQueue = {
+  status: string;
+  generated_at: string;
+  item_count: number;
+  items: MemoryWritebackCandidate[];
 };
 
 export type ContextPacket = {
@@ -635,6 +675,73 @@ export type ManagerAgentRunResponse = {
   sla: Record<string, unknown>;
   activity_count: number;
   completed_at: string;
+};
+
+export type ManagerControlLoopResult = {
+  status: string;
+  manager_control_loop_run_id: string;
+  generated_at: string;
+  summary: {
+    overdue_count: number;
+    retrospective_count: number;
+    specialist_load: Array<{
+      agent_id: string;
+      agent_name: string;
+      active_assignment_count: number;
+      recommended_action: string;
+    }>;
+    execute_ready: boolean;
+  };
+  escalations: Array<Record<string, unknown> & {
+    work_item_id: string;
+    title?: string;
+    action?: string;
+  }>;
+  retrospectives: Array<Record<string, unknown> & {
+    work_item_id: string;
+    review_id?: string;
+    summary?: string;
+  }>;
+};
+
+export type CapabilityDiscovery = {
+  status: string;
+  generated_at: string;
+  summary: Record<string, number>;
+  agent_cards: CapabilityAgentCard[];
+  suggested_prompts: Array<{
+    target_view: string;
+    title: string;
+    prompt: string;
+    action: string;
+  }>;
+  onboarding_steps: Array<{
+    key: string;
+    title: string;
+    description: string;
+  }>;
+  empty_states: Array<{
+    view: string;
+    title: string;
+    action: string;
+  }>;
+};
+
+export type CapabilityAgentCard = {
+  agent_id: string;
+  name: string;
+  kind: string;
+  agent_role: string;
+  provider: string;
+  model: string;
+  release_state: string;
+  tools: string[];
+  skill_ids: string[];
+  workflow_pack_ids: string[];
+  semantic_scopes: Record<string, unknown>;
+  primary_action: string;
+  failure_modes: string[];
+  sample_tasks: string[];
 };
 
 export type TaskBoardSnapshot = {
@@ -1148,6 +1255,18 @@ export async function runManagerAgent(input: {
   });
 }
 
+export async function runManagerControlLoop(input: {
+  manager_agent_id?: string | null;
+  execute_ready?: boolean;
+  max_assignments?: number | null;
+}): Promise<ManagerControlLoopResult> {
+  return api<ManagerControlLoopResult>("/api/manager-agent/control-loop/run", {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
 export async function runSemanticGovernance(input: {
   domain_scope?: string | null;
   workflow_scope?: string | null;
@@ -1157,6 +1276,45 @@ export async function runSemanticGovernance(input: {
   conflict_strategy?: string;
 }): Promise<SemanticGovernanceRunResult> {
   return api<SemanticGovernanceRunResult>("/api/semantic-governance/run", {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function expandSemanticOntology(input: {
+  domain_scope: string;
+  object_types: string[];
+  relation_types: string[];
+  reason?: string | null;
+}): Promise<{ status: string; object: SemanticObject }> {
+  return api<{ status: string; object: SemanticObject }>("/api/semantic-ontology/expand", {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function resolveSemanticConflict(input: {
+  preferred_object_id: string;
+  archive_object_ids: string[];
+  reason?: string | null;
+}): Promise<{ status: string; preferred_object_id: string; archived_object_ids: string[] }> {
+  return api<{ status: string; preferred_object_id: string; archived_object_ids: string[] }>("/api/semantic-conflicts/resolve", {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function runSemanticDreaming(input: {
+  session_id: string;
+  domain_scope: string;
+  workflow_scope: string;
+  memory_scope: string;
+  goal: string;
+}): Promise<{ status: string; candidate: MemoryWritebackCandidate }> {
+  return api<{ status: string; candidate: MemoryWritebackCandidate }>("/api/semantic-reflection/dreaming/run", {
     method: "POST",
     headers: adminHeaders(),
     body: JSON.stringify(input),

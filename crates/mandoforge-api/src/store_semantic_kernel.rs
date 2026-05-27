@@ -803,9 +803,11 @@ fn normalize_semantic_object_type(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
     match normalized.as_str() {
         "decision" | "runbook" | "code_module" | "workflow" | "policy" | "memory" | "artifact"
-        | "project" | "repo" | "service" | "pack" | "work_item" => Ok(normalized),
+        | "project" | "repo" | "service" | "pack" | "work_item" | "ontology_expansion" => {
+            Ok(normalized)
+        }
         _ => Err(AppError::bad_request(
-            "semantic object_type must be decision, runbook, code_module, workflow, policy, memory, artifact, project, repo, service, pack, or work_item",
+            "semantic object_type must be decision, runbook, code_module, workflow, policy, memory, artifact, project, repo, service, pack, work_item, or ontology_expansion",
         )),
     }
 }

@@ -1680,6 +1680,7 @@ h1 {
 .manager-composer,
 .manager-console,
 .manager-run-result,
+.capability-discovery,
 .work-item-list,
 .handoff-evidence,
 .memory-console,
@@ -1691,6 +1692,31 @@ h1 {
   display: grid;
   gap: 10px;
   min-width: 0;
+}
+
+.capability-card {
+  align-items: start;
+}
+
+.prompt-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.prompt-button {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  min-height: 0;
+  padding: 9px;
+  text-align: left;
+  white-space: normal;
+}
+
+.prompt-button span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .manager-grid {
