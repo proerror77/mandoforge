@@ -48,6 +48,7 @@ eval_release_script="scripts/eval-release-evidence-gate.sh"
 finance_script="scripts/finance-evidence-gate.sh"
 completion_audit_script="scripts/stage2-completion-audit-gate.sh"
 whiskey_deploy_script="scripts/whiskey-adoption-deploy.sh"
+whiskey_evidence_script="scripts/whiskey-adoption-evidence.sh"
 worker_isolated_pool_manifests=(
   deploy/k8s/worker-isolated-pool.yaml
   deploy/k8s/worker-isolated-pool-networkpolicy.yaml
@@ -163,6 +164,11 @@ if [[ ! -x "$whiskey_deploy_script" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$whiskey_evidence_script" ]]; then
+  echo "missing executable Whiskey adoption evidence script: $whiskey_evidence_script" >&2
+  exit 1
+fi
+
 if ! grep -q "stop_remote_listener_by_port()" "$whiskey_deploy_script"; then
   echo "Whiskey deploy script must clean stale controller listeners by port before restarting controllers" >&2
   exit 1
@@ -185,6 +191,11 @@ for controller_port in \
     exit 1
   fi
 done
+
+if ! grep -q ".id // .config.pending_rollout.id // .rollout.id // .server.config.pending_rollout.id // empty" "$whiskey_evidence_script"; then
+  echo "Whiskey evidence script must extract rollout ids from top-level id, config.pending_rollout.id, rollout.id, or server.config.pending_rollout.id" >&2
+  exit 1
+fi
 
 stage2_render_file="$(mktemp -t mandoforge-stage2-evidence-kustomize.XXXXXX)"
 stage2_production_render_file="$(mktemp -t mandoforge-stage2-production-evidence-kustomize.XXXXXX)"

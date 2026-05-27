@@ -1836,10 +1836,11 @@ verify_semantic_artifacts() {
     fi
   fi
 
-  set +e
-  verify_run_manifest "$root"
-  issue=$?
-  set -e
+  if verify_run_manifest "$root"; then
+    issue=0
+  else
+    issue=$?
+  fi
   issue_count=$((issue_count + issue))
 
   return "$issue_count"
@@ -2205,6 +2206,15 @@ JSON
   set -e
   if [[ "$negative_status" == "0" ]]; then
     echo "Stage 2 archive verifier self-test expected unconfigured finance delivery target to fail" >&2
+    exit 1
+  fi
+  set +e
+  ALLOW_BLOCKED=1 "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-target-allow-blocked.out 2>/tmp/mandoforge-stage2-archive-finance-target-allow-blocked.err
+  blocked_status="$?"
+  set -e
+  if [[ "$blocked_status" != "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected ALLOW_BLOCKED=1 to tolerate semantic inventory issues" >&2
+    cat /tmp/mandoforge-stage2-archive-finance-target-allow-blocked.err >&2
     exit 1
   fi
 

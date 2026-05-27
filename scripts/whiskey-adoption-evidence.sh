@@ -1149,7 +1149,7 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
     rollout_stamp=\$(date -u +%Y%m%dT%H%M%SZ); \
     activate_after=\$(date -u -d \"1 minute ago\" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1M +%Y-%m-%dT%H:%M:%SZ); \
     rollout_json=\$(curl -fsS -X POST -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" -H \"content-type: application/json\" -d \"{\\\"config\\\":{\\\"source\\\":\\\"whiskey-stage2-preapply-\$rollout_stamp\\\",\\\"health_check\\\":{\\\"interval_seconds\\\":1}},\\\"tool_allowlist\\\":[\\\"search\\\"],\\\"status\\\":\\\"active\\\",\\\"activate_after\\\":\\\"\$activate_after\\\",\\\"reason\\\":\\\"Whiskey MCP strict pre-apply evidence\\\"}\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/teams/\$team_id/mcp-servers/\$server_id/rollouts); \
-    pending_rollout_id=\$(printf '%s' \"\$rollout_json\" | jq -r '.id // empty'); \
+    pending_rollout_id=\$(printf '%s' \"\$rollout_json\" | jq -r '.id // .config.pending_rollout.id // .rollout.id // .server.config.pending_rollout.id // empty'); \
   fi && \
   [[ -n \"\$pending_rollout_id\" ]] && curl -fsS -X POST -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/teams/\$team_id/mcp-servers/\$server_id/rollouts/\$pending_rollout_id/apply >/dev/null"
 
