@@ -1084,6 +1084,45 @@ export type DeploymentVersion = {
   source: string;
 };
 
+export type ProductionDeploymentVerifyResult = Record<string, unknown> & {
+  status: string;
+  target: string;
+  version_match: boolean;
+  running_version: DeploymentVersion;
+  checks: Record<string, unknown>;
+};
+
+export type ProductionAutoDeployPlan = Record<string, unknown> & {
+  status: string;
+  target: string;
+  dry_run: boolean;
+  steps: Array<Record<string, unknown> & { key: string; status: string }>;
+};
+
+export type RemoteComputerProductionPath = Record<string, unknown> & {
+  status: string;
+  generated_at: string;
+  checks: Record<string, unknown>;
+  production_path: Array<Record<string, unknown> & { key: string; status: string }>;
+};
+
+export type WorkflowPackMarketplace = Record<string, unknown> & {
+  status: string;
+  packs: Array<Record<string, unknown> & {
+    id: string;
+    name?: string;
+    version?: string;
+    status: string;
+    manifest_path: string;
+  }>;
+};
+
+export type WorkflowPackConfigWizardPlan = Record<string, unknown> & {
+  status: string;
+  pack: Record<string, unknown> & { id?: string; name?: string; version?: string };
+  steps: Array<Record<string, unknown> & { key: string; status: string }>;
+};
+
 const ADMIN_TOKEN_KEY = "mandoforge.adminToken";
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -1279,6 +1318,18 @@ export async function runSemanticGovernance(input: {
     method: "POST",
     headers: adminHeaders(),
     body: JSON.stringify(input),
+  });
+}
+
+export async function reviewSemanticOntologyProposal(input: {
+  id: string;
+  decision: "approve" | "reject" | "request_changes";
+  reason?: string | null;
+}): Promise<{ status: string; object: SemanticObject }> {
+  return api<{ status: string; object: SemanticObject }>(`/api/semantic-ontology/proposals/${input.id}/review`, {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify({ decision: input.decision, reason: input.reason }),
   });
 }
 

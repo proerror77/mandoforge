@@ -1685,6 +1685,7 @@ h1 {
 .handoff-evidence,
 .memory-console,
 .semantic-product-console,
+.ontology-review-panel,
 .pack-marketplace,
 .pack-release-console,
 .deploy-readiness,
@@ -1692,6 +1693,48 @@ h1 {
   display: grid;
   gap: 10px;
   min-width: 0;
+}
+
+.marketplace-grid,
+.wizard-steps {
+  display: grid;
+  gap: 8px;
+}
+
+.marketplace-grid {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.marketplace-pack,
+.wizard-step {
+  display: grid;
+  gap: 4px;
+  align-items: start;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  padding: 10px;
+  text-align: left;
+  white-space: normal;
+}
+
+.marketplace-pack.selected {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.marketplace-pack span,
+.marketplace-pack small,
+.wizard-step span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.wizard-step {
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
 }
 
 .capability-card {

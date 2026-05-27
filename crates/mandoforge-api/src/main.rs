@@ -2094,6 +2094,13 @@ struct ExpandSemanticOntologyRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ReviewOntologyProposalRequest {
+    decision: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RunSemanticDreamingRequest {
     session_id: Uuid,
     domain_scope: String,
@@ -2412,6 +2419,15 @@ struct ValidateWorkflowPack {
 #[derive(Debug, Deserialize)]
 struct InstallWorkflowPack {
     manifest_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowPackConfigWizardPlanRequest {
+    manifest_path: String,
+    #[serde(default)]
+    domain_scope: Option<String>,
+    #[serde(default)]
+    target_environment: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2901,6 +2917,10 @@ struct SchedulerDueRun {
     agent_releases: AgentReleaseAutomationRun,
     workflow_scheduled_steps: Option<WorkflowScheduledStepActivationSweep>,
     semantic_synthesis_schedules: Option<SemanticSynthesisScheduleSweep>,
+    #[serde(default)]
+    manager_control_loop_schedules: Option<ManagerControlLoopScheduleSweep>,
+    #[serde(default)]
+    semantic_aging_policies: Option<SemanticAgingPolicySweep>,
     mcp_health_runs: Vec<McpServerScheduledHealthRun>,
     mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
     codex_app_server_stale_polls: CodexAppServerStalePollRun,
@@ -2908,6 +2928,33 @@ struct SchedulerDueRun {
     usage_finance_export: UsageFinanceExportDelivery,
     remote_computer_reclaim: RemoteComputerReclaimRun,
     remote_computer_sidecar_supervision: RemoteComputerSidecarSupervisionRun,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManagerControlLoopScheduleSweep {
+    status: String,
+    checked_at: DateTime<Utc>,
+    scheduled_count: usize,
+    due_count: usize,
+    processed_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    runs: Vec<Value>,
+    actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticAgingPolicySweep {
+    status: String,
+    checked_at: DateTime<Utc>,
+    policy_count: usize,
+    due_count: usize,
+    archived_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    archived_object_ids: Vec<Uuid>,
+    runs: Vec<Value>,
+    actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3770,6 +3817,7 @@ struct WorkerLoadValidationRun {
     queue_backend: String,
     worker_mode: String,
     autoscaling_status: String,
+    autoscaling: WorkerAutoscalingReadiness,
     load_validated: bool,
     isolated_worker_pool_configured: bool,
     controller_configured: bool,
@@ -6106,6 +6154,11 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/deployment/version", get(get_deployment_version))
+        .route(
+            "/api/deployment/production/verify",
+            post(verify_production_deployment),
+        )
+        .route("/api/deployment/auto-deploy", post(plan_auto_deploy))
         .route("/api/stage2/readiness", get(get_stage2_readiness))
         .route("/api/agents", get(list_agents).post(create_agent))
         .route(
@@ -6164,6 +6217,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/semantic-ontology/expand",
             post(expand_semantic_ontology),
+        )
+        .route(
+            "/api/semantic-ontology/proposals/{id}/review",
+            post(review_semantic_ontology_proposal),
         )
         .route(
             "/api/semantic-conflicts/resolve",
@@ -6675,6 +6732,14 @@ fn build_router(state: AppState) -> Router {
             post(validate_workflow_pack_route),
         )
         .route(
+            "/api/workflow-packs/marketplace",
+            get(get_workflow_pack_marketplace),
+        )
+        .route(
+            "/api/workflow-packs/config-wizard/plan",
+            post(plan_workflow_pack_config_wizard),
+        )
+        .route(
             "/api/workflow-packs/install",
             post(install_workflow_pack_route),
         )
@@ -6881,6 +6946,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/readiness",
             get(get_remote_computer_readiness),
+        )
+        .route(
+            "/api/remote-computers/production-path",
+            get(get_remote_computer_production_path),
         )
         .route(
             "/api/remote-computers/state-sync/validate",
@@ -7194,8 +7263,177 @@ struct DeploymentVersion {
     source: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProductionDeploymentVerifyRequest {
+    #[serde(default)]
+    expected_git_sha: Option<String>,
+    #[serde(default)]
+    expected_image_tag: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    require_match: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProductionAutoDeployRequest {
+    target: String,
+    #[serde(default)]
+    git_sha: Option<String>,
+    #[serde(default)]
+    image_tag: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
 async fn get_deployment_version() -> Json<DeploymentVersion> {
     Json(deployment_version_from_env())
+}
+
+async fn verify_production_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ProductionDeploymentVerifyRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "deployment", None).await?;
+    let version = deployment_version_from_env();
+    let git_sha_match = deployment_expected_value_matches(
+        input.expected_git_sha.as_deref(),
+        version.git_sha.as_deref(),
+    );
+    let image_tag_match = deployment_expected_value_matches(
+        input.expected_image_tag.as_deref(),
+        version.image_tag.as_deref(),
+    );
+    let version_match = git_sha_match && image_tag_match;
+    let status = if input.require_match && !version_match {
+        "blocked"
+    } else {
+        "ready"
+    };
+    let target = input.target.unwrap_or_else(|| "default".to_string());
+    let response = json!({
+        "status": status,
+        "target": target.clone(),
+        "version_match": version_match,
+        "running_version": version,
+        "checks": {
+            "git_sha_match": git_sha_match,
+            "image_tag_match": image_tag_match,
+            "require_match": input.require_match,
+        },
+        "next_actions": if status == "ready" {
+            json!(["run_auto_deploy_dry_run", "run_post_deploy_verify"])
+        } else {
+            json!(["deploy_expected_version", "rerun_production_verify"])
+        }
+    });
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "deployment.production_verify",
+            "deployment",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "target": target,
+                "version_match": version_match,
+                "expected_git_sha": input.expected_git_sha,
+                "expected_image_tag": input.expected_image_tag,
+            }),
+        ))
+        .await?;
+    Ok(Json(response))
+}
+
+async fn plan_auto_deploy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ProductionAutoDeployRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "deployment", None).await?;
+    let version = deployment_version_from_env();
+    let target = validate_handoff_token("deployment target", &input.target)?;
+    let steps = vec![
+        json!({
+            "key": "verify_running_version",
+            "title": "Verify running version",
+            "status": "planned",
+            "endpoint": "/api/deployment/production/verify"
+        }),
+        json!({
+            "key": "build_or_select_image",
+            "title": "Build or select image",
+            "status": "planned",
+            "git_sha": input.git_sha.clone(),
+            "image_tag": input.image_tag.clone()
+        }),
+        json!({
+            "key": "push_image",
+            "title": "Push image",
+            "status": if input.dry_run { "dry_run" } else { "blocked" }
+        }),
+        json!({
+            "key": "deploy_target",
+            "title": "Deploy target",
+            "status": if input.dry_run { "dry_run" } else { "blocked" },
+            "target": target.clone()
+        }),
+        json!({
+            "key": "post_deploy_verify",
+            "title": "Post deploy verify",
+            "status": "planned",
+            "endpoint": "/healthz"
+        }),
+    ];
+    let status = if input.dry_run { "planned" } else { "blocked" };
+    let response = json!({
+        "status": status,
+        "target": target.clone(),
+        "dry_run": input.dry_run,
+        "running_version": version,
+        "requested": {
+            "git_sha": input.git_sha.clone(),
+            "image_tag": input.image_tag.clone()
+        },
+        "steps": steps,
+        "blocked_reason": if input.dry_run {
+            Value::Null
+        } else {
+            json!("live auto-deploy requires an explicit deployment controller; use dry_run until the controller is configured")
+        }
+    });
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "deployment.auto_deploy_planned",
+            "deployment",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "target": target,
+                "dry_run": input.dry_run,
+                "git_sha": input.git_sha,
+                "image_tag": input.image_tag,
+            }),
+        ))
+        .await?;
+    Ok(Json(response))
+}
+
+fn deployment_expected_value_matches(expected: Option<&str>, running: Option<&str>) -> bool {
+    expected
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none_or(|expected| running == Some(expected))
 }
 
 fn deployment_version_from_env() -> DeploymentVersion {
@@ -9141,6 +9379,96 @@ async fn expand_semantic_ontology(
         "status": "proposed",
         "object": object,
     })))
+}
+
+async fn review_semantic_ontology_proposal(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewOntologyProposalRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_ontology",
+        Some(id),
+    )
+    .await?;
+    let proposal = state.get_semantic_object(id).await?;
+    if proposal.object_type != "ontology_expansion" {
+        return Err(AppError::bad_request(
+            "semantic ontology proposal review requires an ontology_expansion object",
+        ));
+    }
+    let decision = normalize_ontology_review_decision(&input.decision)?;
+    let status = match decision.as_str() {
+        "approve" => "approved",
+        "reject" => "rejected",
+        "request_changes" => "changes_requested",
+        _ => "reviewed",
+    };
+    let principal = principal_from_request(&state, &headers).await?;
+    let mut content = proposal.content.as_object().cloned().unwrap_or_default();
+    content.insert("status".to_string(), json!(status));
+    content.insert(
+        "review".to_string(),
+        json!({
+            "decision": decision.clone(),
+            "reason": input.reason.clone(),
+            "reviewer": principal.subject_id.clone(),
+            "reviewed_at": Utc::now(),
+        }),
+    );
+    let object = state
+        .update_semantic_object(
+            proposal.id,
+            UpdateSemanticObject {
+                title: None,
+                summary: None,
+                content: Some(Value::Object(content)),
+                semantic_scopes: None,
+                source_uri: None,
+                provenance: None,
+                trust_level: None,
+                freshness: None,
+                status: None,
+            },
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_ontology.proposal_reviewed",
+            "semantic_object",
+            Some(object.id),
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "decision": decision.clone(),
+                "reason": input.reason,
+                "semantic_object_id": object.id,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": status,
+        "object": object,
+    })))
+}
+
+fn normalize_ontology_review_decision(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "approve" | "approved" => Ok("approve".to_string()),
+        "reject" | "rejected" => Ok("reject".to_string()),
+        "request_changes" | "changes_requested" => Ok("request_changes".to_string()),
+        _ => Err(AppError::bad_request(
+            "ontology proposal review decision must be approve, reject, or request_changes",
+        )),
+    }
 }
 
 async fn resolve_semantic_conflict(
@@ -13907,6 +14235,200 @@ async fn run_manager_control_loop(
     })))
 }
 
+async fn execute_manager_control_loop_core(
+    state: &AppState,
+    subject: &str,
+    input: RunManagerControlLoopRequest,
+) -> Result<Value, AppError> {
+    let manager_agent = select_manager_agent_for_run(state, input.manager_agent_id).await?;
+    let run_id = Uuid::new_v4();
+    let now = Utc::now();
+    let mut work_items = state.list_work_items().await?;
+    work_items.retain(|work_item| work_item.archived_at.is_none());
+    work_items.sort_by(|left, right| {
+        manager_priority_rank(&right.priority)
+            .cmp(&manager_priority_rank(&left.priority))
+            .then_with(|| left.created_at.cmp(&right.created_at))
+    });
+    let work_items = if let Some(limit) = input.max_assignments {
+        work_items
+            .into_iter()
+            .take(limit.max(1))
+            .collect::<Vec<_>>()
+    } else {
+        work_items
+    };
+    let all_work_items = state.list_work_items().await?;
+    let agents_by_id = state
+        .list_agents()
+        .await?
+        .into_iter()
+        .map(|agent| (agent.id, agent))
+        .collect::<HashMap<_, _>>();
+    let mut load_by_agent = HashMap::<Uuid, (String, usize)>::new();
+    for work_item in &all_work_items {
+        for assignment in state.list_work_item_assignments(work_item.id).await? {
+            if assignment.archived_at.is_some()
+                || assignment.assignee_kind != "agent"
+                || !matches!(
+                    assignment.status.as_str(),
+                    "assigned" | "in_progress" | "blocked" | "review"
+                )
+            {
+                continue;
+            }
+            let Ok(agent_id) = Uuid::parse_str(&assignment.assignee_id) else {
+                continue;
+            };
+            let name = agents_by_id
+                .get(&agent_id)
+                .map(|agent| agent.name.clone())
+                .unwrap_or_else(|| assignment.assignee_id.clone());
+            load_by_agent.entry(agent_id).or_insert((name, 0)).1 += 1;
+        }
+    }
+    let mut escalations = Vec::new();
+    let mut retrospectives = Vec::new();
+    for work_item in &work_items {
+        if !matches!(work_item.status.as_str(), "done" | "canceled") {
+            let activity = state.list_work_item_activity(work_item.id).await?;
+            let already_escalated = activity
+                .iter()
+                .any(|entry| entry.event_type == "manager_agent.sla_escalated");
+            let overdue_due_at = activity
+                .iter()
+                .filter(|entry| entry.event_type == "manager_agent.sla_tracked")
+                .filter_map(|entry| {
+                    entry
+                        .metadata
+                        .get("due_at")
+                        .and_then(parse_rfc3339_value_as_utc)
+                })
+                .min();
+            if let Some(due_at) = overdue_due_at
+                && due_at <= now
+                && !already_escalated
+            {
+                append_manager_run_activity(
+                    state,
+                    work_item,
+                    "manager_agent.sla_escalated",
+                    &manager_agent,
+                    "Manager Agent escalated an overdue SLA",
+                    json!({
+                        "manager_control_loop_run_id": run_id,
+                        "due_at": due_at,
+                        "priority": work_item.priority,
+                        "status": work_item.status,
+                    }),
+                )
+                .await?;
+                escalations.push(json!({
+                    "work_item_id": work_item.id,
+                    "title": work_item.title,
+                    "priority": work_item.priority,
+                    "due_at": due_at,
+                    "action": "sla_escalated",
+                }));
+            }
+        }
+        if work_item.status == "blocked" {
+            let review = state
+                .create_work_item_review(
+                    work_item.id,
+                    CreateWorkItemReview {
+                        reviewer_kind: "agent".to_string(),
+                        reviewer_id: manager_agent.id.to_string(),
+                        status: "completed".to_string(),
+                        decision: Some("changes_requested".to_string()),
+                        summary: Some(
+                            "manager retrospective: blocked WorkItem requires replanning, evidence review, and escalation decision."
+                                .to_string(),
+                        ),
+                        metadata: json!({
+                            "source": "manager_agent.control_loop",
+                            "manager_control_loop_run_id": run_id,
+                            "review_policy": "blocked_items_require_retrospective",
+                        }),
+                    },
+                )
+                .await?;
+            append_manager_run_activity(
+                state,
+                work_item,
+                "manager_agent.retrospective_created",
+                &manager_agent,
+                "Manager Agent created a blocked-work retrospective",
+                json!({
+                    "manager_control_loop_run_id": run_id,
+                    "work_item_review_id": review.id,
+                    "decision": review.decision,
+                }),
+            )
+            .await?;
+            retrospectives.push(json!({
+                "work_item_id": work_item.id,
+                "review_id": review.id,
+                "decision": review.decision,
+                "summary": review.summary,
+            }));
+        }
+    }
+    let mut specialist_load = load_by_agent
+        .into_iter()
+        .map(|(agent_id, (agent_name, active_assignment_count))| {
+            json!({
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "active_assignment_count": active_assignment_count,
+                "recommended_action": if active_assignment_count > 3 {
+                    "rebalance"
+                } else {
+                    "available"
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    specialist_load.sort_by(|left, right| {
+        left["agent_name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["agent_name"].as_str().unwrap_or_default())
+    });
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "agent",
+            Some(manager_agent.id),
+            "manager_agent.control_loop_run",
+            "manager_control_loop",
+            Some(run_id),
+            json!({
+                "subject": subject,
+                "manager_agent_id": manager_agent.id,
+                "run_id": run_id,
+                "execute_ready": input.execute_ready,
+                "max_assignments": input.max_assignments,
+                "overdue_count": escalations.len(),
+                "retrospective_count": retrospectives.len(),
+            }),
+        ))
+        .await?;
+    Ok(json!({
+        "status": "completed",
+        "manager_control_loop_run_id": run_id,
+        "generated_at": now,
+        "summary": {
+            "overdue_count": escalations.len(),
+            "retrospective_count": retrospectives.len(),
+            "specialist_load": specialist_load,
+            "execute_ready": input.execute_ready,
+        },
+        "escalations": escalations,
+        "retrospectives": retrospectives,
+    }))
+}
+
 async fn get_capability_discovery(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -15731,6 +16253,163 @@ async fn validate_workflow_pack_route(
     let report = workflow_pack::validate_workflow_pack_manifest_path(&manifest_path)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     Ok(Json(report))
+}
+
+async fn get_workflow_pack_marketplace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "workflow_pack", None).await?;
+    let generated_at = Utc::now();
+    let mut packs = Vec::new();
+    for manifest_path in workflow_pack_marketplace_manifest_paths() {
+        match load_and_validate_workflow_pack(&manifest_path) {
+            Ok((resolved_path, manifest, report)) => {
+                packs.push(json!({
+                    "id": manifest.id,
+                    "name": manifest.name,
+                    "version": manifest.version,
+                    "kind": workflow_pack_kind_label(&manifest.kind),
+                    "description": manifest.description,
+                    "manifest_path": manifest_path,
+                    "resolved_manifest_path": resolved_path,
+                    "status": "ready",
+                    "validation": report,
+                    "actions": ["install", "configure", "stage", "release"],
+                }));
+            }
+            Err(error) => {
+                let fallback_id = workflow_pack_marketplace_id_from_path(&manifest_path);
+                packs.push(json!({
+                    "id": fallback_id,
+                    "name": fallback_id,
+                    "manifest_path": manifest_path,
+                    "status": "blocked",
+                    "error": error.message,
+                }));
+            }
+        }
+    }
+    Ok(Json(json!({
+        "status": "ready",
+        "generated_at": generated_at,
+        "packs": packs,
+    })))
+}
+
+async fn plan_workflow_pack_config_wizard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<WorkflowPackConfigWizardPlanRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "workflow_pack", None).await?;
+    let manifest_path = resolve_workflow_pack_manifest_path(&input.manifest_path)?;
+    let manifest_input = std::fs::read_to_string(&manifest_path)?;
+    let manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&manifest_input)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let package_dir = manifest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let validation = match manifest.validate_package_dir(package_dir) {
+        Ok(report) => json!(report),
+        Err(error) => json!({
+            "status": "blocked",
+            "error": error.to_string(),
+        }),
+    };
+    let steps = vec![
+        json!({
+            "key": "validate_manifest",
+            "title": "Validate manifest",
+            "status": validation
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("ready"),
+            "artifact": manifest_path.clone(),
+        }),
+        json!({
+            "key": "install_pack",
+            "title": "Install pack",
+            "status": "ready",
+            "endpoint": "/api/workflow-packs/install",
+        }),
+        json!({
+            "key": "configure_profiles",
+            "title": "Configure profiles",
+            "status": "operator_input_required",
+            "profile_count": manifest.profiles.len(),
+        }),
+        json!({
+            "key": "assess_onboarding",
+            "title": "Assess onboarding",
+            "status": "ready",
+        }),
+        json!({
+            "key": "assess_connectors",
+            "title": "Assess connectors",
+            "status": "ready",
+            "connector_count": manifest.connectors.len(),
+        }),
+        json!({
+            "key": "stage_pack",
+            "title": "Stage pack",
+            "status": "ready",
+        }),
+        json!({
+            "key": "release_pack",
+            "title": "Release pack",
+            "status": "approval_required",
+        }),
+    ];
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "workflow_pack.config_wizard_planned",
+            "workflow_pack",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "manifest_path": input.manifest_path.clone(),
+                "pack_id": manifest.id.clone(),
+                "version": manifest.version.clone(),
+                "domain_scope": input.domain_scope.clone(),
+                "target_environment": input.target_environment.clone(),
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": "ready",
+        "generated_at": Utc::now(),
+        "manifest_path": manifest_path,
+        "pack": {
+            "id": manifest.id,
+            "name": manifest.name,
+            "version": manifest.version,
+            "description": manifest.description,
+        },
+        "validation": validation,
+        "operator_inputs": {
+            "domain_scope": input.domain_scope,
+            "target_environment": input.target_environment,
+        },
+        "steps": steps,
+    })))
+}
+
+fn workflow_pack_marketplace_manifest_paths() -> Vec<String> {
+    vec!["packs/ai-governance/package.yaml".to_string()]
+}
+
+fn workflow_pack_marketplace_id_from_path(manifest_path: &str) -> String {
+    FsPath::new(manifest_path)
+        .parent()
+        .and_then(FsPath::file_name)
+        .and_then(|value| value.to_str())
+        .unwrap_or(manifest_path)
+        .to_string()
 }
 
 async fn list_workflow_definitions_route(
@@ -19479,6 +20158,33 @@ async fn build_semantic_synthesis_schedule_due_counts(
     Ok((scheduled_count, due_count, skipped_count))
 }
 
+async fn build_scheduled_runtime_object_due_counts(
+    state: &AppState,
+    checked_at: DateTime<Utc>,
+    runtime_kind: &str,
+    success_action: &str,
+) -> Result<(usize, usize, usize), AppError> {
+    let objects = state
+        .list_workflow_pack_runtime_objects_by_runtime_kind(runtime_kind)
+        .await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let mut scheduled_count = 0usize;
+    let mut due_count = 0usize;
+    let mut skipped_count = 0usize;
+    for object in objects {
+        scheduled_count += 1;
+        if !scheduled_runtime_object_is_runnable(&object, runtime_kind) {
+            skipped_count += 1;
+            continue;
+        }
+        match scheduled_runtime_object_is_due(&object, &audit_logs, checked_at, success_action) {
+            Ok(true) => due_count += 1,
+            Ok(false) | Err(_) => skipped_count += 1,
+        }
+    }
+    Ok((scheduled_count, due_count, skipped_count))
+}
+
 async fn execute_due_semantic_synthesis_schedules(
     state: &AppState,
     checked_at: DateTime<Utc>,
@@ -19968,6 +20674,354 @@ fn semantic_synthesis_scheduled_run_failed(
         candidate_count: 0,
         reason: Some(reason.to_string()),
     }
+}
+
+async fn execute_due_manager_control_loop_schedules(
+    state: &AppState,
+    checked_at: DateTime<Utc>,
+) -> Result<ManagerControlLoopScheduleSweep, AppError> {
+    let objects = state
+        .list_workflow_pack_runtime_objects_by_runtime_kind("manager_control_loop_schedule")
+        .await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let mut scheduled_count = 0usize;
+    let mut due_count = 0usize;
+    let mut processed_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut runs = Vec::new();
+    for object in objects {
+        scheduled_count += 1;
+        if !scheduled_runtime_object_is_runnable(&object, "manager_control_loop_schedule") {
+            skipped_count += 1;
+            runs.push(json!({
+                "runtime_object_id": object.id,
+                "object_key": object.object_key,
+                "status": "skipped",
+                "reason": "schedule runtime object is not released or active",
+            }));
+            continue;
+        }
+        if !scheduled_runtime_object_is_due(
+            &object,
+            &audit_logs,
+            checked_at,
+            "manager_agent.control_loop_schedule_run",
+        )? {
+            skipped_count += 1;
+            runs.push(json!({
+                "runtime_object_id": object.id,
+                "object_key": object.object_key,
+                "status": "skipped",
+                "reason": "schedule is not due or one-shot schedule already ran",
+            }));
+            continue;
+        }
+        due_count += 1;
+        let input = RunManagerControlLoopRequest {
+            manager_agent_id: scheduled_runtime_object_uuid(&object, "manager_agent_id")?,
+            execute_ready: object
+                .spec
+                .get("execute_ready")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            max_assignments: object
+                .spec
+                .get("max_assignments")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize),
+        };
+        match execute_manager_control_loop_core(state, "system", input).await {
+            Ok(result) => {
+                processed_count += 1;
+                state
+                    .append_audit_log(new_audit_log(
+                        None,
+                        "system",
+                        Some(object.id),
+                        "manager_agent.control_loop_schedule_run",
+                        "workflow_pack_runtime_object",
+                        Some(object.id),
+                        json!({
+                            "runtime_object_id": object.id,
+                            "object_key": object.object_key,
+                            "checked_at": checked_at,
+                            "result": result,
+                        }),
+                    ))
+                    .await?;
+                runs.push(json!({
+                    "runtime_object_id": object.id,
+                    "object_key": object.object_key,
+                    "status": "processed",
+                    "result": result,
+                }));
+            }
+            Err(error) => {
+                failed_count += 1;
+                runs.push(json!({
+                    "runtime_object_id": object.id,
+                    "object_key": object.object_key,
+                    "status": "failed",
+                    "reason": error.message,
+                }));
+            }
+        }
+    }
+    let mut actions = Vec::new();
+    if processed_count > 0 {
+        actions.push("run_due_manager_control_loop_schedules".to_string());
+    }
+    let status = if failed_count > 0 && processed_count > 0 {
+        "partial"
+    } else if failed_count > 0 {
+        "failed"
+    } else if processed_count > 0 {
+        "completed"
+    } else if scheduled_count > 0 {
+        "waiting"
+    } else {
+        "noop"
+    }
+    .to_string();
+    Ok(ManagerControlLoopScheduleSweep {
+        status,
+        checked_at,
+        scheduled_count,
+        due_count,
+        processed_count,
+        skipped_count,
+        failed_count,
+        runs,
+        actions,
+    })
+}
+
+async fn execute_due_semantic_aging_policies(
+    state: &AppState,
+    checked_at: DateTime<Utc>,
+) -> Result<SemanticAgingPolicySweep, AppError> {
+    let objects = state
+        .list_workflow_pack_runtime_objects_by_runtime_kind("semantic_aging_policy")
+        .await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let mut policy_count = 0usize;
+    let mut due_count = 0usize;
+    let mut archived_count = 0usize;
+    let mut skipped_count = 0usize;
+    let failed_count = 0usize;
+    let mut archived_object_ids = Vec::new();
+    let mut runs = Vec::new();
+    for object in objects {
+        policy_count += 1;
+        if !scheduled_runtime_object_is_runnable(&object, "semantic_aging_policy") {
+            skipped_count += 1;
+            runs.push(json!({
+                "runtime_object_id": object.id,
+                "object_key": object.object_key,
+                "status": "skipped",
+                "reason": "policy runtime object is not released or active",
+            }));
+            continue;
+        }
+        if !scheduled_runtime_object_is_due(
+            &object,
+            &audit_logs,
+            checked_at,
+            "semantic_aging.policy_run",
+        )? {
+            skipped_count += 1;
+            runs.push(json!({
+                "runtime_object_id": object.id,
+                "object_key": object.object_key,
+                "status": "skipped",
+                "reason": "policy is not due or one-shot policy already ran",
+            }));
+            continue;
+        }
+        due_count += 1;
+        let archive_stale = object
+            .spec
+            .get("archive_stale")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let query = SemanticProductQuery {
+            q: None,
+            object_type: object
+                .spec
+                .get("object_type")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            domain_scope: object
+                .spec
+                .get("domain_scope")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            workflow_scope: object
+                .spec
+                .get("workflow_scope")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            memory_scope: object
+                .spec
+                .get("memory_scope")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            status: Some("active".to_string()),
+            trust_level: None,
+            freshness: None,
+            limit: None,
+        };
+        let stale_objects = state
+            .list_semantic_objects()
+            .await?
+            .into_iter()
+            .filter(|semantic_object| {
+                semantic_object_matches_product_query(semantic_object, &query)
+            })
+            .filter(|semantic_object| semantic_object.freshness != "current")
+            .collect::<Vec<_>>();
+        let mut run_archived_ids = Vec::new();
+        if archive_stale {
+            for stale_object in stale_objects {
+                let archived = state.archive_semantic_object(stale_object.id).await?;
+                run_archived_ids.push(archived.id);
+                archived_object_ids.push(archived.id);
+                archived_count += 1;
+            }
+        }
+        state
+            .append_audit_log(new_audit_log(
+                None,
+                "system",
+                Some(object.id),
+                "semantic_aging.policy_run",
+                "workflow_pack_runtime_object",
+                Some(object.id),
+                json!({
+                    "runtime_object_id": object.id,
+                    "object_key": object.object_key,
+                    "checked_at": checked_at,
+                    "archive_stale": archive_stale,
+                    "archived_object_ids": run_archived_ids,
+                }),
+            ))
+            .await?;
+        runs.push(json!({
+            "runtime_object_id": object.id,
+            "object_key": object.object_key,
+            "status": "processed",
+            "archive_stale": archive_stale,
+            "archived_object_ids": run_archived_ids,
+        }));
+    }
+    let mut actions = Vec::new();
+    if archived_count > 0 {
+        actions.push("run_due_semantic_aging_policies".to_string());
+    }
+    let status = if failed_count > 0 && archived_count > 0 {
+        "partial"
+    } else if failed_count > 0 {
+        "failed"
+    } else if archived_count > 0 {
+        "completed"
+    } else if policy_count > 0 {
+        "waiting"
+    } else {
+        "noop"
+    }
+    .to_string();
+    Ok(SemanticAgingPolicySweep {
+        status,
+        checked_at,
+        policy_count,
+        due_count,
+        archived_count,
+        skipped_count,
+        failed_count,
+        archived_object_ids,
+        runs,
+        actions,
+    })
+}
+
+fn scheduled_runtime_object_is_runnable(
+    object: &WorkflowPackRuntimeObject,
+    runtime_kind: &str,
+) -> bool {
+    object.object_type == "schedule"
+        && object.runtime_kind == runtime_kind
+        && matches!(object.status.as_str(), "released" | "active")
+        && object
+            .spec
+            .pointer("/schedule_policy/enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+}
+
+fn scheduled_runtime_object_is_due(
+    object: &WorkflowPackRuntimeObject,
+    audit_logs: &[AuditLog],
+    checked_at: DateTime<Utc>,
+    success_action: &str,
+) -> Result<bool, AppError> {
+    if scheduled_runtime_object_due_at(object)?.unwrap_or(object.created_at) > checked_at {
+        return Ok(false);
+    }
+    let one_shot = object
+        .spec
+        .pointer("/schedule_policy/one_shot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if one_shot
+        && audit_logs.iter().any(|log| {
+            log.action == success_action
+                && log
+                    .details
+                    .get("runtime_object_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    == Some(object.id)
+        })
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn scheduled_runtime_object_due_at(
+    object: &WorkflowPackRuntimeObject,
+) -> Result<Option<DateTime<Utc>>, AppError> {
+    let Some(value) = object
+        .spec
+        .pointer("/schedule_policy/due_at")
+        .or_else(|| object.spec.get("due_at"))
+    else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(AppError::bad_request(
+            "schedule due_at must be an RFC3339 string",
+        ));
+    };
+    DateTime::parse_from_rfc3339(raw)
+        .map(|value| Some(value.with_timezone(&Utc)))
+        .map_err(|_| AppError::bad_request("schedule due_at must be an RFC3339 string"))
+}
+
+fn scheduled_runtime_object_uuid(
+    object: &WorkflowPackRuntimeObject,
+    key: &str,
+) -> Result<Option<Uuid>, AppError> {
+    object
+        .spec
+        .get(key)
+        .and_then(Value::as_str)
+        .map(|value| {
+            Uuid::parse_str(value)
+                .map_err(|_| AppError::bad_request(format!("schedule {key} must be a UUID string")))
+        })
+        .transpose()
 }
 
 async fn record_workflow_step_run_updated(
@@ -22791,6 +23845,13 @@ fn resolve_workflow_pack_manifest_path(input: &str) -> Result<PathBuf, AppError>
             "manifest_path must not contain parent directory components",
         ));
     }
+    let path = if path.is_file() {
+        path
+    } else if path.is_relative() {
+        project_file_path(trimmed).unwrap_or(path)
+    } else {
+        path
+    };
     if !path.is_file() {
         return Err(AppError::bad_request(format!(
             "workflow pack manifest {} does not exist",
@@ -40823,6 +41884,52 @@ async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, 
             "no semantic synthesis schedules are registered"
         },
     ));
+    let (manager_schedule_count, manager_schedule_due_count, manager_schedule_skipped_count) =
+        build_scheduled_runtime_object_due_counts(
+            state,
+            generated_at,
+            "manager_control_loop_schedule",
+            "manager_agent.control_loop_schedule_run",
+        )
+        .await?;
+    actions.push(scheduler_due_plan_item(
+        "manager",
+        "manager_control_loop_schedule_run",
+        "auto",
+        manager_schedule_due_count,
+        manager_schedule_skipped_count,
+        manager_schedule_count,
+        if manager_schedule_due_count > 0 {
+            "run due Manager Agent control-loop schedules"
+        } else if manager_schedule_count > 0 {
+            "manager control-loop schedules exist but none are due"
+        } else {
+            "no manager control-loop schedules are registered"
+        },
+    ));
+    let (semantic_aging_policy_count, semantic_aging_due_count, semantic_aging_skipped_count) =
+        build_scheduled_runtime_object_due_counts(
+            state,
+            generated_at,
+            "semantic_aging_policy",
+            "semantic_aging.policy_run",
+        )
+        .await?;
+    actions.push(scheduler_due_plan_item(
+        "memory",
+        "semantic_aging_policy_run",
+        "auto",
+        semantic_aging_due_count,
+        semantic_aging_skipped_count,
+        semantic_aging_policy_count,
+        if semantic_aging_due_count > 0 {
+            "archive or flag stale semantic memory according to due aging policies"
+        } else if semantic_aging_policy_count > 0 {
+            "semantic aging policies exist but none are due"
+        } else {
+            "no semantic aging policies are registered"
+        },
+    ));
 
     let stale_remote_computer_attachments = state.list_stale_remote_computer_attachments().await?;
     let remote_computer_leases = state.list_remote_computer_leases().await?;
@@ -41014,6 +42121,9 @@ async fn execute_scheduler_due_tasks(
     let workflow_scheduled_steps = execute_due_workflow_scheduled_steps(state, checked_at).await?;
     let semantic_synthesis_schedules =
         execute_due_semantic_synthesis_schedules(state, checked_at).await?;
+    let manager_control_loop_schedules =
+        execute_due_manager_control_loop_schedules(state, checked_at).await?;
+    let semantic_aging_policies = execute_due_semantic_aging_policies(state, checked_at).await?;
     let usage = build_usage_summary(state).await?;
     let cost_alerts = build_cost_alerts(&usage.provider_budgets, checked_at);
     let active_alert_route_count = state
@@ -41089,6 +42199,14 @@ async fn execute_scheduler_due_tasks(
     {
         actions.push("semantic_synthesis_schedules_processed".to_string());
     }
+    if manager_control_loop_schedules.processed_count > 0
+        || manager_control_loop_schedules.failed_count > 0
+    {
+        actions.push("manager_control_loop_schedules_processed".to_string());
+    }
+    if semantic_aging_policies.archived_count > 0 || semantic_aging_policies.failed_count > 0 {
+        actions.push("semantic_aging_policies_processed".to_string());
+    }
     if cost_alert_delivery.is_some() {
         actions.push("usage_cost_alert_delivery_processed".to_string());
     }
@@ -41134,6 +42252,8 @@ async fn execute_scheduler_due_tasks(
         agent_releases,
         workflow_scheduled_steps: Some(workflow_scheduled_steps),
         semantic_synthesis_schedules: Some(semantic_synthesis_schedules),
+        manager_control_loop_schedules: Some(manager_control_loop_schedules),
+        semantic_aging_policies: Some(semantic_aging_policies),
         mcp_health_runs,
         mcp_rollout_runs,
         codex_app_server_stale_polls,
@@ -41167,6 +42287,10 @@ async fn execute_scheduler_due_tasks(
                 "semantic_synthesis_schedule_status": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.status.clone()),
                 "semantic_synthesis_schedule_created_count": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.created_count).unwrap_or(0),
                 "semantic_synthesis_schedule_failed_count": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.failed_count).unwrap_or(0),
+                "manager_control_loop_schedule_status": run.manager_control_loop_schedules.as_ref().map(|manager| manager.status.clone()),
+                "manager_control_loop_schedule_processed_count": run.manager_control_loop_schedules.as_ref().map(|manager| manager.processed_count).unwrap_or(0),
+                "semantic_aging_policy_status": run.semantic_aging_policies.as_ref().map(|semantic| semantic.status.clone()),
+                "semantic_aging_policy_archived_count": run.semantic_aging_policies.as_ref().map(|semantic| semantic.archived_count).unwrap_or(0),
                 "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
                 "remote_computer_sidecar_supervision_status": run.remote_computer_sidecar_supervision.status,
                 "remote_computer_sidecar_missing_heartbeat_count": run.remote_computer_sidecar_supervision.missing_heartbeat_count,
@@ -46818,6 +47942,49 @@ async fn get_remote_computer_readiness(
     Ok(Json(build_remote_computer_readiness(&state).await?))
 }
 
+async fn get_remote_computer_production_path(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_production_path",
+        None,
+    )
+    .await?;
+    let readiness = build_remote_computer_readiness(&state).await?;
+    let execution_transport = build_remote_computer_execution_transport_readiness(&state).await?;
+    let worker_readiness = build_worker_readiness(&state).await?;
+    let status = if readiness.status == "ready" && execution_transport.execution_enabled {
+        "ready"
+    } else {
+        "ready_for_pilot"
+    };
+    Ok(Json(json!({
+        "status": status,
+        "generated_at": Utc::now(),
+        "checks": {
+            "readiness": readiness,
+            "execution_transport": execution_transport,
+            "worker": worker_readiness,
+        },
+        "production_path": [
+            {"key": "lease_remote_computer", "status": "available"},
+            {"key": "assign_execution_job", "status": "available"},
+            {"key": "worker_executes_assigned_job", "status": if execution_transport.execution_enabled { "enabled" } else { "fail_closed" }},
+            {"key": "sync_artifacts", "status": "available"},
+            {"key": "audit_and_reclaim", "status": "available"}
+        ],
+        "runbook_actions": [
+            "confirm readiness and state-sync blockers before enabling Kubernetes execution transport",
+            "run worker load validation before scaling remote computer workers",
+            "keep direct tool execution behind execution-job approvals and worker handoff"
+        ],
+    })))
+}
+
 async fn validate_remote_computer_state_sync(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -49530,7 +50697,8 @@ where
         checked_at,
         queue_backend: queue_backend.kind,
         worker_mode,
-        autoscaling_status: autoscaling.validation_status,
+        autoscaling_status: autoscaling.validation_status.clone(),
+        autoscaling,
         load_validated,
         isolated_worker_pool_configured,
         controller_configured,
@@ -49550,6 +50718,7 @@ where
                 "queue_backend": run.queue_backend,
                 "worker_mode": run.worker_mode,
                 "autoscaling_status": run.autoscaling_status,
+                "autoscaling": run.autoscaling.clone(),
                 "load_validated": run.load_validated,
                 "isolated_worker_pool_configured": run.isolated_worker_pool_configured,
                 "controller_configured": run.controller_configured,
@@ -58182,6 +59351,403 @@ not json
                 .unwrap()
                 .iter()
                 .any(|state| state["view"] == "semantic")
+        );
+    }
+
+    #[tokio::test]
+    async fn production_closure_exposes_deployment_remote_and_worker_controls() {
+        let app = test_app().await;
+        let version: DeploymentVersion = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/deployment/version")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let verification: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/deployment/production/verify",
+                json!({
+                    "expected_git_sha": version.git_sha,
+                    "target": "whiskey",
+                    "require_match": true
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(verification["status"], "ready");
+        assert_eq!(verification["version_match"], true);
+
+        let deploy_plan: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/deployment/auto-deploy",
+                json!({
+                    "target": "whiskey",
+                    "git_sha": version.git_sha,
+                    "dry_run": true
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(deploy_plan["status"], "planned");
+        assert_eq!(deploy_plan["dry_run"], true);
+        assert!(
+            deploy_plan["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| { step["key"] == "verify_running_version" })
+        );
+
+        let remote_path: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/remote-computers/production-path")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(remote_path["status"], "ready_for_pilot");
+        assert!(remote_path["checks"]["readiness"].is_object());
+        assert!(remote_path["checks"]["execution_transport"].is_object());
+
+        let worker_validation: Value = request_json(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/execution-jobs/worker-load-validation/run")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(matches!(
+            worker_validation["status"].as_str(),
+            Some("validated" | "attention" | "blocked")
+        ));
+        assert!(worker_validation["autoscaling"].is_object());
+    }
+
+    #[tokio::test]
+    async fn scheduler_due_run_processes_manager_loop_and_semantic_aging() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let app = build_router(state.clone());
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let specialist: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Scheduled Manager Specialist",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let manager: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Scheduled Manager",
+                    "kind": "manager",
+                    "agent_role": "manager",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "runtime_config": {
+                        "handoffs": {
+                            "allowed_targets": [{
+                                "target_agent_id": specialist.id,
+                                "intents": ["execute_work_item"],
+                                "schema_versions": ["handoff.v1"],
+                                "risk_levels": ["medium"],
+                                "approval_required": false
+                            }]
+                        }
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let work_item: WorkItem = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-items",
+                json!({
+                    "title": "Scheduled manager overdue item",
+                    "source": "test",
+                    "priority": "urgent"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/manager-agent/runs",
+                json!({
+                    "work_item_id": work_item.id,
+                    "manager_agent_id": manager.id,
+                    "specialist_agent_id": specialist.id,
+                    "risk_classification": "medium",
+                    "auto_assign": true,
+                    "sla_minutes": 0
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let due_at = Utc::now() - chrono::Duration::minutes(5);
+        state
+            .create_workflow_pack_runtime_objects(vec![WorkflowPackRuntimeObject {
+                id: Uuid::new_v4(),
+                installation_id: Uuid::new_v4(),
+                binding_id: Uuid::new_v4(),
+                pack_id: "manager-schedule-pack".to_string(),
+                pack_version: "0.1.0".to_string(),
+                object_type: "schedule".to_string(),
+                object_key: "manager-control-loop:scheduled".to_string(),
+                runtime_kind: "manager_control_loop_schedule".to_string(),
+                status: "released".to_string(),
+                spec: json!({
+                    "manager_agent_id": manager.id,
+                    "execute_ready": false,
+                    "max_assignments": 8,
+                    "schedule_policy": {"mode": "scheduler", "due_at": due_at, "one_shot": true}
+                }),
+                created_at: due_at,
+                updated_at: due_at,
+            }])
+            .await
+            .expect("manager schedule");
+
+        let source: SemanticSource = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-sources",
+                json!({
+                    "source_type": "memory",
+                    "source_uri": "memory://semantic-aging-test",
+                    "display_name": "Semantic aging test"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let stale: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "memory",
+                    "object_key": "memory:legal:stale-aging-test",
+                    "title": "Stale legal memory",
+                    "summary": "This memory should be archived by aging policy.",
+                    "content": {"rule": "old"},
+                    "semantic_scopes": {
+                        "domain_scope": "legal",
+                        "workflow_scope": "contract-review",
+                        "memory_scope": "legal-policy"
+                    },
+                    "trust_level": "source_attested",
+                    "freshness": "stale"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        state
+            .create_workflow_pack_runtime_objects(vec![WorkflowPackRuntimeObject {
+                id: Uuid::new_v4(),
+                installation_id: Uuid::new_v4(),
+                binding_id: Uuid::new_v4(),
+                pack_id: "semantic-aging-pack".to_string(),
+                pack_version: "0.1.0".to_string(),
+                object_type: "schedule".to_string(),
+                object_key: "semantic-aging:legal-policy".to_string(),
+                runtime_kind: "semantic_aging_policy".to_string(),
+                status: "released".to_string(),
+                spec: json!({
+                    "domain_scope": "legal",
+                    "memory_scope": "legal-policy",
+                    "archive_stale": true,
+                    "schedule_policy": {"mode": "scheduler", "due_at": due_at, "one_shot": true}
+                }),
+                created_at: due_at,
+                updated_at: due_at,
+            }])
+            .await
+            .expect("semantic aging policy");
+
+        let scheduler_run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/scheduler/run-due",
+                json!({"idempotency_key": "manager-semantic-aging-test"}),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(
+            scheduler_run["manager_control_loop_schedules"]["processed_count"],
+            json!(1)
+        );
+        assert_eq!(
+            scheduler_run["semantic_aging_policies"]["archived_count"],
+            json!(1)
+        );
+        assert!(
+            scheduler_run["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| { action == "manager_control_loop_schedules_processed" })
+        );
+        assert!(
+            scheduler_run["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| { action == "semantic_aging_policies_processed" })
+        );
+
+        let activity: Vec<WorkItemActivityEntry> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/work-items/{}/activity", work_item.id))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            activity
+                .iter()
+                .any(|entry| entry.event_type == "manager_agent.sla_escalated")
+        );
+        let remaining_objects: Vec<SemanticObject> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/semantic-objects")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(!remaining_objects.iter().any(|object| object.id == stale.id));
+    }
+
+    #[tokio::test]
+    async fn ontology_proposal_review_and_pack_wizard_are_operator_ready() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let expansion: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-ontology/expand",
+                json!({
+                    "domain_scope": "legal",
+                    "object_types": ["contract_clause"],
+                    "relation_types": ["cites_clause"],
+                    "reason": "operator-ready ontology lifecycle"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let proposal_id = expansion["object"]["id"].as_str().expect("proposal id");
+        let reviewed: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/semantic-ontology/proposals/{proposal_id}/review"),
+                json!({
+                    "decision": "approve",
+                    "reason": "legal pilot approved"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(reviewed["status"], "approved");
+        assert_eq!(
+            reviewed["object"]["content"]["review"]["decision"],
+            "approve"
+        );
+
+        let marketplace: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/workflow-packs/marketplace")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(marketplace["status"], "ready");
+        assert!(
+            marketplace["packs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pack| { pack["id"] == "ai-governance" })
+        );
+
+        let wizard: Value = request_json(
+            app,
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-packs/config-wizard/plan",
+                json!({"manifest_path": "packs/ai-governance/package.yaml"}),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(wizard["status"], "ready");
+        assert!(
+            wizard["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| { step["key"] == "validate_manifest" })
+        );
+        assert!(
+            wizard["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| { step["key"] == "release_pack" })
         );
     }
 

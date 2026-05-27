@@ -9,6 +9,7 @@ import {
   getAdminToken,
   reviewMemoryWritebackCandidate,
   reviewManagerAgentPlan,
+  reviewSemanticOntologyProposal,
   expandSemanticOntology,
   resolveSemanticConflict,
   runManagerAgent,
@@ -38,6 +39,9 @@ import {
   type MemoryWritebackCandidate,
   type OntologyRegistry,
   type ObservabilitySummary,
+  type ProductionAutoDeployPlan,
+  type ProductionDeploymentVerifyResult,
+  type RemoteComputerProductionPath,
   type RunWorkflowStepRunResponse,
   type SchedulerOrchestrationSummary,
   type SemanticIngestionBatchResult,
@@ -61,7 +65,9 @@ import {
   type WorkflowDefinition,
   type WorkflowPackBinding,
   type WorkflowPackConnectorQualityAssessment,
+  type WorkflowPackConfigWizardPlan,
   type WorkflowPackInstallation,
+  type WorkflowPackMarketplace as WorkflowPackMarketplaceData,
   type WorkflowPackOnboardingAssessment,
   type WorkflowPackProfileAsset,
   type WorkflowPackRuntimeObject,
@@ -436,6 +442,16 @@ export function App() {
     queryFn: () => api<DeploymentVersion>("/api/deployment/version"),
     refetchInterval: 30000,
   });
+  const remoteProductionPath = useQuery({
+    queryKey: ["remote-computer-production-path"],
+    queryFn: () => api<RemoteComputerProductionPath>("/api/remote-computers/production-path"),
+    refetchInterval: 15000,
+  });
+  const workflowPackMarketplace = useQuery({
+    queryKey: ["workflow-pack-marketplace"],
+    queryFn: () => api<WorkflowPackMarketplaceData>("/api/workflow-packs/marketplace"),
+    refetchInterval: 15000,
+  });
   const semanticObjects = useQuery({
     queryKey: ["semantic-objects"],
     queryFn: () => api<SemanticObject[]>("/api/semantic-objects"),
@@ -505,6 +521,11 @@ export function App() {
   }, [semanticObjectType, semanticObjects.data]);
   const semanticObjectTypes = useMemo(() => {
     return ["all", ...Array.from(new Set((semanticObjects.data ?? []).map((object) => object.object_type))).sort()];
+  }, [semanticObjects.data]);
+  const ontologyProposals = useMemo(() => {
+    return (semanticObjects.data ?? [])
+      .filter((object) => object.object_type === "ontology_expansion" && object.status === "active")
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
   }, [semanticObjects.data]);
   const contextPacket = useMemo(() => {
     const packets = contextPackets.data ?? [];
@@ -785,6 +806,13 @@ export function App() {
   const packValidate = useMutation({
     mutationFn: () => workflowPackAction<Record<string, unknown>>("/api/workflow-packs/validate", { manifest_path: packManifestPath }),
   });
+  const packConfigWizard = useMutation({
+    mutationFn: () => workflowPackAction<WorkflowPackConfigWizardPlan>("/api/workflow-packs/config-wizard/plan", {
+      manifest_path: packManifestPath,
+      domain_scope: semanticDomainScope || null,
+      target_environment: "pilot",
+    }),
+  });
   const packInstall = useMutation({
     mutationFn: () => workflowPackAction<WorkflowPackInstallation>("/api/workflow-packs/install", { manifest_path: packManifestPath }),
     onSuccess: (installation) => {
@@ -898,6 +926,42 @@ export function App() {
     mutationFn: () => api<Record<string, unknown>>("/api/scheduler/run-due", {
       method: "POST",
       body: JSON.stringify({ owner: "web-ui", idempotency_key: `ui-${Date.now()}` }),
+    }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
+  const productionVerify = useMutation({
+    mutationFn: () => api<ProductionDeploymentVerifyResult>("/api/deployment/production/verify", {
+      method: "POST",
+      body: JSON.stringify({
+        expected_git_sha: deploymentVersion.data?.git_sha ?? null,
+        expected_image_tag: deploymentVersion.data?.image_tag ?? null,
+        target: "whiskey",
+        require_match: Boolean(deploymentVersion.data?.git_sha || deploymentVersion.data?.image_tag),
+      }),
+    }),
+  });
+  const productionAutoDeploy = useMutation({
+    mutationFn: () => api<ProductionAutoDeployPlan>("/api/deployment/auto-deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        target: "whiskey",
+        git_sha: deploymentVersion.data?.git_sha ?? null,
+        image_tag: deploymentVersion.data?.image_tag ?? null,
+        dry_run: true,
+      }),
+    }),
+  });
+  const workerLoadValidation = useMutation({
+    mutationFn: () => api<Record<string, unknown>>("/api/execution-jobs/worker-load-validation/run", {
+      method: "POST",
+      body: JSON.stringify({ source: "web-ui" }),
+    }),
+  });
+  const ontologyProposalReview = useMutation({
+    mutationFn: (id: string) => reviewSemanticOntologyProposal({
+      id,
+      decision: "approve",
+      reason: "operator approved from semantic governance console",
     }),
     onSuccess: () => invalidateAll(queryClient),
   });
@@ -1584,6 +1648,14 @@ export function App() {
               </div>
               {schedulerRunDue.error ? <p className="error-note">{errorMessage(schedulerRunDue.error)}</p> : null}
             </Panel>
+            <Panel title="Ontology review">
+              <OntologyProposalReviewPanel
+                proposals={ontologyProposals}
+                isReviewing={ontologyProposalReview.isPending}
+                error={ontologyProposalReview.error}
+                onApprove={(id) => ontologyProposalReview.mutate(id)}
+              />
+            </Panel>
             <Panel title="Writeback queue">
               {memoryWritebacks.data ? (
                 <MemoryWritebackQueuePanel
@@ -1615,17 +1687,21 @@ export function App() {
             <Panel title="Pack marketplace">
               <WorkflowPackMarketplace
                 manifestPath={packManifestPath}
+                marketplace={workflowPackMarketplace.data}
+                wizardPlan={packConfigWizard.data}
                 installations={workflowPackInstallations.data ?? []}
                 selectedInstallationId={packConsoleInstallationId}
                 validateResult={packValidate.data}
                 installResult={packInstall.data}
                 validateError={packValidate.error}
-                installError={packInstall.error}
+                installError={packInstall.error ?? workflowPackMarketplace.error ?? packConfigWizard.error}
                 isValidating={packValidate.isPending}
                 isInstalling={packInstall.isPending}
+                isPlanning={packConfigWizard.isPending}
                 onManifestPathChange={setPackManifestPath}
                 onSelectInstallation={setSelectedPackInstallationId}
                 onValidate={() => packValidate.mutate()}
+                onPlan={() => packConfigWizard.mutate()}
                 onInstall={() => packInstall.mutate()}
               />
             </Panel>
@@ -1682,7 +1758,25 @@ export function App() {
                 stage2={stage2Readiness.data}
                 codexDeployment={codexDeploymentReadiness.data}
                 observability={observabilitySummary.data}
-                errors={[stage2Readiness.error, codexDeploymentReadiness.error, observabilitySummary.error]}
+                remoteProductionPath={remoteProductionPath.data}
+                productionVerifyResult={productionVerify.data}
+                autoDeployPlan={productionAutoDeploy.data}
+                workerLoadValidation={workerLoadValidation.data}
+                isVerifying={productionVerify.isPending}
+                isPlanningDeploy={productionAutoDeploy.isPending}
+                isRunningWorkerValidation={workerLoadValidation.isPending}
+                onVerify={() => productionVerify.mutate()}
+                onPlanDeploy={() => productionAutoDeploy.mutate()}
+                onWorkerValidation={() => workerLoadValidation.mutate()}
+                errors={[
+                  stage2Readiness.error,
+                  codexDeploymentReadiness.error,
+                  observabilitySummary.error,
+                  remoteProductionPath.error,
+                  productionVerify.error,
+                  productionAutoDeploy.error,
+                  workerLoadValidation.error,
+                ]}
               />
             </Panel>
             <Panel title="Latest version path">
@@ -2089,6 +2183,8 @@ function MemoryGovernanceConsole({
 
 function WorkflowPackMarketplace({
   manifestPath,
+  marketplace,
+  wizardPlan,
   installations,
   selectedInstallationId,
   validateResult,
@@ -2097,12 +2193,16 @@ function WorkflowPackMarketplace({
   installError,
   isValidating,
   isInstalling,
+  isPlanning,
   onManifestPathChange,
   onSelectInstallation,
   onValidate,
+  onPlan,
   onInstall,
 }: {
   manifestPath: string;
+  marketplace?: WorkflowPackMarketplaceData;
+  wizardPlan?: WorkflowPackConfigWizardPlan;
   installations: WorkflowPackInstallation[];
   selectedInstallationId: string;
   validateResult?: Record<string, unknown>;
@@ -2111,19 +2211,37 @@ function WorkflowPackMarketplace({
   installError: unknown;
   isValidating: boolean;
   isInstalling: boolean;
+  isPlanning: boolean;
   onManifestPathChange: (value: string) => void;
   onSelectInstallation: (id: string) => void;
   onValidate: () => void;
+  onPlan: () => void;
   onInstall: () => void;
 }) {
   return (
     <div className="pack-marketplace">
+      {marketplace ? (
+        <div className="marketplace-grid">
+          {marketplace.packs.map((pack) => (
+            <button
+              key={`${pack.id}-${pack.manifest_path}`}
+              className={pack.manifest_path === manifestPath ? "marketplace-pack selected" : "marketplace-pack"}
+              onClick={() => onManifestPathChange(pack.manifest_path)}
+            >
+              <strong>{pack.name ?? pack.id}</strong>
+              <span>{pack.version ?? "unversioned"} · {pack.status}</span>
+              <small>{pack.manifest_path}</small>
+            </button>
+          ))}
+        </div>
+      ) : <p className="muted">Marketplace catalog is loading.</p>}
       <div className="control-grid">
         <label className="wide-filter">
           <span>Manifest path</span>
           <input value={manifestPath} onChange={(event) => onManifestPathChange(event.target.value)} />
         </label>
         <button disabled={isValidating || !manifestPath.trim()} onClick={onValidate}>{isValidating ? "Validating..." : "Validate"}</button>
+        <button disabled={isPlanning || !manifestPath.trim()} onClick={onPlan}>{isPlanning ? "Planning..." : "Config wizard"}</button>
         <button disabled={isInstalling || !manifestPath.trim()} onClick={onInstall}>{isInstalling ? "Installing..." : "Install"}</button>
       </div>
       <div className="graph-summary">
@@ -2136,6 +2254,19 @@ function WorkflowPackMarketplace({
           <summary>Validation report</summary>
           <pre>{formatJson(validateResult)}</pre>
         </details>
+      ) : null}
+      {wizardPlan ? (
+        <div className="wizard-steps">
+          {wizardPlan.steps.map((step) => (
+            <div key={step.key} className="wizard-step">
+              <StatusLogo status={statusFromText(step.status)} />
+              <div>
+                <strong>{step.key}</strong>
+                <span>{step.status}</span>
+              </div>
+            </div>
+          ))}
+        </div>
       ) : null}
       <div className="installation-list">
         {installations.map((installation) => (
@@ -2264,11 +2395,31 @@ function DeployReadinessPanel({
   stage2,
   codexDeployment,
   observability,
+  remoteProductionPath,
+  productionVerifyResult,
+  autoDeployPlan,
+  workerLoadValidation,
+  isVerifying,
+  isPlanningDeploy,
+  isRunningWorkerValidation,
+  onVerify,
+  onPlanDeploy,
+  onWorkerValidation,
   errors,
 }: {
   stage2?: Stage2Readiness;
   codexDeployment?: Record<string, unknown>;
   observability?: ObservabilitySummary;
+  remoteProductionPath?: RemoteComputerProductionPath;
+  productionVerifyResult?: ProductionDeploymentVerifyResult;
+  autoDeployPlan?: ProductionAutoDeployPlan;
+  workerLoadValidation?: Record<string, unknown>;
+  isVerifying: boolean;
+  isPlanningDeploy: boolean;
+  isRunningWorkerValidation: boolean;
+  onVerify: () => void;
+  onPlanDeploy: () => void;
+  onWorkerValidation: () => void;
   errors: unknown[];
 }) {
   return (
@@ -2276,10 +2427,20 @@ function DeployReadinessPanel({
       <div className="graph-summary">
         <KeyValue label="Stage 2" value={readinessStatus(stage2)} />
         <KeyValue label="Codex deploy" value={recordStatus(codexDeployment)} />
+        <KeyValue label="Remote path" value={remoteProductionPath?.status ?? "loading"} />
         <KeyValue label="Observability" value={recordStatus(observability)} />
+      </div>
+      <div className="action-row">
+        <button disabled={isVerifying} onClick={onVerify}>{isVerifying ? "Verifying..." : "Verify deployed version"}</button>
+        <button disabled={isPlanningDeploy} onClick={onPlanDeploy}>{isPlanningDeploy ? "Planning..." : "Auto-deploy dry run"}</button>
+        <button disabled={isRunningWorkerValidation} onClick={onWorkerValidation}>{isRunningWorkerValidation ? "Validating..." : "Worker load validation"}</button>
       </div>
       {stage2 ? <ReadinessRecord title="Stage 2 readiness" record={stage2} /> : <p className="muted">Stage 2 readiness is loading.</p>}
       {codexDeployment ? <ReadinessRecord title="Codex App Server deployment" record={codexDeployment} /> : null}
+      {remoteProductionPath ? <ReadinessRecord title="Remote Computer production path" record={remoteProductionPath} /> : null}
+      {productionVerifyResult ? <ReadinessRecord title="Production version verify" record={productionVerifyResult} /> : null}
+      {autoDeployPlan ? <ReadinessRecord title="Auto-deploy plan" record={autoDeployPlan} /> : null}
+      {workerLoadValidation ? <ReadinessRecord title="Worker load validation" record={workerLoadValidation} /> : null}
       {observability ? <ReadinessRecord title="Observability" record={observability} /> : null}
       {errors.filter(Boolean).map((error, index) => <p key={index} className="error-note">{errorMessage(error)}</p>)}
     </div>
@@ -3443,6 +3604,47 @@ function SemanticProductConsole({
           {!graph?.conflicts.length && !graph?.stale_nodes.length ? <p className="muted">No conflicts or stale memory in this graph.</p> : null}
         </div>
       </div>
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+    </div>
+  );
+}
+
+function OntologyProposalReviewPanel({
+  proposals,
+  isReviewing,
+  error,
+  onApprove,
+}: {
+  proposals: SemanticObject[];
+  isReviewing: boolean;
+  error: unknown;
+  onApprove: (id: string) => void;
+}) {
+  const pending = proposals.filter((proposal) => {
+    const contentStatus = typeof proposal.content.status === "string" ? proposal.content.status : "proposed";
+    return contentStatus === "proposed";
+  });
+  return (
+    <div className="ontology-review-panel">
+      <div className="graph-summary">
+        <KeyValue label="Proposals" value={String(proposals.length)} />
+        <KeyValue label="Pending" value={String(pending.length)} />
+      </div>
+      {proposals.slice(0, 5).map((proposal) => {
+        const review = proposal.content.review as Record<string, unknown> | undefined;
+        const decision = typeof review?.decision === "string" ? review.decision : "pending";
+        return (
+          <div key={proposal.id} className="obs-row semantic-object-row">
+            <strong>{proposal.title}</strong>
+            <span>{proposal.content.status as string ?? "proposed"} · {decision} · {relativeAge(proposal.updated_at)}</span>
+            <small>{proposal.summary}</small>
+            <button disabled={isReviewing || decision !== "pending"} onClick={() => onApprove(proposal.id)}>
+              {isReviewing ? "Reviewing..." : "Approve"}
+            </button>
+          </div>
+        );
+      })}
+      {!proposals.length ? <p className="muted">No ontology proposals are waiting for review.</p> : null}
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}
     </div>
   );
