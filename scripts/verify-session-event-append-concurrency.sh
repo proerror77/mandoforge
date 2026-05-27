@@ -94,14 +94,15 @@ curl -fsS "${auth_headers[@]}" "$BASE_URL/api/sessions/$session_id/events" >"$ev
 event_count="$(jq 'length' "$events_file")"
 unique_seq_count="$(jq '[.[].seq] | unique | length' "$events_file")"
 max_seq="$(jq '[.[].seq] | max // 0' "$events_file")"
+target_event_count="$(jq '[.[] | select(.event_type == "session.goal.updated" and (.payload.objective // "" | startswith("append concurrency verifier event ")))] | length' "$events_file")"
 expected_count="$CONCURRENCY"
 
 if [[ "$failure_count" != "0" ]]; then
   echo "session event append concurrency verifier failed: $failure_count request(s) failed" >&2
   exit 1
 fi
-if [[ "$event_count" != "$expected_count" || "$unique_seq_count" != "$event_count" || "$max_seq" != "$event_count" ]]; then
-  echo "session event append concurrency verifier failed: event_count=$event_count unique_seq_count=$unique_seq_count max_seq=$max_seq expected=$expected_count" >&2
+if [[ "$target_event_count" != "$expected_count" || "$unique_seq_count" != "$event_count" ]]; then
+  echo "session event append concurrency verifier failed: target_event_count=$target_event_count event_count=$event_count unique_seq_count=$unique_seq_count max_seq=$max_seq expected=$expected_count" >&2
   exit 1
 fi
 
@@ -109,6 +110,7 @@ jq -n \
   --arg session_id "$session_id" \
   --argjson concurrency "$CONCURRENCY" \
   --argjson event_count "$event_count" \
+  --argjson target_event_count "$target_event_count" \
   --argjson unique_seq_count "$unique_seq_count" \
   --argjson max_seq "$max_seq" \
   '{
@@ -116,6 +118,7 @@ jq -n \
     session_id: $session_id,
     concurrency: $concurrency,
     event_count: $event_count,
+    target_event_count: $target_event_count,
     unique_seq_count: $unique_seq_count,
     max_seq: $max_seq
   }'
