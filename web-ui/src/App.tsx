@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsFetching, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   appendUserMessage,
   api,
@@ -180,6 +180,9 @@ const TASK_BOARD_COLUMNS: Array<{
 
 export function App() {
   const queryClient = useQueryClient();
+  const fetchingCount = useIsFetching();
+  const mutatingCount = useIsMutating();
+  const [liveNow, setLiveNow] = useState(() => Date.now());
   const [selectedSessionId, setSelectedSessionId] = useState(() => localStorage.getItem("mandoforge.activeSessionId") ?? "");
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState("");
@@ -350,6 +353,10 @@ export function App() {
     enabled: Boolean(workflowRunId),
     refetchInterval: 1500,
   });
+  useEffect(() => {
+    const timer = window.setInterval(() => setLiveNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   useEffect(() => {
     if (!selectedWorkflowDefinition) {
       setGraphEditorDraft("");
@@ -537,6 +544,26 @@ export function App() {
   const runtime = runtimeSummary(events.data ?? [], selectedAgent);
   const transitionTypes = uniqueTransitionTypes(workflowGraph.data?.edges ?? workflowTransitions.data ?? []);
   const filteredTransitions = workflowTransitions.data ?? [];
+  const allJobs = useMemo(
+    () => [...(sessionLoopJobs.data ?? []), ...(executionJobs.data ?? [])],
+    [executionJobs.data, sessionLoopJobs.data],
+  );
+  const latestGlobalJob = useMemo(
+    () => [...allJobs].sort((left, right) => timestamp(right).localeCompare(timestamp(left)))[0],
+    [allJobs],
+  );
+  const latestEvent = events.data?.[events.data.length - 1];
+  const lastDataSyncAt = Math.max(
+    agents.dataUpdatedAt,
+    sessions.dataUpdatedAt,
+    approvals.dataUpdatedAt,
+    executionJobs.dataUpdatedAt,
+    sessionLoopJobs.dataUpdatedAt,
+    allToolCalls.dataUpdatedAt,
+    taskBoard.dataUpdatedAt,
+    workflowRuns.dataUpdatedAt,
+    observabilitySummary.dataUpdatedAt,
+  );
 
   const launch = useMutation({
     mutationFn: async () => {
@@ -1009,13 +1036,25 @@ export function App() {
           <p className="eyebrow">MandoForge Co-Work</p>
           <h1>{viewTitle(activeView)}</h1>
         </div>
-        <div className="top-metrics">
-          <Metric label="Agents" value={String(agents.data?.length ?? 0)} />
-          <Metric label="Running" value={String(activeCount)} tone={activeCount ? "live" : undefined} />
-          <Metric label="Needs input" value={String(blockedCount)} tone={blockedCount ? "warn" : undefined} />
-          <Metric label="Sessions" value={String(rows.length)} />
-          <Metric label="Workflows" value={String(workflowRuns.data?.length ?? 0)} />
-          <Metric label="Claimable" value={String(taskBoard.data?.claimable_count ?? 0)} tone={(taskBoard.data?.claimable_count ?? 0) ? "live" : undefined} />
+        <div className="top-monitor">
+          <div className="top-metrics">
+            <Metric label="Agents" value={String(agents.data?.length ?? 0)} />
+            <Metric label="Running" value={String(activeCount)} tone={activeCount ? "live" : undefined} />
+            <Metric label="Needs input" value={String(blockedCount)} tone={blockedCount ? "warn" : undefined} />
+            <Metric label="Sessions" value={String(rows.length)} />
+            <Metric label="Workflows" value={String(workflowRuns.data?.length ?? 0)} />
+            <Metric label="Claimable" value={String(taskBoard.data?.claimable_count ?? 0)} tone={(taskBoard.data?.claimable_count ?? 0) ? "live" : undefined} />
+          </div>
+          <LiveTelemetry
+            apiError={apiError}
+            fetchingCount={fetchingCount}
+            mutatingCount={mutatingCount}
+            lastDataSyncAt={lastDataSyncAt}
+            latestEvent={latestEvent}
+            latestJob={latestGlobalJob}
+            activeCount={activeCount}
+            now={liveNow}
+          />
         </div>
       </header>
 
@@ -1282,7 +1321,12 @@ export function App() {
 
           <Panel title="Context packet trace">
             <div className="action-row">
-              <button disabled={!sessionId || createContextPacket.isPending} onClick={() => createContextPacket.mutate()}>
+              <button
+                aria-busy={createContextPacket.isPending}
+                data-busy={createContextPacket.isPending ? "true" : undefined}
+                disabled={!sessionId || createContextPacket.isPending}
+                onClick={() => createContextPacket.mutate()}
+              >
                 {createContextPacket.isPending ? "Building..." : "Build packet"}
               </button>
               <span>{contextPackets.data?.length ?? 0} packet versions</span>
@@ -1316,7 +1360,12 @@ export function App() {
 
           <Panel title="Writeback review">
             <div className="action-row">
-              <button disabled={!sessionId || generateWritebacks.isPending} onClick={() => generateWritebacks.mutate()}>
+              <button
+                aria-busy={generateWritebacks.isPending}
+                data-busy={generateWritebacks.isPending ? "true" : undefined}
+                disabled={!sessionId || generateWritebacks.isPending}
+                onClick={() => generateWritebacks.mutate()}
+              >
                 {generateWritebacks.isPending ? "Generating..." : "Generate candidates"}
               </button>
               <span>{sessionWritebackCandidates.data?.filter((candidate) => candidate.status === "pending").length ?? 0} pending in session</span>
@@ -1406,8 +1455,12 @@ export function App() {
                   <strong>{approval.action}</strong>
                   <p>{approval.reason}</p>
                   <div>
-                    <button disabled={decide.isPending} onClick={() => decide.mutate({ id: approval.id, decision: "approve" })}>Approve</button>
-                    <button disabled={decide.isPending} className="ghost danger" onClick={() => decide.mutate({ id: approval.id, decision: "reject" })}>Reject</button>
+                    <button aria-busy={decide.isPending} data-busy={decide.isPending ? "true" : undefined} disabled={decide.isPending} onClick={() => decide.mutate({ id: approval.id, decision: "approve" })}>
+                      {decide.isPending ? "Approving..." : "Approve"}
+                    </button>
+                    <button aria-busy={decide.isPending} data-busy={decide.isPending ? "true" : undefined} disabled={decide.isPending} className="ghost danger" onClick={() => decide.mutate({ id: approval.id, decision: "reject" })}>
+                      {decide.isPending ? "Rejecting..." : "Reject"}
+                    </button>
                   </div>
                 </article>
               ))
@@ -1641,7 +1694,12 @@ export function App() {
               />
               <SchedulerPanel summary={schedulerSummary.data ?? emptySchedulerSummary()} />
               <div className="action-row">
-                <button disabled={schedulerRunDue.isPending} onClick={() => schedulerRunDue.mutate()}>
+                <button
+                  aria-busy={schedulerRunDue.isPending}
+                  data-busy={schedulerRunDue.isPending ? "true" : undefined}
+                  disabled={schedulerRunDue.isPending}
+                  onClick={() => schedulerRunDue.mutate()}
+                >
                   {schedulerRunDue.isPending ? "Running..." : "Run due jobs"}
                 </button>
                 <span>scheduler-backed synthesis</span>
@@ -1807,7 +1865,14 @@ export function App() {
           {(environments.data ?? []).map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}
         </select>
         <textarea value={task} onChange={(event) => setTask(event.target.value)} rows={2} placeholder="Describe the job for the managed agent..." />
-        <button disabled={!task.trim() || launch.isPending} onClick={() => launch.mutate()}>{launch.isPending ? "Starting..." : "Start task"}</button>
+        <button
+          aria-busy={launch.isPending}
+          data-busy={launch.isPending ? "true" : undefined}
+          disabled={!task.trim() || launch.isPending}
+          onClick={() => launch.mutate()}
+        >
+          {launch.isPending ? "Starting..." : "Start task"}
+        </button>
       </footer>
     </main>
   );
@@ -1915,13 +1980,29 @@ function ManagerPlanComposer({
         </label>
       </div>
       <div className="action-row">
-        <button disabled={isSaving || !goal.trim() || !sessions.length} onClick={onCreate}>
+        <button
+          aria-busy={isSaving}
+          data-busy={isSaving ? "true" : undefined}
+          disabled={isSaving || !goal.trim() || !sessions.length}
+          onClick={onCreate}
+        >
           {isSaving ? "Creating..." : "Create manager plan"}
         </button>
-        <button disabled={isRunning || !workItemId} onClick={onRunAuto}>
+        <button
+          aria-busy={isRunning}
+          data-busy={isRunning ? "true" : undefined}
+          disabled={isRunning || !workItemId}
+          onClick={onRunAuto}
+        >
           {isRunning ? "Running..." : "Run manager loop"}
         </button>
-        <button className="ghost" disabled={isControlLoopRunning} onClick={onRunControlLoop}>
+        <button
+          className="ghost"
+          aria-busy={isControlLoopRunning}
+          data-busy={isControlLoopRunning ? "true" : undefined}
+          disabled={isControlLoopRunning}
+          onClick={onRunControlLoop}
+        >
           {isControlLoopRunning ? "Inspecting..." : "Inspect queue"}
         </button>
         <span>{sessions.length ? "records manager_plan.created into audit" : "create or select a manager session first"}</span>
@@ -2068,9 +2149,15 @@ function ManagerPlanConsole({
               {!planSteps(plan).length ? <span>no decomposition steps</span> : null}
             </div>
             <div className="review-actions">
-              <button disabled={isReviewing || plan.status === "approved"} onClick={() => onReview(plan.id, "approved")}>Approve</button>
-              <button disabled={isReviewing} className="ghost" onClick={() => onReview(plan.id, "needs_changes")}>Needs changes</button>
-              <button disabled={isReviewing} className="ghost danger" onClick={() => onReview(plan.id, "blocked")}>Block</button>
+              <button aria-busy={isReviewing} data-busy={isReviewing ? "true" : undefined} disabled={isReviewing || plan.status === "approved"} onClick={() => onReview(plan.id, "approved")}>
+                {isReviewing ? "Saving..." : "Approve"}
+              </button>
+              <button aria-busy={isReviewing} data-busy={isReviewing ? "true" : undefined} disabled={isReviewing} className="ghost" onClick={() => onReview(plan.id, "needs_changes")}>
+                {isReviewing ? "Saving..." : "Needs changes"}
+              </button>
+              <button aria-busy={isReviewing} data-busy={isReviewing ? "true" : undefined} disabled={isReviewing} className="ghost danger" onClick={() => onReview(plan.id, "blocked")}>
+                {isReviewing ? "Saving..." : "Block"}
+              </button>
             </div>
             {planHandoffs.length ? (
               <div className="handoff-strip">
@@ -2128,10 +2215,10 @@ function HandoffEvidencePanel({
             <span>{agentName(agents, handoff.source_agent_id)} to {agentName(agents, handoff.target_agent_id)}</span>
             <small>{handoff.review_status} · escalation {handoff.human_escalation_status} · assignment {assignment?.status ?? "none"}</small>
             <div className="review-actions compact-actions">
-              <button disabled={isMutating || handoff.status !== "requested"} onClick={() => onTransition(handoff.id, "accept")}>Accept</button>
-              <button disabled={isMutating || handoff.status !== "accepted"} onClick={() => onTransition(handoff.id, "complete")}>Complete</button>
-              <button disabled={isMutating || handoff.status === "completed" || handoff.status === "rejected"} className="ghost" onClick={() => onTransition(handoff.id, "escalate")}>Escalate</button>
-              <button disabled={isMutating || handoff.status === "completed" || handoff.status === "rejected"} className="ghost danger" onClick={() => onTransition(handoff.id, "fail")}>Fail</button>
+              <button aria-busy={isMutating} data-busy={isMutating ? "true" : undefined} disabled={isMutating || handoff.status !== "requested"} onClick={() => onTransition(handoff.id, "accept")}>Accept</button>
+              <button aria-busy={isMutating} data-busy={isMutating ? "true" : undefined} disabled={isMutating || handoff.status !== "accepted"} onClick={() => onTransition(handoff.id, "complete")}>Complete</button>
+              <button aria-busy={isMutating} data-busy={isMutating ? "true" : undefined} disabled={isMutating || handoff.status === "completed" || handoff.status === "rejected"} className="ghost" onClick={() => onTransition(handoff.id, "escalate")}>Escalate</button>
+              <button aria-busy={isMutating} data-busy={isMutating ? "true" : undefined} disabled={isMutating || handoff.status === "completed" || handoff.status === "rejected"} className="ghost danger" onClick={() => onTransition(handoff.id, "fail")}>Fail</button>
             </div>
           </div>
         );
@@ -2240,9 +2327,9 @@ function WorkflowPackMarketplace({
           <span>Manifest path</span>
           <input value={manifestPath} onChange={(event) => onManifestPathChange(event.target.value)} />
         </label>
-        <button disabled={isValidating || !manifestPath.trim()} onClick={onValidate}>{isValidating ? "Validating..." : "Validate"}</button>
-        <button disabled={isPlanning || !manifestPath.trim()} onClick={onPlan}>{isPlanning ? "Planning..." : "Config wizard"}</button>
-        <button disabled={isInstalling || !manifestPath.trim()} onClick={onInstall}>{isInstalling ? "Installing..." : "Install"}</button>
+        <button aria-busy={isValidating} data-busy={isValidating ? "true" : undefined} disabled={isValidating || !manifestPath.trim()} onClick={onValidate}>{isValidating ? "Validating..." : "Validate"}</button>
+        <button aria-busy={isPlanning} data-busy={isPlanning ? "true" : undefined} disabled={isPlanning || !manifestPath.trim()} onClick={onPlan}>{isPlanning ? "Planning..." : "Config wizard"}</button>
+        <button aria-busy={isInstalling} data-busy={isInstalling ? "true" : undefined} disabled={isInstalling || !manifestPath.trim()} onClick={onInstall}>{isInstalling ? "Installing..." : "Install"}</button>
       </div>
       <div className="graph-summary">
         <KeyValue label="Installed packs" value={String(installations.length)} />
@@ -2359,9 +2446,9 @@ function WorkflowPackReleaseConsole({
       </div>
       <textarea rows={7} value={profileDraft} spellCheck={false} onChange={(event) => onProfileDraftChange(event.target.value)} />
       <div className="action-row">
-        <button disabled={isSavingProfiles} onClick={onSaveProfiles}>{isSavingProfiles ? "Saving..." : "Save profiles"}</button>
-        <button disabled={isAssessing} onClick={onAssess}>{isAssessing ? "Assessing..." : "Assess onboarding"}</button>
-        <button disabled={isAssessingConnectorQuality} onClick={onAssessConnectorQuality}>{isAssessingConnectorQuality ? "Checking..." : "Assess connectors"}</button>
+        <button aria-busy={isSavingProfiles} data-busy={isSavingProfiles ? "true" : undefined} disabled={isSavingProfiles} onClick={onSaveProfiles}>{isSavingProfiles ? "Saving..." : "Save profiles"}</button>
+        <button aria-busy={isAssessing} data-busy={isAssessing ? "true" : undefined} disabled={isAssessing} onClick={onAssess}>{isAssessing ? "Assessing..." : "Assess onboarding"}</button>
+        <button aria-busy={isAssessingConnectorQuality} data-busy={isAssessingConnectorQuality ? "true" : undefined} disabled={isAssessingConnectorQuality} onClick={onAssessConnectorQuality}>{isAssessingConnectorQuality ? "Checking..." : "Assess connectors"}</button>
         <span>{onboardingAssessment ? `${onboardingAssessment.status} · ${onboardingAssessment.blockers.length} blockers` : "assessment pending"}</span>
       </div>
       {onboardingAssessment ? (
@@ -2380,11 +2467,11 @@ function WorkflowPackReleaseConsole({
       ) : null}
       <textarea rows={5} value={releaseEvidence} spellCheck={false} onChange={(event) => onReleaseEvidenceChange(event.target.value)} />
       <div className="review-actions">
-        <button disabled={isStaging || installation.status !== "installed"} onClick={onStage}>{isStaging ? "Staging..." : "Stage"}</button>
-        <button disabled={isReleasing || installation.status !== "staged"} onClick={onRelease}>{isReleasing ? "Releasing..." : "Release"}</button>
-        <button disabled={isRollingBack || installation.status !== "released"} className="ghost danger" onClick={onRollback}>{isRollingBack ? "Rolling back..." : "Rollback"}</button>
-        <button disabled={isUpdating || !canUpdate || !["released", "rolled_back"].includes(installation.status)} className="ghost" onClick={onUpdate}>{isUpdating ? "Updating..." : "Create update"}</button>
-        <button disabled={isArchiving} className="ghost danger" onClick={onArchive}>{isArchiving ? "Archiving..." : "Archive"}</button>
+        <button aria-busy={isStaging} data-busy={isStaging ? "true" : undefined} disabled={isStaging || installation.status !== "installed"} onClick={onStage}>{isStaging ? "Staging..." : "Stage"}</button>
+        <button aria-busy={isReleasing} data-busy={isReleasing ? "true" : undefined} disabled={isReleasing || installation.status !== "staged"} onClick={onRelease}>{isReleasing ? "Releasing..." : "Release"}</button>
+        <button aria-busy={isRollingBack} data-busy={isRollingBack ? "true" : undefined} disabled={isRollingBack || installation.status !== "released"} className="ghost danger" onClick={onRollback}>{isRollingBack ? "Rolling back..." : "Rollback"}</button>
+        <button aria-busy={isUpdating} data-busy={isUpdating ? "true" : undefined} disabled={isUpdating || !canUpdate || !["released", "rolled_back"].includes(installation.status)} className="ghost" onClick={onUpdate}>{isUpdating ? "Updating..." : "Create update"}</button>
+        <button aria-busy={isArchiving} data-busy={isArchiving ? "true" : undefined} disabled={isArchiving} className="ghost danger" onClick={onArchive}>{isArchiving ? "Archiving..." : "Archive"}</button>
       </div>
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}
     </div>
@@ -2431,9 +2518,9 @@ function DeployReadinessPanel({
         <KeyValue label="Observability" value={recordStatus(observability)} />
       </div>
       <div className="action-row">
-        <button disabled={isVerifying} onClick={onVerify}>{isVerifying ? "Verifying..." : "Verify deployed version"}</button>
-        <button disabled={isPlanningDeploy} onClick={onPlanDeploy}>{isPlanningDeploy ? "Planning..." : "Auto-deploy dry run"}</button>
-        <button disabled={isRunningWorkerValidation} onClick={onWorkerValidation}>{isRunningWorkerValidation ? "Validating..." : "Worker load validation"}</button>
+        <button aria-busy={isVerifying} data-busy={isVerifying ? "true" : undefined} disabled={isVerifying} onClick={onVerify}>{isVerifying ? "Verifying..." : "Verify deployed version"}</button>
+        <button aria-busy={isPlanningDeploy} data-busy={isPlanningDeploy ? "true" : undefined} disabled={isPlanningDeploy} onClick={onPlanDeploy}>{isPlanningDeploy ? "Planning..." : "Auto-deploy dry run"}</button>
+        <button aria-busy={isRunningWorkerValidation} data-busy={isRunningWorkerValidation ? "true" : undefined} disabled={isRunningWorkerValidation} onClick={onWorkerValidation}>{isRunningWorkerValidation ? "Validating..." : "Worker load validation"}</button>
       </div>
       {stage2 ? <ReadinessRecord title="Stage 2 readiness" record={stage2} /> : <p className="muted">Stage 2 readiness is loading.</p>}
       {codexDeployment ? <ReadinessRecord title="Codex App Server deployment" record={codexDeployment} /> : null}
@@ -2552,6 +2639,47 @@ function labelForStatus(status: RowStatus): string {
 
 function StatusLogo({ status }: { status: RowStatus }) {
   return <span className={`status-logo logo-${status}`} aria-label={status} />;
+}
+
+function LiveTelemetry({
+  apiError,
+  fetchingCount,
+  mutatingCount,
+  lastDataSyncAt,
+  latestEvent,
+  latestJob,
+  activeCount,
+  now,
+}: {
+  apiError?: string;
+  fetchingCount: number;
+  mutatingCount: number;
+  lastDataSyncAt: number;
+  latestEvent?: SessionEvent;
+  latestJob?: WorkerJob;
+  activeCount: number;
+  now: number;
+}) {
+  const mode = apiError ? "blocked" : mutatingCount ? "committing" : fetchingCount ? "refreshing" : activeCount ? "active" : "watching";
+  const synced = lastDataSyncAt ? `${relativeAge(new Date(lastDataSyncAt).toISOString())} ago` : "not synced";
+  const latestJobLabel = latestJob
+    ? `${latestJob.status} · ${latestJob.worker_id ?? latestJob.tool_name ?? latestJob.reason ?? "worker"}`
+    : "no worker job";
+  const latestEventLabel = latestEvent
+    ? `#${latestEvent.seq} ${latestEvent.event_type}`
+    : "no selected event";
+  return (
+    <div className={`live-telemetry live-${mode}`} aria-live="polite">
+      <span className="live-dot" />
+      <strong>{mode}</strong>
+      <span>{fetchingCount} refresh</span>
+      <span>{mutatingCount} writes</span>
+      <span>synced {synced}</span>
+      <span>{latestJobLabel}</span>
+      <span>{latestEventLabel}</span>
+      <time>{new Date(now).toLocaleTimeString()}</time>
+    </div>
+  );
 }
 
 function Metric({ label, value, tone }: { label: string; value: string; tone?: "live" | "warn" }) {
@@ -2779,10 +2907,15 @@ function TaskBoardCard({
       ) : <small className="task-ready-note">No blocker reported</small>}
       <div className="task-card-actions">
         <span>{relativeAge(item.updated_at) || "now"} ago</span>
-        <button disabled={Boolean(runBlocker) || isRunning} onClick={(event) => {
+        <button
+          aria-busy={isRunning}
+          data-busy={isRunning ? "true" : undefined}
+          disabled={Boolean(runBlocker) || isRunning}
+          onClick={(event) => {
           event.stopPropagation();
           onRun();
-        }}>
+        }}
+        >
           {isRunning ? "Running..." : "Run"}
         </button>
       </div>
@@ -2812,7 +2945,12 @@ function TaskBoardInspector({
           <span>Selected card</span>
           <strong>{item.work_item_title ?? item.step_key}</strong>
         </div>
-        <button disabled={Boolean(runBlocker) || isRunning} onClick={onRun}>
+        <button
+          aria-busy={isRunning}
+          data-busy={isRunning ? "true" : undefined}
+          disabled={Boolean(runBlocker) || isRunning}
+          onClick={onRun}
+        >
           {isRunning ? "Running..." : "Run step"}
         </button>
       </div>
@@ -2870,8 +3008,13 @@ function AgentInboxPanel({
               {entry.blockers.length ? <small>{entry.blockers.join(", ")}</small> : <small>worker will bind context and execute</small>}
             </div>
           </div>
-          <button disabled={!entry.claimable || isRunning} onClick={() => onRun(entry.workflow_step_run_id)}>
-            Run
+          <button
+            aria-busy={isRunning}
+            data-busy={isRunning ? "true" : undefined}
+            disabled={!entry.claimable || isRunning}
+            onClick={() => onRun(entry.workflow_step_run_id)}
+          >
+            {isRunning ? "Running..." : "Run"}
           </button>
         </div>
       ))}
@@ -2912,7 +3055,7 @@ function WorkflowDefinitionEditor({
         <textarea value={draft} onChange={(event) => onDraftChange(event.target.value)} spellCheck={false} />
       </label>
       <div className="action-row">
-        <button disabled={isSaving} onClick={onApply}>{isSaving ? "Saving" : "Apply"}</button>
+        <button aria-busy={isSaving} data-busy={isSaving ? "true" : undefined} disabled={isSaving} onClick={onApply}>{isSaving ? "Saving" : "Apply"}</button>
         <button className="secondary" disabled={isSaving} onClick={onReset}>Reset</button>
       </div>
       {statusMessage ? <p className="status-hint">{statusMessage}</p> : null}
@@ -3253,17 +3396,21 @@ function MemoryWritebackQueuePanel({
             </label>
             <div className="review-actions">
               <button
+                aria-busy={isReviewing}
+                data-busy={isReviewing ? "true" : undefined}
                 disabled={activeRef.status !== "pending" || isReviewing}
                 onClick={() => onReview(activeRef.id, "approve", reviewReason)}
               >
-                Approve
+                {isReviewing ? "Approving..." : "Approve"}
               </button>
               <button
+                aria-busy={isReviewing}
+                data-busy={isReviewing ? "true" : undefined}
                 disabled={activeRef.status !== "pending" || isReviewing}
                 className="ghost danger"
                 onClick={() => onReview(activeRef.id, "reject", reviewReason)}
               >
-                Reject
+                {isReviewing ? "Rejecting..." : "Reject"}
               </button>
             </div>
             {error ? <p className="error-note">{errorMessage(error)}</p> : null}
@@ -3365,8 +3512,12 @@ function WritebackReviewPanel({
             <small>{candidate.summary}</small>
           </div>
           <div className="review-actions">
-            <button disabled={candidate.status !== "pending" || isReviewing} onClick={() => onReview(candidate.id, "approve")}>Approve</button>
-            <button disabled={candidate.status !== "pending" || isReviewing} className="ghost danger" onClick={() => onReview(candidate.id, "reject")}>Reject</button>
+            <button aria-busy={isReviewing} data-busy={isReviewing ? "true" : undefined} disabled={candidate.status !== "pending" || isReviewing} onClick={() => onReview(candidate.id, "approve")}>
+              {isReviewing ? "Approving..." : "Approve"}
+            </button>
+            <button aria-busy={isReviewing} data-busy={isReviewing ? "true" : undefined} disabled={candidate.status !== "pending" || isReviewing} className="ghost danger" onClick={() => onReview(candidate.id, "reject")}>
+              {isReviewing ? "Rejecting..." : "Reject"}
+            </button>
           </div>
         </div>
       )) : (
@@ -3432,7 +3583,7 @@ function SemanticIngestionPanel({
         onChange={(event) => onDraftChange(event.target.value)}
       />
       <div className="action-row">
-        <button disabled={isSaving || !draft.trim()} onClick={onCreate}>
+        <button aria-busy={isSaving} data-busy={isSaving ? "true" : undefined} disabled={isSaving || !draft.trim()} onClick={onCreate}>
           {isSaving ? "Ingesting..." : "Ingest batch"}
         </button>
         <span>{result ? `${result.objects.length} objects · ${result.links.length} links` : "waiting"}</span>
@@ -3474,7 +3625,7 @@ function SemanticSynthesisPanel({
         onChange={(event) => onDraftChange(event.target.value)}
       />
       <div className="action-row">
-        <button disabled={isSaving || !sessionId || !draft.trim()} onClick={onCreate}>
+        <button aria-busy={isSaving} data-busy={isSaving ? "true" : undefined} disabled={isSaving || !sessionId || !draft.trim()} onClick={onCreate}>
           {isSaving ? "Creating..." : "Create synthesis"}
         </button>
         <span>{result ? `${result.artifact.artifact_type} · ${result.candidates.length} candidates` : sessionId ? "waiting" : "select session"}</span>
@@ -3560,11 +3711,11 @@ function SemanticProductConsole({
           <span>Memory scope</span>
           <input value={memoryScope} onChange={(event) => onMemoryScopeChange(event.target.value)} placeholder="brand-voice" />
         </label>
-        <button disabled={isRunningGovernance} onClick={() => onGovernanceRun(true)}>
+        <button aria-busy={isRunningGovernance} data-busy={isRunningGovernance ? "true" : undefined} disabled={isRunningGovernance} onClick={() => onGovernanceRun(true)}>
           {isRunningGovernance ? "Running..." : "Dry-run governance"}
         </button>
-        <button className="ghost danger" disabled={isRunningGovernance} onClick={() => onGovernanceRun(false)}>
-          Apply stale archive
+        <button className="ghost danger" aria-busy={isRunningGovernance} data-busy={isRunningGovernance ? "true" : undefined} disabled={isRunningGovernance} onClick={() => onGovernanceRun(false)}>
+          {isRunningGovernance ? "Running..." : "Apply stale archive"}
         </button>
       </div>
       <div className="graph-summary">
@@ -3638,7 +3789,7 @@ function OntologyProposalReviewPanel({
             <strong>{proposal.title}</strong>
             <span>{proposal.content.status as string ?? "proposed"} · {decision} · {relativeAge(proposal.updated_at)}</span>
             <small>{proposal.summary}</small>
-            <button disabled={isReviewing || decision !== "pending"} onClick={() => onApprove(proposal.id)}>
+            <button aria-busy={isReviewing} data-busy={isReviewing ? "true" : undefined} disabled={isReviewing || decision !== "pending"} onClick={() => onApprove(proposal.id)}>
               {isReviewing ? "Reviewing..." : "Approve"}
             </button>
           </div>
@@ -3699,11 +3850,11 @@ function SemanticWorkbenchPanel({
           <span>Memory</span>
           <input value={memoryScope} onChange={(event) => onMemoryScopeChange(event.target.value)} placeholder="legal-policy" />
         </label>
-        <button disabled={isExpanding} onClick={onExpandOntology}>{isExpanding ? "Proposing..." : "Propose ontology"}</button>
-        <button className="ghost" disabled={isResolving || !(workbench?.conflict_queue.length)} onClick={onResolveConflict}>
+        <button aria-busy={isExpanding} data-busy={isExpanding ? "true" : undefined} disabled={isExpanding} onClick={onExpandOntology}>{isExpanding ? "Proposing..." : "Propose ontology"}</button>
+        <button className="ghost" aria-busy={isResolving} data-busy={isResolving ? "true" : undefined} disabled={isResolving || !(workbench?.conflict_queue.length)} onClick={onResolveConflict}>
           {isResolving ? "Resolving..." : "Resolve first conflict"}
         </button>
-        <button className="ghost" disabled={isDreaming} onClick={onRunDreaming}>{isDreaming ? "Queueing..." : "Queue dreaming"}</button>
+        <button className="ghost" aria-busy={isDreaming} data-busy={isDreaming ? "true" : undefined} disabled={isDreaming} onClick={onRunDreaming}>{isDreaming ? "Queueing..." : "Queue dreaming"}</button>
       </div>
       <div className="graph-summary">
         <KeyValue label="Domain" value={firstPilot?.domain_scope ?? "none"} />
@@ -3782,7 +3933,7 @@ function SemanticLinkManager({
           <option value="">To object</option>
           {objects.map((object) => <option key={object.id} value={object.id}>{object.title}</option>)}
         </select>
-        <button disabled={!canLink || isSaving} onClick={onCreate}>{isSaving ? "Saving..." : "Link"}</button>
+        <button aria-busy={isSaving} data-busy={isSaving ? "true" : undefined} disabled={!canLink || isSaving} onClick={onCreate}>{isSaving ? "Saving..." : "Link"}</button>
       </div>
       {draft.from && draft.to && draft.from === draft.to ? <p className="error-note">Choose two different semantic objects.</p> : null}
       {draft.relation && relationOptions.length && !selectedRelationIsAllowed ? (

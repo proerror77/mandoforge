@@ -38,6 +38,7 @@ textarea {
 }
 
 button {
+  position: relative;
   min-height: 36px;
   border: 0;
   border-radius: 8px;
@@ -46,6 +47,17 @@ button {
   padding: 0 14px;
   font-weight: 760;
   cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease, color 140ms ease, transform 140ms ease;
+}
+
+button:not(:disabled):hover {
+  box-shadow: 0 5px 14px rgba(16, 21, 20, 0.14);
+  transform: translateY(-1px);
+}
+
+button:not(:disabled):active {
+  box-shadow: none;
+  transform: translateY(0);
 }
 
 button.ghost {
@@ -66,7 +78,22 @@ button.danger {
 
 button:disabled {
   opacity: 0.55;
-  cursor: wait;
+  cursor: not-allowed;
+}
+
+button[data-busy="true"] {
+  overflow: hidden;
+  opacity: 0.9;
+  cursor: progress;
+}
+
+button[data-busy="true"]::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.24) 45%, transparent 80%);
+  animation: busy-sweep 1s linear infinite;
+  content: "";
+  pointer-events: none;
 }
 
 h1,
@@ -112,6 +139,83 @@ h1 {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.top-monitor {
+  display: grid;
+  gap: 8px;
+  min-width: min(760px, 58vw);
+  justify-items: end;
+}
+
+.live-telemetry {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fbfcfc;
+  color: var(--muted);
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 800;
+  overflow: hidden;
+}
+
+.live-telemetry span,
+.live-telemetry time,
+.live-telemetry strong {
+  white-space: nowrap;
+}
+
+.live-telemetry span:not(.live-dot),
+.live-telemetry time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-telemetry strong {
+  color: var(--ink);
+  text-transform: uppercase;
+}
+
+.live-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(18, 132, 102, 0.12);
+  flex: none;
+}
+
+.live-refreshing .live-dot,
+.live-committing .live-dot {
+  animation: live-pulse 1s ease-in-out infinite;
+}
+
+.live-refreshing {
+  border-color: #bdd7ef;
+  background: var(--blue-soft);
+}
+
+.live-refreshing .live-dot {
+  background: var(--blue);
+}
+
+.live-committing {
+  border-color: #9ccfc1;
+  background: var(--green-soft);
+}
+
+.live-blocked {
+  border-color: #efb4b8;
+  background: var(--red-soft);
+}
+
+.live-blocked .live-dot {
+  background: var(--red);
 }
 
 .auth-strip {
@@ -425,6 +529,27 @@ h1 {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.88);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+@keyframes busy-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
   }
 }
 
