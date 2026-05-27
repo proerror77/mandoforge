@@ -137,6 +137,41 @@ definition_payload="$(jq -nc --arg agent_id "$agent_id" '{
       {key: "draft_result", type: "agent", depends_on: ["merge"], condition: {source_step: "merge", path: "ready", equals: true}}
     ]
   },
+  handoff_rules: {
+    root_task_grant: {
+      memory_scope: {
+        mode: "snapshot_only",
+        allowed_scope_keys: [],
+        allowed_object_types: [],
+        allowed_source_types: [],
+        allowed_object_ids: [],
+        minimum_trust_level: "verified",
+        max_objects: 0,
+        approval_memory_allowed: false,
+        handoff_memory_allowed: false,
+        writeback_allowed: true
+      },
+      tool_scope: {
+        read: ["file.read", "sql.get_schema", "sql.query"],
+        write: ["artifact.create", "shell.exec"],
+        external_write: []
+      },
+      connector_scope: {
+        mode: "read_only",
+        allowed_connector_ids: [],
+        allowed_tool_names: [],
+        tenant_scope: {},
+        side_effect_classes: []
+      },
+      external_effects: {
+        publish: false,
+        payment: false,
+        ad_spend: false,
+        email_send: false,
+        external_commit: false
+      }
+    }
+  },
   release_state: "released"
 }')"
 definition_file="$(fetch_json POST /api/workflow-definitions "$definition_payload" api-workflow-definitions-runtime-proof)"
