@@ -1395,8 +1395,21 @@ h1 {
 .queue-peek {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+}
+
+.action-row,
+.select-row {
+  flex-wrap: wrap;
+}
+
+.action-row {
+  justify-content: flex-start;
+}
+
+.select-row,
+.queue-peek {
+  justify-content: space-between;
 }
 
 .action-row span,
@@ -1661,6 +1674,7 @@ h1 {
   grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
   gap: 12px;
   min-height: 0;
+  padding: 0 0 14px;
   overflow: hidden;
 }
 
@@ -1671,6 +1685,7 @@ h1 {
   gap: 12px;
   min-height: 0;
   overflow: auto;
+  padding-bottom: 12px;
 }
 
 .product-page .panel {
@@ -1702,7 +1717,7 @@ h1 {
 }
 
 .marketplace-grid {
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .marketplace-pack,
@@ -1735,6 +1750,47 @@ h1 {
 .wizard-step {
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
+}
+
+.pack-marketplace .control-grid {
+  grid-template-columns: minmax(260px, 1fr) repeat(3, max-content);
+  align-items: end;
+}
+
+.pack-marketplace .control-grid button,
+.deploy-readiness .action-row button {
+  min-width: 0;
+  width: auto;
+  white-space: nowrap;
+}
+
+.pack-marketplace .graph-summary,
+.deploy-readiness .graph-summary,
+.latest-deploy-panel .deploy-version-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.semantic-page textarea {
+  max-height: 190px;
+}
+
+.semantic-page .product-side {
+  gap: 10px;
+}
+
+.semantic-page .ontology-matrix {
+  max-height: 190px;
+}
+
+.semantic-workbench .control-grid {
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  align-items: end;
+}
+
+.semantic-workbench .control-grid button {
+  width: auto;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .capability-card {
@@ -1866,6 +1922,7 @@ h1 {
 
 .latest-deploy-panel pre {
   overflow: auto;
+  max-height: 150px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel-soft);
