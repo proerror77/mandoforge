@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlparser::ast::{Query, SetExpr, Statement};
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::{AgentVersion, AppError};
 
@@ -212,27 +216,81 @@ pub(crate) fn ensure_read_only_sql_with_policy(
     sql: &str,
     policy: &SqlPolicy,
 ) -> Result<(), AppError> {
-    let lowered = sql.trim().to_lowercase();
-    if lowered.matches(';').count() > 1 {
+    let dialect = PostgreSqlDialect {};
+    let statements = Parser::parse_sql(&dialect, sql)
+        .map_err(|_| AppError::bad_request("sql.query requires parseable read-only SQL"))?;
+    if statements.len() != 1 {
         return Err(AppError::bad_request("only one SQL statement is allowed"));
     }
-    if policy.blocked_keywords.iter().any(|keyword| {
-        let keyword = keyword.to_lowercase();
-        lowered.starts_with(&keyword) || lowered.contains(&format!(" {keyword} "))
+    ensure_statement_is_read_only(&statements[0])?;
+
+    let blocked_keywords = policy
+        .blocked_keywords
+        .iter()
+        .map(|keyword| keyword.to_ascii_uppercase())
+        .collect::<Vec<_>>();
+    let mut tokenizer = Tokenizer::new(&dialect, sql);
+    let tokens = tokenizer
+        .tokenize()
+        .map_err(|_| AppError::bad_request("sql.query requires parseable read-only SQL"))?;
+    if tokens.iter().any(|token| match token {
+        Token::Word(word) if word.quote_style.is_none() => blocked_keywords
+            .iter()
+            .any(|keyword| word.value.eq_ignore_ascii_case(keyword)),
+        _ => false,
     }) {
         return Err(AppError::bad_request(
             "sql.query only accepts read-only SQL",
         ));
     }
-    if !lowered.starts_with("select")
-        && !lowered.starts_with("with")
-        && !lowered.starts_with("explain")
-    {
+    Ok(())
+}
+
+fn ensure_statement_is_read_only(statement: &Statement) -> Result<(), AppError> {
+    match statement {
+        Statement::Query(query) => ensure_query_is_read_only(query),
+        Statement::Explain {
+            analyze, statement, ..
+        } => {
+            if *analyze {
+                return Err(AppError::bad_request(
+                    "sql.query does not allow EXPLAIN ANALYZE",
+                ));
+            }
+            ensure_statement_is_read_only(statement)
+        }
+        _ => Err(AppError::bad_request(
+            "sql.query only accepts read-only SELECT, WITH, VALUES, TABLE, or non-ANALYZE EXPLAIN",
+        )),
+    }
+}
+
+fn ensure_query_is_read_only(query: &Query) -> Result<(), AppError> {
+    if !query.locks.is_empty() {
         return Err(AppError::bad_request(
-            "sql.query requires SELECT, WITH, or EXPLAIN",
+            "sql.query does not allow row-locking clauses",
         ));
     }
-    Ok(())
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            ensure_query_is_read_only(&cte.query)?;
+        }
+    }
+    ensure_set_expr_is_read_only(&query.body)
+}
+
+fn ensure_set_expr_is_read_only(set_expr: &SetExpr) -> Result<(), AppError> {
+    match set_expr {
+        SetExpr::Select(_) | SetExpr::Values(_) | SetExpr::Table(_) => Ok(()),
+        SetExpr::Query(query) => ensure_query_is_read_only(query),
+        SetExpr::SetOperation { left, right, .. } => {
+            ensure_set_expr_is_read_only(left)?;
+            ensure_set_expr_is_read_only(right)
+        }
+        SetExpr::Insert(_) | SetExpr::Update(_) => Err(AppError::bad_request(
+            "sql.query only accepts read-only query expressions",
+        )),
+    }
 }
 
 #[cfg(test)]

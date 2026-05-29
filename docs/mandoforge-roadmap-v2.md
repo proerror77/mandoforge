@@ -227,9 +227,14 @@ Current repo slice:
 - Context packet generation writes a `context_packet.generated` timeline event and audit record so operators can replay what governed context was assembled before execution.
 - Stage 5.2 promotes context packets from an on-demand Stage 4 helper into versioned `context_packets`; Stage 5.3 still owns memory writeback.
 
-### Stage 4.4 Manager Agent Planner
+### Stage 4.4 Pack-Defined Manager Role
 
-The Manager Agent is the task-control brain:
+Manager-style behavior is a Workflow Pack role, not a platform-owned
+orchestrator. The pack decides whether it needs a manager/orchestrator agent and
+declares that role's workflow graph, routing rules, review checkpoints, SLA
+policy, and escalation behavior.
+
+A pack-defined manager role can:
 
 - intake user or system task
 - classify task intent and risk
@@ -246,8 +251,8 @@ Current repo slice:
 - `manager_agent_plans` stores Manager Agent planning records for task intake, decomposition, specialist selection, risk classification, review status, and audit trace.
 - `POST /api/sessions/{id}/manager-plans` creates a governed plan only when the session is bound to a manager agent; `specialist_agent_id` must point to a specialist agent.
 - `POST /api/manager-plans/{id}/review` records Manager Agent result review and writes `manager_plan.reviewed` timeline/audit evidence.
-- `POST /api/manager-agent/runs` is now the first automated Manager Agent closed loop: it intakes a WorkItem, selects or accepts a Manager Agent and Specialist Agent, creates the Manager session, decomposes the task, approves the Manager plan, creates and accepts the handoff, optionally creates the Specialist assignment, records WorkItem assignment/review records, starts SLA tracking metadata, and writes WorkItem activity plus `manager_agent.run_completed` audit evidence.
-- The Manager console exposes this closed loop as an API-backed `Run manager loop` action alongside the lower-level manual plan composer.
+- Platform-level `POST /api/manager-agent/runs` and `POST /api/manager-agent/control-loop/run` have been removed from the public control plane. Manager execution must enter through pack/workflow/session primitives rather than a hard-coded platform manager loop.
+- The Manager console is a manual plan/work evidence surface. Workflow Pack execution owns the actual routing, review, SLA, and escalation loop.
 
 ### Stage 4.5 Agent Handoff / Assignment
 

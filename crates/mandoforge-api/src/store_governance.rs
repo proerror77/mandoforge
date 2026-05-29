@@ -3143,6 +3143,7 @@ fn membership_role_name(role: Role) -> &'static str {
     match role {
         Role::Admin => "admin",
         Role::Operator => "operator",
+        Role::Worker => "worker",
         Role::Approver => "approver",
         Role::Viewer => "viewer",
     }

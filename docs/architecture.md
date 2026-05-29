@@ -255,8 +255,9 @@ should map into these objects before manager agents act on them.
 
 ## Manager Agent / Work Coordination Layer
 
-Manager Agents are managed agents that run on MandoForge Agent Runtime. They
-perform work orchestration, not runtime orchestration.
+Manager Agents are pack-defined managed agents that run on MandoForge Agent
+Runtime. They perform work orchestration inside a Workflow Pack, not runtime
+orchestration and not platform-owned business control.
 
 They operate on WorkItems and Assignments:
 
@@ -272,12 +273,16 @@ linked to child session threads.
 
 Rules:
 
+- Workflow Packs own manager behavior: task intake, decomposition, routing,
+  review checkpoints, SLA policy, and escalation policy.
 - Manager Agents use runtime tools to create plans, assignments, reviews,
   escalations, and child specialist threads.
 - Manager Agents may choose which specialist/runtime profile should handle a
   task, but execution still goes through the Managed Runtime Layer.
 - Manager Agents must not bypass Tool Router, Policy Engine, Approval Engine,
   `session_events`, `tool_calls`, `audit_logs`, or artifacts.
+- The platform must not expose a hard-coded manager closed-loop API that
+  bypasses pack/workflow definitions.
 
 ## Semantic Layer
 

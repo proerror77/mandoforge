@@ -1068,54 +1068,6 @@ struct CreateAgentHandoffAssignment {
 }
 
 #[derive(Debug, Deserialize)]
-struct RunManagerAgentRequest {
-    work_item_id: Uuid,
-    #[serde(default)]
-    manager_agent_id: Option<Uuid>,
-    #[serde(default)]
-    specialist_agent_id: Option<Uuid>,
-    #[serde(default = "default_manager_agent_run_intent")]
-    intent: String,
-    #[serde(default = "default_manager_agent_run_schema_version")]
-    schema_version: String,
-    #[serde(default = "default_manager_agent_run_risk")]
-    risk_classification: String,
-    #[serde(default)]
-    approval_required: bool,
-    #[serde(default)]
-    auto_assign: bool,
-    #[serde(default)]
-    sla_minutes: Option<i64>,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ManagerAgentRunResponse {
-    status: String,
-    work_item: WorkItem,
-    manager_session: Session,
-    plan: ManagerAgentPlan,
-    handoff: AgentHandoffEvent,
-    assignment: Option<AgentHandoffAssignment>,
-    work_item_assignment: Option<WorkItemAssignment>,
-    work_item_review: Option<WorkItemReview>,
-    sla: Value,
-    activity_count: usize,
-    completed_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RunManagerControlLoopRequest {
-    #[serde(default)]
-    manager_agent_id: Option<Uuid>,
-    #[serde(default)]
-    execute_ready: bool,
-    #[serde(default)]
-    max_assignments: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
 struct AttachAgentHandoffRemoteComputerAssignment {
     remote_computer_job_assignment_id: Uuid,
     #[serde(default = "empty_json_object")]
@@ -2918,8 +2870,6 @@ struct SchedulerDueRun {
     workflow_scheduled_steps: Option<WorkflowScheduledStepActivationSweep>,
     semantic_synthesis_schedules: Option<SemanticSynthesisScheduleSweep>,
     #[serde(default)]
-    manager_control_loop_schedules: Option<ManagerControlLoopScheduleSweep>,
-    #[serde(default)]
     semantic_aging_policies: Option<SemanticAgingPolicySweep>,
     mcp_health_runs: Vec<McpServerScheduledHealthRun>,
     mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
@@ -2928,19 +2878,6 @@ struct SchedulerDueRun {
     usage_finance_export: UsageFinanceExportDelivery,
     remote_computer_reclaim: RemoteComputerReclaimRun,
     remote_computer_sidecar_supervision: RemoteComputerSidecarSupervisionRun,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ManagerControlLoopScheduleSweep {
-    status: String,
-    checked_at: DateTime<Utc>,
-    scheduled_count: usize,
-    due_count: usize,
-    processed_count: usize,
-    skipped_count: usize,
-    failed_count: usize,
-    runs: Vec<Value>,
-    actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6517,11 +6454,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/work-items/{id}/manager-plans",
             get(list_work_item_manager_agent_plans),
-        )
-        .route("/api/manager-agent/runs", post(run_manager_agent))
-        .route(
-            "/api/manager-agent/control-loop/run",
-            post(run_manager_control_loop),
         )
         .route("/api/capability-discovery", get(get_capability_discovery))
         .route(
@@ -13724,711 +13656,6 @@ async fn list_work_item_manager_agent_plans(
     Ok(Json(state.list_work_item_manager_agent_plans(id).await?))
 }
 
-async fn run_manager_agent(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<RunManagerAgentRequest>,
-) -> Result<Json<ManagerAgentRunResponse>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "work_item",
-        Some(input.work_item_id),
-    )
-    .await?;
-    let principal = principal_from_request(&state, &headers).await?;
-    let work_item = get_active_work_item_for_manager_run(&state, input.work_item_id).await?;
-    let manager_agent = select_manager_agent_for_run(&state, input.manager_agent_id).await?;
-    let specialist_agent =
-        select_specialist_agent_for_run(&state, input.specialist_agent_id, &work_item).await?;
-    let intent = validate_handoff_token("intent", &input.intent)?;
-    let schema_version = validate_handoff_schema_version(&input.schema_version)?;
-    let risk = normalize_manager_plan_risk(&input.risk_classification)?;
-    let now = Utc::now();
-    let due_at = input
-        .sla_minutes
-        .map(|minutes| now + ChronoDuration::minutes(minutes.max(0)));
-    let manager_session = state
-        .create_session(CreateSession {
-            agent_id: manager_agent.id,
-            environment_id: None,
-            title: format!("Manager loop for {}", work_item.title),
-            message: Some(format!(
-                "Intake WorkItem {} and delegate to {}.",
-                work_item.id, specialist_agent.name
-            )),
-        })
-        .await?;
-    ensure_primary_session_thread(&state, manager_session.id).await?;
-    append_manager_run_activity(
-        &state,
-        &work_item,
-        "manager_agent.auto_intake",
-        &manager_agent,
-        "Manager Agent intake started",
-        json!({
-            "manager_agent_id": manager_agent.id,
-            "specialist_agent_id": specialist_agent.id,
-            "risk_classification": risk,
-            "intent": intent,
-        }),
-    )
-    .await?;
-    let semantic_scopes = work_item
-        .metadata
-        .get("semantic_scopes")
-        .cloned()
-        .unwrap_or_else(|| specialist_agent.semantic_scopes.clone());
-    let decomposition = manager_run_decomposition(&work_item, &specialist_agent);
-    let plan = create_manager_agent_plan(
-        State(state.clone()),
-        Path(manager_session.id),
-        headers.clone(),
-        Json(CreateManagerAgentPlan {
-            work_item_id: Some(work_item.id),
-            specialist_agent_id: Some(specialist_agent.id),
-            task_intake: json!({
-                "goal": work_item.title,
-                "description": work_item.description,
-                "source": work_item.source,
-                "source_url": work_item.source_url,
-                "priority": work_item.priority,
-                "work_item_id": work_item.id,
-                "metadata": work_item.metadata,
-            }),
-            decomposition: decomposition.clone(),
-            specialist_selection: json!({
-                "selected_agent_id": specialist_agent.id,
-                "selected_agent_name": specialist_agent.name,
-                "reason": "specialist agent matched explicit request or work item semantic scopes",
-                "semantic_scopes": specialist_agent.semantic_scopes,
-            }),
-            risk_classification: risk.clone(),
-            review: json!({
-                "status": "pending",
-                "reviewer": "manager-agent",
-                "sla_minutes": input.sla_minutes,
-            }),
-        }),
-    )
-    .await?
-    .0;
-    append_manager_run_activity(
-        &state,
-        &work_item,
-        "manager_agent.decomposed",
-        &manager_agent,
-        "Manager Agent decomposed the WorkItem",
-        json!({
-            "manager_agent_plan_id": plan.id,
-            "decomposition": decomposition,
-        }),
-    )
-    .await?;
-    let reviewed_plan = review_manager_agent_plan(
-        State(state.clone()),
-        Path(plan.id),
-        headers.clone(),
-        Json(ReviewManagerAgentPlan {
-            status: Some("approved".to_string()),
-            review: json!({
-                "status": "approved",
-                "summary": "Auto-manager loop approved assignment after governed intake and decomposition.",
-                "reviewer": "manager-agent",
-                "reviewed_at": Utc::now(),
-            }),
-        }),
-    )
-    .await?
-    .0;
-    let handoff = create_agent_handoff_event(
-        State(state.clone()),
-        Path(manager_session.id),
-        headers.clone(),
-        Json(CreateAgentHandoffEvent {
-            target_agent_id: specialist_agent.id,
-            manager_plan_id: Some(reviewed_plan.id),
-            intent: intent.clone(),
-            payload: json!({
-                "work_item_id": work_item.id,
-                "title": work_item.title,
-                "description": work_item.description,
-                "priority": work_item.priority,
-                "manager_plan_id": reviewed_plan.id,
-                "metadata": input.metadata,
-            }),
-            schema_version,
-            risk_level: risk,
-            approval_required: input.approval_required,
-            semantic_scopes: Some(semantic_scopes.clone()),
-            runtime_profile_id: specialist_agent.runtime_profile_id,
-            remote_computer_required: None,
-            review_status: Some("manager_reviewed".to_string()),
-            human_escalation_status: Some("none".to_string()),
-        }),
-    )
-    .await?
-    .0;
-    let accepted_handoff = accept_agent_handoff_event(
-        State(state.clone()),
-        Path(handoff.id),
-        headers.clone(),
-        Json(TransitionAgentHandoffEvent {
-            reason: Some("manager auto-loop accepted governed handoff".to_string()),
-        }),
-    )
-    .await?
-    .0;
-    let (assignment, work_item_assignment) = if input.auto_assign {
-        let assignment = assign_agent_handoff_event(
-            State(state.clone()),
-            Path(accepted_handoff.id),
-            headers.clone(),
-            Json(CreateAgentHandoffAssignment {
-                specialist_session_id: None,
-                title: Some(format!("WorkItem: {}", work_item.title)),
-                message: Some(format!(
-                    "Execute WorkItem {} under Manager Agent plan {}.",
-                    work_item.id, reviewed_plan.id
-                )),
-                remote_computer_job_assignment_id: None,
-                assigned_by: Some(principal.subject_id.clone()),
-                metadata: json!({
-                    "source": "manager_agent.run",
-                    "work_item_id": work_item.id,
-                    "manager_plan_id": reviewed_plan.id,
-                }),
-            }),
-        )
-        .await?
-        .0;
-        let work_item_assignment = state
-            .create_work_item_assignment(
-                work_item.id,
-                CreateWorkItemAssignment {
-                    assignee_kind: "agent".to_string(),
-                    assignee_id: specialist_agent.id.to_string(),
-                    role: "owner".to_string(),
-                    status: "assigned".to_string(),
-                    metadata: json!({
-                        "source": "manager_agent.run",
-                        "agent_handoff_assignment_id": assignment.id,
-                        "specialist_session_id": assignment.specialist_session_id,
-                    }),
-                },
-                Some(principal.subject_id.clone()),
-            )
-            .await?;
-        append_manager_run_activity(
-            &state,
-            &work_item,
-            "manager_agent.assigned",
-            &manager_agent,
-            "Manager Agent assigned the WorkItem to a Specialist Agent",
-            json!({
-                "agent_handoff_assignment_id": assignment.id,
-                "work_item_assignment_id": work_item_assignment.id,
-                "specialist_agent_id": specialist_agent.id,
-                "specialist_session_id": assignment.specialist_session_id,
-            }),
-        )
-        .await?;
-        (Some(assignment), Some(work_item_assignment))
-    } else {
-        (None, None)
-    };
-    let work_item_review = state
-        .create_work_item_review(
-            work_item.id,
-            CreateWorkItemReview {
-                reviewer_kind: "agent".to_string(),
-                reviewer_id: manager_agent.id.to_string(),
-                status: "completed".to_string(),
-                decision: Some("approved".to_string()),
-                summary: Some(
-                    "Manager Agent reviewed intake, decomposition, and handoff readiness."
-                        .to_string(),
-                ),
-                metadata: json!({
-                    "source": "manager_agent.run",
-                    "manager_plan_id": reviewed_plan.id,
-                    "agent_handoff_event_id": accepted_handoff.id,
-                }),
-            },
-        )
-        .await?;
-    append_manager_run_activity(
-        &state,
-        &work_item,
-        "manager_agent.reviewed",
-        &manager_agent,
-        "Manager Agent recorded review for the WorkItem",
-        json!({
-            "work_item_review_id": work_item_review.id,
-            "decision": work_item_review.decision,
-            "manager_plan_id": reviewed_plan.id,
-        }),
-    )
-    .await?;
-    append_manager_run_activity(
-        &state,
-        &work_item,
-        "manager_agent.sla_tracked",
-        &manager_agent,
-        "Manager Agent created SLA tracking metadata",
-        json!({
-            "sla_minutes": input.sla_minutes,
-            "due_at": due_at,
-            "status": "tracking",
-        }),
-    )
-    .await?;
-    let activity_count = state.list_work_item_activity(work_item.id).await?.len();
-    state
-        .append_audit_log(new_audit_log(
-            Some(manager_session.id),
-            "agent",
-            Some(manager_agent.id),
-            "manager_agent.run_completed",
-            "work_item",
-            Some(work_item.id),
-            json!({
-                "subject": principal.subject_id,
-                "work_item_id": work_item.id,
-                "manager_agent_id": manager_agent.id,
-                "manager_session_id": manager_session.id,
-                "specialist_agent_id": specialist_agent.id,
-                "manager_plan_id": reviewed_plan.id,
-                "agent_handoff_event_id": accepted_handoff.id,
-                "agent_handoff_assignment_id": assignment.as_ref().map(|item| item.id),
-                "work_item_assignment_id": work_item_assignment.as_ref().map(|item| item.id),
-                "work_item_review_id": work_item_review.id,
-                "auto_assign": input.auto_assign,
-                "sla_minutes": input.sla_minutes,
-                "due_at": due_at,
-            }),
-        ))
-        .await?;
-    Ok(Json(ManagerAgentRunResponse {
-        status: assignment
-            .as_ref()
-            .map(|assignment| assignment.status.clone())
-            .unwrap_or_else(|| "handoff_ready".to_string()),
-        work_item,
-        manager_session,
-        plan: reviewed_plan,
-        handoff: accepted_handoff,
-        assignment,
-        work_item_assignment,
-        work_item_review: Some(work_item_review),
-        sla: json!({
-            "sla_minutes": input.sla_minutes,
-            "due_at": due_at,
-            "status": "tracking",
-        }),
-        activity_count,
-        completed_at: Utc::now(),
-    }))
-}
-
-async fn run_manager_control_loop(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<RunManagerControlLoopRequest>,
-) -> Result<Json<Value>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "manager_control_loop",
-        None,
-    )
-    .await?;
-    let principal = principal_from_request(&state, &headers).await?;
-    let manager_agent = select_manager_agent_for_run(&state, input.manager_agent_id).await?;
-    let run_id = Uuid::new_v4();
-    let now = Utc::now();
-    let mut work_items = state.list_work_items().await?;
-    work_items.retain(|work_item| work_item.archived_at.is_none());
-    work_items.sort_by(|left, right| {
-        manager_priority_rank(&right.priority)
-            .cmp(&manager_priority_rank(&left.priority))
-            .then_with(|| left.created_at.cmp(&right.created_at))
-    });
-    let work_items = if let Some(limit) = input.max_assignments {
-        work_items
-            .into_iter()
-            .take(limit.max(1))
-            .collect::<Vec<_>>()
-    } else {
-        work_items
-    };
-    let all_work_items = state.list_work_items().await?;
-    let mut load_by_agent = HashMap::<Uuid, (String, usize)>::new();
-    let agents_by_id = state
-        .list_agents()
-        .await?
-        .into_iter()
-        .map(|agent| (agent.id, agent))
-        .collect::<HashMap<_, _>>();
-    for work_item in &all_work_items {
-        for assignment in state.list_work_item_assignments(work_item.id).await? {
-            if assignment.archived_at.is_some()
-                || assignment.assignee_kind != "agent"
-                || !matches!(
-                    assignment.status.as_str(),
-                    "assigned" | "in_progress" | "blocked" | "review"
-                )
-            {
-                continue;
-            }
-            let Ok(agent_id) = Uuid::parse_str(&assignment.assignee_id) else {
-                continue;
-            };
-            let name = agents_by_id
-                .get(&agent_id)
-                .map(|agent| agent.name.clone())
-                .unwrap_or_else(|| assignment.assignee_id.clone());
-            let entry = load_by_agent.entry(agent_id).or_insert((name, 0));
-            entry.1 += 1;
-        }
-    }
-    let mut escalations = Vec::new();
-    let mut retrospectives = Vec::new();
-    for work_item in &work_items {
-        if !matches!(work_item.status.as_str(), "done" | "canceled") {
-            let activity = state.list_work_item_activity(work_item.id).await?;
-            let already_escalated = activity
-                .iter()
-                .any(|entry| entry.event_type == "manager_agent.sla_escalated");
-            let overdue_due_at = activity
-                .iter()
-                .filter(|entry| entry.event_type == "manager_agent.sla_tracked")
-                .filter_map(|entry| {
-                    entry
-                        .metadata
-                        .get("due_at")
-                        .and_then(parse_rfc3339_value_as_utc)
-                })
-                .min();
-            if let Some(due_at) = overdue_due_at {
-                if due_at <= now && !already_escalated {
-                    append_manager_run_activity(
-                        &state,
-                        work_item,
-                        "manager_agent.sla_escalated",
-                        &manager_agent,
-                        "Manager Agent escalated an overdue SLA",
-                        json!({
-                            "manager_control_loop_run_id": run_id,
-                            "due_at": due_at,
-                            "priority": work_item.priority,
-                            "status": work_item.status,
-                        }),
-                    )
-                    .await?;
-                    escalations.push(json!({
-                        "work_item_id": work_item.id,
-                        "title": work_item.title,
-                        "priority": work_item.priority,
-                        "due_at": due_at,
-                        "action": "sla_escalated",
-                    }));
-                }
-            }
-        }
-        if work_item.status == "blocked" {
-            let review = state
-                .create_work_item_review(
-                    work_item.id,
-                    CreateWorkItemReview {
-                        reviewer_kind: "agent".to_string(),
-                        reviewer_id: manager_agent.id.to_string(),
-                        status: "completed".to_string(),
-                        decision: Some("changes_requested".to_string()),
-                        summary: Some(
-                            "manager retrospective: blocked WorkItem requires replanning, evidence review, and escalation decision."
-                                .to_string(),
-                        ),
-                        metadata: json!({
-                            "source": "manager_agent.control_loop",
-                            "manager_control_loop_run_id": run_id,
-                            "review_policy": "blocked_items_require_retrospective",
-                        }),
-                    },
-                )
-                .await?;
-            append_manager_run_activity(
-                &state,
-                work_item,
-                "manager_agent.retrospective_created",
-                &manager_agent,
-                "Manager Agent created a blocked-work retrospective",
-                json!({
-                    "manager_control_loop_run_id": run_id,
-                    "work_item_review_id": review.id,
-                    "decision": review.decision,
-                }),
-            )
-            .await?;
-            retrospectives.push(json!({
-                "work_item_id": work_item.id,
-                "review_id": review.id,
-                "decision": review.decision,
-                "summary": review.summary,
-            }));
-        }
-    }
-    let mut specialist_load = load_by_agent
-        .into_iter()
-        .map(|(agent_id, (agent_name, active_assignment_count))| {
-            json!({
-                "agent_id": agent_id,
-                "agent_name": agent_name,
-                "active_assignment_count": active_assignment_count,
-                "recommended_action": if active_assignment_count > 3 {
-                    "rebalance"
-                } else {
-                    "available"
-                },
-            })
-        })
-        .collect::<Vec<_>>();
-    specialist_load.sort_by(|left, right| {
-        left["agent_name"]
-            .as_str()
-            .unwrap_or_default()
-            .cmp(right["agent_name"].as_str().unwrap_or_default())
-    });
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "agent",
-            Some(manager_agent.id),
-            "manager_agent.control_loop_run",
-            "manager_control_loop",
-            Some(run_id),
-            json!({
-                "subject": principal.subject_id,
-                "manager_agent_id": manager_agent.id,
-                "run_id": run_id,
-                "execute_ready": input.execute_ready,
-                "max_assignments": input.max_assignments,
-                "overdue_count": escalations.len(),
-                "retrospective_count": retrospectives.len(),
-            }),
-        ))
-        .await?;
-    Ok(Json(json!({
-        "status": "completed",
-        "manager_control_loop_run_id": run_id,
-        "generated_at": now,
-        "summary": {
-            "overdue_count": escalations.len(),
-            "retrospective_count": retrospectives.len(),
-            "specialist_load": specialist_load,
-            "execute_ready": input.execute_ready,
-        },
-        "escalations": escalations,
-        "retrospectives": retrospectives,
-    })))
-}
-
-async fn execute_manager_control_loop_core(
-    state: &AppState,
-    subject: &str,
-    input: RunManagerControlLoopRequest,
-) -> Result<Value, AppError> {
-    let manager_agent = select_manager_agent_for_run(state, input.manager_agent_id).await?;
-    let run_id = Uuid::new_v4();
-    let now = Utc::now();
-    let mut work_items = state.list_work_items().await?;
-    work_items.retain(|work_item| work_item.archived_at.is_none());
-    work_items.sort_by(|left, right| {
-        manager_priority_rank(&right.priority)
-            .cmp(&manager_priority_rank(&left.priority))
-            .then_with(|| left.created_at.cmp(&right.created_at))
-    });
-    let work_items = if let Some(limit) = input.max_assignments {
-        work_items
-            .into_iter()
-            .take(limit.max(1))
-            .collect::<Vec<_>>()
-    } else {
-        work_items
-    };
-    let all_work_items = state.list_work_items().await?;
-    let agents_by_id = state
-        .list_agents()
-        .await?
-        .into_iter()
-        .map(|agent| (agent.id, agent))
-        .collect::<HashMap<_, _>>();
-    let mut load_by_agent = HashMap::<Uuid, (String, usize)>::new();
-    for work_item in &all_work_items {
-        for assignment in state.list_work_item_assignments(work_item.id).await? {
-            if assignment.archived_at.is_some()
-                || assignment.assignee_kind != "agent"
-                || !matches!(
-                    assignment.status.as_str(),
-                    "assigned" | "in_progress" | "blocked" | "review"
-                )
-            {
-                continue;
-            }
-            let Ok(agent_id) = Uuid::parse_str(&assignment.assignee_id) else {
-                continue;
-            };
-            let name = agents_by_id
-                .get(&agent_id)
-                .map(|agent| agent.name.clone())
-                .unwrap_or_else(|| assignment.assignee_id.clone());
-            load_by_agent.entry(agent_id).or_insert((name, 0)).1 += 1;
-        }
-    }
-    let mut escalations = Vec::new();
-    let mut retrospectives = Vec::new();
-    for work_item in &work_items {
-        if !matches!(work_item.status.as_str(), "done" | "canceled") {
-            let activity = state.list_work_item_activity(work_item.id).await?;
-            let already_escalated = activity
-                .iter()
-                .any(|entry| entry.event_type == "manager_agent.sla_escalated");
-            let overdue_due_at = activity
-                .iter()
-                .filter(|entry| entry.event_type == "manager_agent.sla_tracked")
-                .filter_map(|entry| {
-                    entry
-                        .metadata
-                        .get("due_at")
-                        .and_then(parse_rfc3339_value_as_utc)
-                })
-                .min();
-            if let Some(due_at) = overdue_due_at
-                && due_at <= now
-                && !already_escalated
-            {
-                append_manager_run_activity(
-                    state,
-                    work_item,
-                    "manager_agent.sla_escalated",
-                    &manager_agent,
-                    "Manager Agent escalated an overdue SLA",
-                    json!({
-                        "manager_control_loop_run_id": run_id,
-                        "due_at": due_at,
-                        "priority": work_item.priority,
-                        "status": work_item.status,
-                    }),
-                )
-                .await?;
-                escalations.push(json!({
-                    "work_item_id": work_item.id,
-                    "title": work_item.title,
-                    "priority": work_item.priority,
-                    "due_at": due_at,
-                    "action": "sla_escalated",
-                }));
-            }
-        }
-        if work_item.status == "blocked" {
-            let review = state
-                .create_work_item_review(
-                    work_item.id,
-                    CreateWorkItemReview {
-                        reviewer_kind: "agent".to_string(),
-                        reviewer_id: manager_agent.id.to_string(),
-                        status: "completed".to_string(),
-                        decision: Some("changes_requested".to_string()),
-                        summary: Some(
-                            "manager retrospective: blocked WorkItem requires replanning, evidence review, and escalation decision."
-                                .to_string(),
-                        ),
-                        metadata: json!({
-                            "source": "manager_agent.control_loop",
-                            "manager_control_loop_run_id": run_id,
-                            "review_policy": "blocked_items_require_retrospective",
-                        }),
-                    },
-                )
-                .await?;
-            append_manager_run_activity(
-                state,
-                work_item,
-                "manager_agent.retrospective_created",
-                &manager_agent,
-                "Manager Agent created a blocked-work retrospective",
-                json!({
-                    "manager_control_loop_run_id": run_id,
-                    "work_item_review_id": review.id,
-                    "decision": review.decision,
-                }),
-            )
-            .await?;
-            retrospectives.push(json!({
-                "work_item_id": work_item.id,
-                "review_id": review.id,
-                "decision": review.decision,
-                "summary": review.summary,
-            }));
-        }
-    }
-    let mut specialist_load = load_by_agent
-        .into_iter()
-        .map(|(agent_id, (agent_name, active_assignment_count))| {
-            json!({
-                "agent_id": agent_id,
-                "agent_name": agent_name,
-                "active_assignment_count": active_assignment_count,
-                "recommended_action": if active_assignment_count > 3 {
-                    "rebalance"
-                } else {
-                    "available"
-                },
-            })
-        })
-        .collect::<Vec<_>>();
-    specialist_load.sort_by(|left, right| {
-        left["agent_name"]
-            .as_str()
-            .unwrap_or_default()
-            .cmp(right["agent_name"].as_str().unwrap_or_default())
-    });
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "agent",
-            Some(manager_agent.id),
-            "manager_agent.control_loop_run",
-            "manager_control_loop",
-            Some(run_id),
-            json!({
-                "subject": subject,
-                "manager_agent_id": manager_agent.id,
-                "run_id": run_id,
-                "execute_ready": input.execute_ready,
-                "max_assignments": input.max_assignments,
-                "overdue_count": escalations.len(),
-                "retrospective_count": retrospectives.len(),
-            }),
-        ))
-        .await?;
-    Ok(json!({
-        "status": "completed",
-        "manager_control_loop_run_id": run_id,
-        "generated_at": now,
-        "summary": {
-            "overdue_count": escalations.len(),
-            "retrospective_count": retrospectives.len(),
-            "specialist_load": specialist_load,
-            "execute_ready": input.execute_ready,
-        },
-        "escalations": escalations,
-        "retrospectives": retrospectives,
-    }))
-}
-
 async fn get_capability_discovery(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -14484,7 +13711,7 @@ async fn get_capability_discovery(
                 "target_view": "manager",
                 "title": "拆解并派发一个工作项",
                 "prompt": "请把这个目标拆解成 WorkItem、选择合适 Agent、设置 SLA，并建立复审点。",
-                "action": "create_work_item_then_run_manager_loop"
+                "action": "create_work_item_then_start_pack_workflow"
             },
             {
                 "target_view": "semantic",
@@ -14506,9 +13733,9 @@ async fn get_capability_discovery(
                 "description": "先把业务目标变成可审计、可派工、可复审的任务。"
             },
             {
-                "key": "run_manager_loop",
-                "title": "运行 Manager Loop",
-                "description": "让 Manager Agent 做 intake、拆解、派工、SLA 检查和复审。"
+                "key": "start_pack_manager_workflow",
+                "title": "启动 Pack Manager Workflow",
+                "description": "通过 Workflow Pack 定义的 manager workflow 做 intake、拆解、派工、SLA 检查和复审。"
             },
             {
                 "key": "review_memory",
@@ -14524,8 +13751,8 @@ async fn get_capability_discovery(
         "empty_states": [
             {
                 "view": "manager",
-                "title": "还没有经理循环结果",
-                "action": "run_manager_control_loop"
+                "title": "还没有 Pack Manager Workflow 结果",
+                "action": "start_pack_manager_workflow"
             },
             {
                 "view": "semantic",
@@ -14541,109 +13768,9 @@ async fn get_capability_discovery(
     })))
 }
 
-async fn get_active_work_item_for_manager_run(
-    state: &AppState,
-    work_item_id: Uuid,
-) -> Result<WorkItem, AppError> {
-    state
-        .list_work_items()
-        .await?
-        .into_iter()
-        .find(|work_item| work_item.id == work_item_id && work_item.archived_at.is_none())
-        .ok_or_else(|| AppError::not_found("active work item not found"))
-}
-
-async fn select_manager_agent_for_run(
-    state: &AppState,
-    manager_agent_id: Option<Uuid>,
-) -> Result<Agent, AppError> {
-    match manager_agent_id {
-        Some(agent_id) => {
-            let agent = state.get_agent(agent_id).await?;
-            if agent.agent_role != "manager" {
-                return Err(AppError::bad_request(
-                    "manager_agent_id must reference a manager agent",
-                ));
-            }
-            Ok(agent)
-        }
-        None => state
-            .list_agents()
-            .await?
-            .into_iter()
-            .find(|agent| agent.agent_role == "manager")
-            .ok_or_else(|| AppError::not_found("manager agent not found")),
-    }
-}
-
-async fn select_specialist_agent_for_run(
-    state: &AppState,
-    specialist_agent_id: Option<Uuid>,
-    work_item: &WorkItem,
-) -> Result<Agent, AppError> {
-    if let Some(agent_id) = specialist_agent_id {
-        let agent = state.get_agent(agent_id).await?;
-        if agent.agent_role != "specialist" {
-            return Err(AppError::bad_request(
-                "specialist_agent_id must reference a specialist agent",
-            ));
-        }
-        return Ok(agent);
-    }
-    let work_item_scopes = work_item.metadata.get("semantic_scopes");
-    state
-        .list_agents()
-        .await?
-        .into_iter()
-        .find(|agent| {
-            agent.agent_role == "specialist"
-                && work_item_scopes
-                    .map(|scopes| semantic_scopes_cover(&agent.semantic_scopes, scopes))
-                    .unwrap_or(true)
-        })
-        .ok_or_else(|| AppError::not_found("matching specialist agent not found"))
-}
-
-fn semantic_scopes_cover(candidate: &Value, required: &Value) -> bool {
-    let Some(candidate_scopes) = candidate.as_object() else {
-        return false;
-    };
-    let Some(required_scopes) = required.as_object() else {
-        return false;
-    };
-    required_scopes.iter().all(|(key, value)| {
-        let Some(required_value) = value.as_str().map(str::trim) else {
-            return true;
-        };
-        if required_value.is_empty() || key == "share_policy" || key == "visibility" {
-            return true;
-        }
-        candidate_scopes
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|candidate_value| candidate_value.trim() == required_value)
-    })
-}
-
-fn manager_priority_rank(priority: &str) -> i32 {
-    match priority {
-        "urgent" => 4,
-        "high" => 3,
-        "normal" => 2,
-        "low" => 1,
-        _ => 0,
-    }
-}
-
-fn parse_rfc3339_value_as_utc(value: &Value) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value.as_str()?)
-        .ok()
-        .map(|value| value.with_timezone(&Utc))
-}
-
 fn capability_primary_action(agent: &Agent) -> &'static str {
     match agent.agent_role.as_str() {
-        "manager" => "run_manager_loop",
+        "manager" => "start_pack_manager_workflow",
         "specialist" => "claim_specialist_work",
         _ => "start_session",
     }
@@ -14672,51 +13799,6 @@ fn capability_sample_tasks(agent: &Agent) -> Vec<String> {
         ],
         _ => vec!["启动一个受治理的 managed session".to_string()],
     }
-}
-
-fn manager_run_decomposition(work_item: &WorkItem, specialist: &Agent) -> Value {
-    json!({
-        "mode": "manager_auto_loop",
-        "steps": [
-            {
-                "key": "intake",
-                "title": "Confirm WorkItem intent, priority, semantic scope, and risk.",
-                "status": "ready_for_specialist"
-            },
-            {
-                "key": "execute",
-                "title": format!("{} handles {}", specialist.name, work_item.title),
-                "status": "ready_for_specialist"
-            },
-            {
-                "key": "review",
-                "title": "Return evidence to Manager Agent for review and escalation if blocked.",
-                "status": "waiting_result"
-            }
-        ]
-    })
-}
-
-async fn append_manager_run_activity(
-    state: &AppState,
-    work_item: &WorkItem,
-    event_type: &str,
-    manager_agent: &Agent,
-    summary: &str,
-    metadata: Value,
-) -> Result<(), AppError> {
-    state
-        .append_work_item_activity_entry(
-            work_item.id,
-            event_type,
-            Some(manager_agent.id.to_string()),
-            Some("agent"),
-            Some(manager_agent.id),
-            summary.to_string(),
-            metadata,
-        )
-        .await?;
-    Ok(())
 }
 
 async fn get_manager_agent_plan(
@@ -15405,7 +14487,7 @@ async fn attach_agent_handoff_remote_computer_assignment(
     authorize_request(
         &state,
         &headers,
-        Permission::ExecutionJobsRun,
+        Permission::SessionsRun,
         "session",
         Some(assignment.specialist_session_id),
     )
@@ -20676,127 +19758,6 @@ fn semantic_synthesis_scheduled_run_failed(
     }
 }
 
-async fn execute_due_manager_control_loop_schedules(
-    state: &AppState,
-    checked_at: DateTime<Utc>,
-) -> Result<ManagerControlLoopScheduleSweep, AppError> {
-    let objects = state
-        .list_workflow_pack_runtime_objects_by_runtime_kind("manager_control_loop_schedule")
-        .await?;
-    let audit_logs = state.list_audit_logs(None).await?;
-    let mut scheduled_count = 0usize;
-    let mut due_count = 0usize;
-    let mut processed_count = 0usize;
-    let mut skipped_count = 0usize;
-    let mut failed_count = 0usize;
-    let mut runs = Vec::new();
-    for object in objects {
-        scheduled_count += 1;
-        if !scheduled_runtime_object_is_runnable(&object, "manager_control_loop_schedule") {
-            skipped_count += 1;
-            runs.push(json!({
-                "runtime_object_id": object.id,
-                "object_key": object.object_key,
-                "status": "skipped",
-                "reason": "schedule runtime object is not released or active",
-            }));
-            continue;
-        }
-        if !scheduled_runtime_object_is_due(
-            &object,
-            &audit_logs,
-            checked_at,
-            "manager_agent.control_loop_schedule_run",
-        )? {
-            skipped_count += 1;
-            runs.push(json!({
-                "runtime_object_id": object.id,
-                "object_key": object.object_key,
-                "status": "skipped",
-                "reason": "schedule is not due or one-shot schedule already ran",
-            }));
-            continue;
-        }
-        due_count += 1;
-        let input = RunManagerControlLoopRequest {
-            manager_agent_id: scheduled_runtime_object_uuid(&object, "manager_agent_id")?,
-            execute_ready: object
-                .spec
-                .get("execute_ready")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            max_assignments: object
-                .spec
-                .get("max_assignments")
-                .and_then(Value::as_u64)
-                .map(|value| value as usize),
-        };
-        match execute_manager_control_loop_core(state, "system", input).await {
-            Ok(result) => {
-                processed_count += 1;
-                state
-                    .append_audit_log(new_audit_log(
-                        None,
-                        "system",
-                        Some(object.id),
-                        "manager_agent.control_loop_schedule_run",
-                        "workflow_pack_runtime_object",
-                        Some(object.id),
-                        json!({
-                            "runtime_object_id": object.id,
-                            "object_key": object.object_key,
-                            "checked_at": checked_at,
-                            "result": result,
-                        }),
-                    ))
-                    .await?;
-                runs.push(json!({
-                    "runtime_object_id": object.id,
-                    "object_key": object.object_key,
-                    "status": "processed",
-                    "result": result,
-                }));
-            }
-            Err(error) => {
-                failed_count += 1;
-                runs.push(json!({
-                    "runtime_object_id": object.id,
-                    "object_key": object.object_key,
-                    "status": "failed",
-                    "reason": error.message,
-                }));
-            }
-        }
-    }
-    let mut actions = Vec::new();
-    if processed_count > 0 {
-        actions.push("run_due_manager_control_loop_schedules".to_string());
-    }
-    let status = if failed_count > 0 && processed_count > 0 {
-        "partial"
-    } else if failed_count > 0 {
-        "failed"
-    } else if processed_count > 0 {
-        "completed"
-    } else if scheduled_count > 0 {
-        "waiting"
-    } else {
-        "noop"
-    }
-    .to_string();
-    Ok(ManagerControlLoopScheduleSweep {
-        status,
-        checked_at,
-        scheduled_count,
-        due_count,
-        processed_count,
-        skipped_count,
-        failed_count,
-        runs,
-        actions,
-    })
-}
-
 async fn execute_due_semantic_aging_policies(
     state: &AppState,
     checked_at: DateTime<Utc>,
@@ -21007,21 +19968,6 @@ fn scheduled_runtime_object_due_at(
     DateTime::parse_from_rfc3339(raw)
         .map(|value| Some(value.with_timezone(&Utc)))
         .map_err(|_| AppError::bad_request("schedule due_at must be an RFC3339 string"))
-}
-
-fn scheduled_runtime_object_uuid(
-    object: &WorkflowPackRuntimeObject,
-    key: &str,
-) -> Result<Option<Uuid>, AppError> {
-    object
-        .spec
-        .get(key)
-        .and_then(Value::as_str)
-        .map(|value| {
-            Uuid::parse_str(value)
-                .map_err(|_| AppError::bad_request(format!("schedule {key} must be a UUID string")))
-        })
-        .transpose()
 }
 
 async fn record_workflow_step_run_updated(
@@ -27151,6 +26097,18 @@ async fn principal_from_request(
     headers: &HeaderMap,
 ) -> Result<Principal, AppError> {
     let tenant_id = resolve_request_tenant_id(state, headers)?;
+    if worker_token_authenticated(headers) {
+        return Ok(Principal {
+            tenant_id,
+            subject_id: header_value(headers, "x-mandoforge-subject")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("mandoforge-worker")
+                .to_string(),
+            roles: vec![Role::Worker],
+        });
+    }
+
     let dev_token_authenticated = dev_admin_token_authenticated(headers);
     if dev_token_authenticated {
         return Ok(Principal {
@@ -27220,6 +26178,23 @@ async fn principal_from_request(
 
 fn dev_admin_token_authenticated(headers: &HeaderMap) -> bool {
     let Some(expected) = std::env::var("MANDOFORGE_DEV_ADMIN_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(header) = header_value(headers, "authorization") else {
+        return false;
+    };
+    let Some(token) = header.trim().strip_prefix("Bearer ") else {
+        return false;
+    };
+    token.trim() == expected
+}
+
+fn worker_token_authenticated(headers: &HeaderMap) -> bool {
+    let Some(expected) = std::env::var("MANDOFORGE_WORKER_TOKEN")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -27354,6 +26329,7 @@ fn parse_roles_header(value: &str) -> Result<Vec<Role>, AppError> {
         .map(|role| match role {
             "admin" => Ok(Role::Admin),
             "operator" => Ok(Role::Operator),
+            "worker" => Ok(Role::Worker),
             "approver" => Ok(Role::Approver),
             "viewer" => Ok(Role::Viewer),
             other => Err(AppError::bad_request(format!(
@@ -35217,7 +34193,7 @@ async fn sync_remote_computer_artifacts(
     authorize_request(
         &state,
         &headers,
-        Permission::ExecutionJobsRun,
+        Permission::SessionsRun,
         "remote_computer",
         Some(input.remote_computer_id),
     )
@@ -35330,7 +34306,7 @@ async fn discover_remote_computer_artifacts(
     authorize_request(
         &state,
         &headers,
-        Permission::ExecutionJobsRun,
+        Permission::SessionsRun,
         "remote_computer",
         Some(input.remote_computer_id),
     )
@@ -41884,29 +40860,6 @@ async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, 
             "no semantic synthesis schedules are registered"
         },
     ));
-    let (manager_schedule_count, manager_schedule_due_count, manager_schedule_skipped_count) =
-        build_scheduled_runtime_object_due_counts(
-            state,
-            generated_at,
-            "manager_control_loop_schedule",
-            "manager_agent.control_loop_schedule_run",
-        )
-        .await?;
-    actions.push(scheduler_due_plan_item(
-        "manager",
-        "manager_control_loop_schedule_run",
-        "auto",
-        manager_schedule_due_count,
-        manager_schedule_skipped_count,
-        manager_schedule_count,
-        if manager_schedule_due_count > 0 {
-            "run due Manager Agent control-loop schedules"
-        } else if manager_schedule_count > 0 {
-            "manager control-loop schedules exist but none are due"
-        } else {
-            "no manager control-loop schedules are registered"
-        },
-    ));
     let (semantic_aging_policy_count, semantic_aging_due_count, semantic_aging_skipped_count) =
         build_scheduled_runtime_object_due_counts(
             state,
@@ -42121,8 +41074,6 @@ async fn execute_scheduler_due_tasks(
     let workflow_scheduled_steps = execute_due_workflow_scheduled_steps(state, checked_at).await?;
     let semantic_synthesis_schedules =
         execute_due_semantic_synthesis_schedules(state, checked_at).await?;
-    let manager_control_loop_schedules =
-        execute_due_manager_control_loop_schedules(state, checked_at).await?;
     let semantic_aging_policies = execute_due_semantic_aging_policies(state, checked_at).await?;
     let usage = build_usage_summary(state).await?;
     let cost_alerts = build_cost_alerts(&usage.provider_budgets, checked_at);
@@ -42199,11 +41150,6 @@ async fn execute_scheduler_due_tasks(
     {
         actions.push("semantic_synthesis_schedules_processed".to_string());
     }
-    if manager_control_loop_schedules.processed_count > 0
-        || manager_control_loop_schedules.failed_count > 0
-    {
-        actions.push("manager_control_loop_schedules_processed".to_string());
-    }
     if semantic_aging_policies.archived_count > 0 || semantic_aging_policies.failed_count > 0 {
         actions.push("semantic_aging_policies_processed".to_string());
     }
@@ -42252,7 +41198,6 @@ async fn execute_scheduler_due_tasks(
         agent_releases,
         workflow_scheduled_steps: Some(workflow_scheduled_steps),
         semantic_synthesis_schedules: Some(semantic_synthesis_schedules),
-        manager_control_loop_schedules: Some(manager_control_loop_schedules),
         semantic_aging_policies: Some(semantic_aging_policies),
         mcp_health_runs,
         mcp_rollout_runs,
@@ -42287,8 +41232,6 @@ async fn execute_scheduler_due_tasks(
                 "semantic_synthesis_schedule_status": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.status.clone()),
                 "semantic_synthesis_schedule_created_count": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.created_count).unwrap_or(0),
                 "semantic_synthesis_schedule_failed_count": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.failed_count).unwrap_or(0),
-                "manager_control_loop_schedule_status": run.manager_control_loop_schedules.as_ref().map(|manager| manager.status.clone()),
-                "manager_control_loop_schedule_processed_count": run.manager_control_loop_schedules.as_ref().map(|manager| manager.processed_count).unwrap_or(0),
                 "semantic_aging_policy_status": run.semantic_aging_policies.as_ref().map(|semantic| semantic.status.clone()),
                 "semantic_aging_policy_archived_count": run.semantic_aging_policies.as_ref().map(|semantic| semantic.archived_count).unwrap_or(0),
                 "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
@@ -48523,7 +47466,7 @@ async fn acquire_remote_computer_state_lock(
     authorize_request(
         &state,
         &headers,
-        Permission::ExecutionJobsRun,
+        Permission::SessionsRun,
         "session",
         Some(session_id),
     )
@@ -48574,7 +47517,7 @@ async fn authorize_remote_computer_state_lock_release(
     })?;
     let request = AuthorizationRequest {
         tenant_id: state.current_tenant_id(),
-        permission: Permission::ExecutionJobsRun,
+        permission: Permission::SessionsRun,
         resource_type: "session".to_string(),
         resource_id: Some(session_id),
     };
@@ -48640,7 +47583,7 @@ async fn record_remote_computer_sidecar_heartbeat(
     authorize_request(
         &state,
         &headers,
-        Permission::ExecutionJobsRun,
+        Permission::SessionsRun,
         "session",
         Some(session_id),
     )
@@ -51411,8 +50354,15 @@ async fn cancel_execution_job_route(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
-    authorize_execution_job_run(&state, &headers, id).await?;
     let job = state.execution_queue.get(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(job.session_id),
+    )
+    .await?;
     if matches!(
         job.status,
         ExecutionJobStatus::Completed | ExecutionJobStatus::Failed | ExecutionJobStatus::Canceled
@@ -51554,9 +50504,14 @@ async fn authorize_execution_job_run(
     job_id: Uuid,
 ) -> Result<(), AppError> {
     let principal = principal_from_request(state, headers).await?;
+    let insecure_dev_override = ensure_worker_execution_principal(&principal, headers)?;
     let request = AuthorizationRequest {
         tenant_id: state.current_tenant_id(),
-        permission: Permission::ExecutionJobsRun,
+        permission: if insecure_dev_override {
+            Permission::SessionsRun
+        } else {
+            Permission::ExecutionJobsRun
+        },
         resource_type: "execution_job".to_string(),
         resource_id: Some(job_id),
     };
@@ -51577,6 +50532,7 @@ async fn authorize_session_loop_job_run(
     job_id: Uuid,
 ) -> Result<(), AppError> {
     let principal = principal_from_request(state, headers).await?;
+    ensure_worker_execution_principal(&principal, headers)?;
     let job = state.get_session_loop_job(job_id).await?;
     let request = AuthorizationRequest {
         tenant_id: state.current_tenant_id(),
@@ -51586,6 +50542,36 @@ async fn authorize_session_loop_job_run(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(state, &principal, &request).await
+}
+
+fn ensure_worker_execution_principal(
+    principal: &Principal,
+    headers: &HeaderMap,
+) -> Result<bool, AppError> {
+    let insecure_dev_override = insecure_dev_auth_enabled()
+        && (principal.roles.contains(&Role::Admin) || principal.subject_id == "demo-operator");
+    if !principal.roles.contains(&Role::Worker) && !insecure_dev_override {
+        return Err(AppError::forbidden(
+            "job execution endpoints are not allowed without a worker principal",
+        ));
+    }
+    let Some(worker_id) = header_value(headers, "x-mandoforge-worker-id")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        if insecure_dev_override {
+            return Ok(true);
+        }
+        return Err(AppError::bad_request(
+            "x-mandoforge-worker-id header is required for job execution",
+        ));
+    };
+    if worker_id == "api" || worker_id == "session-loop-worker" {
+        return Err(AppError::bad_request(
+            "x-mandoforge-worker-id must identify a concrete worker",
+        ));
+    }
+    Ok(insecure_dev_override)
 }
 
 async fn list_session_audit_logs(
@@ -52182,18 +51168,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_manager_agent_run_intent() -> String {
-    "execute_work_item".to_string()
-}
-
-fn default_manager_agent_run_schema_version() -> String {
-    "handoff.v1".to_string()
-}
-
-fn default_manager_agent_run_risk() -> String {
-    "medium".to_string()
-}
-
 fn default_semantic_conflict_strategy() -> String {
     "flag".to_string()
 }
@@ -52465,6 +51439,9 @@ mod tests {
             "delete from orders",
             "drop table orders",
             "insert into products values ('x')",
+            "with write_attempt as (insert into products values ('x') returning id) select * from write_attempt",
+            "explain analyze select * from generic_demo.platform_events",
+            "select * from orders for update",
             "select * from orders; delete from orders;",
         ] {
             assert!(ensure_read_only_sql(sql).is_err(), "{sql}");
@@ -56914,386 +55891,38 @@ not json
     }
 
     #[tokio::test]
-    async fn manager_agent_run_closes_intake_assignment_review_loop() {
+    async fn manager_agent_run_routes_are_not_platform_control_plane() {
         let app = test_app().await;
-        let admin_headers = [
-            ("x-mandoforge-subject", "admin-1"),
-            ("x-mandoforge-roles", "admin"),
-        ];
-        let specialist: Agent = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/agents",
-                json!({
-                    "name": "Auto Loop Specialist",
-                    "kind": "specialist",
-                    "agent_role": "specialist",
-                    "provider": "openai-compatible",
-                    "model": "gpt-5.4-mini",
-                    "tools": ["file.read"],
-                    "semantic_scopes": {
-                        "project_scope": "mandoforge",
-                        "repo_scope": "mandoforge",
-                        "service_scope": "agent-os",
-                        "domain_scope": "platform",
-                        "workflow_scope": "manager-auto-loop",
-                        "policy_scope": "approval-required",
-                        "memory_scope": "engineering",
-                        "share_policy": "isolated"
-                    }
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-        let manager: Agent = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/agents",
-                json!({
-                    "name": "Auto Loop Manager",
-                    "kind": "manager",
-                    "agent_role": "manager",
-                    "provider": "openai-compatible",
-                    "model": "gpt-5.4-mini",
-                    "runtime_config": {
-                        "handoffs": {
-                            "allowed_targets": [{
-                                "target_agent_id": specialist.id,
-                                "intents": ["execute_work_item"],
-                                "schema_versions": ["handoff.v1"],
-                                "risk_levels": ["low"],
-                                "approval_required": false
-                            }]
-                        }
-                    }
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-        let work_item: WorkItem = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/work-items",
-                json!({
-                    "title": "Refresh the semantic ingestion guide",
-                    "description": "Find the owner, split the task, and assign it to the right specialist.",
-                    "source": "manual",
-                    "priority": "high",
-                    "metadata": {
-                        "semantic_scopes": {
-                            "project_scope": "mandoforge",
-                            "repo_scope": "mandoforge",
-                            "service_scope": "agent-os",
-                            "domain_scope": "platform",
-                            "workflow_scope": "manager-auto-loop",
-                            "policy_scope": "approval-required",
-                            "memory_scope": "engineering",
-                            "share_policy": "isolated"
-                        }
-                    }
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
 
-        let run: Value = request_json(
+        let (status, _) = request_value(
             app.clone(),
             json_request_with_headers(
                 "POST",
                 "/api/manager-agent/runs",
-                json!({
-                    "work_item_id": work_item.id,
-                    "manager_agent_id": manager.id,
-                    "specialist_agent_id": specialist.id,
-                    "intent": "execute_work_item",
-                    "risk_classification": "low",
-                    "sla_minutes": 30,
-                    "auto_assign": true
-                }),
-                &admin_headers,
+                json!({"work_item_id": Uuid::new_v4()}),
+                &[("x-mandoforge-roles", "admin")],
             ),
         )
         .await;
+        assert!(matches!(
+            status,
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ));
 
-        assert_eq!(run["status"], "assigned");
-        assert_eq!(run["plan"]["status"], "approved");
-        assert_eq!(run["handoff"]["status"], "accepted");
-        assert_eq!(run["assignment"]["status"], "assigned");
-        assert_eq!(run["work_item"]["id"], json!(work_item.id));
-        assert_eq!(
-            run["plan"]["decomposition"]["steps"][0]["status"],
-            "ready_for_specialist"
-        );
-        assert_eq!(
-            run["handoff"]["semantic_scopes"]["workflow_scope"],
-            "manager-auto-loop"
-        );
-        assert!(run["sla"]["due_at"].as_str().is_some());
-
-        let activity: Vec<WorkItemActivityEntry> = request_json(
-            app.clone(),
-            Request::builder()
-                .uri(format!("/api/work-items/{}/activity", work_item.id))
-                .header("x-mandoforge-subject", "admin-1")
-                .header("x-mandoforge-roles", "admin")
-                .body(Body::empty())
-                .expect("valid request"),
-        )
-        .await;
-        for expected in [
-            "manager_agent.auto_intake",
-            "manager_agent.decomposed",
-            "manager_agent.assigned",
-            "manager_agent.reviewed",
-            "manager_agent.sla_tracked",
-        ] {
-            assert!(
-                activity.iter().any(|entry| entry.event_type == expected),
-                "missing work item activity {expected}"
-            );
-        }
-
-        let assignments: Vec<WorkItemAssignment> = request_json(
-            app.clone(),
-            Request::builder()
-                .uri(format!("/api/work-items/{}/assignments", work_item.id))
-                .header("x-mandoforge-subject", "admin-1")
-                .header("x-mandoforge-roles", "admin")
-                .body(Body::empty())
-                .expect("valid request"),
-        )
-        .await;
-        assert!(assignments.iter().any(|assignment| {
-            assignment.assignee_kind == "agent"
-                && assignment.assignee_id == specialist.id.to_string()
-                && assignment.role == "owner"
-                && assignment.status == "assigned"
-        }));
-
-        let reviews: Vec<WorkItemReview> = request_json(
-            app.clone(),
-            Request::builder()
-                .uri(format!("/api/work-items/{}/reviews", work_item.id))
-                .header("x-mandoforge-subject", "admin-1")
-                .header("x-mandoforge-roles", "admin")
-                .body(Body::empty())
-                .expect("valid request"),
-        )
-        .await;
-        assert!(reviews.iter().any(|review| {
-            review.reviewer_kind == "agent"
-                && review.reviewer_id == manager.id.to_string()
-                && review.decision.as_deref() == Some("approved")
-        }));
-
-        let audit_logs: Vec<AuditLog> = request_json(
+        let (status, _) = request_value(
             app,
-            Request::builder()
-                .uri("/api/audit-logs")
-                .header("x-mandoforge-roles", "admin")
-                .body(Body::empty())
-                .expect("valid request"),
-        )
-        .await;
-        assert!(audit_logs.iter().any(|log| {
-            log.action == "manager_agent.run_completed"
-                && log.resource_type == "work_item"
-                && log.resource_id == Some(work_item.id)
-        }));
-    }
-
-    #[tokio::test]
-    async fn manager_control_loop_prioritizes_escalates_and_retrospects_work_items() {
-        let app = test_app().await;
-        let admin_headers = [
-            ("x-mandoforge-subject", "admin-1"),
-            ("x-mandoforge-roles", "admin"),
-        ];
-        let specialist: Agent = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/agents",
-                json!({
-                    "name": "Control Loop Specialist",
-                    "kind": "specialist",
-                    "agent_role": "specialist",
-                    "provider": "openai-compatible",
-                    "model": "gpt-5.4-mini",
-                    "tools": ["file.read"],
-                    "semantic_scopes": {
-                        "project_scope": "mandoforge",
-                        "repo_scope": "mandoforge",
-                        "service_scope": "agent-os",
-                        "workflow_scope": "manager-control-loop",
-                        "policy_scope": "approval-required",
-                        "memory_scope": "engineering"
-                    }
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-        let manager: Agent = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/agents",
-                json!({
-                    "name": "Control Loop Manager",
-                    "kind": "manager",
-                    "agent_role": "manager",
-                    "provider": "openai-compatible",
-                    "model": "gpt-5.4-mini",
-                    "runtime_config": {
-                        "handoffs": {
-                            "allowed_targets": [{
-                                "target_agent_id": specialist.id,
-                                "intents": ["execute_work_item"],
-                                "schema_versions": ["handoff.v1"],
-                                "risk_levels": ["medium"],
-                                "approval_required": false
-                            }]
-                        }
-                    }
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-        let overdue_work_item: WorkItem = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/work-items",
-                json!({
-                    "title": "Overdue launch checklist",
-                    "description": "Manager should escalate this SLA.",
-                    "source": "manual",
-                    "priority": "high",
-                    "metadata": {
-                        "semantic_scopes": {
-                            "project_scope": "mandoforge",
-                            "repo_scope": "mandoforge",
-                            "service_scope": "agent-os",
-                            "workflow_scope": "manager-control-loop",
-                            "policy_scope": "approval-required",
-                            "memory_scope": "engineering"
-                        }
-                    }
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-        let blocked_work_item: WorkItem = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/work-items",
-                json!({
-                    "title": "Blocked handoff review",
-                    "description": "Manager should create a retrospective.",
-                    "source": "manual",
-                    "priority": "normal",
-                    "status": "blocked"
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-        let _: Value = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/manager-agent/runs",
-                json!({
-                    "work_item_id": overdue_work_item.id,
-                    "manager_agent_id": manager.id,
-                    "specialist_agent_id": specialist.id,
-                    "risk_classification": "medium",
-                    "auto_assign": true,
-                    "sla_minutes": 0
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-
-        let loop_run: Value = request_json(
-            app.clone(),
             json_request_with_headers(
                 "POST",
                 "/api/manager-agent/control-loop/run",
-                json!({
-                    "manager_agent_id": manager.id,
-                    "execute_ready": false,
-                    "max_assignments": 3
-                }),
-                &admin_headers,
+                json!({}),
+                &[("x-mandoforge-roles", "admin")],
             ),
         )
         .await;
-
-        assert_eq!(loop_run["status"], "completed");
-        assert_eq!(loop_run["summary"]["overdue_count"], json!(1));
-        assert_eq!(loop_run["escalations"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            loop_run["escalations"][0]["work_item_id"],
-            json!(overdue_work_item.id)
-        );
-        assert_eq!(loop_run["retrospectives"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            loop_run["retrospectives"][0]["work_item_id"],
-            json!(blocked_work_item.id)
-        );
-        assert!(
-            loop_run["summary"]["specialist_load"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|load| load["agent_id"] == json!(specialist.id)
-                    && load["active_assignment_count"] == json!(1))
-        );
-
-        let activity: Vec<WorkItemActivityEntry> = request_json(
-            app.clone(),
-            Request::builder()
-                .uri(format!("/api/work-items/{}/activity", overdue_work_item.id))
-                .header("x-mandoforge-subject", "admin-1")
-                .header("x-mandoforge-roles", "admin")
-                .body(Body::empty())
-                .expect("valid request"),
-        )
-        .await;
-        assert!(activity.iter().any(|entry| {
-            entry.event_type == "manager_agent.sla_escalated"
-                && entry.metadata["manager_control_loop_run_id"].is_string()
-        }));
-        let reviews: Vec<WorkItemReview> = request_json(
-            app.clone(),
-            Request::builder()
-                .uri(format!("/api/work-items/{}/reviews", blocked_work_item.id))
-                .header("x-mandoforge-subject", "admin-1")
-                .header("x-mandoforge-roles", "admin")
-                .body(Body::empty())
-                .expect("valid request"),
-        )
-        .await;
-        assert!(reviews.iter().any(|review| {
-            review.decision.as_deref() == Some("changes_requested")
-                && review
-                    .summary
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("retrospective")
-        }));
+        assert!(matches!(
+            status,
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ));
     }
 
     #[tokio::test]
@@ -59314,7 +57943,7 @@ not json
                 .iter()
                 .any(|card| {
                     card["agent_id"] == json!(manager.id)
-                        && card["primary_action"] == "run_manager_loop"
+                        && card["primary_action"] == "start_pack_manager_workflow"
                 })
         );
         assert!(
@@ -59437,7 +58066,7 @@ not json
     }
 
     #[tokio::test]
-    async fn scheduler_due_run_processes_manager_loop_and_semantic_aging() {
+    async fn scheduler_due_run_processes_semantic_aging() {
         let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
         state.seed_demo_agent().await.expect("seed demo agent");
         let app = build_router(state.clone());
@@ -59445,105 +58074,7 @@ not json
             ("x-mandoforge-subject", "admin-1"),
             ("x-mandoforge-roles", "admin"),
         ];
-        let specialist: Agent = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/agents",
-                json!({
-                    "name": "Scheduled Manager Specialist",
-                    "kind": "specialist",
-                    "agent_role": "specialist",
-                    "provider": "openai-compatible",
-                    "model": "gpt-5.4-mini"
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-        let manager: Agent = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/agents",
-                json!({
-                    "name": "Scheduled Manager",
-                    "kind": "manager",
-                    "agent_role": "manager",
-                    "provider": "openai-compatible",
-                    "model": "gpt-5.4-mini",
-                    "runtime_config": {
-                        "handoffs": {
-                            "allowed_targets": [{
-                                "target_agent_id": specialist.id,
-                                "intents": ["execute_work_item"],
-                                "schema_versions": ["handoff.v1"],
-                                "risk_levels": ["medium"],
-                                "approval_required": false
-                            }]
-                        }
-                    }
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-        let work_item: WorkItem = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/work-items",
-                json!({
-                    "title": "Scheduled manager overdue item",
-                    "source": "test",
-                    "priority": "urgent"
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-        let _: Value = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/manager-agent/runs",
-                json!({
-                    "work_item_id": work_item.id,
-                    "manager_agent_id": manager.id,
-                    "specialist_agent_id": specialist.id,
-                    "risk_classification": "medium",
-                    "auto_assign": true,
-                    "sla_minutes": 0
-                }),
-                &admin_headers,
-            ),
-        )
-        .await;
-
         let due_at = Utc::now() - chrono::Duration::minutes(5);
-        state
-            .create_workflow_pack_runtime_objects(vec![WorkflowPackRuntimeObject {
-                id: Uuid::new_v4(),
-                installation_id: Uuid::new_v4(),
-                binding_id: Uuid::new_v4(),
-                pack_id: "manager-schedule-pack".to_string(),
-                pack_version: "0.1.0".to_string(),
-                object_type: "schedule".to_string(),
-                object_key: "manager-control-loop:scheduled".to_string(),
-                runtime_kind: "manager_control_loop_schedule".to_string(),
-                status: "released".to_string(),
-                spec: json!({
-                    "manager_agent_id": manager.id,
-                    "execute_ready": false,
-                    "max_assignments": 8,
-                    "schedule_policy": {"mode": "scheduler", "due_at": due_at, "one_shot": true}
-                }),
-                created_at: due_at,
-                updated_at: due_at,
-            }])
-            .await
-            .expect("manager schedule");
-
         let source: SemanticSource = request_json(
             app.clone(),
             json_request_with_headers(
@@ -59610,15 +58141,11 @@ not json
             json_request_with_headers(
                 "POST",
                 "/api/scheduler/run-due",
-                json!({"idempotency_key": "manager-semantic-aging-test"}),
+                json!({"idempotency_key": "semantic-aging-test"}),
                 &admin_headers,
             ),
         )
         .await;
-        assert_eq!(
-            scheduler_run["manager_control_loop_schedules"]["processed_count"],
-            json!(1)
-        );
         assert_eq!(
             scheduler_run["semantic_aging_policies"]["archived_count"],
             json!(1)
@@ -59628,30 +58155,9 @@ not json
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|action| { action == "manager_control_loop_schedules_processed" })
-        );
-        assert!(
-            scheduler_run["actions"]
-                .as_array()
-                .unwrap()
-                .iter()
                 .any(|action| { action == "semantic_aging_policies_processed" })
         );
 
-        let activity: Vec<WorkItemActivityEntry> = request_json(
-            app.clone(),
-            Request::builder()
-                .uri(format!("/api/work-items/{}/activity", work_item.id))
-                .header("x-mandoforge-roles", "admin")
-                .body(Body::empty())
-                .expect("valid request"),
-        )
-        .await;
-        assert!(
-            activity
-                .iter()
-                .any(|entry| entry.event_type == "manager_agent.sla_escalated")
-        );
         let remaining_objects: Vec<SemanticObject> = request_json(
             app,
             Request::builder()

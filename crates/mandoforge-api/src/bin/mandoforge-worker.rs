@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| format!("mandoforge-worker-{}", std::process::id()));
     let worker_subject =
         env::var("WORKER_SUBJECT").unwrap_or_else(|_| "mandoforge-worker".to_string());
-    let worker_roles = env::var("WORKER_ROLES").unwrap_or_else(|_| "admin".to_string());
+    let worker_roles = env::var("WORKER_ROLES").unwrap_or_else(|_| "worker".to_string());
     let worker_environment_id = env::var("WORKER_ENVIRONMENT_ID")
         .ok()
         .map(|value| value.trim().to_string())

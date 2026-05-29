@@ -201,7 +201,8 @@ live streaming, Environment-bound worker claims, and lease-fenced job
 finalization. The first WorkItem intake, assignment-routing, review, Activity
 Feed, Agent Teammate/Squad, and Manager Plan binding slice now persists
 collaboration work and audit evidence; the next product work should continue
-upward into UI workflow surfaces and Semantic Objects rather than sideways into
+upward into Workflow Pack-defined manager roles, UI workflow surfaces, and
+Semantic Objects rather than sideways into platform-owned manager loops or
 deployment-evidence tracks.
 
 ## Run Locally
@@ -292,6 +293,7 @@ Queue-backed execution worker:
 ```bash
 MANDOFORGE_EXECUTION_WORKER=queue \
 MANDOFORGE_DEV_ADMIN_TOKEN=local-worker-token \
+MANDOFORGE_WORKER_TOKEN=local-worker-token \
 cargo run -p mandoforge-api
 
 BASE_URL=http://127.0.0.1:8787 \

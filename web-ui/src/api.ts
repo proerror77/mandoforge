@@ -663,47 +663,6 @@ export type WorkItemReview = {
   archived_at?: string | null;
 };
 
-export type ManagerAgentRunResponse = {
-  status: string;
-  work_item: WorkItem;
-  manager_session: Session;
-  plan: ManagerAgentPlan;
-  handoff: AgentHandoffEvent;
-  assignment?: AgentHandoffAssignment | null;
-  work_item_assignment?: WorkItemAssignment | null;
-  work_item_review?: WorkItemReview | null;
-  sla: Record<string, unknown>;
-  activity_count: number;
-  completed_at: string;
-};
-
-export type ManagerControlLoopResult = {
-  status: string;
-  manager_control_loop_run_id: string;
-  generated_at: string;
-  summary: {
-    overdue_count: number;
-    retrospective_count: number;
-    specialist_load: Array<{
-      agent_id: string;
-      agent_name: string;
-      active_assignment_count: number;
-      recommended_action: string;
-    }>;
-    execute_ready: boolean;
-  };
-  escalations: Array<Record<string, unknown> & {
-    work_item_id: string;
-    title?: string;
-    action?: string;
-  }>;
-  retrospectives: Array<Record<string, unknown> & {
-    work_item_id: string;
-    review_id?: string;
-    summary?: string;
-  }>;
-};
-
 export type CapabilityDiscovery = {
   status: string;
   generated_at: string;
@@ -1270,36 +1229,6 @@ export async function reviewManagerAgentPlan(
   },
 ): Promise<ManagerAgentPlan> {
   return api<ManagerAgentPlan>(`/api/manager-plans/${id}/review`, {
-    method: "POST",
-    headers: adminHeaders(),
-    body: JSON.stringify(input),
-  });
-}
-
-export async function runManagerAgent(input: {
-  work_item_id: string;
-  manager_agent_id?: string | null;
-  specialist_agent_id?: string | null;
-  intent?: string;
-  risk_classification?: string;
-  approval_required?: boolean;
-  auto_assign?: boolean;
-  sla_minutes?: number | null;
-  metadata?: Record<string, unknown>;
-}): Promise<ManagerAgentRunResponse> {
-  return api<ManagerAgentRunResponse>("/api/manager-agent/runs", {
-    method: "POST",
-    headers: adminHeaders(),
-    body: JSON.stringify(input),
-  });
-}
-
-export async function runManagerControlLoop(input: {
-  manager_agent_id?: string | null;
-  execute_ready?: boolean;
-  max_assignments?: number | null;
-}): Promise<ManagerControlLoopResult> {
-  return api<ManagerControlLoopResult>("/api/manager-agent/control-loop/run", {
     method: "POST",
     headers: adminHeaders(),
     body: JSON.stringify(input),

@@ -12,8 +12,6 @@ import {
   reviewSemanticOntologyProposal,
   expandSemanticOntology,
   resolveSemanticConflict,
-  runManagerAgent,
-  runManagerControlLoop,
   runSemanticDreaming,
   runSemanticGovernance,
   setAdminToken,
@@ -31,8 +29,6 @@ import {
   type DeploymentVersion,
   type Environment,
   type ManagerAgentPlan,
-  type ManagerControlLoopResult,
-  type ManagerAgentRunResponse,
   type MemoryGovernancePartitionDetail,
   type MemoryGovernanceSummary,
   type MemoryGovernanceWritebackQueue,
@@ -785,40 +781,6 @@ export function App() {
     },
     onSuccess: () => invalidateAll(queryClient),
   });
-  const runManagerAgentMutation = useMutation({
-    mutationFn: () => {
-      if (!managerWorkItemId) {
-        throw new Error("select a work item before running the manager loop");
-      }
-      const managerSession = selectedSession?.agent_id && selectedAgent?.agent_role === "manager"
-        ? selectedSession
-        : managerSessions[0]?.session;
-      return runManagerAgent({
-        work_item_id: managerWorkItemId,
-        manager_agent_id: managerSession?.agent_id ?? null,
-        specialist_agent_id: managerSpecialistAgentId || null,
-        intent: "execute_work_item",
-        risk_classification: managerRisk,
-        auto_assign: true,
-        sla_minutes: managerSlaMinutes,
-        metadata: { source: "manager-console" },
-      });
-    },
-    onSuccess: () => invalidateAll(queryClient),
-  });
-  const runManagerControlLoopMutation = useMutation({
-    mutationFn: () => {
-      const managerSession = selectedSession?.agent_id && selectedAgent?.agent_role === "manager"
-        ? selectedSession
-        : managerSessions[0]?.session;
-      return runManagerControlLoop({
-        manager_agent_id: managerSession?.agent_id ?? null,
-        execute_ready: false,
-        max_assignments: 12,
-      });
-    },
-    onSuccess: () => invalidateAll(queryClient),
-  });
   const reviewManagerPlanMutation = useMutation({
     mutationFn: ({ id, status }: { id: string; status: string }) => reviewManagerAgentPlan(id, {
       status,
@@ -1561,13 +1523,7 @@ export function App() {
                 slaMinutes={managerSlaMinutes}
                 steps={managerSteps}
                 isSaving={createManagerPlanMutation.isPending}
-                isRunning={runManagerAgentMutation.isPending}
-                isControlLoopRunning={runManagerControlLoopMutation.isPending}
                 error={createManagerPlanMutation.error}
-                runError={runManagerAgentMutation.error}
-                runResult={runManagerAgentMutation.data}
-                controlLoopError={runManagerControlLoopMutation.error}
-                controlLoopResult={runManagerControlLoopMutation.data}
                 onGoalChange={setManagerGoal}
                 onRiskChange={setManagerRisk}
                 onWorkItemChange={setManagerWorkItemId}
@@ -1575,8 +1531,6 @@ export function App() {
                 onSlaMinutesChange={setManagerSlaMinutes}
                 onStepsChange={setManagerSteps}
                 onCreate={() => createManagerPlanMutation.mutate()}
-                onRunAuto={() => runManagerAgentMutation.mutate()}
-                onRunControlLoop={() => runManagerControlLoopMutation.mutate()}
               />
             </Panel>
 
@@ -1889,13 +1843,7 @@ function ManagerPlanComposer({
   slaMinutes,
   steps,
   isSaving,
-  isRunning,
-  isControlLoopRunning,
   error,
-  runError,
-  runResult,
-  controlLoopError,
-  controlLoopResult,
   onGoalChange,
   onRiskChange,
   onWorkItemChange,
@@ -1903,8 +1851,6 @@ function ManagerPlanComposer({
   onSlaMinutesChange,
   onStepsChange,
   onCreate,
-  onRunAuto,
-  onRunControlLoop,
 }: {
   sessions: SessionRow[];
   workItems: WorkItem[];
@@ -1916,13 +1862,7 @@ function ManagerPlanComposer({
   slaMinutes: number;
   steps: string;
   isSaving: boolean;
-  isRunning: boolean;
-  isControlLoopRunning: boolean;
   error: unknown;
-  runError: unknown;
-  runResult?: ManagerAgentRunResponse;
-  controlLoopError: unknown;
-  controlLoopResult?: ManagerControlLoopResult;
   onGoalChange: (value: string) => void;
   onRiskChange: (value: string) => void;
   onWorkItemChange: (value: string) => void;
@@ -1930,8 +1870,6 @@ function ManagerPlanComposer({
   onSlaMinutesChange: (value: number) => void;
   onStepsChange: (value: string) => void;
   onCreate: () => void;
-  onRunAuto: () => void;
-  onRunControlLoop: () => void;
 }) {
   return (
     <div className="manager-composer">
@@ -1988,30 +1926,9 @@ function ManagerPlanComposer({
         >
           {isSaving ? "Creating..." : "Create manager plan"}
         </button>
-        <button
-          aria-busy={isRunning}
-          data-busy={isRunning ? "true" : undefined}
-          disabled={isRunning || !workItemId}
-          onClick={onRunAuto}
-        >
-          {isRunning ? "Running..." : "Run manager loop"}
-        </button>
-        <button
-          className="ghost"
-          aria-busy={isControlLoopRunning}
-          data-busy={isControlLoopRunning ? "true" : undefined}
-          disabled={isControlLoopRunning}
-          onClick={onRunControlLoop}
-        >
-          {isControlLoopRunning ? "Inspecting..." : "Inspect queue"}
-        </button>
-        <span>{sessions.length ? "records manager_plan.created into audit" : "create or select a manager session first"}</span>
+        <span>{sessions.length ? "creates a plan record; pack workflows own execution" : "create or select a manager session first"}</span>
       </div>
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}
-      {runError ? <p className="error-note">{errorMessage(runError)}</p> : null}
-      {controlLoopError ? <p className="error-note">{errorMessage(controlLoopError)}</p> : null}
-      {runResult ? <ManagerRunResult result={runResult} /> : null}
-      {controlLoopResult ? <ManagerControlLoopResultPanel result={controlLoopResult} workItems={workItems} /> : null}
     </div>
   );
 }
@@ -2052,51 +1969,6 @@ function CapabilityDiscoveryPanel({
           </button>
         ))}
       </div>
-    </div>
-  );
-}
-
-function ManagerControlLoopResultPanel({ result, workItems }: { result: ManagerControlLoopResult; workItems: WorkItem[] }) {
-  return (
-    <div className="manager-run-result">
-      <div className="graph-summary">
-        <KeyValue label="Overdue" value={String(result.summary.overdue_count)} />
-        <KeyValue label="Retrospectives" value={String(result.summary.retrospective_count)} />
-        <KeyValue label="Load rows" value={String(result.summary.specialist_load.length)} />
-        <KeyValue label="Run ID" value={shortId(result.manager_control_loop_run_id)} />
-      </div>
-      <div className="semantic-product-columns">
-        <div>
-          <h4>SLA escalations</h4>
-          {result.escalations.slice(0, 6).map((item) => (
-            <Row key={`${item.work_item_id}-${String(item.action ?? "escalated")}`} title={workItemTitle(workItems, item.work_item_id)} detail={String(item.action ?? "sla_escalated")} />
-          ))}
-          {!result.escalations.length ? <p className="muted">No overdue SLA escalations.</p> : null}
-        </div>
-        <div>
-          <h4>Agent load</h4>
-          {result.summary.specialist_load.slice(0, 6).map((load) => (
-            <Row key={load.agent_id} title={load.agent_name} detail={`${load.active_assignment_count} active · ${load.recommended_action}`} />
-          ))}
-          {!result.summary.specialist_load.length ? <p className="muted">No active specialist assignments.</p> : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ManagerRunResult({ result }: { result: ManagerAgentRunResponse }) {
-  return (
-    <div className="manager-run-result">
-      <div className="graph-summary">
-        <KeyValue label="Run" value={result.status} />
-        <KeyValue label="Plan" value={shortId(result.plan.id)} />
-        <KeyValue label="Handoff" value={`${result.handoff.intent} · ${result.handoff.status}`} />
-        <KeyValue label="Assignment" value={result.assignment ? `${shortId(result.assignment.id)} · ${result.assignment.status}` : "not assigned"} />
-        <KeyValue label="Activities" value={String(result.activity_count)} />
-        <KeyValue label="SLA" value={String(result.sla.due_at ?? "not set")} />
-      </div>
-      <Row title={result.work_item.title} detail={`specialist session ${shortId(result.assignment?.specialist_session_id ?? "none")}`} />
     </div>
   );
 }

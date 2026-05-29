@@ -18,8 +18,13 @@ The Rust job intentionally does not run both `cargo check` and `cargo test` on e
 - Scheduled runs execute `./scripts/stage1-final-gate.sh`.
 - Manual runs can opt into `RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh`.
 - The workflow also performs a Docker image build dry run.
+- Scheduled runs also start the API and execute
+  `./scripts/managed-workflow-runtime-evidence-gate.sh`; manual runs can opt in
+  with `managed_workflow_runtime=true`.
 
-Use this workflow for full gate confidence when runtime, Docker, or Postgres behavior matters. Keep these checks out of the default PR path unless the change requires them.
+Use this workflow for full gate confidence when runtime, Docker, Postgres, or
+managed workflow graph behavior matters. Keep these checks out of the default PR
+path unless the change requires them.
 
 ## Deploy
 

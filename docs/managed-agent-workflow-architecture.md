@@ -211,7 +211,9 @@ It contains:
 - `profiles`: company, department, domain, approval matrix, connector map,
   output style, and risk policy.
 - `skills`: reusable task methods and assets.
-- `agents`: orchestrator, reader, analyzer, writer, executor roles.
+- `agents`: manager, orchestrator, reader, analyzer, writer, executor roles.
+  Manager is a pack-defined work-coordination role, not a platform-owned
+  runtime orchestrator.
 - `workflows`: typed workflow graphs and entrypoints.
 - `connectors`: MCP or native connector requirements.
 - `schemas`: input, output, handoff, artifact, and extraction contracts.

@@ -142,7 +142,7 @@
         "id": { "$ref": "#/$defs/slug" },
         "path": { "$ref": "#/$defs/relative_path" },
         "role": {
-          "enum": ["reader", "analyzer", "writer", "orchestrator", "executor", "monitor"]
+          "enum": ["reader", "analyzer", "writer", "manager", "orchestrator", "executor", "monitor"]
         },
         "tool_scope": {
           "type": "object",

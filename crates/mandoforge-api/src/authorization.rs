@@ -10,6 +10,7 @@ use crate::AppError;
 pub(crate) enum Role {
     Admin,
     Operator,
+    Worker,
     Approver,
     Viewer,
 }
@@ -98,6 +99,12 @@ fn role_allows_permission(role: Role, permission: Permission) -> bool {
                 | Permission::SessionsRun
                 | Permission::SessionsWrite
                 | Permission::ToolsExecute
+                | Permission::AuditRead
+        ),
+        Role::Worker => matches!(
+            permission,
+            Permission::SessionsRead
+                | Permission::SessionsRun
                 | Permission::ExecutionJobsRun
                 | Permission::AuditRead
         ),
@@ -139,8 +146,12 @@ mod tests {
             Role::Approver,
             Permission::ToolsExecute
         ));
-        assert!(role_allows_permission(
+        assert!(!role_allows_permission(
             Role::Operator,
+            Permission::ExecutionJobsRun
+        ));
+        assert!(role_allows_permission(
+            Role::Worker,
             Permission::ExecutionJobsRun
         ));
         assert!(role_allows_permission(
